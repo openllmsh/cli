@@ -82,7 +82,7 @@ export const runSetup = (): number => {
   } else {
     failures += 1;
     process.stdout.write(
-      "✗ complete unsupported shell (set $SHELL to bash/zsh/fish), or run: openllmc completion <shell>\n",
+      "✗ complete could not install (unsupported shell — set $SHELL to bash/zsh/fish — or unwritable rc); or run: openllmc completion <shell>\n",
     );
   }
 

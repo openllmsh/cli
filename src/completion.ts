@@ -146,7 +146,8 @@ const detectShell = (): TCompletionShell | null => {
   return isShell(sh) ? sh : null;
 };
 
-/** Append a line to a file once (idempotent on an exact marker substring). */
+/** Append a line to a file once (idempotent on an exact marker substring).
+ *  Throws on fs errors — the caller decides how to surface them. */
 const appendOnce = (file: string, line: string, marker: string): boolean => {
   try {
     const existing = readFileSync(file, "utf-8");
@@ -162,24 +163,32 @@ const appendOnce = (file: string, line: string, marker: string): boolean => {
 /**
  * Install completion for the current shell by wiring it into the rc
  * (bash/zsh) or dropping a completions file (fish). Idempotent. Returns the
- * file it touched, or null when the shell is unsupported.
+ * file it touched, or null when the shell is unsupported OR the write failed
+ * (a read-only rc under the daemon sandbox, a missing $HOME, …) — the
+ * callers already render null as a clean "couldn't install" message instead
+ * of a raw stack trace.
  */
 export const installCompletion = (): string | null => {
   const shell = detectShell();
   if (shell === null) return null;
-  if (shell === "fish") {
-    const file = fishCompletionPath();
-    mkdirSync(dirname(file), { recursive: true });
-    writeFileSync(file, fishScript());
-    return file;
+  try {
+    if (shell === "fish") {
+      const file = fishCompletionPath();
+      mkdirSync(dirname(file), { recursive: true });
+      writeFileSync(file, fishScript());
+      return file;
+    }
+    const rc = join(homedir(), shell === "zsh" ? ".zshrc" : ".bashrc");
+    appendOnce(
+      rc,
+      `command -v openllmc >/dev/null && source <(openllmc completion ${shell})  # openllmc-completion`,
+      "openllmc completion",
+    );
+    return rc;
+  } catch {
+    // fs failure (read-only rc / sandbox) — report as not-installed.
+    return null;
   }
-  const rc = join(homedir(), shell === "zsh" ? ".zshrc" : ".bashrc");
-  appendOnce(
-    rc,
-    `command -v openllmc >/dev/null && source <(openllmc completion ${shell})  # openllmc-completion`,
-    "openllmc completion",
-  );
-  return rc;
 };
 
 export const runCompletionCommand = (args: readonly string[]): number => {
@@ -188,7 +197,7 @@ export const runCompletionCommand = (args: readonly string[]): number => {
     const file = installCompletion();
     if (file === null) {
       process.stderr.write(
-        "unsupported shell — supported: bash, zsh, fish (set $SHELL)\n",
+        "could not install completion — unsupported shell (set $SHELL to bash/zsh/fish) or the rc file is not writable\n",
       );
       return 1;
     }

@@ -18,11 +18,13 @@
  * independently.
  */
 
-import { EXEC_GROUPS, EXEC_VERBS, helpText, type TExecGroup } from "./commands";
+import type { TExecGroup } from "./commands";
+import { EXEC_GROUPS, EXEC_VERBS, helpText } from "./commands";
 import { runCompletionCommand } from "./completion";
 import { CLI_VERSION } from "./env";
 import { runClaudeContextCli } from "./mcp/claude-context";
-import { MCP_GROUPS, runMcpServer, type TMcpGroup } from "./mcp/server";
+import type { TMcpGroup } from "./mcp/server";
+import { MCP_GROUPS, runMcpServer } from "./mcp/server";
 import { runSelfUpdate } from "./self-update";
 import { runSetup } from "./setup-cmd";
 
