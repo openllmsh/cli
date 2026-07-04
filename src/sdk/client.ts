@@ -51,6 +51,11 @@ const resolveUrl = (
   return url.toString();
 };
 
+// Generous ceiling: some native operations proxy long-running provider calls
+// (image generation, chat), but a tool call must never hang the MCP server
+// forever on a wedged upstream.
+const REQUEST_TIMEOUT_MS = 120_000;
+
 export const callOperation = async (
   config: TSdkConfig,
   op: TApiOperation,
@@ -66,6 +71,7 @@ export const callOperation = async (
     ...(op.hasBody && args.body !== undefined
       ? { body: JSON.stringify(args.body) }
       : {}),
+    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
   };
   const res = await fetch(url, init);
   const ct = res.headers.get("content-type") ?? "";

@@ -67,10 +67,12 @@ export class MemoryClient {
     };
     if (body !== undefined) headers["Content-Type"] = "application/json";
 
+    // Bounded so a wedged gateway can't hang a save/recall tool call forever.
     const res = await fetch(`${this.baseUrl}${path}`, {
       method,
       headers,
       body: body !== undefined ? JSON.stringify(body) : undefined,
+      signal: AbortSignal.timeout(60_000),
     });
     if (!res.ok) {
       const text = await res.text().catch(() => "");

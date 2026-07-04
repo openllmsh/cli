@@ -27,6 +27,22 @@ const targetSuffix = (): string => {
 
 const GZIP_MAGIC = Buffer.from([0x1f, 0x8b]);
 
+/** Self-update downloads + swaps the running binary — the origin must be
+ *  HTTPS (plain HTTP only for loopback dev gateways), or a network MITM
+ *  could serve both the binary AND the checksum it's verified against. */
+const isSecureOrigin = (raw: string): boolean => {
+  try {
+    const url = new URL(raw);
+    if (url.protocol === "https:") return true;
+    return (
+      url.protocol === "http:" &&
+      (url.hostname === "localhost" || url.hostname === "127.0.0.1")
+    );
+  } catch {
+    return false;
+  }
+};
+
 export const runSelfUpdate = async (): Promise<void> => {
   if (CLI_VERSION === "0.0.0-dev") {
     process.stderr.write(
@@ -35,6 +51,12 @@ export const runSelfUpdate = async (): Promise<void> => {
     process.exit(0);
   }
   const { gatewayUrl } = cliConfig();
+  if (!isSecureOrigin(gatewayUrl)) {
+    process.stderr.write(
+      `[self-update] refusing to update over an insecure origin (${gatewayUrl}) — use https:// (http:// is allowed only for localhost)\n`,
+    );
+    process.exit(1);
+  }
 
   const vRes = await fetch(`${gatewayUrl}/api/cli/version`, {
     signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
@@ -45,8 +67,16 @@ export const runSelfUpdate = async (): Promise<void> => {
     );
     process.exit(1);
   }
-  const { latest_version } = (await vRes.json()) as { latest_version: string };
-  const latest = latest_version.replace(/^v/, "");
+  const payload = (await vRes.json().catch(() => null)) as {
+    latest_version?: unknown;
+  } | null;
+  if (payload === null || typeof payload.latest_version !== "string") {
+    process.stderr.write(
+      "[self-update] malformed version response (no latest_version string)\n",
+    );
+    process.exit(1);
+  }
+  const latest = payload.latest_version.replace(/^v/, "");
   if (latest.length === 0) {
     process.stderr.write("[self-update] no CLI release published yet\n");
     process.exit(1);

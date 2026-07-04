@@ -38,6 +38,10 @@ export interface GatewayConfig {
  */
 export type PluginPath = string;
 
+// Bound every gateway call: an indexing push can be large (embedding runs
+// server-side), but a wedged upstream must never hang the sync forever.
+const GATEWAY_TIMEOUT_MS = 120_000;
+
 export async function gatewayFetch(
   config: GatewayConfig,
   method: string,
@@ -51,6 +55,7 @@ export async function gatewayFetch(
       ...(body !== undefined ? { "Content-Type": "application/json" } : {}),
     },
     body: body !== undefined ? JSON.stringify(body) : undefined,
+    signal: AbortSignal.timeout(GATEWAY_TIMEOUT_MS),
   });
 }
 

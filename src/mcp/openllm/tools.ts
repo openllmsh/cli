@@ -7,10 +7,8 @@
  */
 
 import { callOperation } from "../../sdk/client";
-import {
-  API_OPERATIONS,
-  type TApiOperation,
-} from "../../sdk/generated/operations";
+import type { TApiOperation } from "../../sdk/generated/operations";
+import { API_OPERATIONS } from "../../sdk/generated/operations";
 
 // runtime-only: the MCP tool-result envelope.
 type TToolResult = {
