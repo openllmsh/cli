@@ -1,0 +1,28 @@
+{
+  "name": "@quantidexyz/openllmc",
+  "version": "0.0.0-dev",
+  "private": false,
+  "type": "module",
+  "exports": {
+    ".": "./index.ts",
+    "./*": "./*.ts"
+  },
+  "bin": {
+    "openllmc": "./src/main.ts"
+  },
+  "scripts": {
+    "compile": "bun scripts/compile.ts",
+    "compile:host": "bun scripts/compile.ts --host",
+    "generate:sdk": "bun scripts/generate-sdk.ts"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.0",
+    "cheerio": "^1.2.0",
+    "turndown": "^7.2.4"
+  },
+  "devDependencies": {
+    "@openllm/schema": "workspace:*",
+    "@types/turndown": "^5.0.6"
+  },
+  "license": "BUSL-1.1"
+}
