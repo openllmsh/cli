@@ -10,16 +10,16 @@ import type { TCliRelease } from "./release-types";
 
 export const CLI_RELEASE: TCliRelease = {
   repo: "quantidexyz/openllmc",
-  tag: "v1.5.4-alpha.3",
+  tag: "v1.5.4-alpha.4",
   targets: ["darwin-arm64", "darwin-x64", "linux-x64", "linux-arm64"],
   sha256: {
     "darwin-arm64":
-      "e469d1fabc1808eb1fa4f3c0d1c00f0f479a565af9557804d2520eb867751a16",
+      "966506507a95664ec549ab7740319d774aad00ce3cc2c1bd0a02f3e938fbbae0",
     "darwin-x64":
-      "1ad171aafcd6e39f8d85cabac8d910cbdf339929a5d182390018314918807db0",
+      "959920cdd943ff60460686b6d4a9612d9b9169250c0c0c29685f13b9a0e2f18e",
     "linux-x64":
-      "d384cd3a288c3a78cb1c9ca884bae8fe7c54f867e595cffee71b499e90ce3ffe",
+      "c200085241dc6913a5e1eb0df6cacea54d51f8af4b562f25499e5c3baa4bc825",
     "linux-arm64":
-      "3802118dc8ba1e314f3a3f61a0075b1b7c7d714f5a47e569a5456370b0816631",
+      "850f1eeffb10c22b9874d468246e6aa16a3180aa57a8054f39b21f102711c7d4",
   },
 };
