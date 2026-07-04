@@ -65,11 +65,16 @@ complete -F _openllmc openllmc
 `;
 };
 
+/** Escape a value for a single-quoted shell string (`'` → `'\\''`). The
+ *  descriptions are kept quote-free by convention (commands.ts), but a slip
+ *  must degrade to a weird description, not a parse error in the user's rc. */
+const zq = (s: string): string => s.replace(/'/g, `'\\''`);
+
 const zshScript = (): string => {
   // Descriptions are colon-free (commands.ts), so the `value:desc` specs parse.
   const specs = [
-    ...COMMANDS.map((c) => `'${c.name}:${c.description}'`),
-    ...FLAGS.map((f) => `'${f.name}:${f.description}'`),
+    ...COMMANDS.map((c) => `'${zq(c.name)}:${zq(c.description)}'`),
+    ...FLAGS.map((f) => `'${zq(f.name)}:${zq(f.description)}'`),
   ].join("\n    ");
   const verbCases = EXEC_GROUPS.map(
     (g) => `        ${g}) _values 'verb' ${EXEC_VERBS[g].join(" ")} ;;`,
@@ -106,7 +111,7 @@ compdef _openllmc openllmc
 const fishScript = (): string => {
   const lines = COMMANDS.map(
     (c) =>
-      `complete -c openllmc -n __fish_use_subcommand -a ${c.name} -d '${c.description}'`,
+      `complete -c openllmc -n __fish_use_subcommand -a ${c.name} -d '${zq(c.description)}'`,
   );
   lines.push(
     `complete -c openllmc -n '__fish_seen_subcommand_from completion' -a '${COMPLETION_ARGS.join(" ")}'`,

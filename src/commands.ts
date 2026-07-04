@@ -5,7 +5,10 @@
  * so help text and shell completion can't drift from the actual CLI.
  * Mirrors the daemon's `commands.ts`.
  *
- * Descriptions must stay colon-free: zsh completion specs are `value:desc`.
+ * Descriptions must stay colon-free AND apostrophe-free: zsh completion
+ * specs are single-quoted `value:desc` strings (an apostrophe terminates
+ * the quote → parse error on source), and fish -d args are single-quoted
+ * too. The generators also escape defensively, but keep the source clean.
  */
 
 export type TCommand = {
@@ -51,7 +54,7 @@ export const COMMANDS: readonly TCommand[] = [
   },
   {
     name: "self-update",
-    description: "Update to the gateway's pinned release",
+    description: "Update to the pinned gateway release",
   },
   { name: "version", description: "Print the version" },
   { name: "help", description: "Show help" },

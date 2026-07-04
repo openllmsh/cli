@@ -10934,6 +10934,16 @@
                           },
                           "docs_url": {
                             "type": "string"
+                          },
+                          "post_install": {
+                            "anyOf": [
+                              {
+                                "type": "string"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
                           }
                         },
                         "additionalProperties": false
