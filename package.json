@@ -1,6 +1,6 @@
 {
   "name": "@quantidexyz/openllmc",
-  "version": "0.0.0-dev",
+  "version": "1.5.4-alpha.0",
   "private": false,
   "type": "module",
   "exports": {
