@@ -475,13 +475,9 @@ async function gatewayPost(
 // derive the shared collection from a codebaseId without reaching into tools/.
 void collectionName;
 
-/** Hook subcommands this group serves (`openllmc ctx <sub> …`). */
-export const CLAUDE_CONTEXT_CLI_SUBCOMMANDS = [
-  "index",
-  "search",
-  "status",
-  "index-docs",
-] as const;
+// Hook subcommand names live in `src/commands.ts` (`EXEC_VERBS.ctx`) — the
+// single source help + completion derive from; `runCli` below is the
+// implementation `openllmc exec ctx` dispatches to.
 
 /** The composed tool defs (code + docs pipelines — one group). */
 export const claudeContextGroupToolDefs = allToolDefs;

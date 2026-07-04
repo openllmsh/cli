@@ -34,9 +34,13 @@ dashboard installs it for you; standalone:
 
 ```sh
 curl -fsSL "https://openllm.sh/api/setup/cli/install.sh" | bash
+# ↑ also runs `openllmc setup` (PATH symlink + shell completion)
 openllmc version
 openllmc mcp            # the unified MCP server (stdio)
 ```
+
+> Installed from the dashboard (one-click)? That path runs sandboxed and
+> skips PATH/completion — run `~/.openllm/bin/openllmc setup` once.
 
 Or consume the source as a package:
 
@@ -66,7 +70,9 @@ directly or point `mcpServers.openllm` at your `dist/openllmc`.
 | Command | What |
 | --- | --- |
 | `openllmc mcp [--only <group>]` | the unified MCP server over stdio — groups: `openllm` (native API), `claude-context`, `supermemory` (default all) |
-| `openllmc ctx <index\|search\|status\|index-docs> …` | code/docs-search hook verbs (what the plugin's hooks call) |
+| `openllmc exec ctx <index\|search\|status\|index-docs> …` | code/docs-search hook verbs (what the plugin's hooks call) |
+| `openllmc setup` | PATH symlink + shell completion (idempotent) |
+| `openllmc completion <bash\|zsh\|fish\|install>` | print or install shell completion |
 | `openllmc api --spec` | print the embedded OpenAPI spec |
 | `openllmc self-update` | converge to the gateway's pinned release |
 | `openllmc version` | print the version |

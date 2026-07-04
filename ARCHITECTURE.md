@@ -22,7 +22,10 @@ packages/cli/
 │   ├── compile.ts        # bun --compile --minify --bytecode ×4 targets + gzip sidecars
 │   └── generate-sdk.ts   # MONOREPO-ONLY: HttpApi → committed SDK artifacts
 └── src/
-    ├── main.ts           # entry: mcp | ctx | api | self-update | version
+    ├── main.ts           # entry: mcp | exec | api | setup | completion | self-update | version
+    ├── commands.ts       # SSOT of the command surface (help + completion derive)
+    ├── completion.ts     # bash/zsh/fish completion (daemon-parity)
+    ├── setup-cmd.ts      # PATH symlink + completion install
     ├── env.ts            # config resolution (env → shared ~/.openllm/.env → baked origin)
     ├── self-update.ts    # converge to /api/cli/version (checksum-gated atomic swap)
     ├── sdk/
@@ -40,7 +43,9 @@ packages/cli/
 | Command | What |
 | --- | --- |
 | `openllmc mcp [--only <group>]` | the unified MCP server over stdio (groups: `openllm`, `claude-context`, `supermemory`; default all — `--only` is debug) |
-| `openllmc ctx <index\|search\|status\|index-docs> …` | claude-context hook verbs — what the `openllm` bundle's hooks shell out to |
+| `openllmc exec ctx <index\|search\|status\|index-docs> …` | claude-context hook verbs — what the `openllm` bundle's hooks shell out to (`ctx` kept as a hidden alias for older bundles) |
+| `openllmc setup` | PATH symlink + shell completion — run automatically by the curl installer; shown as a copyable follow-up on the dashboard card for sandboxed one-click installs |
+| `openllmc completion <bash\|zsh\|fish\|install>` | shell completion (derived from `commands.ts`, the single command-surface source) |
 | `openllmc api --spec` | print the embedded OpenAPI spec |
 | `openllmc self-update` | converge to the gateway's pinned release |
 | `openllmc version` | print the baked version |
