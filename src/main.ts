@@ -33,7 +33,7 @@ Usage:
   openllmc self-update            update to the gateway's pinned release
   openllmc version                print the version
 
-Config (env, or ~/.openllm/cli.env):
+Config (env, or the shared ~/.openllm/.env):
   LLM_GATEWAY_URL       gateway origin (default: the baked cloud origin)
   LLM_GATEWAY_API_KEY   your sk-llm-... API key
 `;

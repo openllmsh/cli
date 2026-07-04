@@ -72,7 +72,9 @@ directly or point `mcpServers.openllm` at your `dist/openllmc`.
 | `openllmc version` | print the version |
 
 Config: `LLM_GATEWAY_URL` / `LLM_GATEWAY_API_KEY` (env, or
-`~/.openllm/cli.env`).
+the shared `~/.openllm/.env` — the same file the
+daemon pairing writes, so `OPENLLM_CLOUD_ORIGIN` / `OPENLLM_API_KEY` apply to
+every OpenLLM tool on the box).
 
 ## Verify
 

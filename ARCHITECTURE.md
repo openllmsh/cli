@@ -23,7 +23,7 @@ packages/cli/
 │   └── generate-sdk.ts   # MONOREPO-ONLY: HttpApi → committed SDK artifacts
 └── src/
     ├── main.ts           # entry: mcp | ctx | api | self-update | version
-    ├── env.ts            # config resolution (env → ~/.openllm/cli.env → baked origin)
+    ├── env.ts            # config resolution (env → shared ~/.openllm/.env → baked origin)
     ├── self-update.ts    # converge to /api/cli/version (checksum-gated atomic swap)
     ├── sdk/
     │   ├── generated/    # COMMITTED: openapi.json + operations.ts (58 ops)
@@ -46,7 +46,9 @@ packages/cli/
 | `openllmc version` | print the baked version |
 
 Config: `LLM_GATEWAY_URL` / `LLM_GATEWAY_API_KEY` env (the same contract the
-MCP mapping + hooks carry), falling back to `~/.openllm/cli.env`, falling back
+MCP mapping + hooks carry — plus the shared `OPENLLM_CLOUD_ORIGIN` /
+`OPENLLM_API_KEY` names), falling back to the SHARED `~/.openllm/.env` (the
+same file the daemon boots from — one pairing covers every tool), falling back
 to the compile-time cloud-origin bake.
 
 ## 3. The generated SDK (why the mirror is self-contained)
