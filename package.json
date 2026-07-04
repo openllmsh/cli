@@ -13,7 +13,8 @@
   "scripts": {
     "compile": "bun scripts/compile.ts",
     "compile:host": "bun scripts/compile.ts --host",
-    "generate:sdk": "bun scripts/generate-sdk.ts"
+    "generate:sdk": "bun scripts/generate-sdk.ts",
+    "verify": "bun scripts/verify.ts"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.0.0",
