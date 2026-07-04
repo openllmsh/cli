@@ -44,6 +44,23 @@ Or consume the source as a package:
 bun install github:quantidexyz/openllmc # latest
 ```
 
+## Build from source
+
+This repo is **self-compilable** — no private packages, no monorepo needed
+(the SDK is committed under [`src/sdk/generated/`](./src/sdk/generated)):
+
+```sh
+git clone https://github.com/quantidexyz/openllmc && cd openllmc
+bun install
+bun run compile:host        # → dist/openllmc (this machine's target)
+./dist/openllmc version     # v0.0.0-dev — source builds carry the dev sentinel
+bun run compile             # all 4 targets: darwin/linux × arm64/x64 (+ .gz sidecars)
+```
+
+A source build bakes the `0.0.0-dev` sentinel (release builds are stamped by
+the release pipeline via `--version`), so it never self-updates — run it
+directly or point `mcpServers.openllm` at your `dist/openllmc`.
+
 ## Commands
 
 | Command | What |
