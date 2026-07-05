@@ -18,6 +18,7 @@ import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
+import type { TMcpGroup } from "../commands";
 import { CLI_VERSION, requireKeyedConfig } from "../env";
 import {
   claudeContextGroupToolDefs,
@@ -34,8 +35,10 @@ import {
   supermemoryToolDefs,
 } from "./supermemory/tools";
 
-export const MCP_GROUPS = ["openllm", "claude-context", "supermemory"] as const;
-export type TMcpGroup = (typeof MCP_GROUPS)[number];
+export type { TMcpGroup } from "../commands";
+// The group list is owned by `commands.ts` (the dependency-free command
+// surface) so completion can consume it without this module's SDK graph.
+export { MCP_ONLY_GROUPS as MCP_GROUPS } from "../commands";
 
 const isSupermemoryTool = (name: string): boolean =>
   supermemoryToolDefs.some((t) => t.name === name);

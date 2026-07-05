@@ -9,12 +9,7 @@
 import { callOperation } from "../../sdk/client";
 import type { TApiOperation } from "../../sdk/generated/operations";
 import { API_OPERATIONS } from "../../sdk/generated/operations";
-
-// runtime-only: the MCP tool-result envelope.
-type TToolResult = {
-  content: Array<{ type: "text"; text: string }>;
-  isError?: boolean;
-};
+import type { TToolResult } from "../types";
 
 /** MCP tool names must match `[a-zA-Z0-9_-]+` — sanitize the operation id. */
 const toolNameFor = (op: TApiOperation): string =>

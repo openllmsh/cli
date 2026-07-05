@@ -202,8 +202,27 @@ export function isPrivateHost(hostname: string): boolean {
   ) {
     return true;
   }
-  // IPv6 loopback / link-local (URL.hostname strips the brackets).
-  if (hostname === "::1" || hostname.startsWith("fe80:")) return true;
+  // IPv6 (URL.hostname strips the brackets). Cover the full private space:
+  // unspecified/loopback (::, ::1), link-local (fe80::/10 → fe8–feb), ULA
+  // (fc00::/7 → fc/fd), and IPv4-mapped/translated forms (::ffff:a.b.c.d,
+  // ::ffff:7f00:1, 64:ff9b::/96) which recurse into the IPv4 check below.
+  if (hostname.includes(":")) {
+    const h = hostname.toLowerCase();
+    if (h === "::" || h === "::1") return true;
+    if (/^fe[89ab]/.test(h)) return true; // link-local fe80::/10
+    if (/^f[cd]/.test(h)) return true; // ULA fc00::/7
+    // IPv4-mapped/compatible/translated: extract and re-check the v4 tail.
+    const dotted = h.match(/(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})$/);
+    if (dotted !== null) return isPrivateHost(dotted[1]);
+    const mapped = h.match(/^::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/);
+    if (mapped !== null) {
+      const hi = Number.parseInt(mapped[1], 16);
+      const lo = Number.parseInt(mapped[2], 16);
+      return isPrivateHost(`${hi >> 8}.${hi & 0xff}.${lo >> 8}.${lo & 0xff}`);
+    }
+    if (h.startsWith("64:ff9b:")) return true; // NAT64 well-known prefix
+    return false;
+  }
   const m = hostname.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
   if (m === null) return false;
   const [a, b] = [Number(m[1]), Number(m[2])];
@@ -213,6 +232,20 @@ export function isPrivateHost(hostname: string): boolean {
   if (a === 169 && b === 254) return true; // link-local + metadata
   if (a === 100 && b >= 64 && b <= 127) return true; // CGNAT 100.64/10
   return false;
+}
+
+/**
+ * Re-check a URL AFTER redirects were followed (`res.url`) — the initial
+ * `deriveDocsBase` gate only sees the URL the crawl started from, so a public
+ * host 30x-ing to loopback/RFC1918/metadata would otherwise slip through.
+ * Unparseable URLs are treated as private (fail closed).
+ */
+export function isPrivateUrl(rawUrl: string): boolean {
+  try {
+    return isPrivateHost(new URL(rawUrl).hostname.toLowerCase());
+  } catch {
+    return true;
+  }
 }
 
 export function deriveDocsBase(rawUrl: string): DocsBase | null {
@@ -281,6 +314,11 @@ export async function resolveCanonicalDocsBase(
       signal: ctrl.signal,
     });
     if (!res.ok) {
+      await res.body?.cancel().catch(() => {});
+      return base;
+    }
+    // Redirects were followed — refuse a final hop into private space.
+    if (isPrivateUrl(res.url || base.baseUrl)) {
       await res.body?.cancel().catch(() => {});
       return base;
     }
@@ -378,6 +416,8 @@ async function fetchPage(
       signal: ctrl.signal,
     });
     if (!res.ok) return null;
+    // Redirects were followed — refuse a final hop into private space.
+    if (isPrivateUrl(res.url || url)) return null;
     const ctype = res.headers.get("content-type") ?? "";
     if (!ctype.includes("html")) return null;
     const reader = res.body?.getReader();
@@ -486,6 +526,9 @@ async function fetchSitemapUrls(
   const tryFetch = async (url: string, depth: number): Promise<void> => {
     if (depth > 2 || seen.has(url)) return;
     seen.add(url);
+    // Nested sitemap <loc>s are attacker-influenced — gate before fetching,
+    // and re-check after redirects were followed.
+    if (isPrivateUrl(url)) return;
     const ctrl = new AbortController();
     const t = setTimeout(() => ctrl.abort(), FETCH_TIMEOUT_MS);
     try {
@@ -497,6 +540,7 @@ async function fetchSitemapUrls(
         signal: ctrl.signal,
       });
       if (!res.ok) return;
+      if (isPrivateUrl(res.url || url)) return;
       const xml = await res.text();
       if (xml.length > MAX_PAGE_BYTES) return;
 

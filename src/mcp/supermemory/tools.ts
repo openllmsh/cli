@@ -5,6 +5,7 @@
  * behavior is unchanged, only the server ownership moved.
  */
 
+import type { TToolResult } from "../types";
 import { MemoryClient } from "./client";
 import type { PluginConfig } from "./config";
 
@@ -114,12 +115,6 @@ export const supermemoryToolDefs = [
     },
   },
 ];
-
-// runtime-only: the MCP tool-result envelope the handlers return.
-type TToolResult = {
-  content: Array<{ type: "text"; text: string }>;
-  isError?: boolean;
-};
 
 const clientFor = (() => {
   let cached: { key: string; client: MemoryClient } | null = null;

@@ -69,12 +69,17 @@ export const FLAGS: readonly TFlag[] = [
   { name: "--version", description: "Print the version" },
 ] as const;
 
-/** The MCP tool groups `mcp --only` accepts (mirrors `mcp/server.ts`). */
+/**
+ * The MCP tool groups `mcp --only` accepts. Owned HERE (the command-surface
+ * source of truth, dependency-free) so `completion.ts` doesn't pull the MCP
+ * SDK graph; `mcp/server.ts` re-exports it as `MCP_GROUPS` for dispatch.
+ */
 export const MCP_ONLY_GROUPS = [
   "openllm",
   "claude-context",
   "supermemory",
 ] as const;
+export type TMcpGroup = (typeof MCP_ONLY_GROUPS)[number];
 
 export const COMPLETION_SHELLS = ["bash", "zsh", "fish"] as const;
 export type TCompletionShell = (typeof COMPLETION_SHELLS)[number];
