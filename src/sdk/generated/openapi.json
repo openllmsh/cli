@@ -17317,6 +17317,14 @@
             "required": false
           },
           {
+            "name": "offset",
+            "in": "query",
+            "schema": {
+              "$ref": "#/components/schemas/NumberFromString"
+            },
+            "required": false
+          },
+          {
             "name": "project",
             "in": "query",
             "schema": {

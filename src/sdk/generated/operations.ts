@@ -394,6 +394,10 @@ export const API_OPERATIONS: readonly TApiOperation[] = [
         "required": false
       },
       {
+        "name": "offset",
+        "required": false
+      },
+      {
         "name": "project",
         "required": false
       }
