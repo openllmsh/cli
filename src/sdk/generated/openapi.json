@@ -17073,6 +17073,12 @@
                                 "type": "null"
                               }
                             ]
+                          },
+                          "nonce": {
+                            "type": "string"
+                          },
+                          "encrypted": {
+                            "type": "boolean"
                           }
                         },
                         "additionalProperties": false
@@ -17411,6 +17417,12 @@
                                 "type": "null"
                               }
                             ]
+                          },
+                          "nonce": {
+                            "type": "string"
+                          },
+                          "encrypted": {
+                            "type": "boolean"
                           }
                         },
                         "additionalProperties": false
