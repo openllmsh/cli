@@ -38,11 +38,9 @@ const CLOUD_ORIGIN_DEFAULT: string =
     : "https://openllm.sh";
 
 export const OPENLLM_DIR = join(homedir(), ".openllm");
-/** The SHARED OpenLLM env file (same file the daemon boots from). The
- *  pre-rename `daemon.env` is read as a fallback for installs the daemon
- *  hasn't migrated yet — the CLI never writes either file. */
+/** The SHARED OpenLLM env file (same file the daemon boots from) — the CLI
+ *  never writes it. */
 export const SHARED_ENV_FILE = join(OPENLLM_DIR, ".env");
-const LEGACY_ENV_FILE = join(OPENLLM_DIR, "daemon.env");
 export const CLI_BIN_PATH = join(OPENLLM_DIR, "bin", "openllmc");
 
 /** Parse a KEY=VALUE env file (comments + blank lines ignored). */
@@ -66,12 +64,9 @@ const parseEnvFile = (path: string): Record<string, string> => {
   return out;
 };
 
-/** The shared file's values — `.env` first, legacy `daemon.env` fallback
- *  (read-only: migrating the file is the daemon's job). */
+/** The shared file's values (read-only). */
 const sharedFileConfig = (): Record<string, string> =>
-  fs.existsSync(SHARED_ENV_FILE)
-    ? parseEnvFile(SHARED_ENV_FILE)
-    : parseEnvFile(LEGACY_ENV_FILE);
+  parseEnvFile(SHARED_ENV_FILE);
 
 export type TCliConfig = {
   readonly gatewayUrl: string;
