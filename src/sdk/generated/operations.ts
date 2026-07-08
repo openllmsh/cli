@@ -773,6 +773,20 @@ export const API_OPERATIONS: readonly TApiOperation[] = [
     "hasBody": true
   },
   {
+    "id": "v1Videos.videosDelete",
+    "method": "delete",
+    "path": "/v1/videos/{video_id}",
+    "summary": "",
+    "tags": [
+      "v1Videos"
+    ],
+    "pathParams": [
+      "video_id"
+    ],
+    "queryParams": [],
+    "hasBody": false
+  },
+  {
     "id": "v1Videos.videosRetrieve",
     "method": "get",
     "path": "/v1/videos/{video_id}",
