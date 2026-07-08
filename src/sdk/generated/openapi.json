@@ -17331,6 +17331,14 @@
               "type": "string"
             },
             "required": false
+          },
+          {
+            "name": "q",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            },
+            "required": false
           }
         ],
         "security": [],
