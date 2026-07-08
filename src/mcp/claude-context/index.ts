@@ -14,6 +14,7 @@
  */
 
 import * as fs from "node:fs";
+import { requireKeyedConfig } from "../../env";
 import {
   buildSearchRefs,
   claudeContextToolDefs,
@@ -43,16 +44,14 @@ const FAILED_RETRY_COOLDOWN_MS = ((): number => {
 
 // ── Gateway credentials ───────────────────────────────────────────────────────
 
+// Resolution is owned by `src/env.ts` (`cliConfig`): process env
+// (LLM_GATEWAY_* / legacy GATEWAY_* / OPENLLM_*), then the shared
+// `~/.openllm/.env`, then the baked cloud-origin default. Critical for the
+// hook path — `exec ctx index` fires from SessionStart with NO env vars, so
+// it must fall back to the daemon-paired key in the shared file.
 function resolveGatewayConfig(): { baseUrl: string; apiKey: string } {
-  const baseUrl = process.env.GATEWAY_URL || process.env.LLM_GATEWAY_URL;
-  const apiKey = process.env.GATEWAY_API_KEY || process.env.LLM_GATEWAY_API_KEY;
-  if (!baseUrl || !apiKey) {
-    process.stderr.write(
-      "[ERR] Missing required env: GATEWAY_URL (or LLM_GATEWAY_URL) and GATEWAY_API_KEY (or LLM_GATEWAY_API_KEY)\n",
-    );
-    process.exit(1);
-  }
-  return { baseUrl: baseUrl.replace(/\/+$/, ""), apiKey };
+  const cfg = requireKeyedConfig();
+  return { baseUrl: cfg.gatewayUrl, apiKey: cfg.apiKey };
 }
 
 // ── Tool registry ─────────────────────────────────────────────────────────────
