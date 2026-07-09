@@ -8,18 +8,12 @@
 
 import type { TCliRelease } from "./release-types";
 
+// TODO: re-run release pipeline to generate correct baseline binaries + checksums
 export const CLI_RELEASE: TCliRelease = {
   repo: "quantidexyz/openllmc",
-  tag: "v1.6.8",
-  targets: ["darwin-arm64", "darwin-x64", "linux-x64", "linux-arm64"],
+  tag: "", // empty until baseline binaries published — API returns 503
+  targets: ["darwin-arm64", "darwin-x64-baseline", "linux-x64-baseline", "linux-arm64"],
   sha256: {
-    "darwin-arm64":
-      "5f6f7f3f1d344947ff66d39f6d1d89056b08a6841e93e6fe134fe0c5a8dbf795",
-    "darwin-x64":
-      "970c5a117a64a95805a338632ed9b680eed966c323ca0bd40a9f84fbbe6e33e0",
-    "linux-x64":
-      "99e3079cda293327cc5173ea91d63f9c6a644329d66e3bf9e5cdab0683757639",
-    "linux-arm64":
-      "bd8d2309c66b12ff33fbe41bfe3cf56146e1c4c9b695bc7a48459331a72f2b98",
+    // TODO: fill with actual baseline binary checksums after release
   },
 };

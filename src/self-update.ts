@@ -21,7 +21,8 @@ const FETCH_TIMEOUT_MS = 30_000;
 
 const targetSuffix = (): string => {
   const os = process.platform === "darwin" ? "darwin" : "linux";
-  const arch = process.arch === "arm64" ? "arm64" : "x64";
+  const arch =
+    process.arch === "arm64" ? "arm64" : process.arch === "x64" ? "x64-baseline" : "x64";
   return `${os}-${arch}`;
 };
 
