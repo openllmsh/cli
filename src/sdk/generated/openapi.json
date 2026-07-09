@@ -12536,6 +12536,7 @@
                     "total_tokens_in",
                     "total_tokens_out",
                     "total_cost_usd",
+                    "total_api_equivalent_cost_usd",
                     "by_model",
                     "daily"
                   ],
@@ -12550,6 +12551,9 @@
                       "type": "number"
                     },
                     "total_cost_usd": {
+                      "type": "number"
+                    },
+                    "total_api_equivalent_cost_usd": {
                       "type": "number"
                     },
                     "by_model": {
@@ -14168,6 +14172,31 @@
                             "type": "number"
                           },
                           "pricing": {
+                            "type": "object",
+                            "required": [],
+                            "properties": {
+                              "input_per_million": {
+                                "type": "number"
+                              },
+                              "output_per_million": {
+                                "type": "number"
+                              },
+                              "cache_read_per_million": {
+                                "type": "number"
+                              },
+                              "cache_write_per_million": {
+                                "type": "number"
+                              },
+                              "image_input_per_unit": {
+                                "type": "number"
+                              },
+                              "audio_input_per_minute": {
+                                "type": "number"
+                              }
+                            },
+                            "additionalProperties": false
+                          },
+                          "api_equivalent_pricing": {
                             "type": "object",
                             "required": [],
                             "properties": {
