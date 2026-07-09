@@ -21,14 +21,7 @@ const FETCH_TIMEOUT_MS = 30_000;
 
 const targetSuffix = (): string => {
   const os = process.platform === "darwin" ? "darwin" : "linux";
-  const arch =
-    process.arch === "arm64" ? "arm64" : process.arch === "x64" ? "x64-baseline" : null;
-  if (arch === null) {
-    process.stderr.write(
-      `[self-update] unsupported architecture ${process.arch} (published targets are arm64/x64-baseline)\n`,
-    );
-    process.exit(1);
-  }
+  const arch = process.arch === "arm64" ? "arm64" : "x64";
   return `${os}-${arch}`;
 };
 

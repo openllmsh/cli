@@ -9,8 +9,7 @@
  * embeds the Bun runtime. `--minify --bytecode` strips readable identifiers
  * + original source text. No `.ts` source ships.
  *
- * Targets (no Windows): darwin-{arm64,x64-baseline}, linux-{x64-baseline,arm64}.
- * x64 uses the `baseline` (Nehalem) tier — no AVX/AVX2/FMA required.
+ * Targets (no Windows): darwin-{arm64,x64}, linux-{x64,arm64}.
  *
  * Usage:
  *   bun run packages/cli/scripts/compile.ts            # all targets
@@ -76,8 +75,8 @@ const resolveCloudOrigin = (): string => {
 
 const TARGETS = [
   "bun-darwin-arm64",
-  "bun-darwin-x64-baseline",
-  "bun-linux-x64-baseline",
+  "bun-darwin-x64",
+  "bun-linux-x64",
   "bun-linux-arm64",
 ] as const;
 
