@@ -761,6 +761,60 @@ export const API_OPERATIONS: readonly TApiOperation[] = [
     "hasBody": true
   },
   {
+    "id": "v1Videos.videosCreate",
+    "method": "post",
+    "path": "/v1/videos",
+    "summary": "",
+    "tags": [
+      "v1Videos"
+    ],
+    "pathParams": [],
+    "queryParams": [],
+    "hasBody": true
+  },
+  {
+    "id": "v1Videos.videosDelete",
+    "method": "delete",
+    "path": "/v1/videos/{video_id}",
+    "summary": "",
+    "tags": [
+      "v1Videos"
+    ],
+    "pathParams": [
+      "video_id"
+    ],
+    "queryParams": [],
+    "hasBody": false
+  },
+  {
+    "id": "v1Videos.videosRetrieve",
+    "method": "get",
+    "path": "/v1/videos/{video_id}",
+    "summary": "",
+    "tags": [
+      "v1Videos"
+    ],
+    "pathParams": [
+      "video_id"
+    ],
+    "queryParams": [],
+    "hasBody": false
+  },
+  {
+    "id": "v1Videos.videosContent",
+    "method": "get",
+    "path": "/v1/videos/{video_id}/content",
+    "summary": "",
+    "tags": [
+      "v1Videos"
+    ],
+    "pathParams": [
+      "video_id"
+    ],
+    "queryParams": [],
+    "hasBody": false
+  },
+  {
     "id": "vault.abandon",
     "method": "post",
     "path": "/vault/abandon",
