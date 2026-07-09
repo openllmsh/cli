@@ -6605,6 +6605,28 @@
                                 "type": "string"
                               }
                             },
+                            "subscription_plans": {
+                              "type": "array",
+                              "items": {
+                                "type": "object",
+                                "required": [
+                                  "provider",
+                                  "plan"
+                                ],
+                                "properties": {
+                                  "provider": {
+                                    "type": "string"
+                                  },
+                                  "plan": {
+                                    "type": "string"
+                                  },
+                                  "monthly_usd": {
+                                    "type": "number"
+                                  }
+                                },
+                                "additionalProperties": false
+                              }
+                            },
                             "disabled_default_aliases": {
                               "type": "array",
                               "items": {
@@ -14622,6 +14644,28 @@
                         "type": "array",
                         "items": {
                           "type": "string"
+                        }
+                      },
+                      "subscription_plans": {
+                        "type": "array",
+                        "items": {
+                          "type": "object",
+                          "required": [
+                            "provider",
+                            "plan"
+                          ],
+                          "properties": {
+                            "provider": {
+                              "type": "string"
+                            },
+                            "plan": {
+                              "type": "string"
+                            },
+                            "monthly_usd": {
+                              "type": "number"
+                            }
+                          },
+                          "additionalProperties": false
                         }
                       },
                       "disabled_default_aliases": {
