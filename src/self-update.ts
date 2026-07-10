@@ -15,15 +15,30 @@ import { createHash } from "node:crypto";
 import * as fs from "node:fs";
 import { dirname, join } from "node:path";
 import { gunzipSync } from "node:zlib";
+import { CLI_RELEASE } from "../manifest";
+import { CLI_TARGETS } from "../release-types";
 import { CLI_VERSION, cliConfig } from "./env";
 
 const FETCH_TIMEOUT_MS = 30_000;
 
-const targetSuffix = (): string => {
+/** This host's release target suffix (`<os>-<arch>`), or null when the
+ *  platform/arch isn't one we publish. `process.arch` reports `arm64` / `x64`;
+ *  x64 maps to the `-baseline` variant (the single x64 release target). The
+ *  result is checked against `CLI_TARGETS` so an unsupported OS (e.g. win32)
+ *  returns null too — matching `hostTarget()` in `scripts/verify.ts` and the
+ *  daemon's `currentTarget()` — letting the caller fail with a clear message
+ *  instead of 404ing on a bogus target. */
+const targetSuffix = (): string | null => {
   const os = process.platform === "darwin" ? "darwin" : "linux";
   const arch =
-    process.arch === "arm64" ? "arm64" : process.arch === "x64" ? "x64-baseline" : "x64";
-  return `${os}-${arch}`;
+    process.arch === "x64"
+      ? "x64-baseline"
+      : process.arch === "arm64"
+        ? "arm64"
+        : null;
+  if (arch === null) return null;
+  const t = `${os}-${arch}`;
+  return (CLI_TARGETS as readonly string[]).includes(t) ? t : null;
 };
 
 const GZIP_MAGIC = Buffer.from([0x1f, 0x8b]);
@@ -88,6 +103,15 @@ export const runSelfUpdate = async (): Promise<void> => {
   }
 
   const target = targetSuffix();
+  if (target === null) {
+    // No prebuilt binary for this arch — point at the source repo, whose
+    // README documents building the host binary (`bun run compile:host`).
+    process.stderr.write(
+      `[self-update] unsupported host ${process.platform}/${process.arch} — no prebuilt openllmc for this arch.\n` +
+        `  Build from source: https://github.com/${CLI_RELEASE.repo}#build-from-source\n`,
+    );
+    process.exit(1);
+  }
   process.stderr.write(
     `[self-update] v${CLI_VERSION} → v${latest} (${target})\n`,
   );
