@@ -552,6 +552,10 @@ export const API_OPERATIONS: readonly TApiOperation[] = [
         "required": false
       },
       {
+        "name": "provider",
+        "required": false
+      },
+      {
         "name": "endpoint",
         "required": false
       },
@@ -607,6 +611,10 @@ export const API_OPERATIONS: readonly TApiOperation[] = [
     "queryParams": [
       {
         "name": "model",
+        "required": false
+      },
+      {
+        "name": "provider",
         "required": false
       },
       {

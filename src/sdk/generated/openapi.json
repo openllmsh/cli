@@ -404,6 +404,60 @@
                                                 }
                                               },
                                               "additionalProperties": false
+                                            },
+                                            {
+                                              "type": "object",
+                                              "required": [
+                                                "type",
+                                                "file"
+                                              ],
+                                              "properties": {
+                                                "type": {
+                                                  "type": "string",
+                                                  "enum": [
+                                                    "file"
+                                                  ]
+                                                },
+                                                "file": {
+                                                  "type": "object",
+                                                  "required": [],
+                                                  "properties": {
+                                                    "file_data": {
+                                                      "type": "string"
+                                                    },
+                                                    "file_id": {
+                                                      "type": "string"
+                                                    },
+                                                    "filename": {
+                                                      "type": "string"
+                                                    }
+                                                  },
+                                                  "additionalProperties": false
+                                                },
+                                                "cache_control": {
+                                                  "anyOf": [
+                                                    {
+                                                      "type": "object",
+                                                      "required": [
+                                                        "type"
+                                                      ],
+                                                      "properties": {
+                                                        "type": {
+                                                          "type": "string",
+                                                          "enum": [
+                                                            "ephemeral"
+                                                          ]
+                                                        }
+                                                      },
+                                                      "additionalProperties": false
+                                                    },
+                                                    {
+                                                      "type": "null"
+                                                    }
+                                                  ]
+                                                }
+                                              },
+                                              "additionalProperties": false
                                             }
                                           ]
                                         }
@@ -963,6 +1017,60 @@
                                           }
                                         },
                                         "additionalProperties": false
+                                      },
+                                      {
+                                        "type": "object",
+                                        "required": [
+                                          "type",
+                                          "file"
+                                        ],
+                                        "properties": {
+                                          "type": {
+                                            "type": "string",
+                                            "enum": [
+                                              "file"
+                                            ]
+                                          },
+                                          "file": {
+                                            "type": "object",
+                                            "required": [],
+                                            "properties": {
+                                              "file_data": {
+                                                "type": "string"
+                                              },
+                                              "file_id": {
+                                                "type": "string"
+                                              },
+                                              "filename": {
+                                                "type": "string"
+                                              }
+                                            },
+                                            "additionalProperties": false
+                                          },
+                                          "cache_control": {
+                                            "anyOf": [
+                                              {
+                                                "type": "object",
+                                                "required": [
+                                                  "type"
+                                                ],
+                                                "properties": {
+                                                  "type": {
+                                                    "type": "string",
+                                                    "enum": [
+                                                      "ephemeral"
+                                                    ]
+                                                  }
+                                                },
+                                                "additionalProperties": false
+                                              },
+                                              {
+                                                "type": "null"
+                                              }
+                                            ]
+                                          }
+                                        },
+                                        "additionalProperties": false
                                       }
                                     ]
                                   }
@@ -1150,6 +1258,60 @@
                                               }
                                             },
                                             "additionalProperties": false
+                                          }
+                                        },
+                                        "additionalProperties": false
+                                      },
+                                      {
+                                        "type": "object",
+                                        "required": [
+                                          "type",
+                                          "file"
+                                        ],
+                                        "properties": {
+                                          "type": {
+                                            "type": "string",
+                                            "enum": [
+                                              "file"
+                                            ]
+                                          },
+                                          "file": {
+                                            "type": "object",
+                                            "required": [],
+                                            "properties": {
+                                              "file_data": {
+                                                "type": "string"
+                                              },
+                                              "file_id": {
+                                                "type": "string"
+                                              },
+                                              "filename": {
+                                                "type": "string"
+                                              }
+                                            },
+                                            "additionalProperties": false
+                                          },
+                                          "cache_control": {
+                                            "anyOf": [
+                                              {
+                                                "type": "object",
+                                                "required": [
+                                                  "type"
+                                                ],
+                                                "properties": {
+                                                  "type": {
+                                                    "type": "string",
+                                                    "enum": [
+                                                      "ephemeral"
+                                                    ]
+                                                  }
+                                                },
+                                                "additionalProperties": false
+                                              },
+                                              {
+                                                "type": "null"
+                                              }
+                                            ]
                                           }
                                         },
                                         "additionalProperties": false
@@ -1341,6 +1503,60 @@
                                                   }
                                                 },
                                                 "additionalProperties": false
+                                              }
+                                            },
+                                            "additionalProperties": false
+                                          },
+                                          {
+                                            "type": "object",
+                                            "required": [
+                                              "type",
+                                              "file"
+                                            ],
+                                            "properties": {
+                                              "type": {
+                                                "type": "string",
+                                                "enum": [
+                                                  "file"
+                                                ]
+                                              },
+                                              "file": {
+                                                "type": "object",
+                                                "required": [],
+                                                "properties": {
+                                                  "file_data": {
+                                                    "type": "string"
+                                                  },
+                                                  "file_id": {
+                                                    "type": "string"
+                                                  },
+                                                  "filename": {
+                                                    "type": "string"
+                                                  }
+                                                },
+                                                "additionalProperties": false
+                                              },
+                                              "cache_control": {
+                                                "anyOf": [
+                                                  {
+                                                    "type": "object",
+                                                    "required": [
+                                                      "type"
+                                                    ],
+                                                    "properties": {
+                                                      "type": {
+                                                        "type": "string",
+                                                        "enum": [
+                                                          "ephemeral"
+                                                        ]
+                                                      }
+                                                    },
+                                                    "additionalProperties": false
+                                                  },
+                                                  {
+                                                    "type": "null"
+                                                  }
+                                                ]
                                               }
                                             },
                                             "additionalProperties": false
@@ -1610,6 +1826,60 @@
                                               }
                                             },
                                             "additionalProperties": false
+                                          }
+                                        },
+                                        "additionalProperties": false
+                                      },
+                                      {
+                                        "type": "object",
+                                        "required": [
+                                          "type",
+                                          "file"
+                                        ],
+                                        "properties": {
+                                          "type": {
+                                            "type": "string",
+                                            "enum": [
+                                              "file"
+                                            ]
+                                          },
+                                          "file": {
+                                            "type": "object",
+                                            "required": [],
+                                            "properties": {
+                                              "file_data": {
+                                                "type": "string"
+                                              },
+                                              "file_id": {
+                                                "type": "string"
+                                              },
+                                              "filename": {
+                                                "type": "string"
+                                              }
+                                            },
+                                            "additionalProperties": false
+                                          },
+                                          "cache_control": {
+                                            "anyOf": [
+                                              {
+                                                "type": "object",
+                                                "required": [
+                                                  "type"
+                                                ],
+                                                "properties": {
+                                                  "type": {
+                                                    "type": "string",
+                                                    "enum": [
+                                                      "ephemeral"
+                                                    ]
+                                                  }
+                                                },
+                                                "additionalProperties": false
+                                              },
+                                              {
+                                                "type": "null"
+                                              }
+                                            ]
                                           }
                                         },
                                         "additionalProperties": false
@@ -1995,6 +2265,10 @@
                               "text": {
                                 "type": "string"
                               },
+                              "citations": {
+                                "$id": "/schemas/unknown",
+                                "title": "unknown"
+                              },
                               "cache_control": {
                                 "anyOf": [
                                   {
@@ -2076,8 +2350,344 @@
                                       }
                                     },
                                     "additionalProperties": false
+                                  },
+                                  {
+                                    "type": "object",
+                                    "required": [
+                                      "type",
+                                      "file_id"
+                                    ],
+                                    "properties": {
+                                      "type": {
+                                        "type": "string",
+                                        "enum": [
+                                          "file"
+                                        ]
+                                      },
+                                      "file_id": {
+                                        "type": "string"
+                                      }
+                                    },
+                                    "additionalProperties": false
                                   }
                                 ]
+                              },
+                              "cache_control": {
+                                "anyOf": [
+                                  {
+                                    "type": "object",
+                                    "required": [
+                                      "type"
+                                    ],
+                                    "properties": {
+                                      "type": {
+                                        "type": "string",
+                                        "enum": [
+                                          "ephemeral"
+                                        ]
+                                      }
+                                    },
+                                    "additionalProperties": false
+                                  },
+                                  {
+                                    "type": "null"
+                                  }
+                                ]
+                              }
+                            },
+                            "additionalProperties": false
+                          },
+                          {
+                            "type": "object",
+                            "required": [
+                              "type",
+                              "source"
+                            ],
+                            "properties": {
+                              "type": {
+                                "type": "string",
+                                "enum": [
+                                  "document"
+                                ]
+                              },
+                              "source": {
+                                "anyOf": [
+                                  {
+                                    "type": "object",
+                                    "required": [
+                                      "type",
+                                      "media_type",
+                                      "data"
+                                    ],
+                                    "properties": {
+                                      "type": {
+                                        "type": "string",
+                                        "enum": [
+                                          "base64"
+                                        ]
+                                      },
+                                      "media_type": {
+                                        "type": "string"
+                                      },
+                                      "data": {
+                                        "type": "string"
+                                      }
+                                    },
+                                    "additionalProperties": false
+                                  },
+                                  {
+                                    "type": "object",
+                                    "required": [
+                                      "type",
+                                      "url"
+                                    ],
+                                    "properties": {
+                                      "type": {
+                                        "type": "string",
+                                        "enum": [
+                                          "url"
+                                        ]
+                                      },
+                                      "url": {
+                                        "type": "string"
+                                      }
+                                    },
+                                    "additionalProperties": false
+                                  },
+                                  {
+                                    "type": "object",
+                                    "required": [
+                                      "type",
+                                      "media_type",
+                                      "data"
+                                    ],
+                                    "properties": {
+                                      "type": {
+                                        "type": "string",
+                                        "enum": [
+                                          "text"
+                                        ]
+                                      },
+                                      "media_type": {
+                                        "type": "string"
+                                      },
+                                      "data": {
+                                        "type": "string"
+                                      }
+                                    },
+                                    "additionalProperties": false
+                                  },
+                                  {
+                                    "type": "object",
+                                    "required": [
+                                      "type",
+                                      "content"
+                                    ],
+                                    "properties": {
+                                      "type": {
+                                        "type": "string",
+                                        "enum": [
+                                          "content"
+                                        ]
+                                      },
+                                      "content": {
+                                        "$id": "/schemas/unknown",
+                                        "title": "unknown"
+                                      }
+                                    },
+                                    "additionalProperties": false
+                                  },
+                                  {
+                                    "type": "object",
+                                    "required": [
+                                      "type",
+                                      "file_id"
+                                    ],
+                                    "properties": {
+                                      "type": {
+                                        "type": "string",
+                                        "enum": [
+                                          "file"
+                                        ]
+                                      },
+                                      "file_id": {
+                                        "type": "string"
+                                      }
+                                    },
+                                    "additionalProperties": false
+                                  }
+                                ]
+                              },
+                              "title": {
+                                "anyOf": [
+                                  {
+                                    "type": "string"
+                                  },
+                                  {
+                                    "type": "null"
+                                  }
+                                ]
+                              },
+                              "context": {
+                                "anyOf": [
+                                  {
+                                    "type": "string"
+                                  },
+                                  {
+                                    "type": "null"
+                                  }
+                                ]
+                              },
+                              "citations": {
+                                "type": "object",
+                                "required": [
+                                  "enabled"
+                                ],
+                                "properties": {
+                                  "enabled": {
+                                    "type": "boolean"
+                                  }
+                                },
+                                "additionalProperties": false
+                              },
+                              "cache_control": {
+                                "anyOf": [
+                                  {
+                                    "type": "object",
+                                    "required": [
+                                      "type"
+                                    ],
+                                    "properties": {
+                                      "type": {
+                                        "type": "string",
+                                        "enum": [
+                                          "ephemeral"
+                                        ]
+                                      }
+                                    },
+                                    "additionalProperties": false
+                                  },
+                                  {
+                                    "type": "null"
+                                  }
+                                ]
+                              }
+                            },
+                            "additionalProperties": false
+                          },
+                          {
+                            "type": "object",
+                            "required": [
+                              "type",
+                              "source",
+                              "title",
+                              "content"
+                            ],
+                            "properties": {
+                              "type": {
+                                "type": "string",
+                                "enum": [
+                                  "search_result"
+                                ]
+                              },
+                              "source": {
+                                "type": "string"
+                              },
+                              "title": {
+                                "type": "string"
+                              },
+                              "content": {
+                                "type": "array",
+                                "items": {
+                                  "type": "object",
+                                  "required": [
+                                    "type",
+                                    "text"
+                                  ],
+                                  "properties": {
+                                    "type": {
+                                      "type": "string",
+                                      "enum": [
+                                        "text"
+                                      ]
+                                    },
+                                    "text": {
+                                      "type": "string"
+                                    },
+                                    "citations": {
+                                      "$id": "/schemas/unknown",
+                                      "title": "unknown"
+                                    },
+                                    "cache_control": {
+                                      "anyOf": [
+                                        {
+                                          "type": "object",
+                                          "required": [
+                                            "type"
+                                          ],
+                                          "properties": {
+                                            "type": {
+                                              "type": "string",
+                                              "enum": [
+                                                "ephemeral"
+                                              ]
+                                            }
+                                          },
+                                          "additionalProperties": false
+                                        },
+                                        {
+                                          "type": "null"
+                                        }
+                                      ]
+                                    }
+                                  },
+                                  "additionalProperties": false
+                                }
+                              },
+                              "citations": {
+                                "$id": "/schemas/unknown",
+                                "title": "unknown"
+                              },
+                              "cache_control": {
+                                "anyOf": [
+                                  {
+                                    "type": "object",
+                                    "required": [
+                                      "type"
+                                    ],
+                                    "properties": {
+                                      "type": {
+                                        "type": "string",
+                                        "enum": [
+                                          "ephemeral"
+                                        ]
+                                      }
+                                    },
+                                    "additionalProperties": false
+                                  },
+                                  {
+                                    "type": "null"
+                                  }
+                                ]
+                              }
+                            },
+                            "additionalProperties": false
+                          },
+                          {
+                            "type": "object",
+                            "required": [
+                              "type",
+                              "file_id"
+                            ],
+                            "properties": {
+                              "type": {
+                                "type": "string",
+                                "enum": [
+                                  "container_upload"
+                                ]
+                              },
+                              "file_id": {
+                                "type": "string"
                               },
                               "cache_control": {
                                 "anyOf": [
@@ -2196,6 +2806,10 @@
                                             "text": {
                                               "type": "string"
                                             },
+                                            "citations": {
+                                              "$id": "/schemas/unknown",
+                                              "title": "unknown"
+                                            },
                                             "cache_control": {
                                               "anyOf": [
                                                 {
@@ -2277,8 +2891,303 @@
                                                     }
                                                   },
                                                   "additionalProperties": false
+                                                },
+                                                {
+                                                  "type": "object",
+                                                  "required": [
+                                                    "type",
+                                                    "file_id"
+                                                  ],
+                                                  "properties": {
+                                                    "type": {
+                                                      "type": "string",
+                                                      "enum": [
+                                                        "file"
+                                                      ]
+                                                    },
+                                                    "file_id": {
+                                                      "type": "string"
+                                                    }
+                                                  },
+                                                  "additionalProperties": false
                                                 }
                                               ]
+                                            },
+                                            "cache_control": {
+                                              "anyOf": [
+                                                {
+                                                  "type": "object",
+                                                  "required": [
+                                                    "type"
+                                                  ],
+                                                  "properties": {
+                                                    "type": {
+                                                      "type": "string",
+                                                      "enum": [
+                                                        "ephemeral"
+                                                      ]
+                                                    }
+                                                  },
+                                                  "additionalProperties": false
+                                                },
+                                                {
+                                                  "type": "null"
+                                                }
+                                              ]
+                                            }
+                                          },
+                                          "additionalProperties": false
+                                        },
+                                        {
+                                          "type": "object",
+                                          "required": [
+                                            "type",
+                                            "source"
+                                          ],
+                                          "properties": {
+                                            "type": {
+                                              "type": "string",
+                                              "enum": [
+                                                "document"
+                                              ]
+                                            },
+                                            "source": {
+                                              "anyOf": [
+                                                {
+                                                  "type": "object",
+                                                  "required": [
+                                                    "type",
+                                                    "media_type",
+                                                    "data"
+                                                  ],
+                                                  "properties": {
+                                                    "type": {
+                                                      "type": "string",
+                                                      "enum": [
+                                                        "base64"
+                                                      ]
+                                                    },
+                                                    "media_type": {
+                                                      "type": "string"
+                                                    },
+                                                    "data": {
+                                                      "type": "string"
+                                                    }
+                                                  },
+                                                  "additionalProperties": false
+                                                },
+                                                {
+                                                  "type": "object",
+                                                  "required": [
+                                                    "type",
+                                                    "url"
+                                                  ],
+                                                  "properties": {
+                                                    "type": {
+                                                      "type": "string",
+                                                      "enum": [
+                                                        "url"
+                                                      ]
+                                                    },
+                                                    "url": {
+                                                      "type": "string"
+                                                    }
+                                                  },
+                                                  "additionalProperties": false
+                                                },
+                                                {
+                                                  "type": "object",
+                                                  "required": [
+                                                    "type",
+                                                    "media_type",
+                                                    "data"
+                                                  ],
+                                                  "properties": {
+                                                    "type": {
+                                                      "type": "string",
+                                                      "enum": [
+                                                        "text"
+                                                      ]
+                                                    },
+                                                    "media_type": {
+                                                      "type": "string"
+                                                    },
+                                                    "data": {
+                                                      "type": "string"
+                                                    }
+                                                  },
+                                                  "additionalProperties": false
+                                                },
+                                                {
+                                                  "type": "object",
+                                                  "required": [
+                                                    "type",
+                                                    "content"
+                                                  ],
+                                                  "properties": {
+                                                    "type": {
+                                                      "type": "string",
+                                                      "enum": [
+                                                        "content"
+                                                      ]
+                                                    },
+                                                    "content": {
+                                                      "$id": "/schemas/unknown",
+                                                      "title": "unknown"
+                                                    }
+                                                  },
+                                                  "additionalProperties": false
+                                                },
+                                                {
+                                                  "type": "object",
+                                                  "required": [
+                                                    "type",
+                                                    "file_id"
+                                                  ],
+                                                  "properties": {
+                                                    "type": {
+                                                      "type": "string",
+                                                      "enum": [
+                                                        "file"
+                                                      ]
+                                                    },
+                                                    "file_id": {
+                                                      "type": "string"
+                                                    }
+                                                  },
+                                                  "additionalProperties": false
+                                                }
+                                              ]
+                                            },
+                                            "title": {
+                                              "anyOf": [
+                                                {
+                                                  "type": "string"
+                                                },
+                                                {
+                                                  "type": "null"
+                                                }
+                                              ]
+                                            },
+                                            "context": {
+                                              "anyOf": [
+                                                {
+                                                  "type": "string"
+                                                },
+                                                {
+                                                  "type": "null"
+                                                }
+                                              ]
+                                            },
+                                            "citations": {
+                                              "type": "object",
+                                              "required": [
+                                                "enabled"
+                                              ],
+                                              "properties": {
+                                                "enabled": {
+                                                  "type": "boolean"
+                                                }
+                                              },
+                                              "additionalProperties": false
+                                            },
+                                            "cache_control": {
+                                              "anyOf": [
+                                                {
+                                                  "type": "object",
+                                                  "required": [
+                                                    "type"
+                                                  ],
+                                                  "properties": {
+                                                    "type": {
+                                                      "type": "string",
+                                                      "enum": [
+                                                        "ephemeral"
+                                                      ]
+                                                    }
+                                                  },
+                                                  "additionalProperties": false
+                                                },
+                                                {
+                                                  "type": "null"
+                                                }
+                                              ]
+                                            }
+                                          },
+                                          "additionalProperties": false
+                                        },
+                                        {
+                                          "type": "object",
+                                          "required": [
+                                            "type",
+                                            "source",
+                                            "title",
+                                            "content"
+                                          ],
+                                          "properties": {
+                                            "type": {
+                                              "type": "string",
+                                              "enum": [
+                                                "search_result"
+                                              ]
+                                            },
+                                            "source": {
+                                              "type": "string"
+                                            },
+                                            "title": {
+                                              "type": "string"
+                                            },
+                                            "content": {
+                                              "type": "array",
+                                              "items": {
+                                                "type": "object",
+                                                "required": [
+                                                  "type",
+                                                  "text"
+                                                ],
+                                                "properties": {
+                                                  "type": {
+                                                    "type": "string",
+                                                    "enum": [
+                                                      "text"
+                                                    ]
+                                                  },
+                                                  "text": {
+                                                    "type": "string"
+                                                  },
+                                                  "citations": {
+                                                    "$id": "/schemas/unknown",
+                                                    "title": "unknown"
+                                                  },
+                                                  "cache_control": {
+                                                    "anyOf": [
+                                                      {
+                                                        "type": "object",
+                                                        "required": [
+                                                          "type"
+                                                        ],
+                                                        "properties": {
+                                                          "type": {
+                                                            "type": "string",
+                                                            "enum": [
+                                                              "ephemeral"
+                                                            ]
+                                                          }
+                                                        },
+                                                        "additionalProperties": false
+                                                      },
+                                                      {
+                                                        "type": "null"
+                                                      }
+                                                    ]
+                                                  }
+                                                },
+                                                "additionalProperties": false
+                                              }
+                                            },
+                                            "citations": {
+                                              "$id": "/schemas/unknown",
+                                              "title": "unknown"
                                             },
                                             "cache_control": {
                                               "anyOf": [
@@ -2801,6 +3710,10 @@
                                       "text": {
                                         "type": "string"
                                       },
+                                      "citations": {
+                                        "$id": "/schemas/unknown",
+                                        "title": "unknown"
+                                      },
                                       "cache_control": {
                                         "anyOf": [
                                           {
@@ -2882,8 +3795,344 @@
                                               }
                                             },
                                             "additionalProperties": false
+                                          },
+                                          {
+                                            "type": "object",
+                                            "required": [
+                                              "type",
+                                              "file_id"
+                                            ],
+                                            "properties": {
+                                              "type": {
+                                                "type": "string",
+                                                "enum": [
+                                                  "file"
+                                                ]
+                                              },
+                                              "file_id": {
+                                                "type": "string"
+                                              }
+                                            },
+                                            "additionalProperties": false
                                           }
                                         ]
+                                      },
+                                      "cache_control": {
+                                        "anyOf": [
+                                          {
+                                            "type": "object",
+                                            "required": [
+                                              "type"
+                                            ],
+                                            "properties": {
+                                              "type": {
+                                                "type": "string",
+                                                "enum": [
+                                                  "ephemeral"
+                                                ]
+                                              }
+                                            },
+                                            "additionalProperties": false
+                                          },
+                                          {
+                                            "type": "null"
+                                          }
+                                        ]
+                                      }
+                                    },
+                                    "additionalProperties": false
+                                  },
+                                  {
+                                    "type": "object",
+                                    "required": [
+                                      "type",
+                                      "source"
+                                    ],
+                                    "properties": {
+                                      "type": {
+                                        "type": "string",
+                                        "enum": [
+                                          "document"
+                                        ]
+                                      },
+                                      "source": {
+                                        "anyOf": [
+                                          {
+                                            "type": "object",
+                                            "required": [
+                                              "type",
+                                              "media_type",
+                                              "data"
+                                            ],
+                                            "properties": {
+                                              "type": {
+                                                "type": "string",
+                                                "enum": [
+                                                  "base64"
+                                                ]
+                                              },
+                                              "media_type": {
+                                                "type": "string"
+                                              },
+                                              "data": {
+                                                "type": "string"
+                                              }
+                                            },
+                                            "additionalProperties": false
+                                          },
+                                          {
+                                            "type": "object",
+                                            "required": [
+                                              "type",
+                                              "url"
+                                            ],
+                                            "properties": {
+                                              "type": {
+                                                "type": "string",
+                                                "enum": [
+                                                  "url"
+                                                ]
+                                              },
+                                              "url": {
+                                                "type": "string"
+                                              }
+                                            },
+                                            "additionalProperties": false
+                                          },
+                                          {
+                                            "type": "object",
+                                            "required": [
+                                              "type",
+                                              "media_type",
+                                              "data"
+                                            ],
+                                            "properties": {
+                                              "type": {
+                                                "type": "string",
+                                                "enum": [
+                                                  "text"
+                                                ]
+                                              },
+                                              "media_type": {
+                                                "type": "string"
+                                              },
+                                              "data": {
+                                                "type": "string"
+                                              }
+                                            },
+                                            "additionalProperties": false
+                                          },
+                                          {
+                                            "type": "object",
+                                            "required": [
+                                              "type",
+                                              "content"
+                                            ],
+                                            "properties": {
+                                              "type": {
+                                                "type": "string",
+                                                "enum": [
+                                                  "content"
+                                                ]
+                                              },
+                                              "content": {
+                                                "$id": "/schemas/unknown",
+                                                "title": "unknown"
+                                              }
+                                            },
+                                            "additionalProperties": false
+                                          },
+                                          {
+                                            "type": "object",
+                                            "required": [
+                                              "type",
+                                              "file_id"
+                                            ],
+                                            "properties": {
+                                              "type": {
+                                                "type": "string",
+                                                "enum": [
+                                                  "file"
+                                                ]
+                                              },
+                                              "file_id": {
+                                                "type": "string"
+                                              }
+                                            },
+                                            "additionalProperties": false
+                                          }
+                                        ]
+                                      },
+                                      "title": {
+                                        "anyOf": [
+                                          {
+                                            "type": "string"
+                                          },
+                                          {
+                                            "type": "null"
+                                          }
+                                        ]
+                                      },
+                                      "context": {
+                                        "anyOf": [
+                                          {
+                                            "type": "string"
+                                          },
+                                          {
+                                            "type": "null"
+                                          }
+                                        ]
+                                      },
+                                      "citations": {
+                                        "type": "object",
+                                        "required": [
+                                          "enabled"
+                                        ],
+                                        "properties": {
+                                          "enabled": {
+                                            "type": "boolean"
+                                          }
+                                        },
+                                        "additionalProperties": false
+                                      },
+                                      "cache_control": {
+                                        "anyOf": [
+                                          {
+                                            "type": "object",
+                                            "required": [
+                                              "type"
+                                            ],
+                                            "properties": {
+                                              "type": {
+                                                "type": "string",
+                                                "enum": [
+                                                  "ephemeral"
+                                                ]
+                                              }
+                                            },
+                                            "additionalProperties": false
+                                          },
+                                          {
+                                            "type": "null"
+                                          }
+                                        ]
+                                      }
+                                    },
+                                    "additionalProperties": false
+                                  },
+                                  {
+                                    "type": "object",
+                                    "required": [
+                                      "type",
+                                      "source",
+                                      "title",
+                                      "content"
+                                    ],
+                                    "properties": {
+                                      "type": {
+                                        "type": "string",
+                                        "enum": [
+                                          "search_result"
+                                        ]
+                                      },
+                                      "source": {
+                                        "type": "string"
+                                      },
+                                      "title": {
+                                        "type": "string"
+                                      },
+                                      "content": {
+                                        "type": "array",
+                                        "items": {
+                                          "type": "object",
+                                          "required": [
+                                            "type",
+                                            "text"
+                                          ],
+                                          "properties": {
+                                            "type": {
+                                              "type": "string",
+                                              "enum": [
+                                                "text"
+                                              ]
+                                            },
+                                            "text": {
+                                              "type": "string"
+                                            },
+                                            "citations": {
+                                              "$id": "/schemas/unknown",
+                                              "title": "unknown"
+                                            },
+                                            "cache_control": {
+                                              "anyOf": [
+                                                {
+                                                  "type": "object",
+                                                  "required": [
+                                                    "type"
+                                                  ],
+                                                  "properties": {
+                                                    "type": {
+                                                      "type": "string",
+                                                      "enum": [
+                                                        "ephemeral"
+                                                      ]
+                                                    }
+                                                  },
+                                                  "additionalProperties": false
+                                                },
+                                                {
+                                                  "type": "null"
+                                                }
+                                              ]
+                                            }
+                                          },
+                                          "additionalProperties": false
+                                        }
+                                      },
+                                      "citations": {
+                                        "$id": "/schemas/unknown",
+                                        "title": "unknown"
+                                      },
+                                      "cache_control": {
+                                        "anyOf": [
+                                          {
+                                            "type": "object",
+                                            "required": [
+                                              "type"
+                                            ],
+                                            "properties": {
+                                              "type": {
+                                                "type": "string",
+                                                "enum": [
+                                                  "ephemeral"
+                                                ]
+                                              }
+                                            },
+                                            "additionalProperties": false
+                                          },
+                                          {
+                                            "type": "null"
+                                          }
+                                        ]
+                                      }
+                                    },
+                                    "additionalProperties": false
+                                  },
+                                  {
+                                    "type": "object",
+                                    "required": [
+                                      "type",
+                                      "file_id"
+                                    ],
+                                    "properties": {
+                                      "type": {
+                                        "type": "string",
+                                        "enum": [
+                                          "container_upload"
+                                        ]
+                                      },
+                                      "file_id": {
+                                        "type": "string"
                                       },
                                       "cache_control": {
                                         "anyOf": [
@@ -3002,6 +4251,10 @@
                                                     "text": {
                                                       "type": "string"
                                                     },
+                                                    "citations": {
+                                                      "$id": "/schemas/unknown",
+                                                      "title": "unknown"
+                                                    },
                                                     "cache_control": {
                                                       "anyOf": [
                                                         {
@@ -3083,8 +4336,303 @@
                                                             }
                                                           },
                                                           "additionalProperties": false
+                                                        },
+                                                        {
+                                                          "type": "object",
+                                                          "required": [
+                                                            "type",
+                                                            "file_id"
+                                                          ],
+                                                          "properties": {
+                                                            "type": {
+                                                              "type": "string",
+                                                              "enum": [
+                                                                "file"
+                                                              ]
+                                                            },
+                                                            "file_id": {
+                                                              "type": "string"
+                                                            }
+                                                          },
+                                                          "additionalProperties": false
                                                         }
                                                       ]
+                                                    },
+                                                    "cache_control": {
+                                                      "anyOf": [
+                                                        {
+                                                          "type": "object",
+                                                          "required": [
+                                                            "type"
+                                                          ],
+                                                          "properties": {
+                                                            "type": {
+                                                              "type": "string",
+                                                              "enum": [
+                                                                "ephemeral"
+                                                              ]
+                                                            }
+                                                          },
+                                                          "additionalProperties": false
+                                                        },
+                                                        {
+                                                          "type": "null"
+                                                        }
+                                                      ]
+                                                    }
+                                                  },
+                                                  "additionalProperties": false
+                                                },
+                                                {
+                                                  "type": "object",
+                                                  "required": [
+                                                    "type",
+                                                    "source"
+                                                  ],
+                                                  "properties": {
+                                                    "type": {
+                                                      "type": "string",
+                                                      "enum": [
+                                                        "document"
+                                                      ]
+                                                    },
+                                                    "source": {
+                                                      "anyOf": [
+                                                        {
+                                                          "type": "object",
+                                                          "required": [
+                                                            "type",
+                                                            "media_type",
+                                                            "data"
+                                                          ],
+                                                          "properties": {
+                                                            "type": {
+                                                              "type": "string",
+                                                              "enum": [
+                                                                "base64"
+                                                              ]
+                                                            },
+                                                            "media_type": {
+                                                              "type": "string"
+                                                            },
+                                                            "data": {
+                                                              "type": "string"
+                                                            }
+                                                          },
+                                                          "additionalProperties": false
+                                                        },
+                                                        {
+                                                          "type": "object",
+                                                          "required": [
+                                                            "type",
+                                                            "url"
+                                                          ],
+                                                          "properties": {
+                                                            "type": {
+                                                              "type": "string",
+                                                              "enum": [
+                                                                "url"
+                                                              ]
+                                                            },
+                                                            "url": {
+                                                              "type": "string"
+                                                            }
+                                                          },
+                                                          "additionalProperties": false
+                                                        },
+                                                        {
+                                                          "type": "object",
+                                                          "required": [
+                                                            "type",
+                                                            "media_type",
+                                                            "data"
+                                                          ],
+                                                          "properties": {
+                                                            "type": {
+                                                              "type": "string",
+                                                              "enum": [
+                                                                "text"
+                                                              ]
+                                                            },
+                                                            "media_type": {
+                                                              "type": "string"
+                                                            },
+                                                            "data": {
+                                                              "type": "string"
+                                                            }
+                                                          },
+                                                          "additionalProperties": false
+                                                        },
+                                                        {
+                                                          "type": "object",
+                                                          "required": [
+                                                            "type",
+                                                            "content"
+                                                          ],
+                                                          "properties": {
+                                                            "type": {
+                                                              "type": "string",
+                                                              "enum": [
+                                                                "content"
+                                                              ]
+                                                            },
+                                                            "content": {
+                                                              "$id": "/schemas/unknown",
+                                                              "title": "unknown"
+                                                            }
+                                                          },
+                                                          "additionalProperties": false
+                                                        },
+                                                        {
+                                                          "type": "object",
+                                                          "required": [
+                                                            "type",
+                                                            "file_id"
+                                                          ],
+                                                          "properties": {
+                                                            "type": {
+                                                              "type": "string",
+                                                              "enum": [
+                                                                "file"
+                                                              ]
+                                                            },
+                                                            "file_id": {
+                                                              "type": "string"
+                                                            }
+                                                          },
+                                                          "additionalProperties": false
+                                                        }
+                                                      ]
+                                                    },
+                                                    "title": {
+                                                      "anyOf": [
+                                                        {
+                                                          "type": "string"
+                                                        },
+                                                        {
+                                                          "type": "null"
+                                                        }
+                                                      ]
+                                                    },
+                                                    "context": {
+                                                      "anyOf": [
+                                                        {
+                                                          "type": "string"
+                                                        },
+                                                        {
+                                                          "type": "null"
+                                                        }
+                                                      ]
+                                                    },
+                                                    "citations": {
+                                                      "type": "object",
+                                                      "required": [
+                                                        "enabled"
+                                                      ],
+                                                      "properties": {
+                                                        "enabled": {
+                                                          "type": "boolean"
+                                                        }
+                                                      },
+                                                      "additionalProperties": false
+                                                    },
+                                                    "cache_control": {
+                                                      "anyOf": [
+                                                        {
+                                                          "type": "object",
+                                                          "required": [
+                                                            "type"
+                                                          ],
+                                                          "properties": {
+                                                            "type": {
+                                                              "type": "string",
+                                                              "enum": [
+                                                                "ephemeral"
+                                                              ]
+                                                            }
+                                                          },
+                                                          "additionalProperties": false
+                                                        },
+                                                        {
+                                                          "type": "null"
+                                                        }
+                                                      ]
+                                                    }
+                                                  },
+                                                  "additionalProperties": false
+                                                },
+                                                {
+                                                  "type": "object",
+                                                  "required": [
+                                                    "type",
+                                                    "source",
+                                                    "title",
+                                                    "content"
+                                                  ],
+                                                  "properties": {
+                                                    "type": {
+                                                      "type": "string",
+                                                      "enum": [
+                                                        "search_result"
+                                                      ]
+                                                    },
+                                                    "source": {
+                                                      "type": "string"
+                                                    },
+                                                    "title": {
+                                                      "type": "string"
+                                                    },
+                                                    "content": {
+                                                      "type": "array",
+                                                      "items": {
+                                                        "type": "object",
+                                                        "required": [
+                                                          "type",
+                                                          "text"
+                                                        ],
+                                                        "properties": {
+                                                          "type": {
+                                                            "type": "string",
+                                                            "enum": [
+                                                              "text"
+                                                            ]
+                                                          },
+                                                          "text": {
+                                                            "type": "string"
+                                                          },
+                                                          "citations": {
+                                                            "$id": "/schemas/unknown",
+                                                            "title": "unknown"
+                                                          },
+                                                          "cache_control": {
+                                                            "anyOf": [
+                                                              {
+                                                                "type": "object",
+                                                                "required": [
+                                                                  "type"
+                                                                ],
+                                                                "properties": {
+                                                                  "type": {
+                                                                    "type": "string",
+                                                                    "enum": [
+                                                                      "ephemeral"
+                                                                    ]
+                                                                  }
+                                                                },
+                                                                "additionalProperties": false
+                                                              },
+                                                              {
+                                                                "type": "null"
+                                                              }
+                                                            ]
+                                                          }
+                                                        },
+                                                        "additionalProperties": false
+                                                      }
+                                                    },
+                                                    "citations": {
+                                                      "$id": "/schemas/unknown",
+                                                      "title": "unknown"
                                                     },
                                                     "cache_control": {
                                                       "anyOf": [
@@ -3334,6 +4882,10 @@
                             },
                             "text": {
                               "type": "string"
+                            },
+                            "citations": {
+                              "$id": "/schemas/unknown",
+                              "title": "unknown"
                             },
                             "cache_control": {
                               "anyOf": [
@@ -4089,6 +5641,37 @@
                                               }
                                             },
                                             "additionalProperties": false
+                                          },
+                                          {
+                                            "type": "object",
+                                            "required": [
+                                              "type"
+                                            ],
+                                            "properties": {
+                                              "type": {
+                                                "type": "string",
+                                                "enum": [
+                                                  "input_file"
+                                                ]
+                                              },
+                                              "filename": {
+                                                "type": "string"
+                                              },
+                                              "file_data": {
+                                                "type": "string"
+                                              },
+                                              "file_id": {
+                                                "anyOf": [
+                                                  {
+                                                    "type": "string"
+                                                  },
+                                                  {
+                                                    "type": "null"
+                                                  }
+                                                ]
+                                              }
+                                            },
+                                            "additionalProperties": false
                                           }
                                         ]
                                       }
@@ -4214,6 +5797,37 @@
                                                   "auto",
                                                   "low",
                                                   "high"
+                                                ]
+                                              }
+                                            },
+                                            "additionalProperties": false
+                                          },
+                                          {
+                                            "type": "object",
+                                            "required": [
+                                              "type"
+                                            ],
+                                            "properties": {
+                                              "type": {
+                                                "type": "string",
+                                                "enum": [
+                                                  "input_file"
+                                                ]
+                                              },
+                                              "filename": {
+                                                "type": "string"
+                                              },
+                                              "file_data": {
+                                                "type": "string"
+                                              },
+                                              "file_id": {
+                                                "anyOf": [
+                                                  {
+                                                    "type": "string"
+                                                  },
+                                                  {
+                                                    "type": "null"
+                                                  }
                                                 ]
                                               }
                                             },
@@ -12578,6 +14192,69 @@
                     "total_api_equivalent_cost_usd": {
                       "type": "number"
                     },
+                    "inferred_subscription_usage": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "required": [
+                          "provider",
+                          "off_gateway_usd",
+                          "current_window",
+                          "pair_count",
+                          "tightness"
+                        ],
+                        "properties": {
+                          "provider": {
+                            "type": "string"
+                          },
+                          "off_gateway_usd": {
+                            "type": "number"
+                          },
+                          "current_window": {
+                            "anyOf": [
+                              {
+                                "type": "object",
+                                "required": [
+                                  "window_label",
+                                  "percent_used",
+                                  "used_usd",
+                                  "headroom_usd",
+                                  "bracket_usd"
+                                ],
+                                "properties": {
+                                  "window_label": {
+                                    "type": "string"
+                                  },
+                                  "percent_used": {
+                                    "type": "number"
+                                  },
+                                  "used_usd": {
+                                    "type": "number"
+                                  },
+                                  "headroom_usd": {
+                                    "type": "number"
+                                  },
+                                  "bracket_usd": {
+                                    "type": "number"
+                                  }
+                                },
+                                "additionalProperties": false
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "pair_count": {
+                            "type": "number"
+                          },
+                          "tightness": {
+                            "type": "number"
+                          }
+                        },
+                        "additionalProperties": false
+                      }
+                    },
                     "by_model": {
                       "type": "array",
                       "items": {
@@ -13343,11 +15020,13 @@
                           "id",
                           "provider",
                           "model",
-                          "endpoint",
+                          "endpoints",
                           "count",
                           "tokens_in",
                           "tokens_out",
                           "total_tokens",
+                          "cost_usd",
+                          "api_equivalent_cost_usd",
                           "first_timestamp",
                           "last_timestamp"
                         ],
@@ -13368,15 +15047,11 @@
                               }
                             ]
                           },
-                          "endpoint": {
-                            "anyOf": [
-                              {
-                                "type": "string"
-                              },
-                              {
-                                "type": "null"
-                              }
-                            ]
+                          "endpoints": {
+                            "type": "array",
+                            "items": {
+                              "type": "string"
+                            }
                           },
                           "count": {
                             "type": "number"
@@ -13389,6 +15064,19 @@
                           },
                           "total_tokens": {
                             "type": "number"
+                          },
+                          "cost_usd": {
+                            "type": "number"
+                          },
+                          "api_equivalent_cost_usd": {
+                            "anyOf": [
+                              {
+                                "type": "number"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
                           },
                           "first_timestamp": {
                             "type": "string"
@@ -13590,6 +15278,14 @@
         "parameters": [
           {
             "name": "model",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            },
+            "required": false
+          },
+          {
+            "name": "provider",
             "in": "query",
             "schema": {
               "type": "string"
@@ -13812,6 +15508,14 @@
         "parameters": [
           {
             "name": "model",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            },
+            "required": false
+          },
+          {
+            "name": "provider",
             "in": "query",
             "schema": {
               "type": "string"
