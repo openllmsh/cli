@@ -14250,6 +14250,76 @@
                           },
                           "tightness": {
                             "type": "number"
+                          },
+                          "accounts": {
+                            "type": "array",
+                            "items": {
+                              "type": "object",
+                              "required": [
+                                "account_hash",
+                                "off_gateway_usd",
+                                "current_window",
+                                "pair_count",
+                                "tightness"
+                              ],
+                              "properties": {
+                                "account_hash": {
+                                  "anyOf": [
+                                    {
+                                      "type": "string"
+                                    },
+                                    {
+                                      "type": "null"
+                                    }
+                                  ]
+                                },
+                                "off_gateway_usd": {
+                                  "type": "number"
+                                },
+                                "current_window": {
+                                  "anyOf": [
+                                    {
+                                      "type": "object",
+                                      "required": [
+                                        "window_label",
+                                        "percent_used",
+                                        "used_usd",
+                                        "headroom_usd",
+                                        "bracket_usd"
+                                      ],
+                                      "properties": {
+                                        "window_label": {
+                                          "type": "string"
+                                        },
+                                        "percent_used": {
+                                          "type": "number"
+                                        },
+                                        "used_usd": {
+                                          "type": "number"
+                                        },
+                                        "headroom_usd": {
+                                          "type": "number"
+                                        },
+                                        "bracket_usd": {
+                                          "type": "number"
+                                        }
+                                      },
+                                      "additionalProperties": false
+                                    },
+                                    {
+                                      "type": "null"
+                                    }
+                                  ]
+                                },
+                                "pair_count": {
+                                  "type": "number"
+                                },
+                                "tightness": {
+                                  "type": "number"
+                                }
+                              },
+                              "additionalProperties": false
+                            }
                           }
                         },
                         "additionalProperties": false
