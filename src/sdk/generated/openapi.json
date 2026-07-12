@@ -2191,6 +2191,9 @@
                     "additionalProperties": {
                       "type": "string"
                     }
+                  },
+                  "prompt_cache_key": {
+                    "type": "string"
                   }
                 },
                 "additionalProperties": false
@@ -6073,6 +6076,16 @@
                     ]
                   },
                   "previous_response_id": {
+                    "anyOf": [
+                      {
+                        "type": "string"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "prompt_cache_key": {
                     "anyOf": [
                       {
                         "type": "string"
