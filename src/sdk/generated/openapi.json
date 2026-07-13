@@ -9682,7 +9682,10 @@
                                   "user_agent",
                                   "device_id",
                                   "device_label",
-                                  "daemon_status"
+                                  "daemon_status",
+                                  "daemon_status_session_id",
+                                  "daemon_status_session_started_at_ms",
+                                  "daemon_status_seq"
                                 ],
                                 "properties": {
                                   "daemon_active": {
@@ -9777,6 +9780,36 @@
                                   "daemon_status": {
                                     "$id": "/schemas/unknown",
                                     "title": "unknown"
+                                  },
+                                  "daemon_status_session_id": {
+                                    "anyOf": [
+                                      {
+                                        "type": "string"
+                                      },
+                                      {
+                                        "type": "null"
+                                      }
+                                    ]
+                                  },
+                                  "daemon_status_session_started_at_ms": {
+                                    "anyOf": [
+                                      {
+                                        "type": "number"
+                                      },
+                                      {
+                                        "type": "null"
+                                      }
+                                    ]
+                                  },
+                                  "daemon_status_seq": {
+                                    "anyOf": [
+                                      {
+                                        "type": "number"
+                                      },
+                                      {
+                                        "type": "null"
+                                      }
+                                    ]
                                   }
                                 },
                                 "additionalProperties": false
