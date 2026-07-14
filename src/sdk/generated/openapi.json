@@ -14246,6 +14246,7 @@
                           "provider",
                           "off_gateway_usd",
                           "current_window",
+                          "monthly_index",
                           "pair_count",
                           "tightness"
                         ],
@@ -14291,6 +14292,33 @@
                               }
                             ]
                           },
+                          "monthly_index": {
+                            "anyOf": [
+                              {
+                                "type": "object",
+                                "required": [
+                                  "used_usd",
+                                  "headroom_usd",
+                                  "bracket_usd"
+                                ],
+                                "properties": {
+                                  "used_usd": {
+                                    "type": "number"
+                                  },
+                                  "headroom_usd": {
+                                    "type": "number"
+                                  },
+                                  "bracket_usd": {
+                                    "type": "number"
+                                  }
+                                },
+                                "additionalProperties": false
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
                           "pair_count": {
                             "type": "number"
                           },
@@ -14305,6 +14333,7 @@
                                 "account_hash",
                                 "off_gateway_usd",
                                 "current_window",
+                                "monthly_index",
                                 "pair_count",
                                 "tightness"
                               ],
@@ -14340,6 +14369,33 @@
                                         "percent_used": {
                                           "type": "number"
                                         },
+                                        "used_usd": {
+                                          "type": "number"
+                                        },
+                                        "headroom_usd": {
+                                          "type": "number"
+                                        },
+                                        "bracket_usd": {
+                                          "type": "number"
+                                        }
+                                      },
+                                      "additionalProperties": false
+                                    },
+                                    {
+                                      "type": "null"
+                                    }
+                                  ]
+                                },
+                                "monthly_index": {
+                                  "anyOf": [
+                                    {
+                                      "type": "object",
+                                      "required": [
+                                        "used_usd",
+                                        "headroom_usd",
+                                        "bracket_usd"
+                                      ],
+                                      "properties": {
                                         "used_usd": {
                                           "type": "number"
                                         },
