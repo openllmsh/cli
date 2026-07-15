@@ -769,6 +769,18 @@ export const API_OPERATIONS: readonly TApiOperation[] = [
     "hasBody": true
   },
   {
+    "id": "v1Search.search",
+    "method": "post",
+    "path": "/v1/search",
+    "summary": "",
+    "tags": [
+      "v1Search"
+    ],
+    "pathParams": [],
+    "queryParams": [],
+    "hasBody": true
+  },
+  {
     "id": "v1Videos.videosCreate",
     "method": "post",
     "path": "/v1/videos",
