@@ -24,8 +24,8 @@ import { gzipSync } from "node:zlib";
 import { $ } from "bun";
 
 // Resolve paths from THIS script's location, not the cwd — works identically
-// from the monorepo (`packages/cli/scripts`) and the flattened `openllmc`
-// mirror (`openllmc/scripts`). Same pattern as the daemon's compile script.
+// from the monorepo (`packages/cli/scripts`) and the flattened `cli`
+// mirror (`cli/scripts`). Same pattern as the daemon's compile script.
 const PKG_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const ENTRY = join(PKG_ROOT, "src", "main.ts");
 const OUT_DIR = join(PKG_ROOT, "dist");

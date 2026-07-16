@@ -1,4 +1,4 @@
-# `@quantidexyz/openllmc` — the OpenLLM CLI
+# `@openllmsh/cli` — the OpenLLM CLI
 
 > The single distribution vehicle for every gateway extension: ONE compiled,
 > source-free binary (`~/.openllm/bin/openllmc`) serving ONE MCP server that
@@ -14,7 +14,7 @@
 
 ```
 packages/cli/
-├── package.json          # @quantidexyz/openllmc · 0.0.0-dev placeholder · BUSL-1.1
+├── package.json          # @openllmsh/cli · 0.0.0-dev placeholder · BUSL-1.1
 ├── manifest.ts           # COMMITTED release pin (repo/tag/per-target sha256)
 ├── release-types.ts      # CLI_TARGETS (SSOT of buildable targets) + TCliRelease
 ├── index.ts              # barrel: manifest + release-types only (gateway reads the pin)
@@ -73,7 +73,7 @@ operation, no hand-picked subset; coverage tracks the spec. Mutating
 operations carry explicit consent copy in their tool descriptions.
 
 Because the artifacts are committed, `packages/cli` has **zero runtime
-workspace deps** — the public `openllmc` mirror builds standalone
+workspace deps** — the public `cli` mirror builds standalone
 (`bun install && bun run compile`). The drift test
 (`tests/cli/sdk-drift.test.ts`) regenerates in-memory and fails when the
 committed artifacts lag the HttpApi; `@openllm/schema` appears only under
@@ -87,7 +87,7 @@ Everything follows `packages/daemon` exactly — see
 - ONE version identity: the manifest tag. `package.json` stays `0.0.0-dev`
   (the sentinel dev guards key on — a source build never self-updates).
 - 4 targets (`CLI_TARGETS`), compiled in parallel, gzipped release assets
-  `openllmc-<target>.gz` on `quantidexyz/openllmc`; the manifest pins the
+  `openllmc-<target>.gz` on `openllmsh/cli`; the manifest pins the
   sha256 of the DECOMPRESSED binary.
 - Change-gated on `CLI_BINARY_SOURCES` (`cli/src` + `release-types.ts` +
   `package.json` — the actual import closure, no workspace packages): an

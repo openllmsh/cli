@@ -2,7 +2,7 @@
 
 /**
  * Generate the CLI's committed SDK artifacts from the Effect `HttpApi`
- * (`@openllm/schema/http-api`) — MONOREPO-ONLY (the `openllmc` mirror ships
+ * (`@openllm/schema/http-api`) — MONOREPO-ONLY (the `cli` mirror ships
  * the committed outputs, never this generator's inputs).
  *
  * Two artifacts land in `src/sdk/generated/` (both COMMITTED):

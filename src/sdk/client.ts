@@ -2,7 +2,7 @@
  * Thin runtime wrapper over the generated operations table — the OpenLLM
  * SDK's transport. Resolves an operation's path/query/body from the tool
  * args, authenticates with the user's `sk-llm-...` key, and returns the
- * parsed response. No workspace deps — the openllmc mirror is
+ * parsed response. No workspace deps — the cli mirror is
  * self-contained.
  */
 

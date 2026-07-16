@@ -45,7 +45,7 @@ openllmc mcp            # the unified MCP server (stdio)
 Or consume the source as a package:
 
 ```sh
-bun install github:quantidexyz/openllmc # latest
+bun install github:openllmsh/cli # latest
 ```
 
 ## Build from source
@@ -54,7 +54,7 @@ This repo is **self-compilable** — no private packages, no monorepo needed
 (the SDK is committed under [`src/sdk/generated/`](./src/sdk/generated)):
 
 ```sh
-git clone https://github.com/quantidexyz/openllmc && cd openllmc
+git clone https://github.com/openllmsh/cli && cd cli
 bun install
 bun run compile:host        # → dist/openllmc (this machine's target)
 ./dist/openllmc version     # v0.0.0-dev — source builds carry the dev sentinel

@@ -1,5 +1,5 @@
 /**
- * `@quantidexyz/openllmc` — the OpenLLM CLI.
+ * `@openllmsh/cli` — the OpenLLM CLI.
  *
  * The single distribution vehicle for every gateway extension: one compiled,
  * source-free binary (`~/.openllm/bin/openllmc`) that serves the unified MCP

@@ -9,7 +9,7 @@
 import type { TCliRelease } from "./release-types";
 
 export const CLI_RELEASE: TCliRelease = {
-  repo: "quantidexyz/openllmc",
+  repo: "openllmsh/cli",
   tag: "v1.6.31",
   targets: [
     "darwin-arm64",
