@@ -17067,6 +17067,7 @@
                     "subscription_discount",
                     "current_period_end",
                     "trial_end",
+                    "invite_trial_days",
                     "cancel_at",
                     "cancel_at_period_end"
                   ],
@@ -17168,6 +17169,16 @@
                       "anyOf": [
                         {
                           "type": "string"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "invite_trial_days": {
+                      "anyOf": [
+                        {
+                          "type": "number"
                         },
                         {
                           "type": "null"
