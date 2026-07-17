@@ -545,6 +545,56 @@
                                   }
                                 ]
                               },
+                              "server_search_calls": {
+                                "anyOf": [
+                                  {
+                                    "type": "array",
+                                    "items": {
+                                      "type": "object",
+                                      "required": [
+                                        "id",
+                                        "query"
+                                      ],
+                                      "properties": {
+                                        "id": {
+                                          "type": "string"
+                                        },
+                                        "query": {
+                                          "type": "string"
+                                        },
+                                        "queries": {
+                                          "type": "array",
+                                          "items": {
+                                            "type": "string"
+                                          }
+                                        },
+                                        "results": {
+                                          "type": "array",
+                                          "items": {
+                                            "type": "object",
+                                            "required": [
+                                              "url"
+                                            ],
+                                            "properties": {
+                                              "url": {
+                                                "type": "string"
+                                              },
+                                              "title": {
+                                                "type": "string"
+                                              }
+                                            },
+                                            "additionalProperties": false
+                                          }
+                                        }
+                                      },
+                                      "additionalProperties": false
+                                    }
+                                  },
+                                  {
+                                    "type": "null"
+                                  }
+                                ]
+                              },
                               "cache_control": {
                                 "anyOf": [
                                   {
@@ -1640,6 +1690,56 @@
                                   "items": {
                                     "$id": "/schemas/unknown",
                                     "title": "unknown"
+                                  }
+                                },
+                                {
+                                  "type": "null"
+                                }
+                              ]
+                            },
+                            "server_search_calls": {
+                              "anyOf": [
+                                {
+                                  "type": "array",
+                                  "items": {
+                                    "type": "object",
+                                    "required": [
+                                      "id",
+                                      "query"
+                                    ],
+                                    "properties": {
+                                      "id": {
+                                        "type": "string"
+                                      },
+                                      "query": {
+                                        "type": "string"
+                                      },
+                                      "queries": {
+                                        "type": "array",
+                                        "items": {
+                                          "type": "string"
+                                        }
+                                      },
+                                      "results": {
+                                        "type": "array",
+                                        "items": {
+                                          "type": "object",
+                                          "required": [
+                                            "url"
+                                          ],
+                                          "properties": {
+                                            "url": {
+                                              "type": "string"
+                                            },
+                                            "title": {
+                                              "type": "string"
+                                            }
+                                          },
+                                          "additionalProperties": false
+                                        }
+                                      }
+                                    },
+                                    "additionalProperties": false
                                   }
                                 },
                                 {
@@ -3464,6 +3564,23 @@
                           "anyOf": [
                             {
                               "type": "number"
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "server_tool_use": {
+                          "anyOf": [
+                            {
+                              "type": "object",
+                              "required": [],
+                              "properties": {
+                                "web_search_requests": {
+                                  "type": "number"
+                                }
+                              },
+                              "additionalProperties": false
                             },
                             {
                               "type": "null"
