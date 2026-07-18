@@ -232,18 +232,6 @@ export const API_OPERATIONS: readonly TApiOperation[] = [
     "hasBody": true
   },
   {
-    "id": "plugins.list",
-    "method": "get",
-    "path": "/plugins",
-    "summary": "",
-    "tags": [
-      "plugins"
-    ],
-    "pathParams": [],
-    "queryParams": [],
-    "hasBody": false
-  },
-  {
     "id": "pluginsClaudeContext.removeCodebase",
     "method": "delete",
     "path": "/plugins/claude-context/codebase",
@@ -415,18 +403,6 @@ export const API_OPERATIONS: readonly TApiOperation[] = [
     "summary": "",
     "tags": [
       "pluginsSupermemory"
-    ],
-    "pathParams": [],
-    "queryParams": [],
-    "hasBody": false
-  },
-  {
-    "id": "plugins.targets",
-    "method": "get",
-    "path": "/plugins/targets",
-    "summary": "",
-    "tags": [
-      "plugins"
     ],
     "pathParams": [],
     "queryParams": [],
