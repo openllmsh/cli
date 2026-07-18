@@ -14113,6 +14113,7 @@
                           "name",
                           "description",
                           "icon",
+                          "os",
                           "version",
                           "commit_url",
                           "pointer_url",
@@ -14139,6 +14140,17 @@
                           },
                           "icon": {
                             "type": "string"
+                          },
+                          "os": {
+                            "type": "array",
+                            "items": {
+                              "type": "string",
+                              "enum": [
+                                "osx",
+                                "linux",
+                                "win"
+                              ]
+                            }
                           },
                           "version": {
                             "type": "string"
