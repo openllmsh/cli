@@ -14113,6 +14113,8 @@
                           "name",
                           "description",
                           "icon",
+                          "version",
+                          "commit_url",
                           "pointer_url",
                           "config_var",
                           "requires_key",
@@ -14136,6 +14138,12 @@
                             "type": "string"
                           },
                           "icon": {
+                            "type": "string"
+                          },
+                          "version": {
+                            "type": "string"
+                          },
+                          "commit_url": {
                             "type": "string"
                           },
                           "pointer_url": {
