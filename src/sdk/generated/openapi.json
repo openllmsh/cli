@@ -14152,6 +14152,16 @@
                               ]
                             }
                           },
+                          "gateway_modes": {
+                            "type": "array",
+                            "items": {
+                              "type": "string",
+                              "enum": [
+                                "local",
+                                "cloud"
+                              ]
+                            }
+                          },
                           "version": {
                             "type": "string"
                           },
