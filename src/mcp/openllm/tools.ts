@@ -11,8 +11,10 @@ import type { TApiOperation } from "../../sdk/generated/operations";
 import { API_OPERATIONS } from "../../sdk/generated/operations";
 import type { TToolResult } from "../types";
 
-/** MCP tool names must match `[a-zA-Z0-9_-]+` — sanitize the operation id. */
-const toolNameFor = (op: TApiOperation): string =>
+/** MCP tool names must match `[a-zA-Z0-9_-]+` — sanitize the operation id.
+ *  Exported: the browser chat's tool bridge maps operations back to tool
+ *  names with the SAME convention (no second naming scheme). */
+export const toolNameFor = (op: TApiOperation): string =>
   `api_${op.id.replace(/[^a-zA-Z0-9_-]+/g, "_")}`;
 
 const MUTATING = new Set(["post", "put", "patch", "delete"]);
