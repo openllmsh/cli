@@ -77,9 +77,9 @@ directly or point `mcpServers.openllm` at your `dist/openllmc`.
 | `openllmc self-update` | converge to the gateway's pinned release |
 | `openllmc version` | print the version |
 
-Config: `LLM_GATEWAY_URL` / `LLM_GATEWAY_API_KEY` (env, or
+Config: `OPENLLM_CLOUD_ORIGIN` / `OPENLLM_API_KEY` (env, or
 the shared `~/.openllm/.env` — the same file the
-daemon pairing writes, so `OPENLLM_CLOUD_ORIGIN` / `OPENLLM_API_KEY` apply to
+daemon pairing writes, so one pairing applies to
 every OpenLLM tool on the box).
 
 ## Verify

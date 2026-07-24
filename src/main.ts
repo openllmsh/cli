@@ -52,7 +52,7 @@ const MCP_USAGE = `usage: openllmc mcp [--only <group>]
 
 Run the unified MCP server over stdio (what mcpServers.openllm executes).
 Groups: ${MCP_GROUPS.join(" | ")} (default: all; --only is for debugging).
-Requires LLM_GATEWAY_API_KEY (env or the shared ~/.openllm/.env).
+Requires OPENLLM_API_KEY (env or the shared ~/.openllm/.env).
 `;
 
 const EXEC_USAGE = `usage: openllmc exec <group> <verb> [...]

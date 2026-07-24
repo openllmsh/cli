@@ -50,9 +50,8 @@ packages/cli/
 | `openllmc self-update` | converge to the gateway's pinned release |
 | `openllmc version` | print the baked version |
 
-Config: `LLM_GATEWAY_URL` / `LLM_GATEWAY_API_KEY` env (the same contract the
-MCP mapping + hooks carry — plus the shared `OPENLLM_CLOUD_ORIGIN` /
-`OPENLLM_API_KEY` names), falling back to the SHARED `~/.openllm/.env` (the
+Config: `OPENLLM_CLOUD_ORIGIN` / `OPENLLM_API_KEY` env (the same contract the
+MCP mapping + hooks carry), falling back to the SHARED `~/.openllm/.env` (the
 same file the daemon boots from — one pairing covers every tool), falling back
 to the compile-time cloud-origin bake.
 

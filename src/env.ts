@@ -7,10 +7,8 @@
  *
  * Resolution order per value:
  *
- *   1. process env — `LLM_GATEWAY_URL` / `LLM_GATEWAY_API_KEY` (the contract
- *      the MCP mapping + hooks carry), or the legacy `GATEWAY_URL` /
- *      `GATEWAY_API_KEY` aliases, or the shared `OPENLLM_CLOUD_ORIGIN` /
- *      `OPENLLM_API_KEY` names
+ *   1. process env — the shared `OPENLLM_CLOUD_ORIGIN` / `OPENLLM_API_KEY`
+ *      names, or the legacy `GATEWAY_URL` / `GATEWAY_API_KEY` aliases
  *   2. `~/.openllm/.env` (KEY=VALUE lines — the shared file; the same
  *      OPENLLM_* keys the daemon reads/writes)
  *   3. the compile-time cloud-origin default (`--define` bake) for the URL
@@ -78,18 +76,14 @@ export type TCliConfig = {
 export const cliConfig = (): TCliConfig => {
   const file = sharedFileConfig();
   const gatewayUrl = (
-    process.env.LLM_GATEWAY_URL ??
     process.env.GATEWAY_URL ??
     process.env.OPENLLM_CLOUD_ORIGIN ??
-    file.LLM_GATEWAY_URL ??
     file.OPENLLM_CLOUD_ORIGIN ??
     CLOUD_ORIGIN_DEFAULT
   ).replace(/\/+$/, "");
   const apiKey =
-    process.env.LLM_GATEWAY_API_KEY ??
     process.env.GATEWAY_API_KEY ??
     process.env.OPENLLM_API_KEY ??
-    file.LLM_GATEWAY_API_KEY ??
     file.OPENLLM_API_KEY ??
     "";
   return { gatewayUrl, apiKey };
@@ -100,7 +94,7 @@ export const requireKeyedConfig = (): TCliConfig => {
   const cfg = cliConfig();
   if (cfg.apiKey.length === 0) {
     process.stderr.write(
-      "[openllmc] No API key configured — set LLM_GATEWAY_API_KEY (env), or pair the daemon so ~/.openllm/.env carries OPENLLM_API_KEY\n",
+      "[openllmc] No API key configured — set OPENLLM_API_KEY (env), or pair the daemon so ~/.openllm/.env carries OPENLLM_API_KEY\n",
     );
     process.exit(1);
   }

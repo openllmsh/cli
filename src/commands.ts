@@ -99,8 +99,8 @@ Exec groups:
 ${EXEC_GROUPS.map((g) => `  openllmc exec ${g} <${EXEC_VERBS[g].join("|")}>`).join("\n")}
 
 Config (env, or the shared ~/.openllm/.env):
-  LLM_GATEWAY_URL       gateway origin (default: the baked cloud origin)
-  LLM_GATEWAY_API_KEY   your sk-llm-... API key
+  OPENLLM_CLOUD_ORIGIN  gateway origin (default: the baked cloud origin)
+  OPENLLM_API_KEY       your sk-llm-... API key
 
 Every command accepts -h/--help.
 `;
