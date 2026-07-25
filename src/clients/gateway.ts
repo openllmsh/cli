@@ -9,7 +9,7 @@
  * that comes and goes therefore needs no reinstall.
  */
 
-import { cliConfig, openllmDir } from "../env";
+import { cliConfig, openllmDir, sharedFileConfig } from "../env";
 
 /** How long to wait for the local daemon's /status before falling back. */
 const PROBE_TIMEOUT_MS = 400;
@@ -18,11 +18,16 @@ const CATALOG_TIMEOUT_MS = 8_000;
 
 const DEFAULT_DAEMON_PORT = 8787;
 
-/** The daemon port from the shared env file, defaulting to 8787. */
+/** Load daemon configuration from env + shared file, defaulting to 8787. */
 const daemonPort = (): number => {
-  const raw = process.env.OPENLLM_DAEMON_PORT;
-  const parsed = Number.parseInt(raw ?? "", 10);
-  return Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_DAEMON_PORT;
+  const raw =
+    process.env.OPENLLM_DAEMON_PORT ??
+    sharedFileConfig().OPENLLM_DAEMON_PORT ??
+    String(DEFAULT_DAEMON_PORT);
+  const parsed = Number.parseInt(raw, 10);
+  return Number.isFinite(parsed) && parsed >= 1 && parsed <= 65535
+    ? parsed
+    : DEFAULT_DAEMON_PORT;
 };
 
 export type TGateway = {

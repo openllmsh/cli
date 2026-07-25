@@ -190,6 +190,38 @@ state_key = hashlib.sha1(
 ).hexdigest()[:16]
 state_file = os.path.join(sessions_dir, state_key + ".json")
 
+# Remove stale lock files older than 7 days that are not actively held.
+def prune_stale_lock(path: str) -> None:
+    try:
+        if time.time() - os.path.getmtime(path) < 7 * 24 * 60 * 60:
+            return
+    except Exception:
+        return
+
+    try:
+        fd = os.open(path, os.O_RDWR)
+    except Exception:
+        return
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        os.close(fd)
+        return
+    except Exception:
+        os.close(fd)
+        return
+    try:
+        os.unlink(path)
+    except Exception:
+        pass
+    finally:
+        os.close(fd)
+
+for entry in os.listdir(sessions_dir):
+    if entry.endswith(".lock"):
+        lock_path = os.path.join(sessions_dir, entry)
+        prune_stale_lock(lock_path)
+
 # Serialize concurrent extractions for the same session/transcript. Keep an
 # ownership-safe kernel lock for this process's lifetime; crashes release it
 # automatically, and a later process cannot unlink a live owner's lock.
@@ -224,6 +256,14 @@ try:
 except OSError:
     sys.exit(0)
 now = int(time.time())
+
+
+def stamp_state():
+    try:
+        with open(state_file, "w") as f:
+            json.dump({"size": cur_size, "ts": now}, f)
+    except Exception:
+        pass
 
 if (
     prev_state.get("size") == cur_size
@@ -365,11 +405,7 @@ def load_recent_turns(path: str, limit: int):
 turns = load_recent_turns(transcript_path, max_turns)
 if len(turns) < 2:
     # Need at least one user + one assistant turn to read intent + confirmation.
-    try:
-        with open(state_file, "w") as f:
-            json.dump({"size": cur_size, "ts": now}, f)
-    except Exception:
-        pass
+    stamp_state()
     sys.exit(0)
 
 
@@ -630,20 +666,8 @@ except Exception as e:
     # transcript size if it's down — and LOG it: a broken extractor must be
     # visible in auto-save.log, not silent.
     log_line("ERROR", f"[{project}] extractor LLM call failed: {type(e).__name__}: {e}")
-    try:
-        with open(state_file, "w") as f:
-            json.dump({"size": cur_size, "ts": now}, f)
-    except Exception:
-        pass
+    stamp_state()
     sys.exit(0)
-
-def stamp_state():
-    try:
-        with open(state_file, "w") as f:
-            json.dump({"size": cur_size, "ts": now}, f)
-    except Exception:
-        pass
-
 
 try:
     text = data["choices"][0]["message"]["content"] or ""
@@ -786,11 +810,7 @@ for mem in save_items:
     except Exception:
         errors += 1
 
-try:
-    with open(state_file, "w") as f:
-        json.dump({"size": cur_size, "ts": now}, f)
-except Exception:
-    pass
+stamp_state()
 
 if saved or forgot or skipped_dup or errors:
     try:

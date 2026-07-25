@@ -84,7 +84,7 @@ const parseEnvFile = (path: string): Record<string, string> => {
 };
 
 /** The shared file's values (read-only). */
-const sharedFileConfig = (): Record<string, string> =>
+export const sharedFileConfig = (): Record<string, string> =>
   parseEnvFile(sharedEnvFile());
 
 export type TCliConfig = {

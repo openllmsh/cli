@@ -125,23 +125,27 @@ fi
 
 # Record the gateway origin (and a key, when supplied) in the SHARED config file
 # the daemon also boots from. Never clobber an existing key with nothing.
-if [ ! -f "$ENV_FILE" ] || [ -n "${OPENLLM_API_KEY:-}" ]; then
-  EXISTING_KEY=""
-  EXISTING_DEVICE_ID=""
-  if [ -f "$ENV_FILE" ]; then
-    EXISTING_KEY="$(sed -n 's/^OPENLLM_API_KEY=//p' "$ENV_FILE" | head -1)"
-    EXISTING_DEVICE_ID="$(sed -n 's/^OPENLLM_DEVICE_ID=//p' "$ENV_FILE" | head -1)"
-  fi
-  API_KEY="${OPENLLM_API_KEY:-$EXISTING_KEY}"
+# Always refresh OPENLLM_CLOUD_ORIGIN so origin changes are propagated.
+EXISTING_KEY=""
+EXISTING_DEVICE_ID=""
+if [ -f "$ENV_FILE" ]; then
+  EXISTING_KEY="$(sed -n 's/^OPENLLM_API_KEY=//p' "$ENV_FILE" | head -1)"
+  EXISTING_DEVICE_ID="$(sed -n 's/^OPENLLM_DEVICE_ID=//p' "$ENV_FILE" | head -1)"
+fi
+API_KEY="${OPENLLM_API_KEY:-$EXISTING_KEY}"
+# umask in a SUBSHELL: this write is now unconditional, so a bare `umask 077`
+# would leak owner-only mode into everything after it — including the rc file
+# `$DEST setup` appends to.
+(
   umask 077
   {
     echo "OPENLLM_CLOUD_ORIGIN=$ORIGIN"
     [ -n "$API_KEY" ] && echo "OPENLLM_API_KEY=$API_KEY"
     [ -n "$EXISTING_DEVICE_ID" ] && echo "OPENLLM_DEVICE_ID=$EXISTING_DEVICE_ID"
   } > "$ENV_FILE"
-  chmod 0600 "$ENV_FILE"
-  echo "  gateway config written → $ENV_FILE"
-fi
+)
+chmod 0600 "$ENV_FILE"
+echo "  gateway config written → $ENV_FILE"
 
 # PATH symlinks (openllm + ollm), the marked rc block, and completion for both
 # names — the same code path a human runs as `openllm setup`.

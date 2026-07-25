@@ -64,7 +64,9 @@ RECALL_PROJECT="${SUPERMEMORY_RECALL_PROJECT:-}"
 RECALL_TIMEOUT="${SUPERMEMORY_RECALL_TIMEOUT:-5.0}"
 MAX_PROMPT_CHARS="${SUPERMEMORY_RECALL_MAX_PROMPT:-1000}"
 LOG_DIR="${SUPERMEMORY_AUTO_LOG_DIR:-$HOME/.claude/plugin-state/supermemory}"
+umask 077
 mkdir -p "$LOG_DIR" 2>/dev/null || true
+chmod 700 "$LOG_DIR" 2>/dev/null || true
 
 # Read the event JSON from stdin IN BASH and hand it to python via the
 # environment — `python3 - <<'PYEOF'` consumes stdin for the program text, so

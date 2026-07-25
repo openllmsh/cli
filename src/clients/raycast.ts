@@ -29,9 +29,9 @@ import {
 import { join } from "node:path";
 import { CLI_VERSION, openllmDir, userHome } from "../env";
 import { contextStateDir, fetchModelCatalog, resolveGateway } from "./gateway";
-import type { TClientFlags } from "./registry";
 import { removeRegion, substitute, upsertRegion } from "./merge";
 import { OVERLAYS } from "./overlays";
+import type { TClientFlags } from "./registry";
 
 const REGION_BEGIN = "# >>> openllm (managed) >>>";
 const REGION_END = "# <<< openllm (managed) <<<";
@@ -97,23 +97,31 @@ const writeLedger = (ledger: TRaycastLedger): void => {
   writeFileSync(path, `${JSON.stringify(ledger, null, 2)}\n`, { mode: 0o600 });
 };
 
-/** Read a UserDefaults array; empty when unset or unreadable. */
+/** Read Raycast's plist domain as JSON with `defaults export | plutil`. */
 const readDefaultsArray = (key: string): string[] => {
   try {
-    const out = execFileSync("defaults", ["read", DOMAIN, key], {
+    const plist = execFileSync("defaults", ["export", DOMAIN, "-"], {
       encoding: "utf-8",
       stdio: ["ignore", "pipe", "ignore"],
     });
-    // `defaults read` prints an old-style plist array: ( "a", "b" )
-    return [...out.matchAll(/"([^"]+)"|^\s{4}([^",\n]+),?$/gm)]
-      .map((m) => (m[1] ?? m[2] ?? "").trim())
-      .filter((v) => v.length > 0);
+    const json = execFileSync("plutil", ["-convert", "json", "-o", "-", "-"], {
+      encoding: "utf-8",
+      input: plist,
+      stdio: ["pipe", "pipe", "ignore"],
+    });
+    const parsed = JSON.parse(json) as Record<string, unknown>;
+    const raw = parsed[key];
+    return Array.isArray(raw)
+      ? raw.filter((item): item is string => typeof item === "string")
+      : [];
   } catch {
     return [];
   }
 };
 
 const writeDefaultsArray = (key: string, values: readonly string[]): void => {
+  // No empty-array special case: spreading zero values already yields the
+  // exact `defaults write <domain> <key> -array` that writes an empty array.
   execFileSync("defaults", ["write", DOMAIN, key, "-array", ...values], {
     stdio: "ignore",
   });
@@ -269,6 +277,7 @@ export const uninstallRaycast = (): number => {
   }
 
   // Reverse ONLY the prefs the ledger says we changed.
+  let prefsRestored = true;
   if (ledger !== null && isDarwin()) {
     try {
       if (ledger.prefs.added_custom_providers) {
@@ -287,13 +296,16 @@ export const uninstallRaycast = (): number => {
           writeDefaultsArray(DISABLED_KEY, [...disabled, ...restore]);
       }
     } catch {
+      prefsRestored = false;
       process.stdout.write(
         "  note: could not restore Raycast preferences (they may need a manual check)\n",
       );
     }
   }
 
-  rmSync(ledgerPath(), { force: true });
+  if (prefsRestored) {
+    rmSync(ledgerPath(), { force: true });
+  }
   process.stdout.write(
     removed
       ? `✓ Removed OpenLLM from ${path}\n  Restart Raycast to reload providers.\n`

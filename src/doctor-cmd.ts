@@ -92,13 +92,29 @@ export const runDoctor = (args: readonly string[]): number => {
   for (const path of legacyPaths()) {
     if (!existsSync(path)) continue;
     found.push(path);
-    if (scrub) rmSync(path, { recursive: true, force: true });
+    if (scrub) {
+      try {
+        rmSync(path, { recursive: true, force: true });
+      } catch {
+        process.stdout.write(
+          `  ! ${path} could not be removed — left untouched\n`,
+        );
+      }
+    }
   }
 
   for (const backup of legacyBackups()) {
     if (!existsSync(backup)) continue;
     found.push(`${backup} (may contain an API key)`);
-    if (scrub) rmSync(backup, { force: true });
+    if (scrub) {
+      try {
+        rmSync(backup, { force: true });
+      } catch {
+        process.stdout.write(
+          `  ! ${backup} could not be removed — left untouched\n`,
+        );
+      }
+    }
   }
 
   for (const { path, begin, end } of legacyRegions()) {
