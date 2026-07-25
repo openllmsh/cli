@@ -65,7 +65,9 @@ export type TClient = {
   readonly catalogSlug?: string;
   /** Platforms the client runs on; empty = every supported OS. */
   readonly os?: readonly ("darwin" | "linux")[];
-  /** One-line note rendered under the dashboard card. */
+  /** One-line note. Rendered as a `# …` comment inside the dashboard's
+   *  terminal block and in `openllm <client> -h`, so keep it short and
+   *  period-free — it has to read as a shell comment. */
   readonly note: string;
 };
 
@@ -78,7 +80,7 @@ export const CLIENTS: Readonly<Record<TClientId, TClient>> = {
     bin: "claude",
     binPaths: ["~/.local/bin/claude"],
     installHint: "https://claude.ai/install.sh",
-    note: "Your ~/.claude config is never modified.",
+    note: "your ~/.claude config is never modified",
   },
   codex: {
     id: "codex",
@@ -89,7 +91,7 @@ export const CLIENTS: Readonly<Record<TClientId, TClient>> = {
     binPaths: ["~/.local/bin/codex", "~/.codex/bin/codex"],
     installHint: "https://chatgpt.com/codex/install.sh",
     catalogSlug: "codex",
-    note: "Your ~/.codex/config.toml is never modified.",
+    note: "your ~/.codex/config.toml is never modified",
   },
   grok: {
     id: "grok",
@@ -100,7 +102,7 @@ export const CLIENTS: Readonly<Record<TClientId, TClient>> = {
     binPaths: ["~/.grok/bin/grok", "~/.local/bin/grok"],
     installHint: "https://x.ai/cli/install.sh",
     catalogSlug: "grok-build",
-    note: "Your ~/.grok config and auth.json are never modified.",
+    note: "your ~/.grok config and auth.json are never modified",
   },
   opencode: {
     id: "opencode",
@@ -111,7 +113,7 @@ export const CLIENTS: Readonly<Record<TClientId, TClient>> = {
     binPaths: ["~/.opencode/bin/opencode", "~/.local/bin/opencode"],
     installHint: "https://opencode.ai/install",
     catalogSlug: "opencode",
-    note: "Your ~/.config/opencode config is never modified.",
+    note: "your ~/.config/opencode config is never modified",
   },
   raycast: {
     id: "raycast",
@@ -122,7 +124,7 @@ export const CLIENTS: Readonly<Record<TClientId, TClient>> = {
     installHint: "https://raycast.com",
     catalogSlug: "raycast",
     os: ["darwin"],
-    note: "Raycast runs continuously, so OpenLLM is applied to its config once. Remove it with `openllm raycast uninstall`.",
+    note: "Raycast runs continuously, so this applies to its config once",
   },
 } as const;
 
