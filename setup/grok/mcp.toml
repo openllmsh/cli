@@ -1,0 +1,8 @@
+# The OpenLLM MCP server for Grok Build — merged into the run-local
+# config.toml alongside the model tables. Carries no secret: `openllm mcp`
+# resolves the gateway origin + API key from the shared ~/.openllm/.env.
+
+[mcp_servers.openllm]
+command = "{{OPENLLM_BIN}}"
+args = ["mcp"]
+env = { CLAUDE_CONTEXT_STATE_DIR = "{{STATE_DIR}}" }

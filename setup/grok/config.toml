@@ -1,0 +1,22 @@
+# Grok Build overlay. Grok has no config-override flag, so this is merged with
+# the user's own ~/.grok/config.toml in memory and written into a run-local
+# GROK_HOME (a symlink farm over ~/.grok, so auth.json / sessions / history all
+# still resolve to the user's real files). The user's config.toml is read-only
+# input.
+#
+# Grok declares every custom endpoint explicitly — there is no global
+# base_url/api_key default — so one [model."<id>"] table per activated model is
+# required. `{{MODELS}}` is replaced by the TOML block from
+# /api/setup/grok/model-catalog (one table per model, with real context
+# windows); the `ultra` table below is the always-present fallback used when
+# that fetch fails.
+
+[models]
+default = "ultra"
+
+[model."ultra"]
+model = "ultra"
+name = "ultra (OpenLLM)"
+base_url = "{{OPENLLM_API_BASE}}/v1"
+api_key = "{{OPENLLM_API_KEY}}"
+context_window = 262144

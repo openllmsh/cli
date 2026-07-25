@@ -1,0 +1,61 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "{{HOOKS_DIR}}/ctx-session-start.sh",
+            "timeout": 30
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Grep|Glob|Bash|grep|list_dir|run_terminal_command",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "{{HOOKS_DIR}}/ctx-grep-nudge.sh",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write|NotebookEdit|edit_file|create_file",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "{{HOOKS_DIR}}/ctx-reindex-on-edit.sh",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "{{HOOKS_DIR}}/mem-recall-on-prompt.sh",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "{{HOOKS_DIR}}/mem-extract-on-stop.sh",
+            "timeout": 5
+          }
+        ]
+      }
+    ]
+  }
+}

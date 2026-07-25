@@ -1,0 +1,15 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "model": "openllm/ultra",
+  "provider": {
+    "openllm": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "OpenLLM",
+      "options": {
+        "baseURL": "{{OPENLLM_API_BASE}}/v1",
+        "apiKey": "{{OPENLLM_API_KEY}}"
+      },
+      "models": "{{MODELS}}"
+    }
+  }
+}

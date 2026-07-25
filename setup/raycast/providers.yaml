@@ -1,0 +1,19 @@
+# Raycast overlay — the ONE always-on client (see docs/proposals/
+# remove-registry-runtime-config-merge.md §3.4.2). Raycast is a long-lived app
+# with a fixed config path and no per-invocation overlay hook, so
+# `openllm raycast` merges this provider entry into the user's real
+# providers.yaml in place, and `openllm raycast uninstall` removes exactly what
+# it wrote (tracked in ~/.openllm/clients/raycast.json).
+#
+# `{{MODELS}}` is replaced by the YAML `models:` block from
+# /api/setup/raycast/model-catalog — Raycast does not auto-discover from
+# /v1/models, so every model must be declared. The three chain aliases below
+# are the fallback used when that fetch fails.
+
+providers:
+  - id: openllm
+    name: OpenLLM
+    base_url: "{{OPENLLM_API_BASE}}/v1"
+    api_keys:
+      default: "{{OPENLLM_API_KEY}}"
+    models: "{{MODELS}}"

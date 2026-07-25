@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "openllm": {
+      "command": "{{OPENLLM_BIN}}",
+      "args": ["mcp"],
+      "env": {
+        "CLAUDE_CONTEXT_STATE_DIR": "{{STATE_DIR}}"
+      }
+    }
+  }
+}

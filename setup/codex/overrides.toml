@@ -1,0 +1,19 @@
+# Codex overlay. Applied at run time as `-c key=value` overrides layered on
+# top of the user's own ~/.codex/config.toml — Codex's documented override
+# mechanism, so nothing here is ever written into the user's config.
+#
+# Every leaf below becomes one `-c <dotted.key>=<toml-value>` argument (see
+# `tomlLeaves` in src/clients/merge.ts). `model_catalog_json` points at the
+# run-local catalog fetched from /api/setup/codex/model-catalog, which stops
+# Codex warning "Model metadata for <slug> not found" and mis-sizing
+# auto-compaction.
+
+model_provider = "openllm"
+model = "ultra"
+model_catalog_json = "{{MODEL_CATALOG_PATH}}"
+
+[model_providers.openllm]
+name = "OpenLLM"
+base_url = "{{OPENLLM_API_BASE}}/v1"
+wire_api = "responses"
+experimental_bearer_token = "{{OPENLLM_API_KEY}}"
