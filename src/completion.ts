@@ -43,28 +43,40 @@ const bashScript = (): string => {
   const top = TOP_LEVEL.join(" ");
   const verbCases = EXEC_GROUPS.map(
     (g) =>
-      `      ${g}) [ "$COMP_CWORD" -eq 3 ] && COMPREPLY=( $(compgen -W "${EXEC_VERBS[g].join(" ")}" -- "$cur") ) ;;`,
+      `      ${g}) [ "$pos" -eq 3 ] && COMPREPLY=( $(compgen -W "${EXEC_VERBS[g].join(" ")}" -- "$cur") ) ;;`,
   ).join("\n");
+  // `-d|-r` — the alternation the flag-skipping loop matches on.
+  const clientFlagPattern = CLIENT_FLAGS.map((f) => f.name).join("|");
   return `# openllm bash completion
 _openllm() {
-  local cur cmd
+  local cur cmd off pos
   cur="\${COMP_WORDS[COMP_CWORD]}"
-  cmd="\${COMP_WORDS[1]}"
-  if [ "$COMP_CWORD" -eq 1 ]; then
+  # Our own flags sit BEFORE the client name (\`openllm -d -r claude …\`), so
+  # skip them: the command is the first non-flag word, not always word 1.
+  off=0
+  while [ $((off + 1)) -lt "$COMP_CWORD" ]; do
+    case "\${COMP_WORDS[off + 1]}" in
+      ${clientFlagPattern}) off=$((off + 1)) ;;
+      *) break ;;
+    esac
+  done
+  cmd="\${COMP_WORDS[off + 1]}"
+  if [ "$COMP_CWORD" -eq $((off + 1)) ]; then
     COMPREPLY=( $(compgen -W "${top}" -- "$cur") )
     return
   fi
+  pos=$((COMP_CWORD - off))
   case "$cmd" in
     completion) COMPREPLY=( $(compgen -W "${COMPLETION_ARGS.join(" ")}" -- "$cur") ) ;;
     mcp) COMPREPLY=( $(compgen -W "--only ${MCP_ONLY_GROUPS.join(" ")}" -- "$cur") ) ;;
     api) COMPREPLY=( $(compgen -W "--spec" -- "$cur") ) ;;
     raycast) COMPREPLY=( $(compgen -W "uninstall status" -- "$cur") ) ;;
     exec)
-      if [ "$COMP_CWORD" -eq 2 ]; then
+      if [ "$pos" -eq 2 ]; then
         COMPREPLY=( $(compgen -W "${EXEC_GROUPS.join(" ")}" -- "$cur") )
         return
       fi
-      case "\${COMP_WORDS[2]}" in
+      case "\${COMP_WORDS[off + 2]}" in
 ${verbCases}
       esac ;;
   esac
@@ -86,32 +98,45 @@ const zshScript = (): string => {
     ...CLIENT_FLAGS.map((f) => `'${zq(f.name)}:${zq(f.description)}'`),
   ].join("\n    ");
   const verbCases = EXEC_GROUPS.map(
-    (g) => `        ${g}) _values 'verb' ${EXEC_VERBS[g].join(" ")} ;;`,
+    (g) => `      ${g}) _values 'verb' ${EXEC_VERBS[g].join(" ")} ;;`,
   ).join("\n");
+  const clientFlagPattern = CLIENT_FLAGS.map((f) => f.name).join("|");
+  // Hand-rolled over `_arguments -C '1:command:->cmd'`: our own flags sit
+  // BEFORE the client name (`openllm -d -r claude …`), so word 1 is not
+  // necessarily the command. Skip the leading flags, then dispatch on the
+  // first non-flag word — otherwise completion dies after `-d`/`-r`.
   return `# openllm zsh completion
 _openllm() {
   local -a _cmds
   _cmds=(
     ${specs}
   )
-  _arguments -C '1:command:->cmd' '*::arg:->args'
-  case "$state" in
-    cmd) _describe -t commands 'openllm command' _cmds ;;
-    args)
-      case "$line[1]" in
-        completion) _values 'shell' ${COMPLETION_ARGS.join(" ")} ;;
-        mcp) _values 'group' --only ${MCP_ONLY_GROUPS.join(" ")} ;;
-        api) _values 'flag' --spec ;;
-        raycast) _values 'verb' uninstall status ;;
-        exec)
-          if (( CURRENT == 2 )); then
-            _values 'group' ${EXEC_GROUPS.join(" ")}
-          else
-            case "$line[2]" in
+  local off=1 cmd pos
+  while (( off + 1 < CURRENT )); do
+    case "\${words[off + 1]}" in
+      ${clientFlagPattern}) (( off++ )) ;;
+      *) break ;;
+    esac
+  done
+  cmd="\${words[off + 1]}"
+  if (( CURRENT == off + 1 )); then
+    _describe -t commands 'openllm command' _cmds
+    return
+  fi
+  (( pos = CURRENT - off + 1 ))
+  case "$cmd" in
+    completion) _values 'shell' ${COMPLETION_ARGS.join(" ")} ;;
+    mcp) _values 'group' --only ${MCP_ONLY_GROUPS.join(" ")} ;;
+    api) _values 'flag' --spec ;;
+    raycast) _values 'verb' uninstall status ;;
+    exec)
+      if (( pos == 3 )); then
+        _values 'group' ${EXEC_GROUPS.join(" ")}
+      else
+        case "\${words[off + 2]}" in
 ${verbCases}
-            esac
-          fi ;;
-      esac ;;
+        esac
+      fi ;;
   esac
 }
 compdef _openllm openllm ollm
