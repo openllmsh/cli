@@ -27,25 +27,27 @@ export const EXEC_VERBS: Record<TExecGroup, readonly string[]> = {
   ctx: ["index", "search", "status", "index-docs"],
 };
 
+export type TFlag = { readonly name: string; readonly description: string };
+
 export const COMMANDS: readonly TCommand[] = [
   {
     name: "claude",
-    args: "[-d] [-r] [...args]",
+    args: "[...args]",
     description: "Run Claude Code through OpenLLM",
   },
   {
     name: "codex",
-    args: "[-d] [-r] [...args]",
+    args: "[...args]",
     description: "Run Codex through OpenLLM",
   },
   {
     name: "grok",
-    args: "[-d] [-r] [...args]",
+    args: "[...args]",
     description: "Run Grok Build through OpenLLM",
   },
   {
     name: "opencode",
-    args: "[-r] [...args]",
+    args: "[...args]",
     description: "Run OpenCode through OpenLLM",
   },
   {
@@ -95,12 +97,16 @@ export const COMMANDS: readonly TCommand[] = [
   { name: "help", description: "Show help" },
 ] as const;
 
-/** The flags a CLIENT invocation accepts (see `parseClientFlags`). Completion
- *  offers these after a client name; `-d` only applies to clients that have an
- *  equivalent, which the runtime enforces. */
-export const CLIENT_FLAGS = ["-d", "-r"] as const;
-
-export type TFlag = { readonly name: string; readonly description: string };
+/**
+ * openllm's own flags for a client invocation, which sit BEFORE the client name
+ * (`openllm -d -r claude …`). They must not be consumed after the name: `-d`
+ * and `-r` are already claude's --debug/--resume and grok's --resume, so
+ * reading them there would steal a flag meant for the client.
+ */
+export const CLIENT_FLAGS: readonly TFlag[] = [
+  { name: "-d", description: "Skip every approval prompt in the client" },
+  { name: "-r", description: "Route the session via the cloud gateway" },
+] as const;
 
 export const FLAGS: readonly TFlag[] = [
   { name: "-h", description: "Show help" },
@@ -130,15 +136,24 @@ export const helpText = (version: string): string => {
     const invocation = c.args === undefined ? c.name : `${c.name} ${c.args}`;
     return `  openllm ${invocation.padEnd(30)} ${c.description}`;
   }).join("\n");
+  const clientFlagRows = CLIENT_FLAGS.map(
+    (f) => `  ${f.name.padEnd(4)} ${f.description}`,
+  ).join("\n");
   return `openllm v${version} — the OpenLLM CLI (also available as \`ollm\`)
 
-Usage:
+Usage: openllm [-d] [-r] <command> [...]
 ${rows}
 
+Client flags (BEFORE the client name — everything after it is the client's):
+${clientFlagRows}
+
+  e.g. \`openllm -d claude\`, \`openllm -r codex\`, \`openllm -dr grok\`.
+  They sit before the name on purpose: -d/-r are also claude's --debug and
+  --resume, so \`openllm claude -r\` passes -r STRAIGHT THROUGH to claude.
+
 Running a client:
-  Arguments are forwarded to the client verbatim, so \`openllm claude --resume\`
-  behaves exactly like \`claude --resume\`. Use \`--\` when an argument would
-  otherwise be read by openllm itself (e.g. \`openllm grok -- --help\`).
+  Every argument after the client name is forwarded verbatim, so
+  \`openllm claude --resume\` behaves exactly like \`claude --resume\`.
   Your client's own config is never modified — the OpenLLM settings are
   applied for the lifetime of that one launch. Raycast is the exception: it
   runs continuously, so \`openllm raycast\` applies to its config and

@@ -31,7 +31,12 @@ import {
 import { userHome } from "./env";
 
 /** Top-level completion tokens: every subcommand + every flag alias. */
-const TOP_LEVEL = [...COMMANDS.map((c) => c.name), ...FLAGS.map((f) => f.name)];
+const TOP_LEVEL = [
+  ...COMMANDS.map((c) => c.name),
+  ...FLAGS.map((f) => f.name),
+  // Client flags live BEFORE the subcommand, so they belong here.
+  ...CLIENT_FLAGS.map((f) => f.name),
+];
 const COMPLETION_ARGS = [...COMPLETION_SHELLS, "install"];
 
 const bashScript = (): string => {
@@ -53,7 +58,6 @@ _openllm() {
     completion) COMPREPLY=( $(compgen -W "${COMPLETION_ARGS.join(" ")}" -- "$cur") ) ;;
     mcp) COMPREPLY=( $(compgen -W "--only ${MCP_ONLY_GROUPS.join(" ")}" -- "$cur") ) ;;
     api) COMPREPLY=( $(compgen -W "--spec" -- "$cur") ) ;;
-    claude|codex|grok|opencode) COMPREPLY=( $(compgen -W "${CLIENT_FLAGS.join(" ")}" -- "$cur") ) ;;
     raycast) COMPREPLY=( $(compgen -W "uninstall status" -- "$cur") ) ;;
     exec)
       if [ "$COMP_CWORD" -eq 2 ]; then
@@ -79,6 +83,7 @@ const zshScript = (): string => {
   const specs = [
     ...COMMANDS.map((c) => `'${zq(c.name)}:${zq(c.description)}'`),
     ...FLAGS.map((f) => `'${zq(f.name)}:${zq(f.description)}'`),
+    ...CLIENT_FLAGS.map((f) => `'${zq(f.name)}:${zq(f.description)}'`),
   ].join("\n    ");
   const verbCases = EXEC_GROUPS.map(
     (g) => `        ${g}) _values 'verb' ${EXEC_VERBS[g].join(" ")} ;;`,
@@ -97,7 +102,6 @@ _openllm() {
         completion) _values 'shell' ${COMPLETION_ARGS.join(" ")} ;;
         mcp) _values 'group' --only ${MCP_ONLY_GROUPS.join(" ")} ;;
         api) _values 'flag' --spec ;;
-        claude|codex|grok|opencode) _values 'flag' ${CLIENT_FLAGS.join(" ")} ;;
         raycast) _values 'verb' uninstall status ;;
         exec)
           if (( CURRENT == 2 )); then

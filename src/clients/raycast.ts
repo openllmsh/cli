@@ -29,6 +29,7 @@ import {
 import { join } from "node:path";
 import { CLI_VERSION, openllmDir, userHome } from "../env";
 import { contextStateDir, fetchModelCatalog, resolveGateway } from "./gateway";
+import type { TClientFlags } from "./registry";
 import { removeRegion, substitute, upsertRegion } from "./merge";
 import { OVERLAYS } from "./overlays";
 
@@ -120,13 +121,22 @@ const writeDefaultsArray = (key: string, values: readonly string[]): void => {
 
 const isDarwin = (): boolean => process.platform === "darwin";
 
-/** Apply — idempotent. Returns a process exit code. */
-export const applyRaycast = async (): Promise<number> => {
+/**
+ * Apply — idempotent. Returns a process exit code.
+ *
+ * `remote` (`-r`) picks which base URL gets BAKED into `providers.yaml`: the
+ * local daemon (default) or the cloud origin. Unlike a session client this
+ * choice persists until the next apply, because Raycast reads the file rather
+ * than being relaunched — so re-run `openllm -r raycast` to switch it.
+ */
+export const applyRaycast = async (opts?: {
+  readonly remote?: boolean;
+}): Promise<number> => {
   if (!isDarwin()) {
     process.stderr.write("openllm raycast is macOS-only.\n");
     return 1;
   }
-  const gateway = await resolveGateway();
+  const gateway = await resolveGateway({ remote: opts?.remote });
   if (gateway.apiKey.length === 0) {
     process.stderr.write(
       "No OpenLLM API key configured — set OPENLLM_API_KEY, or pair the daemon so ~/.openllm/.env carries it.\n",
@@ -311,14 +321,20 @@ export const statusRaycast = (): number => {
   return 0;
 };
 
-const RAYCAST_USAGE = `usage: openllm raycast [uninstall|status]
+const RAYCAST_USAGE = `usage: openllm [-r] raycast [uninstall|status]
 
 Raycast runs continuously and has no per-launch config hook, so OpenLLM is
 applied to its config once:
 
   openllm raycast              apply / refresh (idempotent)
+  openllm -r raycast           apply, baking the CLOUD gateway base URL
   openllm raycast uninstall    remove exactly what apply wrote
   openllm raycast status       report whether OpenLLM is wired in
+
+The applied base URL defaults to your local daemon (127.0.0.1:8787). \`-r\`
+bakes the cloud origin instead, which 307-redirects subscription hops back to a
+live daemon. Because Raycast reads the FILE (it isn't relaunched per session),
+that choice persists until the next apply — re-run to switch.
 
 Re-run apply after adding models or providers. Restart Raycast afterwards.
 `;
@@ -326,9 +342,18 @@ Re-run apply after adding models or providers. Restart Raycast afterwards.
 /** Dispatch for the always-on client. */
 export const runRaycastCommand = async (
   args: readonly string[],
+  flags?: TClientFlags,
 ): Promise<number> => {
+  if (flags?.dangerous === true) {
+    // Nothing is launched here, so there are no approval prompts to skip.
+    // Ignoring it silently would imply it did something.
+    process.stderr.write(
+      "-d does not apply to raycast — it configures Raycast rather than launching it.\n",
+    );
+    return 2;
+  }
   const verb = args[0];
-  if (verb === undefined) return applyRaycast();
+  if (verb === undefined) return applyRaycast({ remote: flags?.remote });
   if (verb === "uninstall") return uninstallRaycast();
   if (verb === "status") return statusRaycast();
   if (verb === "-h" || verb === "--help") {

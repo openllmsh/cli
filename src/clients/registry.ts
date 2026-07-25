@@ -150,14 +150,17 @@ export const isAlwaysOnVerb = (value: string): value is TAlwaysOnVerb =>
   (ALWAYS_ON_VERBS as readonly string[]).includes(value);
 
 /**
- * OpenLLM-level flags a client invocation may carry, stripped before the rest
- * is forwarded verbatim.
+ * OpenLLM-level flags, which sit BEFORE the client name:
  *
- * Deliberately tiny and single-dash: these are OUR flags, and everything else —
- * including any long flag that happens to collide — belongs to the client. A
- * user who needs to pass `-d`/`-r` THROUGH to the client separates them with
- * `--` (`openllm claude -- -d`), which is the same escape hatch the arg
- * passthrough already documents.
+ *   openllm -d -r claude --resume
+ *           ^^^^^ ours    ^^^^^^^^ the client's, untouched
+ *
+ * Position is load-bearing, not stylistic. `-d` and `-r` are already taken by
+ * the clients themselves — claude has `-d`=--debug and `-r`=--resume, grok has
+ * `-r`=--resume — so consuming them AFTER the client name would silently steal
+ * a flag the user meant for the client. Putting them where openllm's own flags
+ * live means everything after the client name is unambiguously the client's,
+ * now and as clients add flags.
  */
 export type TClientFlags = {
   /** `-d` — translate to the client's own skip-all-approvals flag. */
@@ -165,18 +168,18 @@ export type TClientFlags = {
   /** `-r` — point the session at the CLOUD gateway instead of this machine's
    *  daemon, so subscription hops take the cloud's 307-redirect path. */
   readonly remote: boolean;
-  /** Everything that wasn't ours, in order, for the client. */
+  /** Everything from the client name onward, in order and untouched. */
   readonly rest: readonly string[];
 };
 
 /**
- * Split our flags off the front of a client invocation.
+ * Split our flags off the front of `openllm`'s OWN argv — i.e. the arguments
+ * that appear before the client name. Stops at the first token that isn't one
+ * of ours, which is the client name itself.
  *
- * Only scans the LEADING run of arguments and stops at the first non-flag or at
- * `--`: `openllm claude -d file.ts` is ours-then-theirs, while
- * `openllm claude run -d` leaves `-d` alone because it belongs to whatever
- * `run` is. That keeps the passthrough promise honest — we never rewrite an
- * argument the client was meant to parse.
+ * `rest` therefore begins with the client name (when one was given), and
+ * everything after it is forwarded to the client verbatim — we never inspect,
+ * reorder, or rewrite a single client argument.
  */
 export const parseClientFlags = (args: readonly string[]): TClientFlags => {
   let dangerous = false;
@@ -192,7 +195,13 @@ export const parseClientFlags = (args: readonly string[]): TClientFlags => {
       remote = true;
       continue;
     }
-    break; // `--`, a client flag, or a positional — the rest is theirs
+    // Combined short form (`-dr`), since these are ours and take no values.
+    if (/^-[dr]+$/.test(arg)) {
+      dangerous = dangerous || arg.includes("d");
+      remote = remote || arg.includes("r");
+      continue;
+    }
+    break; // the client name (or an unknown flag) — everything from here is not ours
   }
   return { dangerous, remote, rest: args.slice(i) };
 };

@@ -19,7 +19,11 @@
  */
 
 import { runRaycastCommand } from "./clients/raycast";
-import { CLIENTS, isClientId } from "./clients/registry";
+import {
+  CLIENTS,
+  isClientId,
+  parseClientFlags,
+} from "./clients/registry";
 import { runSessionClient } from "./clients/session";
 import type { TExecGroup } from "./commands";
 import { EXEC_GROUPS, EXEC_VERBS, helpText } from "./commands";
@@ -36,7 +40,12 @@ import { runUninstall } from "./uninstall-cmd";
 const HELP = helpText(CLI_VERSION);
 
 const argv = process.argv.slice(2);
-const cmd = argv[0];
+// OUR client flags sit BEFORE the subcommand (`openllm -d -r claude …`), so
+// they're stripped here — everything after the client name belongs to the
+// client. See `parseClientFlags` for why position matters (`-d`/`-r` collide
+// with claude's --debug/--resume and grok's --resume).
+const clientFlags = parseClientFlags(argv);
+const cmd = clientFlags.rest[0];
 
 const isGroup = (s: string): s is TMcpGroup =>
   (MCP_GROUPS as readonly string[]).includes(s);
@@ -108,46 +117,46 @@ const clientUsage = (id: string): string => {
   }
   const dangerous =
     client.dangerousFlag !== undefined
-      ? `  -d    skip every approval prompt (${client.bin}'s ${client.dangerousFlag})\n`
+      ? `  openllm -d ${id}    skip every approval prompt (${client.dangerousFlag})\n`
       : "";
-  return `usage: openllm ${id} [-d] [-r] [...args]
+  return `usage: openllm [-d] [-r] ${id} [...args]
 
-Runs ${client.name} through OpenLLM. Every argument after ours is forwarded to
-${client.bin} verbatim, so \`openllm ${id} <args>\` behaves exactly like
-\`${client.bin} <args>\`.
+Runs ${client.name} through OpenLLM. EVERY argument after \`${id}\` is forwarded
+to ${client.bin} verbatim, so \`openllm ${id} <args>\` behaves exactly like
+\`${client.bin} <args>\` — including \`-d\`/\`-r\` if ${client.bin} defines them.
 
 ${client.note}
 
-Flags (openllm's own — everything else goes to ${client.bin}):
-${dangerous}  -r    route via the cloud gateway instead of this machine's daemon
+openllm's own flags go BEFORE the client name:
+${dangerous}  openllm -r ${id}    route the session via the cloud gateway
 
 The session points at your local daemon by default, so subscription models
 serve locally with no cloud round trip. \`-r\` points it at the cloud origin,
 which 307-redirects subscription hops back to a live daemon.
 
-Our flags are only read at the FRONT of the command. To pass one THROUGH to
-${client.bin} (or its own help), separate it with \`--\`:
-
-  openllm ${id} -- --help
+  openllm ${id} -- --help   # \`--\` also works, though nothing after the
+                          # client name is ever read by openllm
 `;
 };
 
 const main = async (): Promise<void> => {
-  const rest = argv.slice(1);
+  const rest = clientFlags.rest.slice(1);
 
   // Client subcommands are dispatched from the registry (the SSOT) rather than
   // hand-written cases, so help/completion/dispatch can't drift.
   if (cmd !== undefined && isClientId(cmd)) {
     const client = CLIENTS[cmd];
     if (client.mode === "always-on") {
-      return process.exit(await runRaycastCommand(rest));
+      return process.exit(await runRaycastCommand(rest, clientFlags));
     }
     // ONLY a LEADING -h/--help is ours; anywhere else it belongs to the client
     // (`openllm claude --resume -h` must reach the client). `--` forwards it.
     if (rest[0] === "-h" || rest[0] === "--help") {
       return usage(clientUsage(cmd), 0);
     }
-    return process.exit(await runSessionClient(client, rest));
+    return process.exit(
+      await runSessionClient(client, rest, clientFlags),
+    );
   }
 
   switch (cmd) {

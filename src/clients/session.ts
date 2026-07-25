@@ -25,7 +25,7 @@ import { openllmDir, userHome } from "../env";
 import { contextStateDir, fetchModelCatalog, resolveGateway } from "./gateway";
 import { HOOK_SCRIPTS } from "./hooks";
 import { buildLaunchPlan, type TLaunchPlan } from "./launch";
-import { parseClientFlags, type TClient } from "./registry";
+import type { TClient, TClientFlags } from "./registry";
 
 /** `~/.openllm/run` — every ephemeral per-launch overlay lives here. */
 export const runRoot = (): string => join(openllmDir(), "run");
@@ -160,16 +160,16 @@ const readUserConfig = (client: TClient): string | undefined => {
 /**
  * Run a session client: merge, materialize, exec, clean up.
  *
- * Returns the child's exit code so the caller can exit with it. Our own leading
- * flags (`-d`, `-r`) are consumed here; everything after them is forwarded
- * VERBATIM, and a leading `--` (used to pass one of ours THROUGH to the client)
- * is stripped once.
+ * Returns the child's exit code so the caller can exit with it. `userArgs` is
+ * everything after the client name and is forwarded VERBATIM (one leading `--`
+ * is stripped, so `openllm claude -- --help` reaches the client). `flags` are
+ * openllm's own, already parsed off the front of argv by the caller.
  */
 export const runSessionClient = async (
   client: TClient,
   userArgs: readonly string[],
+  flags: TClientFlags,
 ): Promise<number> => {
-  const flags = parseClientFlags(userArgs);
   // `-d` must fail loudly on a client with no equivalent: silently launching
   // WITH approval prompts after the user asked to skip them is the wrong
   // surprise.
@@ -218,7 +218,7 @@ export const runSessionClient = async (
 
     // Strip ONE leading `--` (the disambiguator), then forward verbatim.
     const forwarded =
-      flags.rest[0] === "--" ? flags.rest.slice(1) : flags.rest.slice(0);
+      userArgs[0] === "--" ? userArgs.slice(1) : userArgs.slice(0);
     // `-d` becomes the client's OWN flag, ahead of the user's args so their
     // explicit choices still win on anything that conflicts.
     const dangerous =
