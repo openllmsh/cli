@@ -63,6 +63,28 @@ json_field() {
     | tr -d '\n' \
     | sed -n "s/.*\"$1\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p"
 }
+# --- adopt the origin the manifest reports -----------------------------------
+# The endpoint we just called knows which deployment served it, so it tells us
+# rather than making the user pass OPENLLM_CLOUD_ORIGIN by hand. That keeps the
+# one-liner short AND makes "install from the dashboard you're looking at"
+# true — pins, binaries, and ~/.openllm/.env all end up on one deployment.
+#
+# Trust boundary: we only adopt an origin we ALREADY fetched from. An explicit
+# OPENLLM_CLOUD_ORIGIN always wins (it's the user's own override), and a
+# reported origin whose host differs from the one we curled is IGNORED — a
+# compromised or misconfigured deployment must not be able to redirect a
+# machine's pairing somewhere else.
+REPORTED_ORIGIN="$(json_field origin)"
+if [ -z "${OPENLLM_CLOUD_ORIGIN:-}" ] && [ -n "$REPORTED_ORIGIN" ]; then
+  reported_host="${REPORTED_ORIGIN#*://}"; reported_host="${reported_host%%/*}"
+  origin_host="${ORIGIN#*://}"; origin_host="${origin_host%%/*}"
+  if [ "$reported_host" = "$origin_host" ]; then
+    ORIGIN="${REPORTED_ORIGIN%/}"
+  else
+    echo "  note: ignoring reported origin $REPORTED_ORIGIN (host != $origin_host)" >&2
+  fi
+fi
+
 CLI_VERSION="$(json_field cli_version)"
 [ -n "$CLI_VERSION" ] || die "no CLI release is published yet"
 
