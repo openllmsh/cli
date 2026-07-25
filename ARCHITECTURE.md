@@ -1,12 +1,21 @@
 # `@openllmsh/cli` — the OpenLLM CLI
 
-> The single distribution vehicle for every gateway extension: ONE compiled,
-> source-free binary (`~/.openllm/bin/openllm`) serving ONE MCP server that
-> exposes the full native gateway API plus the claude-context and supermemory
-> tool groups. Installed by the `openllm` plugin bundle
-> (`packages/registry/plugin/openllm/install.sh`), self-updating against the
-> gateway's pinned release — the extension-side twin of
-> [`packages/daemon`](../daemon/ARCHITECTURE.md).
+> The single distribution vehicle for every gateway extension AND for client
+> configuration: ONE compiled, source-free binary (`~/.openllm/bin/openllm`,
+> alias `ollm`) that
+>
+>  1. runs each supported client through OpenLLM (`openllm <client>`), applying
+>     its embedded `setup/<client>/` overlay at RUN time — session clients never
+>     have their config written, and Raycast (the one always-on client) gets an
+>     explicit, reversible in-place apply;
+>  2. serves ONE MCP server exposing the full native gateway API plus the
+>     claude-context and supermemory tool groups.
+>
+> Installed by `install.sh` at the repo root (or by the daemon's installer,
+> which installs both binaries), self-updating against the gateway's pinned
+> release — the extension-side twin of
+> [`packages/daemon`](../daemon/ARCHITECTURE.md). Design:
+> [`docs/proposals/remove-registry-runtime-config-merge.md`](../../docs/proposals/remove-registry-runtime-config-merge.md).
 
 ---
 
@@ -15,6 +24,10 @@
 ```
 packages/cli/
 ├── package.json          # @openllmsh/cli · 0.0.0-dev placeholder · BUSL-1.1
+├── install.sh            # the CLI-only installer (mirrored to the repo root)
+├── setup/                # STATIC client overlays, embedded as text
+│   ├── claude/ codex/ grok/ opencode/ raycast/
+│   └── hooks/            # session hooks, materialized into the run dir
 ├── manifest.ts           # COMMITTED release pin (repo/tag/per-target sha256)
 ├── release-types.ts      # CLI_TARGETS (SSOT of buildable targets) + TCliRelease
 ├── index.ts              # barrel: manifest + release-types only (gateway reads the pin)
@@ -22,7 +35,19 @@ packages/cli/
 │   ├── compile.ts        # bun --compile --minify --bytecode ×4 targets + gzip sidecars
 │   └── generate-sdk.ts   # MONOREPO-ONLY: HttpApi → committed SDK artifacts
 └── src/
-    ├── main.ts           # entry: mcp | exec | api | setup | completion | self-update | version
+    ├── main.ts           # entry: <client> | mcp | exec | api | setup | completion
+    │                      #        | uninstall | doctor | self-update | version
+    ├── clients/          # the runtime client commands
+    │   ├── registry.ts   #   SSOT: which clients, session vs always-on
+    │   ├── overlays.ts   #   the embedded setup/** text
+    │   ├── merge.ts      #   pure merge primitives (substitute/deepMerge/TOML)
+    │   ├── launch.ts     #   pure per-client launch plans
+    │   ├── session.ts    #   run dir + exec with full arg passthrough
+    │   ├── raycast.ts    #   the always-on apply/uninstall/status
+    │   ├── gateway.ts    #   per-launch local-vs-cloud resolution
+    │   └── hooks.ts      #   embedded hook scripts
+    ├── uninstall-cmd.ts  # teardown (reverses always-on clients first)
+    ├── doctor-cmd.ts     # report/scrub pre-runtime-merge leftovers
     ├── commands.ts       # SSOT of the command surface (help + completion derive)
     ├── completion.ts     # bash/zsh/fish completion (daemon-parity)
     ├── setup-cmd.ts      # PATH symlink + completion install
@@ -42,6 +67,10 @@ packages/cli/
 
 | Command | What |
 | --- | --- |
+| `openllm <claude\|codex\|grok\|opencode> [...args]` | run that client through OpenLLM — args forwarded VERBATIM, config never written |
+| `openllm raycast [uninstall\|status]` | the always-on client: apply in place, or reverse exactly what apply wrote |
+| `openllm uninstall [--yes]` | remove the CLI (reverses always-on wiring first) |
+| `openllm doctor [--scrub-legacy]` | report/clean leftovers from the old install model |
 | `openllm mcp [--only <group>]` | the unified MCP server over stdio (groups: `openllm`, `claude-context`, `supermemory`; default all — `--only` is debug) |
 | `openllm exec ctx <index\|search\|status\|index-docs> …` | claude-context hook verbs — what the `openllm` bundle's hooks shell out to (`ctx` kept as a hidden alias for older bundles) |
 | `openllm setup` | PATH symlink + shell completion — run automatically by the curl installer; shown as a copyable follow-up on the dashboard card for sandboxed one-click installs |

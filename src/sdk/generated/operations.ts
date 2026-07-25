@@ -232,6 +232,32 @@ export const API_OPERATIONS: readonly TApiOperation[] = [
     "hasBody": true
   },
   {
+    "id": "media.list",
+    "method": "get",
+    "path": "/media",
+    "summary": "",
+    "tags": [
+      "media"
+    ],
+    "pathParams": [],
+    "queryParams": [],
+    "hasBody": false
+  },
+  {
+    "id": "media.remove",
+    "method": "delete",
+    "path": "/media/{id}",
+    "summary": "",
+    "tags": [
+      "media"
+    ],
+    "pathParams": [
+      "id"
+    ],
+    "queryParams": [],
+    "hasBody": false
+  },
+  {
     "id": "pluginsClaudeContext.removeCodebase",
     "method": "delete",
     "path": "/plugins/claude-context/codebase",
@@ -459,16 +485,70 @@ export const API_OPERATIONS: readonly TApiOperation[] = [
     "hasBody": true
   },
   {
-    "id": "setup.listOptions",
+    "id": "sessions.list",
     "method": "get",
-    "path": "/setup/options",
+    "path": "/sessions",
     "summary": "",
     "tags": [
-      "setup"
+      "sessions"
     ],
     "pathParams": [],
     "queryParams": [],
     "hasBody": false
+  },
+  {
+    "id": "sessions.put",
+    "method": "post",
+    "path": "/sessions",
+    "summary": "",
+    "tags": [
+      "sessions"
+    ],
+    "pathParams": [],
+    "queryParams": [],
+    "hasBody": true
+  },
+  {
+    "id": "sessions.remove",
+    "method": "delete",
+    "path": "/sessions/{id}",
+    "summary": "",
+    "tags": [
+      "sessions"
+    ],
+    "pathParams": [
+      "id"
+    ],
+    "queryParams": [],
+    "hasBody": false
+  },
+  {
+    "id": "sessions.get",
+    "method": "get",
+    "path": "/sessions/{id}",
+    "summary": "",
+    "tags": [
+      "sessions"
+    ],
+    "pathParams": [
+      "id"
+    ],
+    "queryParams": [],
+    "hasBody": false
+  },
+  {
+    "id": "sessions.update",
+    "method": "patch",
+    "path": "/sessions/{id}",
+    "summary": "",
+    "tags": [
+      "sessions"
+    ],
+    "pathParams": [
+      "id"
+    ],
+    "queryParams": [],
+    "hasBody": true
   },
   {
     "id": "stats.user",
@@ -546,6 +626,10 @@ export const API_OPERATIONS: readonly TApiOperation[] = [
       {
         "name": "keyId",
         "required": false
+      },
+      {
+        "name": "failed",
+        "required": false
       }
     ],
     "hasBody": false
@@ -554,6 +638,31 @@ export const API_OPERATIONS: readonly TApiOperation[] = [
     "id": "stats.requests",
     "method": "get",
     "path": "/stats/requests",
+    "summary": "",
+    "tags": [
+      "stats"
+    ],
+    "pathParams": [],
+    "queryParams": [
+      {
+        "name": "page",
+        "required": false
+      },
+      {
+        "name": "pageSize",
+        "required": false
+      },
+      {
+        "name": "keyId",
+        "required": false
+      }
+    ],
+    "hasBody": false
+  },
+  {
+    "id": "stats.requestErrors",
+    "method": "get",
+    "path": "/stats/requests/errors",
     "summary": "",
     "tags": [
       "stats"
@@ -607,6 +716,10 @@ export const API_OPERATIONS: readonly TApiOperation[] = [
       },
       {
         "name": "keyId",
+        "required": false
+      },
+      {
+        "name": "failed",
         "required": false
       }
     ],
