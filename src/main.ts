@@ -18,6 +18,9 @@
  * independently.
  */
 
+import { runRaycastCommand } from "./clients/raycast";
+import { CLIENTS, isClientId } from "./clients/registry";
+import { runSessionClient } from "./clients/session";
 import type { TExecGroup } from "./commands";
 import { EXEC_GROUPS, EXEC_VERBS, helpText } from "./commands";
 import { runCompletionCommand } from "./completion";
@@ -95,8 +98,45 @@ Print a completion script for a shell, or \`install\` to wire it into your
 rc (~/.zshrc, ~/.bashrc) / fish completions dir automatically.
 `;
 
+/** Per-client usage — shown for `openllm <client> -h`. */
+const clientUsage = (id: string): string => {
+  const client = CLIENTS[id as keyof typeof CLIENTS];
+  if (client.mode === "always-on") {
+    return `usage: openllm ${id} [uninstall|status]\n\n${client.note}\n`;
+  }
+  return `usage: openllm ${id} [...args]
+
+Runs ${client.name} through OpenLLM. Every argument is forwarded to
+${client.bin} verbatim, so \`openllm ${id} <args>\` behaves exactly like
+\`${client.bin} <args>\`.
+
+${client.note}
+
+To pass an argument openllm would otherwise read itself (e.g. the client's own
+help), separate it with \`--\`:
+
+  openllm ${id} -- --help
+`;
+};
+
 const main = async (): Promise<void> => {
   const rest = argv.slice(1);
+
+  // Client subcommands are dispatched from the registry (the SSOT) rather than
+  // hand-written cases, so help/completion/dispatch can't drift.
+  if (cmd !== undefined && isClientId(cmd)) {
+    const client = CLIENTS[cmd];
+    if (client.mode === "always-on") {
+      return process.exit(await runRaycastCommand(rest));
+    }
+    // ONLY a LEADING -h/--help is ours; anywhere else it belongs to the client
+    // (`openllm claude --resume -h` must reach the client). `--` forwards it.
+    if (rest[0] === "-h" || rest[0] === "--help") {
+      return usage(clientUsage(cmd), 0);
+    }
+    return process.exit(await runSessionClient(client, rest));
+  }
+
   switch (cmd) {
     case "mcp": {
       if (wantsHelp(rest)) return usage(MCP_USAGE, 0);

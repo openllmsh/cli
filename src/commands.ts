@@ -29,6 +29,31 @@ export const EXEC_VERBS: Record<TExecGroup, readonly string[]> = {
 
 export const COMMANDS: readonly TCommand[] = [
   {
+    name: "claude",
+    args: "[...args]",
+    description: "Run Claude Code through OpenLLM",
+  },
+  {
+    name: "codex",
+    args: "[...args]",
+    description: "Run Codex through OpenLLM",
+  },
+  {
+    name: "grok",
+    args: "[...args]",
+    description: "Run Grok Build through OpenLLM",
+  },
+  {
+    name: "opencode",
+    args: "[...args]",
+    description: "Run OpenCode through OpenLLM",
+  },
+  {
+    name: "raycast",
+    args: "[uninstall|status]",
+    description: "Apply OpenLLM to Raycast, or remove it",
+  },
+  {
     name: "mcp",
     args: "[--only <group>]",
     description: "Run the unified MCP server over stdio",
@@ -90,10 +115,19 @@ export const helpText = (version: string): string => {
     const invocation = c.args === undefined ? c.name : `${c.name} ${c.args}`;
     return `  openllm ${invocation.padEnd(30)} ${c.description}`;
   }).join("\n");
-  return `openllm v${version} — the OpenLLM CLI
+  return `openllm v${version} — the OpenLLM CLI (also available as \`ollm\`)
 
 Usage:
 ${rows}
+
+Running a client:
+  Arguments are forwarded to the client verbatim, so \`openllm claude --resume\`
+  behaves exactly like \`claude --resume\`. Use \`--\` when an argument would
+  otherwise be read by openllm itself (e.g. \`openllm grok -- --help\`).
+  Your client's own config is never modified — the OpenLLM settings are
+  applied for the lifetime of that one launch. Raycast is the exception: it
+  runs continuously, so \`openllm raycast\` applies to its config and
+  \`openllm raycast uninstall\` removes it again.
 
 Exec groups:
 ${EXEC_GROUPS.map((g) => `  openllm exec ${g} <${EXEC_VERBS[g].join("|")}>`).join("\n")}
@@ -101,6 +135,8 @@ ${EXEC_GROUPS.map((g) => `  openllm exec ${g} <${EXEC_VERBS[g].join("|")}>`).joi
 Config (env, or the shared ~/.openllm/.env):
   OPENLLM_CLOUD_ORIGIN  gateway origin (default: the baked cloud origin)
   OPENLLM_API_KEY       your sk-llm-... API key
+  OPENLLM_GATEWAY       force \`local\` or \`cloud\` (default: local when the
+                        daemon is reachable, else cloud)
 
 Every command accepts -h/--help.
 `;

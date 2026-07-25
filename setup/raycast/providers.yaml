@@ -5,15 +5,16 @@
 # providers.yaml in place, and `openllm raycast uninstall` removes exactly what
 # it wrote (tracked in ~/.openllm/clients/raycast.json).
 #
-# `{{MODELS}}` is replaced by the YAML `models:` block from
-# /api/setup/raycast/model-catalog — Raycast does not auto-discover from
-# /v1/models, so every model must be declared. The three chain aliases below
-# are the fallback used when that fetch fails.
-
-providers:
+# This file is the BODY of the managed region — one item under the top-level
+# `providers:` key, indented two spaces. the MODELS placeholder sits on its own line and
+# is replaced by the already-indented `models:` entries from
+# /api/setup/raycast/model-catalog (Raycast does not auto-discover from
+# /v1/models, so every model must be declared); when that fetch fails the
+# runtime substitutes the three chain aliases instead.
   - id: openllm
     name: OpenLLM
     base_url: "{{OPENLLM_API_BASE}}/v1"
     api_keys:
       default: "{{OPENLLM_API_KEY}}"
-    models: "{{MODELS}}"
+    models:
+{{MODELS}}

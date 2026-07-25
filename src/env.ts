@@ -35,7 +35,21 @@ const CLOUD_ORIGIN_DEFAULT: string =
     ? __OPENLLM_CLOUD_ORIGIN_DEFAULT__
     : "https://openllm.sh";
 
-export const OPENLLM_DIR = join(homedir(), ".openllm");
+/**
+ * The user's home directory, `$HOME` first.
+ *
+ * `os.homedir()` on macOS resolves via `getpwuid`, IGNORING `$HOME` — which
+ * would make the CLI disagree with its own shell hooks (`openllm-env.sh` reads
+ * `$HOME/.openllm/.env`) and with a child launched under an explicitly set HOME
+ * (the daemon's isolated-CLI path does exactly that). Honour `$HOME` when
+ * present so every OpenLLM component resolves the same tree.
+ */
+export const userHome = (): string => {
+  const fromEnv = process.env.HOME;
+  return fromEnv !== undefined && fromEnv.length > 0 ? fromEnv : homedir();
+};
+
+export const OPENLLM_DIR = join(userHome(), ".openllm");
 /** The SHARED OpenLLM env file (same file the daemon boots from) — the CLI
  *  never writes it. */
 export const SHARED_ENV_FILE = join(OPENLLM_DIR, ".env");

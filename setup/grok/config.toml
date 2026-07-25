@@ -6,7 +6,7 @@
 #
 # Grok declares every custom endpoint explicitly — there is no global
 # base_url/api_key default — so one [model."<id>"] table per activated model is
-# required. `{{MODELS}}` is replaced by the TOML block from
+# required. the MODELS placeholder below is replaced by the TOML block from
 # /api/setup/grok/model-catalog (one table per model, with real context
 # windows); the `ultra` table below is the always-present fallback used when
 # that fetch fails.

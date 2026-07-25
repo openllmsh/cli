@@ -12,8 +12,12 @@ model_provider = "openllm"
 model = "ultra"
 model_catalog_json = "{{MODEL_CATALOG_PATH}}"
 
+# `env_key` (not an inline `experimental_bearer_token`) on purpose: every leaf
+# here becomes a `-c` ARGUMENT, and argv is world-readable via `ps`. Naming the
+# env var instead keeps the key out of the process table — the runtime exports
+# OPENLLM_API_KEY into the child's environment.
 [model_providers.openllm]
 name = "OpenLLM"
 base_url = "{{OPENLLM_API_BASE}}/v1"
 wire_api = "responses"
-experimental_bearer_token = "{{OPENLLM_API_KEY}}"
+env_key = "OPENLLM_API_KEY"
