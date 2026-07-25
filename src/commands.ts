@@ -81,6 +81,16 @@ export const COMMANDS: readonly TCommand[] = [
     name: "self-update",
     description: "Update to the pinned gateway release",
   },
+  {
+    name: "uninstall",
+    args: "[--yes]",
+    description: "Remove the openllm CLI from this machine",
+  },
+  {
+    name: "doctor",
+    args: "[--scrub-legacy]",
+    description: "Report or clean up leftovers from the old install model",
+  },
   { name: "version", description: "Print the version" },
   { name: "help", description: "Show help" },
 ] as const;

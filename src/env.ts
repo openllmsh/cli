@@ -49,11 +49,18 @@ export const userHome = (): string => {
   return fromEnv !== undefined && fromEnv.length > 0 ? fromEnv : homedir();
 };
 
-export const OPENLLM_DIR = join(userHome(), ".openllm");
+/**
+ * `~/.openllm` — resolved LAZILY (a function, not a module const) for the same
+ * reason `userHome()` exists: a const captures the home directory at import
+ * time, so any caller that legitimately runs under a different HOME (a child
+ * the daemon launches with an isolated HOME, a test harness) would silently
+ * read the wrong tree.
+ */
+export const openllmDir = (): string => join(userHome(), ".openllm");
 /** The SHARED OpenLLM env file (same file the daemon boots from) — the CLI
  *  never writes it. */
-export const SHARED_ENV_FILE = join(OPENLLM_DIR, ".env");
-export const CLI_BIN_PATH = join(OPENLLM_DIR, "bin", "openllm");
+export const sharedEnvFile = (): string => join(openllmDir(), ".env");
+export const cliBinPath = (): string => join(openllmDir(), "bin", "openllm");
 
 /** Parse a KEY=VALUE env file (comments + blank lines ignored). */
 const parseEnvFile = (path: string): Record<string, string> => {
@@ -78,7 +85,7 @@ const parseEnvFile = (path: string): Record<string, string> => {
 
 /** The shared file's values (read-only). */
 const sharedFileConfig = (): Record<string, string> =>
-  parseEnvFile(SHARED_ENV_FILE);
+  parseEnvFile(sharedEnvFile());
 
 export type TCliConfig = {
   readonly gatewayUrl: string;

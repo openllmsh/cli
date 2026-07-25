@@ -27,7 +27,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { join } from "node:path";
-import { CLI_VERSION, OPENLLM_DIR, userHome } from "../env";
+import { CLI_VERSION, openllmDir, userHome } from "../env";
 import { contextStateDir, fetchModelCatalog, resolveGateway } from "./gateway";
 import { removeRegion, substitute, upsertRegion } from "./merge";
 import { OVERLAYS } from "./overlays";
@@ -47,7 +47,7 @@ const providersPath = (): string =>
   process.env.OPENLLM_RAYCAST_PROVIDERS ??
   join(userHome(), ".config", "raycast", "ai", "providers.yaml");
 
-const ledgerPath = (): string => join(OPENLLM_DIR, "clients", "raycast.json");
+const ledgerPath = (): string => join(openllmDir(), "clients", "raycast.json");
 
 /** Fallback `models:` block when the live catalog is unavailable. */
 const FALLBACK_MODELS = [

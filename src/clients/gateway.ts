@@ -9,7 +9,7 @@
  * that comes and goes therefore needs no reinstall.
  */
 
-import { cliConfig, OPENLLM_DIR } from "../env";
+import { cliConfig, openllmDir } from "../env";
 
 /** How long to wait for the local daemon's /status before falling back. */
 const PROBE_TIMEOUT_MS = 400;
@@ -104,4 +104,4 @@ export const fetchModelCatalog = async (
 /** claude-context's on-disk state dir (wire-stable name, every client). */
 export const contextStateDir = (): string =>
   process.env.CLAUDE_CONTEXT_STATE_DIR ??
-  `${OPENLLM_DIR}/plugin-state/claude-context`;
+  `${openllmDir()}/plugin-state/claude-context`;

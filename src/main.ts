@@ -24,12 +24,14 @@ import { runSessionClient } from "./clients/session";
 import type { TExecGroup } from "./commands";
 import { EXEC_GROUPS, EXEC_VERBS, helpText } from "./commands";
 import { runCompletionCommand } from "./completion";
+import { runDoctor } from "./doctor-cmd";
 import { CLI_VERSION } from "./env";
 import { runClaudeContextCli } from "./mcp/claude-context";
 import type { TMcpGroup } from "./mcp/server";
 import { MCP_GROUPS, runMcpServer } from "./mcp/server";
 import { runSelfUpdate } from "./self-update";
 import { runSetup } from "./setup-cmd";
+import { runUninstall } from "./uninstall-cmd";
 
 const HELP = helpText(CLI_VERSION);
 
@@ -209,6 +211,10 @@ const main = async (): Promise<void> => {
       if (wantsHelp(rest)) return usage(SELF_UPDATE_USAGE, 0);
       await runSelfUpdate();
       break;
+    case "uninstall":
+      return process.exit(await runUninstall(rest));
+    case "doctor":
+      return process.exit(runDoctor(rest));
     case "version":
     case "-v":
     case "--version":

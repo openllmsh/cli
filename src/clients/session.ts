@@ -21,14 +21,14 @@ import {
 } from "node:fs";
 import { constants as osConstants } from "node:os";
 import { dirname, join } from "node:path";
-import { OPENLLM_DIR, userHome } from "../env";
+import { openllmDir, userHome } from "../env";
 import { contextStateDir, fetchModelCatalog, resolveGateway } from "./gateway";
 import { HOOK_SCRIPTS } from "./hooks";
 import { buildLaunchPlan, type TLaunchPlan } from "./launch";
 import type { TClient } from "./registry";
 
 /** `~/.openllm/run` — every ephemeral per-launch overlay lives here. */
-export const runRoot = (): string => join(OPENLLM_DIR, "run");
+export const runRoot = (): string => join(openllmDir(), "run");
 
 const expandHome = (p: string): string =>
   p.startsWith("~/") ? join(userHome(), p.slice(2)) : p;

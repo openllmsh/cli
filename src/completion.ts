@@ -14,9 +14,9 @@ import {
   appendFileSync,
   mkdirSync,
   readFileSync,
+  rmSync,
   writeFileSync,
 } from "node:fs";
-import { homedir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import type { TCompletionShell } from "./commands";
 import {
@@ -27,6 +27,7 @@ import {
   FLAGS,
   MCP_ONLY_GROUPS,
 } from "./commands";
+import { userHome } from "./env";
 
 /** Top-level completion tokens: every subcommand + every flag alias. */
 const TOP_LEVEL = [...COMMANDS.map((c) => c.name), ...FLAGS.map((f) => f.name)];
@@ -143,8 +144,11 @@ export const completionScript = (shell: TCompletionShell): string => {
 const isShell = (v: string): v is TCompletionShell =>
   (COMPLETION_SHELLS as readonly string[]).includes(v);
 
+/** The marker every rc line we add carries, so removal is exact. */
+const RC_MARKER = "# openllm-completion";
+
 const fishCompletionPath = (): string =>
-  join(homedir(), ".config", "fish", "completions", "openllm.fish");
+  join(userHome(), ".config", "fish", "completions", "openllm.fish");
 
 /** The current login shell name from `$SHELL`, or null if not recognized. */
 const detectShell = (): TCompletionShell | null => {
@@ -184,16 +188,44 @@ export const installCompletion = (): string | null => {
       writeFileSync(file, fishScript());
       return file;
     }
-    const rc = join(homedir(), shell === "zsh" ? ".zshrc" : ".bashrc");
+    const rc = join(userHome(), shell === "zsh" ? ".zshrc" : ".bashrc");
     appendOnce(
       rc,
-      `command -v openllm >/dev/null && source <(openllm completion ${shell})  # openllm-completion`,
-      "openllm completion",
+      `command -v openllm >/dev/null && source <(openllm completion ${shell})  ${RC_MARKER}`,
+      RC_MARKER,
     );
     return rc;
   } catch {
     // fs failure (read-only rc / sandbox) — report as not-installed.
     return null;
+  }
+};
+
+/**
+ * Remove the completion we installed: drop our marked rc line (bash/zsh) and
+ * delete the fish completions file. Best-effort and silent — the uninstall path
+ * must not fail because a shell rc is read-only.
+ */
+export const removeCompletion = (): void => {
+  try {
+    rmSync(fishCompletionPath(), { force: true });
+  } catch {
+    // best-effort
+  }
+  for (const name of [".zshrc", ".bashrc"]) {
+    const rc = join(userHome(), name);
+    try {
+      const existing = readFileSync(rc, "utf-8");
+      if (!existing.includes(RC_MARKER)) continue;
+      const next = existing
+        .split("\n")
+        .filter((line) => !line.includes(RC_MARKER))
+        .join("\n")
+        .replace(/\n{3,}/g, "\n\n");
+      writeFileSync(rc, next);
+    } catch {
+      // missing / unwritable rc — nothing to do
+    }
   }
 };
 
