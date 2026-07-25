@@ -1,5 +1,5 @@
 /**
- * The single source of truth for the `openllmc` command surface — names,
+ * The single source of truth for the `openllm` command surface — names,
  * descriptions, argument choices. `main.ts` (dispatch + help), every
  * subcommand's `-h`, and `completion.ts` all derive from these definitions,
  * so help text and shell completion can't drift from the actual CLI.
@@ -18,7 +18,7 @@ export type TCommand = {
 };
 
 /** The exec groups — every CLI utility runs through ONE path:
- *  `openllmc exec <group> <verb> […]`. */
+ *  `openllm exec <group> <verb> […]`. */
 export const EXEC_GROUPS = ["ctx"] as const;
 export type TExecGroup = (typeof EXEC_GROUPS)[number];
 
@@ -45,7 +45,7 @@ export const COMMANDS: readonly TCommand[] = [
   },
   {
     name: "setup",
-    description: "Add openllmc to PATH and install shell completion",
+    description: "Add openllm to PATH and install shell completion",
   },
   {
     name: "completion",
@@ -88,15 +88,15 @@ export type TCompletionShell = (typeof COMPLETION_SHELLS)[number];
 export const helpText = (version: string): string => {
   const rows = COMMANDS.map((c) => {
     const invocation = c.args === undefined ? c.name : `${c.name} ${c.args}`;
-    return `  openllmc ${invocation.padEnd(30)} ${c.description}`;
+    return `  openllm ${invocation.padEnd(30)} ${c.description}`;
   }).join("\n");
-  return `openllmc v${version} — the OpenLLM CLI
+  return `openllm v${version} — the OpenLLM CLI
 
 Usage:
 ${rows}
 
 Exec groups:
-${EXEC_GROUPS.map((g) => `  openllmc exec ${g} <${EXEC_VERBS[g].join("|")}>`).join("\n")}
+${EXEC_GROUPS.map((g) => `  openllm exec ${g} <${EXEC_VERBS[g].join("|")}>`).join("\n")}
 
 Config (env, or the shared ~/.openllm/.env):
   OPENLLM_CLOUD_ORIGIN  gateway origin (default: the baked cloud origin)

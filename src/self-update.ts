@@ -1,8 +1,8 @@
 /**
  * Self-update — converge the installed binary to the gateway's pinned CLI
- * release, the `openllmc` twin of the daemon's converge policy:
+ * release, the `openllm` twin of the daemon's converge policy:
  *
- *   - `openllmc self-update` fetches `GET /api/cli/version` (the committed
+ *   - `openllm self-update` fetches `GET /api/cli/version` (the committed
  *     manifest tag the gateway serves), compares with the baked
  *     `CLI_VERSION`, and on ANY difference (upgrade or rollback) downloads
  *     `GET /api/cli/binary/<target>` (302 → gzipped release asset), verifies
@@ -98,7 +98,7 @@ export const runSelfUpdate = async (): Promise<void> => {
     process.exit(1);
   }
   if (latest === CLI_VERSION) {
-    process.stdout.write(`openllmc v${CLI_VERSION} is up to date\n`);
+    process.stdout.write(`openllm v${CLI_VERSION} is up to date\n`);
     process.exit(0);
   }
 
@@ -107,7 +107,7 @@ export const runSelfUpdate = async (): Promise<void> => {
     // No prebuilt binary for this arch — point at the source repo, whose
     // README documents building the host binary (`bun run compile:host`).
     process.stderr.write(
-      `[self-update] unsupported host ${process.platform}/${process.arch} — no prebuilt openllmc for this arch.\n` +
+      `[self-update] unsupported host ${process.platform}/${process.arch} — no prebuilt openllm for this arch.\n` +
         `  Build from source: https://github.com/${CLI_RELEASE.repo}#build-from-source\n`,
     );
     process.exit(1);
@@ -149,8 +149,8 @@ export const runSelfUpdate = async (): Promise<void> => {
   // rename over. The running process keeps its inode; the next invocation
   // picks up the new binary.
   const self = process.execPath;
-  const staging = join(dirname(self), `.openllmc.next-${process.pid}`);
+  const staging = join(dirname(self), `.openllm.next-${process.pid}`);
   fs.writeFileSync(staging, bytes, { mode: 0o755 });
   fs.renameSync(staging, self);
-  process.stdout.write(`openllmc updated to v${latest}\n`);
+  process.stdout.write(`openllm updated to v${latest}\n`);
 };

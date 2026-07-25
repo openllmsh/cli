@@ -2,13 +2,13 @@
 
 /**
  * Verify published CLI binaries against the committed checksum manifest —
- * the `openllmc` twin of `packages/daemon/scripts/verify.ts`.
+ * the `openllm` twin of `packages/daemon/scripts/verify.ts`.
  *
  * The CLI ships as a compiled binary, so end users don't run this `.ts`
  * source — they run an artifact the cloud serves, which redirects to the
  * GitHub Release on the mirror repo. This command lets ANYONE independently
  * confirm that artifact is exactly what this source-available repo vouches
- * for: it downloads each published `openllmc-<target>.gz` asset straight
+ * for: it downloads each published `openllm-<target>.gz` asset straight
  * from the GitHub Release named in `manifest.ts`, decompresses it, sha256's
  * the bytes that actually execute, and asserts the digest equals the value
  * committed in `manifest.ts`. A mismatch fails loud (non-zero exit).
@@ -22,8 +22,8 @@
  *   bun run verify                        # every published target vs the manifest
  *   bun run verify -- --host              # only this host's target
  *   bun run verify -- --target linux-x64-baseline # one target
- *   bun run verify -- --file ./openllmc   # a local binary you have
- *   bun run verify -- --installed         # the `openllmc` found on $PATH
+ *   bun run verify -- --file ./openllm   # a local binary you have
+ *   bun run verify -- --installed         # the `openllm` found on $PATH
  */
 
 import { createHash } from "node:crypto";
@@ -54,7 +54,7 @@ const hostTarget = (): TCliTarget | null => {
 
 /** The published GitHub Release asset URL for a target (gzipped binary). */
 const assetUrl = (target: TCliTarget): string =>
-  `https://github.com/${CLI_RELEASE.repo}/releases/download/${CLI_RELEASE.tag}/openllmc-${target}.gz`;
+  `https://github.com/${CLI_RELEASE.repo}/releases/download/${CLI_RELEASE.tag}/openllm-${target}.gz`;
 
 /** Decompress when the gzip magic (0x1f 0x8b) is present; tolerate a raw
  *  binary too. The pinned sha256 is over the DECOMPRESSED bytes. */
@@ -201,14 +201,14 @@ const main = async (): Promise<void> => {
     );
   }
 
-  console.log("openllmc release verification");
+  console.log("openllm release verification");
   console.log(`  repo: ${CLI_RELEASE.repo}`);
   console.log(`  tag:  ${CLI_RELEASE.tag}\n`);
 
   const localPath = args.installed
-    ? (Bun.which("openllmc") ??
+    ? (Bun.which("openllm") ??
       ((): never => {
-        throw new Error("--installed: no `openllmc` found on $PATH");
+        throw new Error("--installed: no `openllm` found on $PATH");
       })())
     : args.file;
   if (localPath !== null) {

@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
 
 /**
- * Compile the CLI into source-free standalone binaries — the `openllmc`
+ * Compile the CLI into source-free standalone binaries — the `openllm`
  * twin of `packages/daemon/scripts/compile.ts`.
  *
  * `bun build --compile` inlines the runtime deps (the MCP SDK, cheerio,
@@ -93,14 +93,14 @@ const version =
 
 const outfileFor = (target: string): string => {
   const suffix = target.replace(/^bun-/, "");
-  return `${OUT_DIR}/openllmc-${suffix}`;
+  return `${OUT_DIR}/openllm-${suffix}`;
 };
 
 const buildOne = async (
   target: string | null,
   cloudOrigin: string,
 ): Promise<string> => {
-  const outfile = target === null ? `${OUT_DIR}/openllmc` : outfileFor(target);
+  const outfile = target === null ? `${OUT_DIR}/openllm` : outfileFor(target);
   const targetArgs = target === null ? [] : ["--target", target];
   await $`bun build ${ENTRY} \
     --compile \

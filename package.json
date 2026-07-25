@@ -8,7 +8,7 @@
     "./*": "./*.ts"
   },
   "bin": {
-    "openllmc": "./src/main.ts"
+    "openllm": "./src/main.ts"
   },
   "scripts": {
     "compile": "bun scripts/compile.ts",

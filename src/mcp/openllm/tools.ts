@@ -49,7 +49,7 @@ const inputSchemaFor = (op: TApiOperation): Record<string, unknown> => {
     properties.body = {
       type: "object",
       description:
-        "JSON request body — see the operation's schema in the OpenAPI spec (`openllmc api --spec`).",
+        "JSON request body — see the operation's schema in the OpenAPI spec (`openllm api --spec`).",
     };
   }
   return {

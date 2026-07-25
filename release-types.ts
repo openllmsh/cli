@@ -1,6 +1,6 @@
 /**
  * Shape of the committed CLI-release manifest (`./manifest.ts`) — the
- * `openllmc` twin of `packages/daemon/release-types.ts`. The data module is
+ * `openllm` twin of `packages/daemon/release-types.ts`. The data module is
  * rewritten by the release CLI after each GitHub release; this type stays
  * hand-written so the manifest is type-checked.
  *

@@ -1,12 +1,12 @@
 /**
- * Shell completion for `openllmc` — `openllmc completion <bash|zsh|fish>`
- * emits a completion script; `openllmc completion install` detects the
+ * Shell completion for `openllm` — `openllm completion <bash|zsh|fish>`
+ * emits a completion script; `openllm completion install` detects the
  * current shell (`$SHELL`) and wires it into the user's rc (idempotent).
  * Every subcommand, exec group/verb, flag, and shell is derived from the
  * shared definitions in `commands.ts`, so completion can't drift from the
- * actual CLI surface. The openllmc twin of the daemon's `completion.ts`.
+ * actual CLI surface. The openllm twin of the daemon's `completion.ts`.
  *
- * The bash/zsh scripts are sourced dynamically (`source <(openllmc
+ * The bash/zsh scripts are sourced dynamically (`source <(openllm
  * completion <shell>)`) so they always reflect the installed binary; fish
  * writes a static file into its completions dir.
  */
@@ -38,8 +38,8 @@ const bashScript = (): string => {
     (g) =>
       `      ${g}) [ "$COMP_CWORD" -eq 3 ] && COMPREPLY=( $(compgen -W "${EXEC_VERBS[g].join(" ")}" -- "$cur") ) ;;`,
   ).join("\n");
-  return `# openllmc bash completion
-_openllmc() {
+  return `# openllm bash completion
+_openllm() {
   local cur cmd
   cur="\${COMP_WORDS[COMP_CWORD]}"
   cmd="\${COMP_WORDS[1]}"
@@ -61,7 +61,7 @@ ${verbCases}
       esac ;;
   esac
 }
-complete -F _openllmc openllmc
+complete -F _openllm openllm ollm
 `;
 };
 
@@ -79,15 +79,15 @@ const zshScript = (): string => {
   const verbCases = EXEC_GROUPS.map(
     (g) => `        ${g}) _values 'verb' ${EXEC_VERBS[g].join(" ")} ;;`,
   ).join("\n");
-  return `# openllmc zsh completion
-_openllmc() {
+  return `# openllm zsh completion
+_openllm() {
   local -a _cmds
   _cmds=(
     ${specs}
   )
   _arguments -C '1:command:->cmd' '*::arg:->args'
   case "$state" in
-    cmd) _describe -t commands 'openllmc command' _cmds ;;
+    cmd) _describe -t commands 'openllm command' _cmds ;;
     args)
       case "$line[1]" in
         completion) _values 'shell' ${COMPLETION_ARGS.join(" ")} ;;
@@ -104,28 +104,29 @@ ${verbCases}
       esac ;;
   esac
 }
-compdef _openllmc openllmc
+compdef _openllm openllm ollm
 `;
 };
 
 const fishScript = (): string => {
   const lines = COMMANDS.map(
     (c) =>
-      `complete -c openllmc -n __fish_use_subcommand -a ${c.name} -d '${zq(c.description)}'`,
+      `complete -c openllm -n __fish_use_subcommand -a ${c.name} -d '${zq(c.description)}'`,
   );
   lines.push(
-    `complete -c openllmc -n '__fish_seen_subcommand_from completion' -a '${COMPLETION_ARGS.join(" ")}'`,
-    `complete -c openllmc -n '__fish_seen_subcommand_from mcp' -a '--only ${MCP_ONLY_GROUPS.join(" ")}'`,
-    `complete -c openllmc -n '__fish_seen_subcommand_from api' -a '--spec'`,
-    `complete -c openllmc -n '__fish_seen_subcommand_from exec' -a '${EXEC_GROUPS.join(" ")}'`,
+    `complete -c openllm -n '__fish_seen_subcommand_from completion' -a '${COMPLETION_ARGS.join(" ")}'`,
+    `complete -c openllm -n '__fish_seen_subcommand_from mcp' -a '--only ${MCP_ONLY_GROUPS.join(" ")}'`,
+    `complete -c openllm -n '__fish_seen_subcommand_from api' -a '--spec'`,
+    `complete -c openllm -n '__fish_seen_subcommand_from exec' -a '${EXEC_GROUPS.join(" ")}'`,
     ...EXEC_GROUPS.map(
       (g) =>
-        `complete -c openllmc -n '__fish_seen_subcommand_from ${g}' -a '${EXEC_VERBS[g].join(" ")}'`,
+        `complete -c openllm -n '__fish_seen_subcommand_from ${g}' -a '${EXEC_VERBS[g].join(" ")}'`,
     ),
-    `complete -c openllmc -s h -l help -d 'Show help'`,
-    `complete -c openllmc -s v -l version -d 'Print the version'`,
+    `complete -c openllm -s h -l help -d 'Show help'`,
+    `complete -c openllm -s v -l version -d 'Print the version'`,
   );
-  return `# openllmc fish completion\ncomplete -c openllmc -f\n${lines.join("\n")}\n`;
+  // `ollm` wraps `openllm` — fish inherits every completion for the alias.
+  return `# openllm fish completion\ncomplete -c openllm -f\n${lines.join("\n")}\ncomplete -c ollm --wraps openllm\n`;
 };
 
 export const completionScript = (shell: TCompletionShell): string => {
@@ -143,7 +144,7 @@ const isShell = (v: string): v is TCompletionShell =>
   (COMPLETION_SHELLS as readonly string[]).includes(v);
 
 const fishCompletionPath = (): string =>
-  join(homedir(), ".config", "fish", "completions", "openllmc.fish");
+  join(homedir(), ".config", "fish", "completions", "openllm.fish");
 
 /** The current login shell name from `$SHELL`, or null if not recognized. */
 const detectShell = (): TCompletionShell | null => {
@@ -186,8 +187,8 @@ export const installCompletion = (): string | null => {
     const rc = join(homedir(), shell === "zsh" ? ".zshrc" : ".bashrc");
     appendOnce(
       rc,
-      `command -v openllmc >/dev/null && source <(openllmc completion ${shell})  # openllmc-completion`,
-      "openllmc completion",
+      `command -v openllm >/dev/null && source <(openllm completion ${shell})  # openllm-completion`,
+      "openllm completion",
     );
     return rc;
   } catch {
@@ -214,6 +215,6 @@ export const runCompletionCommand = (args: readonly string[]): number => {
     process.stdout.write(completionScript(arg));
     return 0;
   }
-  process.stderr.write("usage: openllmc completion <bash|zsh|fish|install>\n");
+  process.stderr.write("usage: openllm completion <bash|zsh|fish|install>\n");
   return 2;
 };

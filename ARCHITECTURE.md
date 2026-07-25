@@ -1,7 +1,7 @@
 # `@openllmsh/cli` — the OpenLLM CLI
 
 > The single distribution vehicle for every gateway extension: ONE compiled,
-> source-free binary (`~/.openllm/bin/openllmc`) serving ONE MCP server that
+> source-free binary (`~/.openllm/bin/openllm`) serving ONE MCP server that
 > exposes the full native gateway API plus the claude-context and supermemory
 > tool groups. Installed by the `openllm` plugin bundle
 > (`packages/registry/plugin/openllm/install.sh`), self-updating against the
@@ -42,13 +42,13 @@ packages/cli/
 
 | Command | What |
 | --- | --- |
-| `openllmc mcp [--only <group>]` | the unified MCP server over stdio (groups: `openllm`, `claude-context`, `supermemory`; default all — `--only` is debug) |
-| `openllmc exec ctx <index\|search\|status\|index-docs> …` | claude-context hook verbs — what the `openllm` bundle's hooks shell out to (`ctx` kept as a hidden alias for older bundles) |
-| `openllmc setup` | PATH symlink + shell completion — run automatically by the curl installer; shown as a copyable follow-up on the dashboard card for sandboxed one-click installs |
-| `openllmc completion <bash\|zsh\|fish\|install>` | shell completion (derived from `commands.ts`, the single command-surface source) |
-| `openllmc api --spec` | print the embedded OpenAPI spec |
-| `openllmc self-update` | converge to the gateway's pinned release |
-| `openllmc version` | print the baked version |
+| `openllm mcp [--only <group>]` | the unified MCP server over stdio (groups: `openllm`, `claude-context`, `supermemory`; default all — `--only` is debug) |
+| `openllm exec ctx <index\|search\|status\|index-docs> …` | claude-context hook verbs — what the `openllm` bundle's hooks shell out to (`ctx` kept as a hidden alias for older bundles) |
+| `openllm setup` | PATH symlink + shell completion — run automatically by the curl installer; shown as a copyable follow-up on the dashboard card for sandboxed one-click installs |
+| `openllm completion <bash\|zsh\|fish\|install>` | shell completion (derived from `commands.ts`, the single command-surface source) |
+| `openllm api --spec` | print the embedded OpenAPI spec |
+| `openllm self-update` | converge to the gateway's pinned release |
+| `openllm version` | print the baked version |
 
 Config: `OPENLLM_CLOUD_ORIGIN` / `OPENLLM_API_KEY` env (the same contract the
 MCP mapping + hooks carry), falling back to the SHARED `~/.openllm/.env` (the
@@ -63,7 +63,7 @@ doc via the exact same path as the served `/api/swagger`
 sanitize, so the SDK can never drift from the published spec), then emits two
 COMMITTED artifacts into `src/sdk/generated/`:
 
-- `openapi.json` — the sanitized spec (also served by `openllmc api --spec`).
+- `openapi.json` — the sanitized spec (also served by `openllm api --spec`).
 - `operations.ts` — a dependency-free typed table: one row per spec operation
   (method, path, params, body-presence). Deterministically sorted.
 
@@ -86,7 +86,7 @@ Everything follows `packages/daemon` exactly — see
 - ONE version identity: the manifest tag. `package.json` stays `0.0.0-dev`
   (the sentinel dev guards key on — a source build never self-updates).
 - 4 targets (`CLI_TARGETS`), compiled in parallel, gzipped release assets
-  `openllmc-<target>.gz` on `openllmsh/cli`; the manifest pins the
+  `openllm-<target>.gz` on `openllmsh/cli`; the manifest pins the
   sha256 of the DECOMPRESSED binary.
 - Change-gated on `CLI_BINARY_SOURCES` (`cli/src` + `release-types.ts` +
   `package.json` — the actual import closure, no workspace packages): an
@@ -108,7 +108,7 @@ Everything follows `packages/daemon` exactly — see
   `<target>.sha256` serves the committed digest
   (`packages/api/handlers/cli-binary.ts`).
 - `GET /api/cli/version` → `{ latest_version }` from the committed pin.
-- `openllmc self-update` compares the baked version, downloads, gunzips,
+- `openllm self-update` compares the baked version, downloads, gunzips,
   verifies the decompressed sha256, atomically swaps itself via
   same-directory rename. Converge policy (rollbacks supported);
   `0.0.0-dev` never self-updates.

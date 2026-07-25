@@ -1,19 +1,19 @@
 #!/usr/bin/env bun
 
 /**
- * `openllmc` — the OpenLLM CLI. One binary distributes every gateway
+ * `openllm` — the OpenLLM CLI. One binary distributes every gateway
  * extension. Command surface (names/descriptions/verbs) is defined ONCE in
  * `commands.ts` — help + shell completion derive from it.
  *
- *   openllmc mcp [--only <group>]     the unified MCP server over stdio
- *   openllmc exec <group> <verb> […]  CLI utilities (hook verbs, scripting)
- *   openllmc api --spec               print the embedded OpenAPI spec
- *   openllmc setup                    PATH symlink + shell completion
- *   openllmc completion <shell|install>
- *   openllmc self-update              converge to the gateway's pinned release
- *   openllmc version
+ *   openllm mcp [--only <group>]     the unified MCP server over stdio
+ *   openllm exec <group> <verb> […]  CLI utilities (hook verbs, scripting)
+ *   openllm api --spec               print the embedded OpenAPI spec
+ *   openllm setup                    PATH symlink + shell completion
+ *   openllm completion <shell|install>
+ *   openllm self-update              converge to the gateway's pinned release
+ *   openllm version
  *
- * `openllmc ctx …` is kept as a hidden alias of `openllmc exec ctx …` — the
+ * `openllm ctx …` is kept as a hidden alias of `openllm exec ctx …` — the
  * shipped plugin hooks call it, and hook bundles + the binary rev
  * independently.
  */
@@ -48,19 +48,19 @@ const usage = (text: string, exit: number): never => {
   return process.exit(exit);
 };
 
-const MCP_USAGE = `usage: openllmc mcp [--only <group>]
+const MCP_USAGE = `usage: openllm mcp [--only <group>]
 
 Run the unified MCP server over stdio (what mcpServers.openllm executes).
 Groups: ${MCP_GROUPS.join(" | ")} (default: all; --only is for debugging).
 Requires OPENLLM_API_KEY (env or the shared ~/.openllm/.env).
 `;
 
-const EXEC_USAGE = `usage: openllmc exec <group> <verb> [...]
+const EXEC_USAGE = `usage: openllm exec <group> <verb> [...]
 
 Run a CLI utility — the one-shot path the plugin hooks + scripts use
 (hooks can't speak MCP stdio; this is the same code over argv/stdout).
 
-${EXEC_GROUPS.map((g) => `  openllmc exec ${g} <${EXEC_VERBS[g].join("|")}>`).join("\n")}
+${EXEC_GROUPS.map((g) => `  openllm exec ${g} <${EXEC_VERBS[g].join("|")}>`).join("\n")}
 
   ctx index      --path <dir> [--force]        index a repo for semantic search
   ctx search     --path <dir> --query <q> [--limit N]
@@ -68,28 +68,28 @@ ${EXEC_GROUPS.map((g) => `  openllmc exec ${g} <${EXEC_VERBS[g].join("|")}>`).jo
   ctx index-docs --url <url> [--force]         index a docs site
 `;
 
-const API_USAGE = `usage: openllmc api --spec
+const API_USAGE = `usage: openllm api --spec
 
 Print the embedded OpenAPI spec (the exact document the gateway serves at
 /api/swagger; also the source of the MCP native-API tools).
 `;
 
-const SETUP_USAGE = `usage: openllmc setup
+const SETUP_USAGE = `usage: openllm setup
 
-Post-install setup: symlink openllmc onto your PATH (/usr/local/bin or
+Post-install setup: symlink openllm onto your PATH (/usr/local/bin or
 ~/.local/bin) and install shell completion for your current shell
 (bash/zsh/fish). Idempotent — safe to re-run. Needed after a dashboard
 (daemon-driven) install, which runs sandboxed and can't touch PATH dirs.
 `;
 
-const SELF_UPDATE_USAGE = `usage: openllmc self-update
+const SELF_UPDATE_USAGE = `usage: openllm self-update
 
 Converge this binary to the gateway's pinned release: fetch
 /api/cli/version, download + sha256-verify the target, atomic swap.
 Source builds (0.0.0-dev) never self-update.
 `;
 
-const COMPLETION_USAGE = `usage: openllmc completion <bash|zsh|fish|install>
+const COMPLETION_USAGE = `usage: openllm completion <bash|zsh|fish|install>
 
 Print a completion script for a shell, or \`install\` to wire it into your
 rc (~/.zshrc, ~/.bashrc) / fish completions dir automatically.
@@ -172,7 +172,7 @@ const main = async (): Promise<void> => {
     case "version":
     case "-v":
     case "--version":
-      process.stdout.write(`openllmc v${CLI_VERSION}\n`);
+      process.stdout.write(`openllm v${CLI_VERSION}\n`);
       break;
     case undefined:
     case "help":
@@ -188,7 +188,7 @@ const main = async (): Promise<void> => {
 
 main().catch((err) => {
   process.stderr.write(
-    `[openllmc] fatal: ${err instanceof Error ? err.message : String(err)}\n`,
+    `[openllm] fatal: ${err instanceof Error ? err.message : String(err)}\n`,
   );
   process.exit(1);
 });

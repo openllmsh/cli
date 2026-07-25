@@ -1,6 +1,6 @@
 /**
  * supermemory tool group — defs + dispatcher, composed into the ONE
- * `openllmc mcp` server by `../server.ts`. Extracted from the former
+ * `openllm mcp` server by `../server.ts`. Extracted from the former
  * standalone MCP entry (`src/index.ts` of the supermemory plugin bundle);
  * behavior is unchanged, only the server ownership moved.
  */

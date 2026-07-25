@@ -1,5 +1,5 @@
 /**
- * The ONE MCP server (`openllmc mcp`) — composes every tool group over a
+ * The ONE MCP server (`openllm mcp`) — composes every tool group over a
  * single stdio transport, registered in `~/.claude.json` as the single
  * `mcpServers.openllm` entry:
  *

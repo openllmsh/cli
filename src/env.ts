@@ -39,7 +39,7 @@ export const OPENLLM_DIR = join(homedir(), ".openllm");
 /** The SHARED OpenLLM env file (same file the daemon boots from) — the CLI
  *  never writes it. */
 export const SHARED_ENV_FILE = join(OPENLLM_DIR, ".env");
-export const CLI_BIN_PATH = join(OPENLLM_DIR, "bin", "openllmc");
+export const CLI_BIN_PATH = join(OPENLLM_DIR, "bin", "openllm");
 
 /** Parse a KEY=VALUE env file (comments + blank lines ignored). */
 const parseEnvFile = (path: string): Record<string, string> => {
@@ -94,7 +94,7 @@ export const requireKeyedConfig = (): TCliConfig => {
   const cfg = cliConfig();
   if (cfg.apiKey.length === 0) {
     process.stderr.write(
-      "[openllmc] No API key configured — set OPENLLM_API_KEY (env), or pair the daemon so ~/.openllm/.env carries OPENLLM_API_KEY\n",
+      "[openllm] No API key configured — set OPENLLM_API_KEY (env), or pair the daemon so ~/.openllm/.env carries OPENLLM_API_KEY\n",
     );
     process.exit(1);
   }

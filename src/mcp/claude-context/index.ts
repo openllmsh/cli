@@ -465,9 +465,9 @@ async function gatewayPost(
 
 // ── Composition exports ───────────────────────────────────────────────────────
 //
-// This module no longer self-executes: the ONE `openllmc` entry
-// (`src/main.ts`) owns dispatch — `openllmc mcp` composes the tool group
-// below into the unified server (`../server.ts`), and `openllmc ctx …`
+// This module no longer self-executes: the ONE `openllm` entry
+// (`src/main.ts`) owns dispatch — `openllm mcp` composes the tool group
+// below into the unified server (`../server.ts`), and `openllm ctx …`
 // forwards the hook subcommands to `runClaudeContextCli`.
 
 // `collectionName` intentionally re-exported so downstream scripts can still
@@ -476,7 +476,7 @@ void collectionName;
 
 // Hook subcommand names live in `src/commands.ts` (`EXEC_VERBS.ctx`) — the
 // single source help + completion derive from; `runCli` below is the
-// implementation `openllmc exec ctx` dispatches to.
+// implementation `openllm exec ctx` dispatches to.
 
 /** The composed tool defs (code + docs pipelines — one group). */
 export const claudeContextGroupToolDefs = allToolDefs;
