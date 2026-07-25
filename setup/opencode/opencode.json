@@ -11,5 +11,14 @@
       },
       "models": "{{MODELS}}"
     }
+  },
+  "mcp": {
+    "openllm": {
+      "type": "local",
+      "command": ["{{OPENLLM_BIN}}", "mcp"],
+      "environment": {
+        "CLAUDE_CONTEXT_STATE_DIR": "{{STATE_DIR}}"
+      }
+    }
   }
 }
