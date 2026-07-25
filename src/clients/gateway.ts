@@ -49,18 +49,37 @@ const daemonReachable = async (port: number): Promise<boolean> => {
 };
 
 /**
- * Resolve which gateway this launch should use. `OPENLLM_GATEWAY` forces a
- * choice (`local` / `cloud`) for scripting and tests; otherwise the local
- * daemon wins when reachable.
+ * Resolve the base URL this launch hands the client.
+ *
+ * LOCAL BY DEFAULT: the client points at this machine's daemon
+ * (`http://127.0.0.1:<port>`), so subscription models serve locally with no
+ * cloud round trip. `-r` (`remote: true`) points it at the cloud origin
+ * instead, where subscription hops take the cloud's 307-redirect path back to
+ * whichever daemon is live for that key.
+ *
+ * The local default is still PROBED: if no daemon answers, a local base URL
+ * would hand the client an address nothing is listening on, so we fall back to
+ * the cloud rather than launching something guaranteed to fail. `-r` skips the
+ * probe entirely (it isn't asking about local).
+ *
+ * `OPENLLM_GATEWAY=local|cloud` forces the choice for scripting and tests and
+ * outranks the probe; an explicit `-r` outranks both.
  */
-export const resolveGateway = async (): Promise<TGateway> => {
+export const resolveGateway = async (opts?: {
+  readonly remote?: boolean;
+}): Promise<TGateway> => {
   const { gatewayUrl, apiKey } = cliConfig();
-  const forced = process.env.OPENLLM_GATEWAY;
   const port = daemonPort();
   const localBase = `http://127.0.0.1:${port}`;
-  if (forced === "cloud") {
-    return { base: gatewayUrl, apiKey, cloudOrigin: gatewayUrl, local: false };
-  }
+  const cloud = {
+    base: gatewayUrl,
+    apiKey,
+    cloudOrigin: gatewayUrl,
+    local: false,
+  };
+  if (opts?.remote === true) return cloud;
+  const forced = process.env.OPENLLM_GATEWAY;
+  if (forced === "cloud") return cloud;
   if (forced === "local") {
     return { base: localBase, apiKey, cloudOrigin: gatewayUrl, local: true };
   }

@@ -30,22 +30,22 @@ export const EXEC_VERBS: Record<TExecGroup, readonly string[]> = {
 export const COMMANDS: readonly TCommand[] = [
   {
     name: "claude",
-    args: "[...args]",
+    args: "[-d] [-r] [...args]",
     description: "Run Claude Code through OpenLLM",
   },
   {
     name: "codex",
-    args: "[...args]",
+    args: "[-d] [-r] [...args]",
     description: "Run Codex through OpenLLM",
   },
   {
     name: "grok",
-    args: "[...args]",
+    args: "[-d] [-r] [...args]",
     description: "Run Grok Build through OpenLLM",
   },
   {
     name: "opencode",
-    args: "[...args]",
+    args: "[-r] [...args]",
     description: "Run OpenCode through OpenLLM",
   },
   {
@@ -94,6 +94,11 @@ export const COMMANDS: readonly TCommand[] = [
   { name: "version", description: "Print the version" },
   { name: "help", description: "Show help" },
 ] as const;
+
+/** The flags a CLIENT invocation accepts (see `parseClientFlags`). Completion
+ *  offers these after a client name; `-d` only applies to clients that have an
+ *  equivalent, which the runtime enforces. */
+export const CLIENT_FLAGS = ["-d", "-r"] as const;
 
 export type TFlag = { readonly name: string; readonly description: string };
 

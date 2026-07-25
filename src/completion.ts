@@ -20,6 +20,7 @@ import {
 import { basename, dirname, join } from "node:path";
 import type { TCompletionShell } from "./commands";
 import {
+  CLIENT_FLAGS,
   COMMANDS,
   COMPLETION_SHELLS,
   EXEC_GROUPS,
@@ -52,6 +53,8 @@ _openllm() {
     completion) COMPREPLY=( $(compgen -W "${COMPLETION_ARGS.join(" ")}" -- "$cur") ) ;;
     mcp) COMPREPLY=( $(compgen -W "--only ${MCP_ONLY_GROUPS.join(" ")}" -- "$cur") ) ;;
     api) COMPREPLY=( $(compgen -W "--spec" -- "$cur") ) ;;
+    claude|codex|grok|opencode) COMPREPLY=( $(compgen -W "${CLIENT_FLAGS.join(" ")}" -- "$cur") ) ;;
+    raycast) COMPREPLY=( $(compgen -W "uninstall status" -- "$cur") ) ;;
     exec)
       if [ "$COMP_CWORD" -eq 2 ]; then
         COMPREPLY=( $(compgen -W "${EXEC_GROUPS.join(" ")}" -- "$cur") )
@@ -94,6 +97,8 @@ _openllm() {
         completion) _values 'shell' ${COMPLETION_ARGS.join(" ")} ;;
         mcp) _values 'group' --only ${MCP_ONLY_GROUPS.join(" ")} ;;
         api) _values 'flag' --spec ;;
+        claude|codex|grok|opencode) _values 'flag' ${CLIENT_FLAGS.join(" ")} ;;
+        raycast) _values 'verb' uninstall status ;;
         exec)
           if (( CURRENT == 2 )); then
             _values 'group' ${EXEC_GROUPS.join(" ")}

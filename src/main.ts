@@ -106,16 +106,27 @@ const clientUsage = (id: string): string => {
   if (client.mode === "always-on") {
     return `usage: openllm ${id} [uninstall|status]\n\n${client.note}\n`;
   }
-  return `usage: openllm ${id} [...args]
+  const dangerous =
+    client.dangerousFlag !== undefined
+      ? `  -d    skip every approval prompt (${client.bin}'s ${client.dangerousFlag})\n`
+      : "";
+  return `usage: openllm ${id} [-d] [-r] [...args]
 
-Runs ${client.name} through OpenLLM. Every argument is forwarded to
+Runs ${client.name} through OpenLLM. Every argument after ours is forwarded to
 ${client.bin} verbatim, so \`openllm ${id} <args>\` behaves exactly like
 \`${client.bin} <args>\`.
 
 ${client.note}
 
-To pass an argument openllm would otherwise read itself (e.g. the client's own
-help), separate it with \`--\`:
+Flags (openllm's own — everything else goes to ${client.bin}):
+${dangerous}  -r    route via the cloud gateway instead of this machine's daemon
+
+The session points at your local daemon by default, so subscription models
+serve locally with no cloud round trip. \`-r\` points it at the cloud origin,
+which 307-redirects subscription hops back to a live daemon.
+
+Our flags are only read at the FRONT of the command. To pass one THROUGH to
+${client.bin} (or its own help), separate it with \`--\`:
 
   openllm ${id} -- --help
 `;

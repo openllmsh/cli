@@ -25,7 +25,7 @@ import { openllmDir, userHome } from "../env";
 import { contextStateDir, fetchModelCatalog, resolveGateway } from "./gateway";
 import { HOOK_SCRIPTS } from "./hooks";
 import { buildLaunchPlan, type TLaunchPlan } from "./launch";
-import type { TClient } from "./registry";
+import { parseClientFlags, type TClient } from "./registry";
 
 /** `~/.openllm/run` — every ephemeral per-launch overlay lives here. */
 export const runRoot = (): string => join(openllmDir(), "run");
@@ -160,14 +160,25 @@ const readUserConfig = (client: TClient): string | undefined => {
 /**
  * Run a session client: merge, materialize, exec, clean up.
  *
- * Returns the child's exit code so the caller can exit with it. `userArgs` is
- * forwarded VERBATIM after our own flags — a leading `--` (used to disambiguate
- * from openllm's flags) is stripped once.
+ * Returns the child's exit code so the caller can exit with it. Our own leading
+ * flags (`-d`, `-r`) are consumed here; everything after them is forwarded
+ * VERBATIM, and a leading `--` (used to pass one of ours THROUGH to the client)
+ * is stripped once.
  */
 export const runSessionClient = async (
   client: TClient,
   userArgs: readonly string[],
 ): Promise<number> => {
+  const flags = parseClientFlags(userArgs);
+  // `-d` must fail loudly on a client with no equivalent: silently launching
+  // WITH approval prompts after the user asked to skip them is the wrong
+  // surprise.
+  if (flags.dangerous && client.dangerousFlag === undefined) {
+    process.stderr.write(
+      `${client.name} has no skip-approvals flag, so -d does not apply.\n`,
+    );
+    return 2;
+  }
   const bin = findClientBinary(client);
   if (bin === null) {
     process.stderr.write(
@@ -177,7 +188,7 @@ export const runSessionClient = async (
     return 127;
   }
 
-  const gateway = await resolveGateway();
+  const gateway = await resolveGateway({ remote: flags.remote });
   if (gateway.apiKey.length === 0) {
     process.stderr.write(
       "No OpenLLM API key configured — set OPENLLM_API_KEY, or pair the daemon so ~/.openllm/.env carries it.\n",
@@ -207,8 +218,18 @@ export const runSessionClient = async (
 
     // Strip ONE leading `--` (the disambiguator), then forward verbatim.
     const forwarded =
-      userArgs[0] === "--" ? userArgs.slice(1) : userArgs.slice(0);
-    code = await execClient(bin, [...plan.args, ...forwarded], plan.env);
+      flags.rest[0] === "--" ? flags.rest.slice(1) : flags.rest.slice(0);
+    // `-d` becomes the client's OWN flag, ahead of the user's args so their
+    // explicit choices still win on anything that conflicts.
+    const dangerous =
+      flags.dangerous && client.dangerousFlag !== undefined
+        ? [client.dangerousFlag]
+        : [];
+    code = await execClient(
+      bin,
+      [...plan.args, ...dangerous, ...forwarded],
+      plan.env,
+    );
   } finally {
     rmSync(runDir, { recursive: true, force: true });
   }

@@ -65,6 +65,14 @@ export type TClient = {
   readonly catalogSlug?: string;
   /** Platforms the client runs on; empty = every supported OS. */
   readonly os?: readonly ("darwin" | "linux")[];
+  /**
+   * This client's own "skip every approval prompt" flag, which `-d` translates
+   * to. Every client spells it differently, so `-d` is OUR stable spelling and
+   * this is the mapping. Undefined = the client has no equivalent, and `-d`
+   * errors rather than silently launching WITH prompts (a false sense of
+   * yolo-mode is worse than a clear refusal).
+   */
+  readonly dangerousFlag?: string;
   /** One-line note. Rendered as a `# …` comment inside the dashboard's
    *  terminal block and in `openllm <client> -h`, so keep it short and
    *  period-free — it has to read as a shell comment. */
@@ -80,6 +88,7 @@ export const CLIENTS: Readonly<Record<TClientId, TClient>> = {
     bin: "claude",
     binPaths: ["~/.local/bin/claude"],
     installHint: "https://claude.ai/install.sh",
+    dangerousFlag: "--dangerously-skip-permissions",
     note: "your ~/.claude config is never modified",
   },
   codex: {
@@ -91,6 +100,7 @@ export const CLIENTS: Readonly<Record<TClientId, TClient>> = {
     binPaths: ["~/.local/bin/codex", "~/.codex/bin/codex"],
     installHint: "https://chatgpt.com/codex/install.sh",
     catalogSlug: "codex",
+    dangerousFlag: "--dangerously-bypass-approvals-and-sandbox",
     note: "your ~/.codex/config.toml is never modified",
   },
   grok: {
@@ -102,6 +112,7 @@ export const CLIENTS: Readonly<Record<TClientId, TClient>> = {
     binPaths: ["~/.grok/bin/grok", "~/.local/bin/grok"],
     installHint: "https://x.ai/cli/install.sh",
     catalogSlug: "grok-build",
+    dangerousFlag: "--always-approve",
     note: "your ~/.grok config and auth.json are never modified",
   },
   opencode: {
@@ -137,3 +148,51 @@ export type TAlwaysOnVerb = (typeof ALWAYS_ON_VERBS)[number];
 
 export const isAlwaysOnVerb = (value: string): value is TAlwaysOnVerb =>
   (ALWAYS_ON_VERBS as readonly string[]).includes(value);
+
+/**
+ * OpenLLM-level flags a client invocation may carry, stripped before the rest
+ * is forwarded verbatim.
+ *
+ * Deliberately tiny and single-dash: these are OUR flags, and everything else —
+ * including any long flag that happens to collide — belongs to the client. A
+ * user who needs to pass `-d`/`-r` THROUGH to the client separates them with
+ * `--` (`openllm claude -- -d`), which is the same escape hatch the arg
+ * passthrough already documents.
+ */
+export type TClientFlags = {
+  /** `-d` — translate to the client's own skip-all-approvals flag. */
+  readonly dangerous: boolean;
+  /** `-r` — point the session at the CLOUD gateway instead of this machine's
+   *  daemon, so subscription hops take the cloud's 307-redirect path. */
+  readonly remote: boolean;
+  /** Everything that wasn't ours, in order, for the client. */
+  readonly rest: readonly string[];
+};
+
+/**
+ * Split our flags off the front of a client invocation.
+ *
+ * Only scans the LEADING run of arguments and stops at the first non-flag or at
+ * `--`: `openllm claude -d file.ts` is ours-then-theirs, while
+ * `openllm claude run -d` leaves `-d` alone because it belongs to whatever
+ * `run` is. That keeps the passthrough promise honest — we never rewrite an
+ * argument the client was meant to parse.
+ */
+export const parseClientFlags = (args: readonly string[]): TClientFlags => {
+  let dangerous = false;
+  let remote = false;
+  let i = 0;
+  for (; i < args.length; i += 1) {
+    const arg = args[i];
+    if (arg === "-d") {
+      dangerous = true;
+      continue;
+    }
+    if (arg === "-r") {
+      remote = true;
+      continue;
+    }
+    break; // `--`, a client flag, or a positional — the rest is theirs
+  }
+  return { dangerous, remote, rest: args.slice(i) };
+};
