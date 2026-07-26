@@ -1,6 +1,6 @@
 {
   "name": "@openllmsh/cli",
-  "version": "0.0.0-dev",
+  "version": "1.8.5",
   "private": false,
   "type": "module",
   "exports": {
@@ -23,7 +23,6 @@
     "turndown": "^7.2.4"
   },
   "devDependencies": {
-    "@openllm/schema": "workspace:*",
     "@types/turndown": "^5.0.6"
   },
   "license": "BUSL-1.1"
