@@ -124,6 +124,13 @@ const HELPER_KEY_VAR = "OPENLLM_GATEWAY_KEY";
 const CLAUDE_KEY_HELPER = `#!/bin/sh\nprintf '%s' "$${HELPER_KEY_VAR}"\n`;
 
 /**
+ * The helper's path RELATIVE to the run dir. Single source for both the
+ * `execFiles` key (which is run-dir-relative) and the absolute `apiKeyHelper`
+ * setting, so the two can never drift apart.
+ */
+const CLAUDE_KEY_HELPER_REL = "hooks/api-key.sh";
+
+/**
  * Claude Code — `--settings` layers additional settings over the user's own and
  * `--mcp-config` adds MCP servers, so NOTHING needs merging and nothing needs a
  * config-dir redirect: the user's `~/.claude` stays fully authoritative
@@ -140,7 +147,7 @@ const CLAUDE_KEY_HELPER = `#!/bin/sh\nprintf '%s' "$${HELPER_KEY_VAR}"\n`;
  */
 const planClaude = (inputs: TLaunchInputs): TLaunchPlan => {
   const vars = overlayVars(inputs);
-  const helperPath = `${inputs.runDir}/hooks/api-key.sh`;
+  const helperPath = `${inputs.runDir}/${CLAUDE_KEY_HELPER_REL}`;
   const settings = parseJsonLoose(
     substitute(OVERLAYS.claude.settings, vars),
   ) as TJsonObject;
@@ -165,7 +172,7 @@ const planClaude = (inputs: TLaunchInputs): TLaunchPlan => {
       )}\n`,
       "mcp.json": substitute(OVERLAYS.claude.mcp, vars),
     },
-    execFiles: { "hooks/api-key.sh": CLAUDE_KEY_HELPER },
+    execFiles: { [CLAUDE_KEY_HELPER_REL]: CLAUDE_KEY_HELPER },
     args: [
       "--settings",
       `${inputs.runDir}/settings.json`,
