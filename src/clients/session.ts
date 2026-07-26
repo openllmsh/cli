@@ -229,11 +229,42 @@ export const runSessionClient = async (
       bin,
       [...plan.args, ...dangerous, ...forwarded],
       plan.env,
+      plan.unsetEnv,
     );
   } finally {
     rmSync(runDir, { recursive: true, force: true });
   }
   return code;
+};
+
+/**
+ * Build the child environment as inherited env minus explicit removes, then
+ * overlayed with plan-specific env. The overlay always wins: an unset name is
+ * removed only when the plan does not explicitly set it.
+ */
+export const mergeSessionEnv = (
+  inherited: NodeJS.ProcessEnv,
+  env: Readonly<Record<string, string>>,
+  unsetEnv: readonly string[] = [],
+): NodeJS.ProcessEnv => {
+  const remove = new Set(unsetEnv);
+  const output = {} as NodeJS.ProcessEnv;
+
+  for (const [name, value] of Object.entries(inherited)) {
+    if (value === undefined) {
+      continue;
+    }
+    if (remove.has(name) && !Object.hasOwn(env, name)) {
+      continue;
+    }
+    output[name] = value;
+  }
+
+  for (const [name, value] of Object.entries(env)) {
+    output[name] = value;
+  }
+
+  return output;
 };
 
 /**
@@ -246,11 +277,12 @@ const execClient = (
   bin: string,
   args: readonly string[],
   env: Readonly<Record<string, string>>,
+  unsetEnv: readonly string[] = [],
 ): Promise<number> =>
   new Promise((resolve) => {
     const child = spawn(bin, args, {
       stdio: "inherit",
-      env: { ...process.env, ...env },
+      env: mergeSessionEnv(process.env, env, unsetEnv),
     });
     const forward = (signal: NodeJS.Signals) => (): void => {
       // Let the child decide how to die; our own exit follows its code.

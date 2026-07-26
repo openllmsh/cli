@@ -45,6 +45,14 @@ export type TLaunchPlan = {
   readonly args: readonly string[];
   /** Env overrides for the child process. */
   readonly env: Readonly<Record<string, string>>;
+  /**
+   * Env vars to remove from inherited process env before spawning.
+   *
+   * This is required when OpenLLM writes its own auth for the child, but the user
+   * also has ambient credentials (for example, from a separate Claude Code login)
+   * that could be picked up accidentally and overshadow the OpenLLM flow.
+   */
+  readonly unsetEnv?: readonly string[];
   /** When set, the run dir must be a symlink farm over this real config dir
    *  (so credentials / history / sessions still resolve to the user's files). */
   readonly mirrorDir?: string;
@@ -124,6 +132,7 @@ const planClaude = (inputs: TLaunchInputs): TLaunchPlan => {
       OPENLLM_BIN: inputs.binPath,
       CLAUDE_CONTEXT_STATE_DIR: inputs.stateDir,
     },
+    unsetEnv: ["ANTHROPIC_AUTH_TOKEN"],
     hooks: true,
   };
 };
