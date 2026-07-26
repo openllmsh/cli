@@ -171,6 +171,7 @@ const planClaude = (inputs: TLaunchInputs): TLaunchPlan => {
         2,
       )}\n`,
       "mcp.json": substitute(OVERLAYS.claude.mcp, vars),
+      "prompt-prefix.md": OVERLAYS.claude.promptPrefix,
     },
     execFiles: { [CLAUDE_KEY_HELPER_REL]: CLAUDE_KEY_HELPER },
     args: [
@@ -178,6 +179,11 @@ const planClaude = (inputs: TLaunchInputs): TLaunchPlan => {
       `${inputs.runDir}/settings.json`,
       "--mcp-config",
       `${inputs.runDir}/mcp.json`,
+      // Additive by design: replacing Claude Code's system prompt would remove
+      // its vendor-required first preamble. The OAuth transport then forwards
+      // this genuine client-authored request without gateway-side injection.
+      "--append-system-prompt-file",
+      `${inputs.runDir}/prompt-prefix.md`,
     ],
     env: {
       ANTHROPIC_BASE_URL: inputs.apiBase,

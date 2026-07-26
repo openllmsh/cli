@@ -13,6 +13,7 @@
   "scripts": {
     "compile": "bun scripts/compile.ts",
     "compile:host": "bun scripts/compile.ts --host",
+    "generate:prompt-prefix": "bun scripts/generate-prompt-prefix.ts",
     "generate:sdk": "bun scripts/generate-sdk.ts",
     "verify": "bun scripts/verify.ts"
   },

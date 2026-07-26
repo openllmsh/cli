@@ -13,6 +13,9 @@ import claudeGuidance from "../../setup/claude/guidance.md" with {
   type: "text",
 };
 import claudeMcp from "../../setup/claude/mcp.json" with { type: "text" };
+import claudePromptPrefix from "../../setup/claude/prompt-prefix.md" with {
+  type: "text",
+};
 import claudeSettings from "../../setup/claude/settings.json" with {
   type: "text",
 };
@@ -50,6 +53,7 @@ export const OVERLAYS = {
     settings: asText(claudeSettings),
     mcp: asText(claudeMcp),
     guidance: claudeGuidance,
+    promptPrefix: claudePromptPrefix,
   },
   codex: { overrides: codexOverrides },
   grok: {

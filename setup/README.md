@@ -34,11 +34,15 @@ user's home directory by a setup script.
    converges the binary, and the next `openllm <client>` uses the new overlay —
    there is no reinstall step.
 
+5. **Do not hand-edit `claude/prompt-prefix.md`.** It is generated from
+   `packages/protocol/prompt-prefix.ts` by
+   `bun run --cwd packages/cli generate:prompt-prefix`.
+
 ## Layout
 
 ```
 setup/
-├── claude/     settings.json · mcp.json · guidance.md
+├── claude/     settings.json · mcp.json · guidance.md · prompt-prefix.md (generated)
 ├── codex/      overrides.toml
 ├── grok/       config.toml · mcp.toml · hooks.json · guidance.md
 ├── opencode/   opencode.json
