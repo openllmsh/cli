@@ -41,6 +41,13 @@ export type TLaunchInputs = {
 export type TLaunchPlan = {
   /** run-dir-relative path → contents. Written 0o600 under a 0o700 dir. */
   readonly files: Readonly<Record<string, string>>;
+  /**
+   * Like `files`, but written 0o700 — for the few plan entries the client must
+   * EXECUTE rather than read (Claude's `apiKeyHelper`). Kept separate from the
+   * shared `HOOK_SCRIPTS` table because these bodies are per-launch (they
+   * reference the run dir) and per-client.
+   */
+  readonly execFiles?: Readonly<Record<string, string>>;
   /** Args prepended BEFORE the user's own args. */
   readonly args: readonly string[];
   /** Env overrides for the child process. */
@@ -104,19 +111,61 @@ const overlayVars = (
 });
 
 /**
+ * The env var the run-local `apiKeyHelper` echoes. Deliberately NOT one of
+ * Claude's own `ANTHROPIC_*` names: Claude must see the key ONLY through the
+ * helper, so this name is invisible to its credential resolution.
+ */
+const HELPER_KEY_VAR = "OPENLLM_GATEWAY_KEY";
+
+/**
+ * The run-local `apiKeyHelper`. Echoes the key from the child ENVIRONMENT
+ * rather than embedding it, so the launch plan still writes NO secret to disk.
+ */
+const CLAUDE_KEY_HELPER = `#!/bin/sh\nprintf '%s' "$${HELPER_KEY_VAR}"\n`;
+
+/**
  * Claude Code — `--settings` layers additional settings over the user's own and
  * `--mcp-config` adds MCP servers, so NOTHING needs merging and nothing needs a
  * config-dir redirect: the user's `~/.claude` stays fully authoritative
- * (credentials, history, projects). The model aliases + base URL go through the
- * child ENVIRONMENT, so no secret is written to disk at all.
+ * (credentials, history, projects, and their claude.ai login).
+ *
+ * The gateway key is supplied via `apiKeyHelper` rather than `ANTHROPIC_API_KEY`,
+ * and every ambient Anthropic credential is stripped from the child env. That is
+ * what keeps the session to exactly ONE key source. Claude warns
+ * "Both <x> and <y> set · auth may not work as expected" whenever it finds two
+ * live credentials at once, and setting `ANTHROPIC_API_KEY` while the user is
+ * signed in to claude.ai is precisely that collision — the login lives in the
+ * macOS keychain, which no env var or config-dir override can scope, so removing
+ * OUR side is the only fix that leaves theirs intact.
  */
 const planClaude = (inputs: TLaunchInputs): TLaunchPlan => {
   const vars = overlayVars(inputs);
+  const helperPath = `${inputs.runDir}/hooks/api-key.sh`;
+  const settings = parseJsonLoose(
+    substitute(OVERLAYS.claude.settings, vars),
+  ) as TJsonObject;
   return {
     files: {
-      "settings.json": substitute(OVERLAYS.claude.settings, vars),
+      "settings.json": `${JSON.stringify(
+        {
+          ...settings,
+          apiKeyHelper: helperPath,
+          // Claude auto-fetches the user's claude.ai cloud MCP connectors, then
+          // reports that it disabled them because another auth source takes
+          // precedence. Under the gateway they could never have connected — the
+          // session authenticates with the gateway key, not the claude.ai
+          // login — so opting out up front removes a warning about something we
+          // were never going to use. Scoped to this launch: "any-source-true
+          // wins", but we only ever set it in the run-local settings, so the
+          // user's own connectors are untouched outside `openllm claude`.
+          disableClaudeAiConnectors: true,
+        },
+        null,
+        2,
+      )}\n`,
       "mcp.json": substitute(OVERLAYS.claude.mcp, vars),
     },
+    execFiles: { "hooks/api-key.sh": CLAUDE_KEY_HELPER },
     args: [
       "--settings",
       `${inputs.runDir}/settings.json`,
@@ -125,14 +174,21 @@ const planClaude = (inputs: TLaunchInputs): TLaunchPlan => {
     ],
     env: {
       ANTHROPIC_BASE_URL: inputs.apiBase,
-      ANTHROPIC_API_KEY: inputs.apiKey,
+      [HELPER_KEY_VAR]: inputs.apiKey,
       ANTHROPIC_DEFAULT_OPUS_MODEL: "ultra",
       ANTHROPIC_DEFAULT_SONNET_MODEL: "plus",
       ANTHROPIC_DEFAULT_HAIKU_MODEL: "lite",
       OPENLLM_BIN: inputs.binPath,
       CLAUDE_CONTEXT_STATE_DIR: inputs.stateDir,
     },
-    unsetEnv: ["ANTHROPIC_AUTH_TOKEN"],
+    // A second live credential is exactly what triggers the warning, so every
+    // ambient Anthropic key is dropped — including any the user exported
+    // themselves, which would otherwise silently outrank the gateway.
+    unsetEnv: [
+      "ANTHROPIC_API_KEY",
+      "ANTHROPIC_AUTH_TOKEN",
+      "CLAUDE_CODE_OAUTH_TOKEN",
+    ],
     hooks: true,
   };
 };

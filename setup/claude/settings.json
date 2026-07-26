@@ -1,5 +1,9 @@
 {
   "model": "ultra[1m]",
+  "statusLine": {
+    "type": "command",
+    "command": "{{HOOKS_DIR}}/statusline.sh"
+  },
   "hooks": {
     "SessionStart": [
       {

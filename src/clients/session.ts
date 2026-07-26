@@ -128,13 +128,22 @@ const materialize = (plan: TLaunchPlan, runDir: string): void => {
     mkdirSync(dirname(abs), { recursive: true, mode: 0o700 });
     writeFileSync(abs, contents, { mode: 0o600 });
   }
-  if (!plan.hooks) return;
-  const hooksDir = join(runDir, "hooks");
-  mkdirSync(hooksDir, { recursive: true, mode: 0o700 });
-  for (const [name, body] of Object.entries(HOOK_SCRIPTS)) {
-    const abs = join(hooksDir, name);
+  if (plan.hooks) {
+    const hooksDir = join(runDir, "hooks");
+    mkdirSync(hooksDir, { recursive: true, mode: 0o700 });
+    for (const [name, body] of Object.entries(HOOK_SCRIPTS)) {
+      const abs = join(hooksDir, name);
+      writeFileSync(abs, body, { mode: 0o700 });
+      chmodSync(abs, 0o700);
+    }
+  }
+  // Executable plan entries last, so they land whether or not the client uses
+  // hooks and are never clobbered by the shared hook table above.
+  for (const [rel, body] of Object.entries(plan.execFiles ?? {})) {
+    const abs = join(runDir, rel);
+    mkdirSync(dirname(abs), { recursive: true, mode: 0o700 });
     writeFileSync(abs, body, { mode: 0o700 });
-    chmodSync(abs, 0o700);
+    chmodSync(abs, 0o700); // force mode regardless of umask
   }
 };
 

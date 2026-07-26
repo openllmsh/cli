@@ -31,6 +31,7 @@ import memRecallOnPrompt from "../../setup/hooks/mem-recall-on-prompt.sh" with {
   type: "text",
 };
 import openllmEnv from "../../setup/hooks/openllm-env.sh" with { type: "text" };
+import statusline from "../../setup/hooks/statusline.sh" with { type: "text" };
 
 /** filename → script body. Materialized 0o700 into `<runDir>/hooks/`. */
 export const HOOK_SCRIPTS: Readonly<Record<string, string>> = {
@@ -40,4 +41,8 @@ export const HOOK_SCRIPTS: Readonly<Record<string, string>> = {
   "ctx-reindex-on-edit.sh": ctxReindexOnEdit,
   "mem-recall-on-prompt.sh": memRecallOnPrompt,
   "mem-extract-on-stop.sh": memExtractOnStop,
+  // Not a hook in the event sense — a `statusLine` command — but it shares the
+  // same lifecycle: embedded as text, materialized 0700 into the run dir, and
+  // referenced from the run-local settings.
+  "statusline.sh": statusline,
 };
