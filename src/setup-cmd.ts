@@ -28,14 +28,14 @@ import {
   unlinkSync,
   writeFileSync,
 } from "node:fs";
-import { homedir } from "node:os";
 import { basename, join } from "node:path";
 import { installCompletion } from "./completion";
+import { userHome } from "./env";
 
-const BIN_DIR = join(homedir(), ".openllm", "bin");
-const BIN_PATH = join(BIN_DIR, "openllm");
+const binDir = (): string => join(userHome(), ".openllm", "bin");
+const binPath = (): string => join(binDir(), "openllm");
 /** Legacy binary path (pre-rename installs). */
-const LEGACY_BIN_PATH = join(BIN_DIR, "openllmc");
+const legacyBinPath = (): string => join(binDir(), "openllmc");
 
 /** The owned rc block markers — install/uninstall operate on exactly this
  *  region, never on the rest of the user's rc. */
@@ -45,20 +45,18 @@ export const RC_END = "# <<< openllm (managed) <<<";
 /** Names we link onto PATH — the binary and its short alias. */
 const LINK_NAMES = ["openllm", "ollm"] as const;
 
-const PATH_DIR_CANDIDATES = [
-  "/usr/local/bin",
-  join(homedir(), ".local", "bin"),
-] as const;
+const pathDirCandidates = (): readonly string[] =>
+  ["/usr/local/bin", join(userHome(), ".local", "bin")] as const;
 
 /** True when `link` is a symlink whose target is one of OUR binaries (the
  *  new path, the legacy path, or a sibling `openllm` link). */
 const pointsAtOurs = (link: string): boolean => {
+  const path = binPath();
+  const legacyPath = legacyBinPath();
   try {
     const target = readlinkSync(link);
     return (
-      target === BIN_PATH ||
-      target === LEGACY_BIN_PATH ||
-      basename(target) === "openllm"
+      target === path || target === legacyPath || basename(target) === "openllm"
     );
   } catch {
     return false; // not a symlink (or unreadable) — not ours
@@ -68,18 +66,19 @@ const pointsAtOurs = (link: string): boolean => {
 /** Best-effort symlink of one name into the first writable PATH dir.
  *  Returns the link path or null when no dir was writable. */
 const linkName = (name: string): string | null => {
-  for (const dir of PATH_DIR_CANDIDATES) {
+  for (const dir of pathDirCandidates()) {
     const link = join(dir, name);
     try {
       mkdirSync(dir, { recursive: true });
       // Replace only a symlink pointing at our binary — never clobber a
       // foreign regular file (or foreign symlink) with this name.
+      const path = binPath();
       if (existsSync(link)) {
-        if (readlinkSync(link) === BIN_PATH) return link; // already correct
+        if (readlinkSync(link) === path) return link; // already correct
         if (!pointsAtOurs(link)) continue; // foreign — try the next dir
         unlinkSync(link);
       }
-      symlinkSync(BIN_PATH, link);
+      symlinkSync(path, link);
       return link;
     } catch {
       // unwritable / not a symlink — try the next candidate
@@ -96,29 +95,32 @@ const linkName = (name: string): string | null => {
  * (old MCP entries, old hooks) keep working.
  */
 const migrateLegacyLinks = (): void => {
-  for (const dir of PATH_DIR_CANDIDATES) {
+  for (const dir of pathDirCandidates()) {
     const link = join(dir, "openllmc");
     try {
+      const path = binPath();
       if (existsSync(link) && pointsAtOurs(link)) {
         unlinkSync(link);
-        symlinkSync(BIN_PATH, link);
+        symlinkSync(path, link);
       }
     } catch {
       // best-effort — a foreign or unwritable link is left alone
     }
   }
   try {
+    const path = binPath();
+    const legacyPath = legacyBinPath();
     // ~/.openllm/bin/openllmc: replace a stale regular file (the pre-rename
     // binary) or wrong-target link with a transitional symlink to openllm.
-    if (existsSync(LEGACY_BIN_PATH)) {
+    if (existsSync(legacyPath)) {
       try {
-        if (readlinkSync(LEGACY_BIN_PATH) === BIN_PATH) return; // already done
+        if (readlinkSync(legacyPath) === path) return; // already done
       } catch {
         // regular file (old binary) — replace below
       }
-      unlinkSync(LEGACY_BIN_PATH);
+      unlinkSync(legacyPath);
     }
-    if (existsSync(BIN_PATH)) symlinkSync(BIN_PATH, LEGACY_BIN_PATH);
+    if (existsSync(path)) symlinkSync(path, legacyPath);
   } catch {
     // best-effort
   }
@@ -127,11 +129,12 @@ const migrateLegacyLinks = (): void => {
 /** The rc file for the user's login shell, or null when unsupported. */
 const rcFileForShell = (): { rc: string; fish: boolean } | null => {
   const shell = basename(process.env.SHELL ?? "");
-  if (shell === "zsh") return { rc: join(homedir(), ".zshrc"), fish: false };
-  if (shell === "bash") return { rc: join(homedir(), ".bashrc"), fish: false };
+  const home = userHome();
+  if (shell === "zsh") return { rc: join(home, ".zshrc"), fish: false };
+  if (shell === "bash") return { rc: join(home, ".bashrc"), fish: false };
   if (shell === "fish")
     return {
-      rc: join(homedir(), ".config", "fish", "config.fish"),
+      rc: join(home, ".config", "fish", "config.fish"),
       fish: true,
     };
   return null;
@@ -213,7 +216,8 @@ export const removeRcBlock = (): void => {
 
 /** Remove every PATH symlink we own (uninstall path). Best-effort. */
 export const removeOwnedLinks = (): void => {
-  for (const dir of PATH_DIR_CANDIDATES) {
+  const legacyPath = legacyBinPath();
+  for (const dir of pathDirCandidates()) {
     for (const name of [...LINK_NAMES, "openllmc"]) {
       const link = join(dir, name);
       try {
@@ -224,14 +228,15 @@ export const removeOwnedLinks = (): void => {
     }
   }
   try {
-    if (existsSync(LEGACY_BIN_PATH) && pointsAtOurs(LEGACY_BIN_PATH))
-      unlinkSync(LEGACY_BIN_PATH);
+    if (existsSync(legacyPath) && pointsAtOurs(legacyPath))
+      unlinkSync(legacyPath);
   } catch {
     // best-effort
   }
 };
 
 export const runSetup = (): number => {
+  const path = binPath();
   let failures = 0;
 
   migrateLegacyLinks();
@@ -239,11 +244,11 @@ export const runSetup = (): number => {
   for (const name of LINK_NAMES) {
     const link = linkName(name);
     if (link !== null) {
-      process.stdout.write(`✓ PATH     ${link} → ${BIN_PATH}\n`);
+      process.stdout.write(`✓ PATH     ${link} → ${path}\n`);
     } else {
       failures += 1;
       process.stdout.write(
-        `✗ PATH     no writable bin dir for ${name} — link manually:\n           ln -sf ${BIN_PATH} ~/.local/bin/${name}\n`,
+        `✗ PATH     no writable bin dir for ${name} — link manually:\n           ln -sf ${path} ~/.local/bin/${name}\n`,
       );
     }
   }
