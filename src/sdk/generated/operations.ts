@@ -232,6 +232,20 @@ export const API_OPERATIONS: readonly TApiOperation[] = [
     "hasBody": true
   },
   {
+    "id": "keys.provisionDeviceAccess",
+    "method": "post",
+    "path": "/keys/{id}/device-access",
+    "summary": "",
+    "tags": [
+      "keys"
+    ],
+    "pathParams": [
+      "id"
+    ],
+    "queryParams": [],
+    "hasBody": true
+  },
+  {
     "id": "media.list",
     "method": "get",
     "path": "/media",
