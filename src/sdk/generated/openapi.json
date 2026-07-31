@@ -13243,13 +13243,18 @@
                     "type": "string",
                     "description": "a string at most 128 character(s) long",
                     "title": "maxLength(128)",
+                    "minLength": 1,
                     "maxLength": 128
                   },
                   "cli": {
                     "type": "string",
-                    "description": "a string at most 64 character(s) long",
-                    "title": "maxLength(64)",
-                    "maxLength": 64
+                    "enum": [
+                      "claude_code",
+                      "chatgpt",
+                      "kimi_code",
+                      "grok",
+                      "cursor"
+                    ]
                   }
                 },
                 "additionalProperties": false
