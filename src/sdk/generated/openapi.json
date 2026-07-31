@@ -10837,7 +10837,7 @@
                     "type": "number"
                   },
                   "device_access_pubkey": {
-                    "type": "string"
+                    "$ref": "#/components/schemas/NonEmptyString"
                   }
                 },
                 "additionalProperties": false
@@ -11837,7 +11837,7 @@
                 ],
                 "properties": {
                   "device_access_pubkey": {
-                    "type": "string"
+                    "$ref": "#/components/schemas/NonEmptyString"
                   },
                   "vault_version": {
                     "type": "number"
@@ -24454,6 +24454,12 @@
             "description": "an object to be decoded into a globally shared symbol"
           }
         ]
+      },
+      "NonEmptyString": {
+        "type": "string",
+        "description": "a non empty string",
+        "title": "nonEmptyString",
+        "minLength": 1
       },
       "NumberFromString": {
         "type": "string",
