@@ -10290,6 +10290,16 @@
                                         "type": "null"
                                       }
                                     ]
+                                  },
+                                  "daemon_x25519_pubkey": {
+                                    "anyOf": [
+                                      {
+                                        "type": "string"
+                                      },
+                                      {
+                                        "type": "null"
+                                      }
+                                    ]
                                   }
                                 },
                                 "additionalProperties": false
@@ -11581,6 +11591,16 @@
                               "anyOf": [
                                 {
                                   "type": "number"
+                                },
+                                {
+                                  "type": "null"
+                                }
+                              ]
+                            },
+                            "daemon_x25519_pubkey": {
+                              "anyOf": [
+                                {
+                                  "type": "string"
                                 },
                                 {
                                   "type": "null"
