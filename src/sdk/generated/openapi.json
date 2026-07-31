@@ -13238,6 +13238,18 @@
                     "description": "a string at most 64 character(s) long",
                     "title": "maxLength(64)",
                     "maxLength": 64
+                  },
+                  "device_id": {
+                    "type": "string",
+                    "description": "a string at most 128 character(s) long",
+                    "title": "maxLength(128)",
+                    "maxLength": 128
+                  },
+                  "cli": {
+                    "type": "string",
+                    "description": "a string at most 64 character(s) long",
+                    "title": "maxLength(64)",
+                    "maxLength": 64
                   }
                 },
                 "additionalProperties": false
