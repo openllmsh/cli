@@ -13251,9 +13251,8 @@
                     "enum": [
                       "claude_code",
                       "chatgpt",
-                      "kimi_code",
                       "grok",
-                      "cursor"
+                      "opencode"
                     ]
                   }
                 },

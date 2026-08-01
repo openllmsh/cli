@@ -25,6 +25,7 @@ import { openllmDir, userHome } from "../env";
 import { contextStateDir, fetchModelCatalog, resolveGateway } from "./gateway";
 import { HOOK_SCRIPTS } from "./hooks";
 import { buildLaunchPlan, type TLaunchPlan } from "./launch";
+import { buildLiveJson, writeLiveJson } from "./live";
 import type { TClient, TClientFlags } from "./registry";
 
 /** `~/.openllm/run` — every ephemeral per-launch overlay lives here. */
@@ -234,6 +235,20 @@ export const runSessionClient = async (
       flags.dangerous && client.dangerousFlag !== undefined
         ? [client.dangerousFlag]
         : [];
+
+    // Index this process for the daemon's local-session list / attach path.
+    // Device PTYs set OPENLLM_DEVICE_SESSION_ID so host=device + openllm id
+    // land here; local interactive launches stay host=local.
+    writeLiveJson(
+      runDir,
+      buildLiveJson({
+        clientId: client.id,
+        cwd: process.cwd(),
+        dangerous: flags.dangerous,
+        userArgs: forwarded,
+      }),
+    );
+
     code = await execClient(
       bin,
       [...plan.args, ...dangerous, ...forwarded],
