@@ -240,7 +240,20 @@ export const API_OPERATIONS: readonly TApiOperation[] = [
       "media"
     ],
     "pathParams": [],
-    "queryParams": [],
+    "queryParams": [
+      {
+        "name": "cursor",
+        "required": false
+      },
+      {
+        "name": "limit",
+        "required": false
+      },
+      {
+        "name": "kind",
+        "required": false
+      }
+    ],
     "hasBody": false
   },
   {
@@ -493,7 +506,12 @@ export const API_OPERATIONS: readonly TApiOperation[] = [
       "sessions"
     ],
     "pathParams": [],
-    "queryParams": [],
+    "queryParams": [
+      {
+        "name": "archived",
+        "required": false
+      }
+    ],
     "hasBody": false
   },
   {

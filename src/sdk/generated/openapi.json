@@ -11876,7 +11876,19 @@
           "sessions"
         ],
         "operationId": "sessions.list",
-        "parameters": [],
+        "parameters": [
+          {
+            "name": "archived",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "true"
+              ]
+            },
+            "required": false
+          }
+        ],
         "security": [],
         "responses": {
           "200": {
@@ -11899,6 +11911,8 @@
                           "device_id",
                           "cli",
                           "title",
+                          "pinned_at",
+                          "archived_at",
                           "created_at",
                           "updated_at"
                         ],
@@ -11935,6 +11949,26 @@
                           },
                           "title": {
                             "type": "string"
+                          },
+                          "pinned_at": {
+                            "anyOf": [
+                              {
+                                "type": "string"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "archived_at": {
+                            "anyOf": [
+                              {
+                                "type": "string"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
                           },
                           "created_at": {
                             "type": "string"
@@ -12488,6 +12522,8 @@
                     "device_id",
                     "cli",
                     "title",
+                    "pinned_at",
+                    "archived_at",
                     "created_at",
                     "updated_at",
                     "ciphertext",
@@ -12526,6 +12562,26 @@
                     },
                     "title": {
                       "type": "string"
+                    },
+                    "pinned_at": {
+                      "anyOf": [
+                        {
+                          "type": "string"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "archived_at": {
+                      "anyOf": [
+                        {
+                          "type": "string"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
                     },
                     "created_at": {
                       "type": "string"
@@ -13019,6 +13075,12 @@
                     "title": "maxLength(120)",
                     "maxLength": 120
                   },
+                  "pinned": {
+                    "type": "boolean"
+                  },
+                  "archived": {
+                    "type": "boolean"
+                  },
                   "ciphertext": {
                     "type": "string",
                     "description": "a string at most 1400000 character(s) long",
@@ -13297,7 +13359,37 @@
           "media"
         ],
         "operationId": "media.list",
-        "parameters": [],
+        "parameters": [
+          {
+            "name": "cursor",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            },
+            "required": false
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "schema": {
+              "$ref": "#/components/schemas/NumberFromString"
+            },
+            "required": false
+          },
+          {
+            "name": "kind",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "image",
+                "audio",
+                "video"
+              ]
+            },
+            "required": false
+          }
+        ],
         "security": [],
         "responses": {
           "200": {
@@ -13307,7 +13399,8 @@
                 "schema": {
                   "type": "object",
                   "required": [
-                    "data"
+                    "data",
+                    "has_more"
                   ],
                   "properties": {
                     "data": {
@@ -13349,6 +13442,12 @@
                         },
                         "additionalProperties": false
                       }
+                    },
+                    "next_cursor": {
+                      "type": "string"
+                    },
+                    "has_more": {
+                      "type": "boolean"
                     }
                   },
                   "additionalProperties": false
