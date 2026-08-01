@@ -27,7 +27,6 @@ export type TLiveJson = {
   readonly version: 1;
   readonly client: TClientId;
   readonly pid: number;
-  readonly child_pid?: number;
   readonly cwd: string;
   readonly started_at_ms: number;
   readonly host: TLiveHost;
@@ -117,10 +116,7 @@ export const buildLiveJson = (args: {
 };
 
 /** Write `live.json` into the run dir (best-effort; never throws). */
-export const writeLiveJson = (
-  runDir: string,
-  live: TLiveJson,
-): void => {
+export const writeLiveJson = (runDir: string, live: TLiveJson): void => {
   try {
     writeFileSync(join(runDir, LIVE_JSON_NAME), `${JSON.stringify(live)}\n`, {
       mode: 0o600,
