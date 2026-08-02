@@ -173,6 +173,11 @@ const readUserConfig = (client: TClient): string | undefined => {
   }
 };
 
+const isBrokerOptOut = (value: string | undefined): boolean => {
+  const v = value?.trim();
+  return v === "0" || v === "false";
+};
+
 /** The gate is ordered: device children bypass first; every later false selects direct launch. */
 export const brokerEligible = (args: {
   readonly client: TClient;
@@ -182,14 +187,14 @@ export const brokerEligible = (args: {
   readonly stdoutIsTty: boolean;
   readonly platform: NodeJS.Platform;
   readonly deviceSessionId?: string;
-  readonly brokerOptIn?: string;
+  readonly brokerSessions?: string;
 }): boolean => {
   if (
     args.deviceSessionId !== undefined &&
     args.deviceSessionId.trim().length > 0
   )
     return false;
-  if (args.brokerOptIn !== "1") return false;
+  if (isBrokerOptOut(args.brokerSessions)) return false;
   if (args.flags.remote) return false;
   if (!args.stdinIsTty || !args.stdoutIsTty || args.platform === "win32")
     return false;
@@ -217,8 +222,9 @@ const brokerReachable = async (port: number): Promise<boolean> => {
 };
 
 /**
- * Run a session client: broker-attach when explicitly enabled, otherwise
- * materialize a launch plan into an ephemeral run dir and exec the real client.
+ * Run a session client: broker-attach when the daemon is available for an
+ * interactive local session, otherwise materialize a launch plan into an
+ * ephemeral run dir and exec the real client.
  */
 export const runSessionClient = async (
   client: TClient,
@@ -252,7 +258,7 @@ export const runSessionClient = async (
       stdoutIsTty: process.stdout.isTTY === true,
       platform: process.platform,
       deviceSessionId: process.env.OPENLLM_DEVICE_SESSION_ID,
-      brokerOptIn: process.env.OPENLLM_BROKER_SESSIONS,
+      brokerSessions: process.env.OPENLLM_BROKER_SESSIONS,
     }) &&
     client.daemonCli !== undefined
   ) {

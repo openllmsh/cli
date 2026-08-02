@@ -292,12 +292,11 @@ export const attachBrokerSession = async (args: {
           settle({ kind: "pre-ack-failed" });
           return;
         }
-        if (envelope.p.code === "superseded") {
-          io.stderr.write("[openllm] attached elsewhere\n");
-          settle({ kind: "completed", code: 0 });
-          return;
-        }
-        io.stderr.write(`[openllm] ${envelope.p.message ?? envelope.p.code}\n`);
+        const message =
+          envelope.p.code === "superseded"
+            ? "session ended elsewhere"
+            : (envelope.p.message ?? envelope.p.code);
+        io.stderr.write(`[openllm] ${message}\n`);
         settle({ kind: "completed", code: 1 });
       }
     };
