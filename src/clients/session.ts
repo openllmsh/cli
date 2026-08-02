@@ -249,7 +249,11 @@ export const runSessionClient = async (
   }
 
   const forwarded = forwardedVendorArgs(userArgs);
+  // Broker mode only when the resolved gateway is the LOCAL daemon — a forced
+  // cloud selection (--remote / OPENLLM_GATEWAY=cloud) must not route the
+  // session through the local daemon it just declined.
   if (
+    gateway.local &&
     brokerEligible({
       client,
       userArgs: forwarded,
