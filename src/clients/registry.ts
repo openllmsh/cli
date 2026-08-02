@@ -48,6 +48,12 @@ export type TSessionStrategy =
   /** A single config-file env var (OpenCode). */
   | "config-file";
 
+/** The daemon broker's session vocabulary for launchable clients.
+ *  Mirrors DeviceSessionCli in packages/protocol/daemon.ts — this compiled
+ *  binary carries no workspace deps, so the set is restated here once and
+ *  every CLI-side consumer imports THIS alias. */
+export type TDaemonCli = "claude_code" | "chatgpt" | "grok" | "opencode";
+
 export type TClient = {
   readonly id: TClientId;
   /** Human label for help text + the dashboard card. */
@@ -61,7 +67,7 @@ export type TClient = {
   /** Session clients only: how the overlay reaches the client. */
   readonly strategy?: TSessionStrategy;
   /** Daemon broker's DeviceSessionCli vocabulary for this client. */
-  readonly daemonCli?: "claude_code" | "chatgpt" | "grok" | "opencode";
+  readonly daemonCli?: TDaemonCli;
   /** Client argv markers that select a non-interactive mode. */
   readonly nonInteractiveMarkers?: readonly string[];
   /** Whether this client needs a live model catalog (and under which id the

@@ -7,17 +7,21 @@
 
 import { attachBrokerSession } from "./clients/attach";
 import { daemonPort } from "./clients/gateway";
+import type { TDaemonCli } from "./clients/registry";
 import { cliConfig } from "./env";
 
+/** One `/broker/sessions` row — mirrors TLocalCliSession in
+ *  packages/protocol/daemon.ts (nullable cwd/host/openllm_session_id),
+ *  restated because this binary carries no workspace deps. */
 export type TBrokerSessionRow = {
   readonly id: string;
   readonly title: string;
-  readonly cwd: string;
+  readonly cwd: string | null;
   readonly updated_at_ms: number;
-  readonly cli: "claude_code" | "chatgpt" | "grok" | "opencode";
+  readonly cli: TDaemonCli;
   readonly live: boolean;
-  readonly host?: string;
-  readonly openllm_session_id?: string;
+  readonly host?: string | null;
+  readonly openllm_session_id?: string | null;
   readonly attachable: boolean;
 };
 
@@ -159,7 +163,12 @@ const attach = async (
     );
     return 1;
   }
-  if (!session.attachable || session.openllm_session_id === undefined) {
+  const openllmSessionId = session.openllm_session_id;
+  if (
+    !session.attachable ||
+    openllmSessionId === undefined ||
+    openllmSessionId === null
+  ) {
     process.stderr.write("[openllm] session is not attachable\n");
     return 1;
   }
@@ -178,7 +187,7 @@ const attach = async (
     apiKey,
     open: {
       // mirrors SESSION_ID_PATTERN in packages/protocol/session.ts
-      session_id: session.openllm_session_id,
+      session_id: openllmSessionId,
       cli: session.cli,
       cols: process.stdout.columns ?? 80,
       rows: process.stdout.rows ?? 24,

@@ -6,9 +6,11 @@
  * and daemon versions can roll independently.
  */
 
+import type { TDaemonCli } from "./registry";
+
 export type TBrokerOpen = {
   readonly session_id: string;
-  readonly cli: "claude_code" | "chatgpt" | "grok" | "opencode";
+  readonly cli: TDaemonCli;
   readonly cols: number;
   readonly rows: number;
   readonly mode: "spawn" | "attach";
@@ -248,8 +250,20 @@ export const attachBrokerSession = async (args: {
       if (envelope === null) return;
       if (envelope.t === "ctrl" && envelope.p.t === "open_ack") {
         if (envelope.p.ok !== true) {
-          if (!acknowledged) settle({ kind: "pre-ack-failed" });
-          else {
+          if (!acknowledged) {
+            // Spawn callers fall back to a direct launch, so their nack must
+            // stay silent; an explicit attach has no fallback — surface why.
+            if (args.open.mode === "attach") {
+              io.stderr.write(
+                `[openllm] ${
+                  typeof envelope.p.error === "string"
+                    ? envelope.p.error
+                    : "session open failed"
+                }\n`,
+              );
+            }
+            settle({ kind: "pre-ack-failed" });
+          } else {
             const message =
               typeof envelope.p.error === "string"
                 ? envelope.p.error
