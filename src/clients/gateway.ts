@@ -19,7 +19,7 @@ const CATALOG_TIMEOUT_MS = 8_000;
 const DEFAULT_DAEMON_PORT = 8787;
 
 /** Load daemon configuration from env + shared file, defaulting to 8787. */
-const daemonPort = (): number => {
+export const daemonPort = (): number => {
   const raw =
     process.env.OPENLLM_DAEMON_PORT ??
     sharedFileConfig().OPENLLM_DAEMON_PORT ??

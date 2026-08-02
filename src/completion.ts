@@ -71,6 +71,7 @@ _openllm() {
     mcp) COMPREPLY=( $(compgen -W "--only ${MCP_ONLY_GROUPS.join(" ")}" -- "$cur") ) ;;
     api) COMPREPLY=( $(compgen -W "--spec" -- "$cur") ) ;;
     raycast) COMPREPLY=( $(compgen -W "uninstall status" -- "$cur") ) ;;
+    sessions) COMPREPLY=( $(compgen -W "list attach kill" -- "$cur") ) ;;
     exec)
       if [ "$pos" -eq 2 ]; then
         COMPREPLY=( $(compgen -W "${EXEC_GROUPS.join(" ")}" -- "$cur") )
@@ -129,6 +130,7 @@ _openllm() {
     mcp) _values 'group' --only ${MCP_ONLY_GROUPS.join(" ")} ;;
     api) _values 'flag' --spec ;;
     raycast) _values 'verb' uninstall status ;;
+    sessions) _values 'verb' list attach kill ;;
     exec)
       if (( pos == 3 )); then
         _values 'group' ${EXEC_GROUPS.join(" ")}
@@ -152,6 +154,7 @@ const fishScript = (): string => {
     `complete -c openllm -n '__fish_seen_subcommand_from completion' -a '${COMPLETION_ARGS.join(" ")}'`,
     `complete -c openllm -n '__fish_seen_subcommand_from mcp' -a '--only ${MCP_ONLY_GROUPS.join(" ")}'`,
     `complete -c openllm -n '__fish_seen_subcommand_from api' -a '--spec'`,
+    `complete -c openllm -n '__fish_seen_subcommand_from sessions' -a 'list attach kill'`,
     `complete -c openllm -n '__fish_seen_subcommand_from exec' -a '${EXEC_GROUPS.join(" ")}'`,
     ...EXEC_GROUPS.map(
       (g) =>

@@ -84,6 +84,11 @@ export const COMMANDS: readonly TCommand[] = [
     description: "Update to the pinned gateway release",
   },
   {
+    name: "sessions",
+    args: "[list|attach <id>|kill <id>]",
+    description: "List, attach, or kill local daemon sessions",
+  },
+  {
     name: "uninstall",
     args: "[--yes]",
     description: "Remove the openllm CLI from this machine",

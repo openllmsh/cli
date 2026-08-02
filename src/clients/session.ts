@@ -20,9 +20,15 @@ import {
   writeFileSync,
 } from "node:fs";
 import { constants as osConstants } from "node:os";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { openllmDir, userHome } from "../env";
-import { contextStateDir, fetchModelCatalog, resolveGateway } from "./gateway";
+import { attachBrokerSession } from "./attach";
+import {
+  contextStateDir,
+  daemonPort,
+  fetchModelCatalog,
+  resolveGateway,
+} from "./gateway";
 import { HOOK_SCRIPTS } from "./hooks";
 import { buildLaunchPlan, type TLaunchPlan } from "./launch";
 import { buildLiveJson, writeLiveJson } from "./live";
@@ -167,13 +173,52 @@ const readUserConfig = (client: TClient): string | undefined => {
   }
 };
 
+/** The gate is ordered: device children bypass first; every later false selects direct launch. */
+export const brokerEligible = (args: {
+  readonly client: TClient;
+  readonly userArgs: readonly string[];
+  readonly flags: TClientFlags;
+  readonly stdinIsTty: boolean;
+  readonly stdoutIsTty: boolean;
+  readonly platform: NodeJS.Platform;
+  readonly deviceSessionId?: string;
+  readonly brokerOptIn?: string;
+}): boolean => {
+  if (
+    args.deviceSessionId !== undefined &&
+    args.deviceSessionId.trim().length > 0
+  )
+    return false;
+  if (args.brokerOptIn !== "1") return false;
+  if (args.flags.remote) return false;
+  if (!args.stdinIsTty || !args.stdoutIsTty || args.platform === "win32")
+    return false;
+  return !args.client.nonInteractiveMarkers?.some((marker) =>
+    args.userArgs.includes(marker),
+  );
+};
+
+/** Remove the one optional argv disambiguator before handing args to a vendor or broker. */
+export const forwardedVendorArgs = (
+  userArgs: readonly string[],
+): readonly string[] =>
+  userArgs[0] === "--" ? userArgs.slice(1) : userArgs.slice(0);
+
+const brokerReachable = async (port: number): Promise<boolean> => {
+  try {
+    return (
+      await fetch(`http://127.0.0.1:${port}/status`, {
+        signal: AbortSignal.timeout(300),
+      })
+    ).ok;
+  } catch {
+    return false;
+  }
+};
+
 /**
- * Run a session client: merge, materialize, exec, clean up.
- *
- * Returns the child's exit code so the caller can exit with it. `userArgs` is
- * everything after the client name and is forwarded VERBATIM (one leading `--`
- * is stripped, so `openllm claude -- --help` reaches the client). `flags` are
- * openllm's own, already parsed off the front of argv by the caller.
+ * Run a session client: broker-attach when explicitly enabled, otherwise
+ * materialize a launch plan into an ephemeral run dir and exec the real client.
  */
 export const runSessionClient = async (
   client: TClient,
@@ -189,6 +234,51 @@ export const runSessionClient = async (
     );
     return 2;
   }
+  const gateway = await resolveGateway({ remote: flags.remote });
+  if (gateway.apiKey.length === 0) {
+    process.stderr.write(
+      "No OpenLLM API key configured — set OPENLLM_API_KEY, or pair the daemon so ~/.openllm/.env carries it.\n",
+    );
+    return 1;
+  }
+
+  const forwarded = forwardedVendorArgs(userArgs);
+  if (
+    brokerEligible({
+      client,
+      userArgs: forwarded,
+      flags,
+      stdinIsTty: process.stdin.isTTY === true,
+      stdoutIsTty: process.stdout.isTTY === true,
+      platform: process.platform,
+      deviceSessionId: process.env.OPENLLM_DEVICE_SESSION_ID,
+      brokerOptIn: process.env.OPENLLM_BROKER_SESSIONS,
+    }) &&
+    client.daemonCli !== undefined
+  ) {
+    const port = daemonPort();
+    if (await brokerReachable(port)) {
+      const result = await attachBrokerSession({
+        origin: `http://127.0.0.1:${port}`,
+        apiKey: gateway.apiKey,
+        open: {
+          // mirrors SESSION_ID_PATTERN in packages/protocol/session.ts
+          session_id: crypto.randomUUID(),
+          cli: client.daemonCli,
+          cols: process.stdout.columns ?? 80,
+          rows: process.stdout.rows ?? 24,
+          mode: "spawn",
+          title: basename(process.cwd()),
+          ...(flags.dangerous ? { dangerous: true } : {}),
+          ...(forwarded.length > 0 ? { vendor_args: forwarded } : {}),
+          cwd: process.cwd(),
+        },
+        announce: true,
+      });
+      if (result.kind === "completed") return result.code;
+    }
+  }
+
   const bin = findClientBinary(client);
   if (bin === null) {
     process.stderr.write(
@@ -196,14 +286,6 @@ export const runSessionClient = async (
         `OpenLLM does not install third-party CLIs for you.\n`,
     );
     return 127;
-  }
-
-  const gateway = await resolveGateway({ remote: flags.remote });
-  if (gateway.apiKey.length === 0) {
-    process.stderr.write(
-      "No OpenLLM API key configured — set OPENLLM_API_KEY, or pair the daemon so ~/.openllm/.env carries it.\n",
-    );
-    return 1;
   }
 
   const catalog =
@@ -226,9 +308,6 @@ export const runSessionClient = async (
     });
     materialize(plan, runDir);
 
-    // Strip ONE leading `--` (the disambiguator), then forward verbatim.
-    const forwarded =
-      userArgs[0] === "--" ? userArgs.slice(1) : userArgs.slice(0);
     // `-d` becomes the client's OWN flag, ahead of the user's args so their
     // explicit choices still win on anything that conflicts.
     const dangerous =

@@ -60,6 +60,10 @@ export type TClient = {
   readonly installHint: string;
   /** Session clients only: how the overlay reaches the client. */
   readonly strategy?: TSessionStrategy;
+  /** Daemon broker's DeviceSessionCli vocabulary for this client. */
+  readonly daemonCli?: "claude_code" | "chatgpt" | "grok" | "opencode";
+  /** Client argv markers that select a non-interactive mode. */
+  readonly nonInteractiveMarkers?: readonly string[];
   /** Whether this client needs a live model catalog (and under which id the
    *  gateway serves it — the historical slug, which may differ from `id`). */
   readonly catalogSlug?: string;
@@ -85,6 +89,8 @@ export const CLIENTS: Readonly<Record<TClientId, TClient>> = {
     name: "Claude Code",
     mode: "session",
     strategy: "flags",
+    daemonCli: "claude_code",
+    nonInteractiveMarkers: ["-p", "--print"],
     bin: "claude",
     binPaths: ["~/.local/bin/claude"],
     installHint: "https://claude.ai/install.sh",
@@ -96,6 +102,8 @@ export const CLIENTS: Readonly<Record<TClientId, TClient>> = {
     name: "Codex",
     mode: "session",
     strategy: "config-overrides",
+    daemonCli: "chatgpt",
+    nonInteractiveMarkers: ["exec"],
     bin: "codex",
     binPaths: ["~/.local/bin/codex", "~/.codex/bin/codex"],
     installHint: "https://chatgpt.com/codex/install.sh",
@@ -108,6 +116,8 @@ export const CLIENTS: Readonly<Record<TClientId, TClient>> = {
     name: "Grok Build",
     mode: "session",
     strategy: "config-dir",
+    daemonCli: "grok",
+    nonInteractiveMarkers: ["-p", "--print"],
     bin: "grok",
     binPaths: ["~/.grok/bin/grok", "~/.local/bin/grok"],
     installHint: "https://x.ai/cli/install.sh",
@@ -120,6 +130,8 @@ export const CLIENTS: Readonly<Record<TClientId, TClient>> = {
     name: "OpenCode",
     mode: "session",
     strategy: "config-file",
+    daemonCli: "opencode",
+    nonInteractiveMarkers: ["run", "serve", "--print"],
     bin: "opencode",
     binPaths: ["~/.opencode/bin/opencode", "~/.local/bin/opencode"],
     installHint: "https://opencode.ai/install",

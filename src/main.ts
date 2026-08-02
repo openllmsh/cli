@@ -19,11 +19,7 @@
  */
 
 import { runRaycastCommand } from "./clients/raycast";
-import {
-  CLIENTS,
-  isClientId,
-  parseClientFlags,
-} from "./clients/registry";
+import { CLIENTS, isClientId, parseClientFlags } from "./clients/registry";
 import { runSessionClient } from "./clients/session";
 import type { TExecGroup } from "./commands";
 import { EXEC_GROUPS, EXEC_VERBS, helpText } from "./commands";
@@ -34,6 +30,7 @@ import { runClaudeContextCli } from "./mcp/claude-context";
 import type { TMcpGroup } from "./mcp/server";
 import { MCP_GROUPS, runMcpServer } from "./mcp/server";
 import { runSelfUpdate } from "./self-update";
+import { runSessionsCommand } from "./sessions-cmd";
 import { runSetup } from "./setup-cmd";
 import { runUninstall } from "./uninstall-cmd";
 
@@ -154,9 +151,7 @@ const main = async (): Promise<void> => {
     if (rest[0] === "-h" || rest[0] === "--help") {
       return usage(clientUsage(cmd), 0);
     }
-    return process.exit(
-      await runSessionClient(client, rest, clientFlags),
-    );
+    return process.exit(await runSessionClient(client, rest, clientFlags));
   }
 
   switch (cmd) {
@@ -231,6 +226,8 @@ const main = async (): Promise<void> => {
       if (wantsHelp(rest)) return usage(SELF_UPDATE_USAGE, 0);
       await runSelfUpdate();
       break;
+    case "sessions":
+      return process.exit(await runSessionsCommand(rest));
     case "uninstall":
       return process.exit(await runUninstall(rest));
     case "doctor":
