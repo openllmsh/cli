@@ -89,9 +89,7 @@ to the compile-time cloud-origin bake.
 For a plain interactive local TTY launch, `openllm <client>` uses the reachable
 local daemon's broker by default, so the daemon is the canonical session
 manager. If the daemon is unavailable, the CLI transparently falls back to the
-existing inherited-stdio launch; it never requires the daemon. During the
-migration release, `OPENLLM_BROKER_SESSIONS=0` (or `false`) opts out of broker
-launches.
+existing inherited-stdio launch; it never requires the daemon.
 
 ## 3. The generated SDK (why the mirror is self-contained)
 

@@ -117,12 +117,27 @@ const listSessions = async (
   }
 };
 
+const isSessionRow = (value: unknown): value is TBrokerSessionRow => {
+  if (typeof value !== "object" || value === null) return false;
+  const row = value as Partial<Record<keyof TBrokerSessionRow, unknown>>;
+  return (
+    typeof row.id === "string" &&
+    typeof row.title === "string" &&
+    (row.cwd === null || typeof row.cwd === "string") &&
+    typeof row.updated_at_ms === "number" &&
+    typeof row.cli === "string" &&
+    typeof row.live === "boolean" &&
+    typeof row.attachable === "boolean"
+  );
+};
+
 const isSessionsResponse = (
   value: unknown,
 ): value is { readonly sessions: readonly TBrokerSessionRow[] } =>
   typeof value === "object" &&
   value !== null &&
-  Array.isArray((value as { sessions?: unknown }).sessions);
+  Array.isArray((value as { sessions?: unknown }).sessions) &&
+  (value as { sessions: unknown[] }).sessions.every(isSessionRow);
 
 const requireSession = (
   sessions: readonly TBrokerSessionRow[],
