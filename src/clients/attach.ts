@@ -138,10 +138,29 @@ const toBytes = (value: string | ArrayBuffer | Uint8Array): Uint8Array => {
   return value;
 };
 
+export type TBrokerAttachTarget = string;
+
+/**
+ * Resolve either the legacy daemon broker origin/URL or a durable session-host
+ * Unix socket path. `ws+unix://` is Bun's WebSocket dial form (the host's own
+ * transport test uses this exact spelling).
+ */
+export const brokerAttachUrl = (target: TBrokerAttachTarget): string => {
+  if (target.startsWith("ws+unix://")) return target;
+  if (target.startsWith("/")) return `ws+unix://${target}`;
+  if (target.startsWith("ws://") || target.startsWith("wss://"))
+    return target.endsWith("/broker/session")
+      ? target
+      : `${target.replace(/\/+$/, "")}/broker/session`;
+  return `${target.replace(/^http/, "ws").replace(/\/+$/, "")}/broker/session`;
+};
+
 /** Attach the current terminal to an already-created (or newly spawned) broker session. */
 export const attachBrokerSession = async (args: {
-  readonly origin: string;
-  readonly apiKey: string;
+  /** Daemon broker origin/URL, or the session-host Unix socket path. */
+  readonly target: TBrokerAttachTarget;
+  /** Required only by the legacy daemon broker; Unix sockets are filesystem-private. */
+  readonly apiKey?: string;
   readonly open: TBrokerOpen;
   readonly announce: boolean;
   readonly io?: TAttachIo;
@@ -151,7 +170,7 @@ export const attachBrokerSession = async (args: {
     stdout: process.stdout,
     stderr: process.stderr,
   };
-  const url = `${args.origin.replace(/^http/, "ws")}/broker/session`;
+  const url = brokerAttachUrl(args.target);
 
   return new Promise<TAttachResult>((resolve) => {
     let ws: WebSocket | null = null;
@@ -217,9 +236,12 @@ export const attachBrokerSession = async (args: {
     };
 
     try {
-      ws = new BunWebSocket(url, {
-        headers: { Authorization: `Bearer ${args.apiKey}` },
-      });
+      ws = new BunWebSocket(
+        url,
+        args.apiKey === undefined
+          ? {}
+          : { headers: { Authorization: `Bearer ${args.apiKey}` } },
+      );
     } catch {
       settle({ kind: "pre-ack-failed" });
       return;
@@ -277,7 +299,7 @@ export const attachBrokerSession = async (args: {
         if (timer !== undefined) clearTimeout(timer);
         if (args.announce) {
           io.stderr.write(
-            `[openllm] session ${args.open.session_id} on local daemon — Ctrl-] to detach\n`,
+            `[openllm] session ${args.open.session_id} attached — Ctrl-] to detach\n`,
           );
         }
         enterRawMode();

@@ -57,6 +57,14 @@ export const userHome = (): string => {
  * read the wrong tree.
  */
 export const openllmDir = (): string => join(userHome(), ".openllm");
+
+/**
+ * The daemon-owned state root used by durable session hosts. Unlike ordinary
+ * CLI state, this must honour the daemon override so both binaries scan the
+ * same socket registry in development and tests.
+ */
+export const daemonStateDir = (): string =>
+  process.env.OPENLLM_DAEMON_STATE_DIR ?? openllmDir();
 /** The SHARED OpenLLM env file (same file the daemon boots from) — the CLI
  *  never writes it. */
 export const sharedEnvFile = (): string => join(openllmDir(), ".env");

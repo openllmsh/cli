@@ -1,18 +1,17 @@
 /**
- * `openllm sessions` manages the local daemon's brokered PTYs.
+ * `openllm sessions` manages durable local session-host processes directly.
  *
- * This deliberately talks to the loopback daemon rather than the cloud API: the
- * PTY and its single-consumer lifecycle exist only on this machine.
+ * Their registry is filesystem-owned (`~/.openllm/sessions/<id>/meta.json` +
+ * `ctl.sock`), so these commands remain usable while the daemon is stopped.
  */
 
 import { attachBrokerSession } from "./clients/attach";
-import { daemonPort } from "./clients/gateway";
 import type { TDaemonCli } from "./clients/registry";
-import { cliConfig } from "./env";
+import {
+  discoverLiveSessionHosts,
+  sessionHostProcessAlive,
+} from "./session-host";
 
-/** One `/broker/sessions` row — mirrors TLocalCliSession in
- *  packages/protocol/daemon.ts (nullable cwd/host/openllm_session_id),
- *  restated because this binary carries no workspace deps. */
 export type TBrokerSessionRow = {
   readonly id: string;
   readonly title: string;
@@ -20,28 +19,17 @@ export type TBrokerSessionRow = {
   readonly updated_at_ms: number;
   readonly cli: TDaemonCli;
   readonly live: boolean;
-  readonly host?: string | null;
-  readonly openllm_session_id?: string | null;
   readonly attachable: boolean;
+  readonly socket_path?: string;
+  readonly pid?: number;
 };
 
 const SESSIONS_USAGE = `usage: openllm sessions [list]
        openllm sessions attach <id>
        openllm sessions kill <id>
 
-List local daemon sessions, attach to a live brokered session, or kill one.
+List, attach to, or kill live local durable sessions.
 `;
-
-const origin = (): string => `http://127.0.0.1:${daemonPort()}`;
-
-const authHeaders = (apiKey: string): HeadersInit => ({
-  Authorization: `Bearer ${apiKey}`,
-});
-
-const unavailable = (): number => {
-  process.stderr.write("[openllm] local daemon is unavailable\n");
-  return 1;
-};
 
 const truncate = (value: string, max: number): string =>
   value.length <= max ? value : `${value.slice(0, Math.max(0, max - 1))}…`;
@@ -66,7 +54,7 @@ export const formatSessionRows = (
   sessions: readonly TBrokerSessionRow[],
   nowMs = Date.now(),
 ): string => {
-  if (sessions.length === 0) return "No local daemon sessions.\n";
+  if (sessions.length === 0) return "No local durable sessions.\n";
   const rows = sessions.map((session) => [
     truncate(session.id, 12),
     session.cli,
@@ -100,44 +88,19 @@ export const resolveSessionId = (
   return matches.length === 0 ? "missing" : "ambiguous";
 };
 
-const listSessions = async (
-  apiKey: string,
-): Promise<readonly TBrokerSessionRow[] | null> => {
-  try {
-    const response = await fetch(`${origin()}/broker/sessions`, {
-      headers: authHeaders(apiKey),
-      signal: AbortSignal.timeout(1_000),
-    });
-    if (!response.ok) return null;
-    const body: unknown = await response.json();
-    if (!isSessionsResponse(body)) return null;
-    return body.sessions;
-  } catch {
-    return null;
-  }
-};
-
-const isSessionRow = (value: unknown): value is TBrokerSessionRow => {
-  if (typeof value !== "object" || value === null) return false;
-  const row = value as Partial<Record<keyof TBrokerSessionRow, unknown>>;
-  return (
-    typeof row.id === "string" &&
-    typeof row.title === "string" &&
-    (row.cwd === null || typeof row.cwd === "string") &&
-    typeof row.updated_at_ms === "number" &&
-    typeof row.cli === "string" &&
-    typeof row.live === "boolean" &&
-    typeof row.attachable === "boolean"
-  );
-};
-
-const isSessionsResponse = (
-  value: unknown,
-): value is { readonly sessions: readonly TBrokerSessionRow[] } =>
-  typeof value === "object" &&
-  value !== null &&
-  Array.isArray((value as { sessions?: unknown }).sessions) &&
-  (value as { sessions: unknown[] }).sessions.every(isSessionRow);
+/** Read and validate live process-owned directories, reaping stale entries. */
+export const listSessionHosts = (): readonly TBrokerSessionRow[] =>
+  discoverLiveSessionHosts().map((session) => ({
+    id: session.id,
+    cli: session.cli,
+    title: session.title ?? "",
+    cwd: session.cwd,
+    updated_at_ms: session.startedAtMs,
+    live: true,
+    attachable: true,
+    socket_path: session.socketPath,
+    pid: session.pid,
+  }));
 
 const requireSession = (
   sessions: readonly TBrokerSessionRow[],
@@ -159,30 +122,12 @@ const requireSession = (
   return resolved;
 };
 
-/** Vendor resume invocation for a dead session — flags differ per CLI. */
-const resumeHint = (cli: TBrokerSessionRow["cli"], id: string): string =>
-  ({
-    claude_code: `openllm claude --resume ${id}`,
-    chatgpt: `openllm codex resume ${id}`,
-    grok: `openllm grok --resume ${id}`,
-    opencode: `openllm opencode --session ${id}`,
-  })[cli];
-
-const attach = async (
-  session: TBrokerSessionRow,
-  apiKey: string,
-): Promise<number> => {
-  if (!session.live) {
-    process.stderr.write(
-      `[openllm] session is not running — resume it with:\n  ${resumeHint(session.cli, session.id)}\n`,
-    );
-    return 1;
-  }
-  const openllmSessionId = session.openllm_session_id;
+const attach = async (session: TBrokerSessionRow): Promise<number> => {
   if (
+    !session.live ||
     !session.attachable ||
-    openllmSessionId === undefined ||
-    openllmSessionId === null
+    session.socket_path === undefined ||
+    session.pid === undefined
   ) {
     process.stderr.write("[openllm] session is not attachable\n");
     return 1;
@@ -198,11 +143,9 @@ const attach = async (
     return 1;
   }
   const result = await attachBrokerSession({
-    origin: origin(),
-    apiKey,
+    target: session.socket_path,
     open: {
-      // mirrors SESSION_ID_PATTERN in packages/protocol/session.ts
-      session_id: openllmSessionId,
+      session_id: session.id,
       cli: session.cli,
       cols: process.stdout.columns ?? 80,
       rows: process.stdout.rows ?? 24,
@@ -210,40 +153,40 @@ const attach = async (
     },
     announce: true,
   });
-  return result.kind === "completed" ? result.code : unavailable();
+  if (result.kind === "completed") return result.code;
+  process.stderr.write("[openllm] session host is unavailable\n");
+  return 1;
 };
 
-const kill = async (
-  session: TBrokerSessionRow,
-  apiKey: string,
-): Promise<number> => {
+const sleep = async (ms: number): Promise<void> =>
+  new Promise((resolve) => setTimeout(resolve, ms));
+
+/** Stop the standalone host; its SIGTERM handler closes the owned PTY cleanly. */
+export const killSessionHost = async (pid: number): Promise<boolean> => {
   try {
-    const response = await fetch(
-      `${origin()}/broker/sessions/${encodeURIComponent(session.id)}/kill`,
-      {
-        method: "POST",
-        headers: authHeaders(apiKey),
-        signal: AbortSignal.timeout(1_000),
-      },
-    );
-    if (!response.ok) return unavailable();
-    const body: unknown = await response.json();
-    if (
-      typeof body !== "object" ||
-      body === null ||
-      typeof (body as { ok?: unknown }).ok !== "boolean"
-    ) {
-      return unavailable();
-    }
-    if ((body as { ok: boolean }).ok) {
-      process.stdout.write(`[openllm] killed session ${session.id}\n`);
-      return 0;
-    }
+    process.kill(pid, "SIGTERM");
+  } catch {
+    return false;
+  }
+  for (let elapsed = 0; elapsed < 1_000; elapsed += 50) {
+    await sleep(50);
+    if (!sessionHostProcessAlive(pid)) return true;
+  }
+  try {
+    process.kill(pid, "SIGKILL");
+    return true;
+  } catch {
+    return false;
+  }
+};
+
+const kill = async (session: TBrokerSessionRow): Promise<number> => {
+  if (session.pid === undefined || !(await killSessionHost(session.pid))) {
     process.stderr.write(`[openllm] could not kill session ${session.id}\n`);
     return 1;
-  } catch {
-    return unavailable();
   }
+  process.stdout.write(`[openllm] killed session ${session.id}\n`);
+  return 0;
 };
 
 /** Dispatch `openllm sessions [list|attach|kill]`. */
@@ -254,25 +197,17 @@ export const runSessionsCommand = async (
     process.stdout.write(SESSIONS_USAGE);
     return 0;
   }
-  const { apiKey } = cliConfig();
-  if (apiKey.length === 0) {
-    process.stderr.write(
-      "[openllm] No API key configured — set OPENLLM_API_KEY\n",
-    );
-    return 1;
-  }
   const verb = args[0] ?? "list";
   if (verb !== "list" && verb !== "attach" && verb !== "kill") {
     process.stderr.write(SESSIONS_USAGE);
     return 2;
   }
-  const sessions = await listSessions(apiKey);
-  if (sessions === null) return unavailable();
+  const sessions = listSessionHosts();
   if (verb === "list") {
     process.stdout.write(formatSessionRows(sessions));
     return 0;
   }
   const session = requireSession(sessions, args[1]);
   if (session === null) return 1;
-  return verb === "attach" ? attach(session, apiKey) : kill(session, apiKey);
+  return verb === "attach" ? attach(session) : kill(session);
 };

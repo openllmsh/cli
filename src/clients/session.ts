@@ -22,13 +22,14 @@ import {
 import { constants as osConstants } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { openllmDir, userHome } from "../env";
-import { attachBrokerSession } from "./attach";
 import {
-  contextStateDir,
-  daemonPort,
-  fetchModelCatalog,
-  resolveGateway,
-} from "./gateway";
+  findDaemonBinary,
+  sessionHostSpawnArgv,
+  spawnSessionHost,
+  waitForSessionHostSocket,
+} from "../session-host";
+import { attachBrokerSession } from "./attach";
+import { contextStateDir, fetchModelCatalog, resolveGateway } from "./gateway";
 import { HOOK_SCRIPTS } from "./hooks";
 import { buildLaunchPlan, type TLaunchPlan } from "./launch";
 import { buildLiveJson, writeLiveJson } from "./live";
@@ -202,22 +203,51 @@ export const forwardedVendorArgs = (
 ): readonly string[] =>
   userArgs[0] === "--" ? userArgs.slice(1) : userArgs.slice(0);
 
-const brokerReachable = async (port: number): Promise<boolean> => {
-  try {
-    return (
-      await fetch(`http://127.0.0.1:${port}/status`, {
-        signal: AbortSignal.timeout(300),
-      })
-    ).ok;
-  } catch {
-    return false;
-  }
+/**
+ * Run a session client: interactive local sessions get a detached durable host;
+ * all other invocations retain the direct, inherited-stdio launch contract.
+ */
+const launchDurableSessionHost = async (args: {
+  readonly client: TClient;
+  readonly forwarded: readonly string[];
+  readonly dangerous: boolean;
+}): Promise<number | null> => {
+  const cli = args.client.daemonCli;
+  if (cli === undefined) return null;
+  const binary = findDaemonBinary();
+  if (binary === null) return null;
+  const id = crypto.randomUUID();
+  const spawned = spawnSessionHost({
+    binary,
+    argv: sessionHostSpawnArgv({
+      id,
+      cli,
+      cwd: process.cwd(),
+      title: basename(process.cwd()),
+      dangerous: args.dangerous,
+      vendorArgs: args.forwarded,
+    }),
+  });
+  if (!spawned) return null;
+  const socketPath = await waitForSessionHostSocket(id);
+  if (socketPath === null) return null;
+  const result = await attachBrokerSession({
+    target: socketPath,
+    open: {
+      session_id: id,
+      cli,
+      cols: process.stdout.columns ?? 80,
+      rows: process.stdout.rows ?? 24,
+      mode: "attach",
+    },
+    announce: true,
+  });
+  return result.kind === "completed" ? result.code : null;
 };
 
 /**
- * Run a session client: broker-attach when the daemon is available for an
- * interactive local session, otherwise materialize a launch plan into an
- * ephemeral run dir and exec the real client.
+ * Run a session client: interactive local sessions get a detached durable host;
+ * all other invocations retain the direct, inherited-stdio launch contract.
  */
 export const runSessionClient = async (
   client: TClient,
@@ -242,11 +272,11 @@ export const runSessionClient = async (
   }
 
   const forwarded = forwardedVendorArgs(userArgs);
-  // Broker mode only when the resolved gateway is the LOCAL daemon — a forced
-  // cloud selection (--remote / OPENLLM_GATEWAY=cloud) must not route the
-  // session through the local daemon it just declined.
+  // Durable local sessions do not need a running daemon. An explicit cloud
+  // selection still means direct launch, preserving the existing `-r` and
+  // OPENLLM_GATEWAY=cloud semantics.
   if (
-    gateway.local &&
+    process.env.OPENLLM_GATEWAY !== "cloud" &&
     brokerEligible({
       client,
       userArgs: forwarded,
@@ -255,30 +285,14 @@ export const runSessionClient = async (
       stdoutIsTty: process.stdout.isTTY === true,
       platform: process.platform,
       deviceSessionId: process.env.OPENLLM_DEVICE_SESSION_ID,
-    }) &&
-    client.daemonCli !== undefined
+    })
   ) {
-    const port = daemonPort();
-    if (await brokerReachable(port)) {
-      const result = await attachBrokerSession({
-        origin: `http://127.0.0.1:${port}`,
-        apiKey: gateway.apiKey,
-        open: {
-          // mirrors SESSION_ID_PATTERN in packages/protocol/session.ts
-          session_id: crypto.randomUUID(),
-          cli: client.daemonCli,
-          cols: process.stdout.columns ?? 80,
-          rows: process.stdout.rows ?? 24,
-          mode: "spawn",
-          title: basename(process.cwd()),
-          ...(flags.dangerous ? { dangerous: true } : {}),
-          ...(forwarded.length > 0 ? { vendor_args: forwarded } : {}),
-          cwd: process.cwd(),
-        },
-        announce: true,
-      });
-      if (result.kind === "completed") return result.code;
-    }
+    const code = await launchDurableSessionHost({
+      client,
+      forwarded,
+      dangerous: flags.dangerous,
+    });
+    if (code !== null) return code;
   }
 
   const bin = findClientBinary(client);
