@@ -331,7 +331,13 @@ export const runSessionClient = async (
       client,
       apiBase: gateway.base,
       apiKey: gateway.apiKey,
-      binPath: process.execPath,
+      // `OPENLLM_BIN` bakes this into wrapped-client MCP `command` entries. Run
+      // from a compiled binary, `process.execPath` IS `openllm` — correct. Run
+      // from source (dev: the daemon spawns us via a shim that execs
+      // `bun main.ts`), `process.execPath` is `bun`, which would make those MCP
+      // entries launch bun with no script. The daemon carries the shim path in
+      // `OPENLLM_BIN_OVERRIDE` so MCP resolves to a real runnable `openllm`.
+      binPath: process.env.OPENLLM_BIN_OVERRIDE ?? process.execPath,
       runDir,
       stateDir: contextStateDir(),
       userConfig: readUserConfig(client),
