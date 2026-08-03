@@ -19,7 +19,7 @@
 
 import * as fs from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { isAbsolute, join } from "node:path";
 
 // Compile-time defines (see scripts/compile.ts). Source runs fall back.
 declare const __OPENLLM_CLI_VERSION__: string | undefined;
@@ -62,9 +62,17 @@ export const openllmDir = (): string => join(userHome(), ".openllm");
  * The daemon-owned state root used by durable session hosts. Unlike ordinary
  * CLI state, this must honour the daemon override so both binaries scan the
  * same socket registry in development and tests.
+ *
+ * The override must be an absolute path. Session-host discovery reaps stale
+ * entries with a recursive delete, so a relative root would resolve against
+ * the invoking directory.
  */
-export const daemonStateDir = (): string =>
-  process.env.OPENLLM_DAEMON_STATE_DIR ?? openllmDir();
+export const daemonStateDir = (): string => {
+  const override = process.env.OPENLLM_DAEMON_STATE_DIR;
+  return override !== undefined && override.length > 0 && isAbsolute(override)
+    ? override
+    : openllmDir();
+};
 /** The SHARED OpenLLM env file (same file the daemon boots from) — the CLI
  *  never writes it. */
 export const sharedEnvFile = (): string => join(openllmDir(), ".env");

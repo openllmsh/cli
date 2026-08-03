@@ -228,9 +228,18 @@ const launchDurableSessionHost = async (args: {
       vendorArgs: args.forwarded,
     }),
   });
-  if (!spawned) return null;
+  if (spawned === null) return null;
   const socketPath = await waitForSessionHostSocket(id);
-  if (socketPath === null) return null;
+  if (socketPath === null) {
+    // The host may still be starting. Reap it so the direct-launch fallback
+    // does not leave a second vendor PTY on the same cwd.
+    try {
+      spawned.kill();
+    } catch {
+      // best-effort
+    }
+    return null;
+  }
   const result = await attachBrokerSession({
     target: socketPath,
     open: {
@@ -242,7 +251,13 @@ const launchDurableSessionHost = async (args: {
     },
     announce: true,
   });
-  return result.kind === "completed" ? result.code : null;
+  if (result.kind === "completed") return result.code;
+  try {
+    spawned.kill();
+  } catch {
+    // best-effort
+  }
+  return null;
 };
 
 /**

@@ -39,6 +39,7 @@ export type TAttachIo = {
 };
 
 const CTRL_DETACH = 0x1d;
+const PIPE_CTRL = 0x1e;
 const OPEN_ACK_TIMEOUT_MS = 5_000;
 
 // lib.dom's constructor only models the protocol overload. Bun supports its
@@ -343,7 +344,16 @@ export const attachBrokerSession = async (args: {
       }
       const envelope = parseBrokerEnvelope(event.data);
       if (envelope === null) return;
-      if (envelope.t === "ctrl" && envelope.p.t === "open_ack") {
+      if (envelope.t === "ctrl") {
+        if (
+          pipe &&
+          (envelope.p.t === "open_ack" || envelope.p.t === "replay_done")
+        ) {
+          io.stdout.write(
+            `${String.fromCharCode(PIPE_CTRL)}${JSON.stringify(envelope.p)}\n`,
+          );
+        }
+        if (envelope.p.t !== "open_ack") return;
         if (envelope.p.ok !== true) {
           if (!acknowledged) {
             // Spawn callers fall back to a direct launch, so their nack must
@@ -383,6 +393,11 @@ export const attachBrokerSession = async (args: {
         return;
       }
       if (envelope.t === "reset") {
+        if (pipe) {
+          io.stdout.write(
+            `${String.fromCharCode(PIPE_CTRL)}${JSON.stringify({ t: "reset", ...envelope.p })}\n`,
+          );
+        }
         if (!acknowledged) {
           settle({ kind: "pre-ack-failed" });
           return;

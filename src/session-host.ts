@@ -1,6 +1,12 @@
 /** Durable local session-host process discovery and launch helpers. */
 
-import { existsSync, readdirSync, readFileSync, rmSync } from "node:fs";
+import {
+  existsSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  statSync,
+} from "node:fs";
 import { join } from "node:path";
 import type { TDaemonCli } from "./clients/registry";
 import { daemonStateDir } from "./env";
@@ -83,6 +89,24 @@ const readSessionHostMeta = (dir: string): TSessionHostMeta | null => {
  * Scan the process-owned registry. Invalid, dead, or socket-less entries are
  * stale and are removed here; a live entry is never touched.
  */
+const HOST_STARTUP_GRACE_MS = 10_000;
+
+const directoryAgeMs = (directory: string): number => {
+  try {
+    return Date.now() - statSync(directory).mtimeMs;
+  } catch {
+    return Number.POSITIVE_INFINITY;
+  }
+};
+
+const reapDirectory = (directory: string): void => {
+  try {
+    rmSync(directory, { recursive: true, force: true });
+  } catch {
+    // Best effort: a concurrently exiting host owns final cleanup.
+  }
+};
+
 export const discoverLiveSessionHosts = (): readonly TLiveSessionHost[] => {
   let entries: string[];
   try {
@@ -95,19 +119,30 @@ export const discoverLiveSessionHosts = (): readonly TLiveSessionHost[] => {
     const directory = sessionHostDir(name);
     const meta = readSessionHostMeta(directory);
     const socketPath = join(directory, "ctl.sock");
-    if (
-      meta === null ||
-      meta.id !== name ||
-      !existsSync(socketPath) ||
-      !sessionHostProcessAlive(meta.pid)
-    ) {
-      try {
-        rmSync(directory, { recursive: true, force: true });
-      } catch {
-        // Best effort: a concurrently exiting host owns final cleanup.
+
+    // A directory with no valid metadata may be mid-write. Leave it alone until
+    // the grace period expires so a concurrent scan cannot delete a host that is
+    // still starting.
+    if (meta === null || meta.id !== name) {
+      if (directoryAgeMs(directory) > HOST_STARTUP_GRACE_MS) {
+        reapDirectory(directory);
       }
       continue;
     }
+
+    // A dead pid is unambiguously stale regardless of age.
+    if (!sessionHostProcessAlive(meta.pid)) {
+      reapDirectory(directory);
+      continue;
+    }
+
+    if (!existsSync(socketPath)) {
+      if (Date.now() - meta.startedAtMs > HOST_STARTUP_GRACE_MS) {
+        reapDirectory(directory);
+      }
+      continue;
+    }
+
     sessions.push({ ...meta, socketPath });
   }
   return sessions.sort((a, b) => b.startedAtMs - a.startedAtMs);
@@ -164,19 +199,22 @@ export const sessionHostSpawnArgv = (args: {
   ...args.vendorArgs.flatMap((arg) => ["--vendor-arg", arg]),
 ];
 
-/** Spawn the host as a sibling process so it survives the invoking CLI. */
+/**
+ * Spawn the host as a sibling process so it survives the invoking CLI.
+ * Returns the child process so the caller may clean up on fallback.
+ */
 export const spawnSessionHost = (args: {
   readonly binary: string;
   readonly argv: readonly string[];
-}): boolean => {
+}): ReturnType<typeof Bun.spawn> | null => {
   try {
     const proc = Bun.spawn([args.binary, ...args.argv], {
       detached: true,
       stdio: ["ignore", "ignore", "ignore"],
     });
     proc.unref();
-    return true;
+    return proc;
   } catch {
-    return false;
+    return null;
   }
 };
