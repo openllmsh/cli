@@ -162,8 +162,21 @@ export const waitForSessionHostSocket = async (
   return existsSync(socketPath) ? socketPath : null;
 };
 
-/** Resolve the installed durable-host binary, allowing a normal PATH install. */
+/**
+ * Resolve the durable-host binary, allowing a normal PATH install.
+ *
+ * `OPENLLM_DAEMON_BIN_OVERRIDE` wins first: in the source-watch dev harness
+ * (`scripts/dev.ts` / `scripts/dev-cli.ts`) it points at an executable shim
+ * (`.dev/openllmd` → `exec bun packages/daemon/src/main.ts "$@"`), so a LOCAL
+ * `openllm <client>` session spawns a host running THIS working tree's daemon
+ * source instead of the stale compiled `~/.openllm/bin/openllmd`. The shim must
+ * be executable — `spawnSessionHost` runs `Bun.spawn([binary, ...argv])`, so
+ * `[shim, "__session-host", …]` execs `bun main.ts __session-host …`.
+ */
 export const findDaemonBinary = (): string | null => {
+  const override = process.env.OPENLLM_DAEMON_BIN_OVERRIDE;
+  if (override !== undefined && override.length > 0 && existsSync(override))
+    return override;
   const installed = join(daemonStateDir(), "bin", "openllmd");
   if (existsSync(installed)) return installed;
   for (const directory of (process.env.PATH ?? "").split(":")) {

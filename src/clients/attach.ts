@@ -312,9 +312,13 @@ export const attachBrokerSession = async (args: {
       process.on("SIGINT", onDetachSignal);
       process.on("SIGTERM", onDetachSignal);
       // A freshly-attached local human almost certainly wants to drive the PTY
-      // size — claim primary immediately without waiting for a keystroke.
+      // size — claim primary immediately without waiting for a keystroke, and
+      // announce this terminal's LIVE size so the daemon adopts it now rather
+      // than only on the next SIGWINCH (which may never fire).
       if (ws?.readyState === WebSocket.OPEN) {
         ws.send(brokerEnvelope("ctrl", { p: { t: "focus" } }));
+        const { cols, rows } = terminalSize(io.stdout);
+        ws.send(brokerEnvelope("ctrl", { p: { t: "resize", cols, rows } }));
       }
     };
 
