@@ -34,15 +34,17 @@ user's home directory by a setup script.
    converges the binary, and the next `openllm <client>` uses the new overlay —
    there is no reinstall step.
 
-5. **Do not hand-edit `claude/prompt-prefix.md`.** It is generated from
-   `packages/protocol/prompt-prefix.ts` by
-   `bun run --cwd packages/cli generate:prompt-prefix`.
+5. **`claude/prompt-prefix.md` is hand-maintained here.** It is the ONLY home
+   of the agent steering prefix — the gateway does NOT inject any prompt
+   prefix into upstream calls (a gateway-injected prefix breaks prompt-cache
+   prefix stability and self-identifies the subscription hop as a gateway).
+   Edit the text directly in this file; there is no generator.
 
 ## Layout
 
 ```
 setup/
-├── claude/     settings.json · mcp.json · guidance.md · prompt-prefix.md (generated)
+├── claude/     settings.json · mcp.json · guidance.md · prompt-prefix.md
 ├── codex/      overrides.toml
 ├── grok/       config.toml · mcp.toml · hooks.json · guidance.md
 ├── opencode/   opencode.json
