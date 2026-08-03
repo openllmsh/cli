@@ -163,6 +163,13 @@ export const attachBrokerSession = async (args: {
   readonly apiKey?: string;
   readonly open: TBrokerOpen;
   readonly announce: boolean;
+  /**
+   * Non-tty-friendly mode for stdio piping:
+   * - keeps the terminal bridge active
+   * - suppresses raw-mode setup and resize controls
+   * - forwards bytes unchanged
+   */
+  readonly pipe?: boolean;
   readonly io?: TAttachIo;
 }): Promise<TAttachResult> => {
   const io = args.io ?? {
@@ -179,6 +186,7 @@ export const attachBrokerSession = async (args: {
     let settled = false;
     let detached = false;
     let raw = false;
+    const pipe = args.pipe === true;
     let timer: ReturnType<typeof setTimeout> | undefined;
 
     const settle = (result: TAttachResult): void => {
@@ -206,9 +214,11 @@ export const attachBrokerSession = async (args: {
       // settle() restores the terminal synchronously, so the hint below
       // lands on a sane screen instead of inside the alt-screen raw mode.
       settle({ kind: "completed", code: 0 });
-      io.stderr.write(
-        `[openllm] detached — resume with: openllm sessions attach ${args.open.session_id}\n`,
-      );
+      if (!pipe) {
+        io.stderr.write(
+          `[openllm] detached — resume with: openllm sessions attach ${args.open.session_id}\n`,
+        );
+      }
     };
 
     const onResize = (): void => {
@@ -217,14 +227,77 @@ export const attachBrokerSession = async (args: {
       ws.send(brokerEnvelope("ctrl", { p: { t: "resize", cols, rows } }));
     };
 
+    /**
+     * Pipe-mode stdin framing from a parent (the daemon):
+     *   - `0x1e` + JSON line + `\n` → control envelope (resize/close)
+     *   - anything else → raw PTY input
+     * Interactive mode still scans for Ctrl-] detach.
+     */
+    let pipeCtrlBuf = "";
     const onData = (chunk: Buffer): void => {
       if (ws?.readyState !== WebSocket.OPEN) return;
+      if (pipe) {
+        let i = 0;
+        while (i < chunk.length) {
+          if (pipeCtrlBuf.length > 0 || chunk[i] === 0x1e) {
+            if (pipeCtrlBuf.length === 0) i += 1; // skip RS
+            while (i < chunk.length) {
+              const b = chunk[i] ?? 0;
+              i += 1;
+              if (b === 0x0a) {
+                try {
+                  const ctrl = JSON.parse(pipeCtrlBuf) as {
+                    t?: string;
+                    cols?: number;
+                    rows?: number;
+                    intent?: string;
+                  };
+                  if (
+                    ctrl.t === "resize" &&
+                    typeof ctrl.cols === "number" &&
+                    typeof ctrl.rows === "number"
+                  ) {
+                    ws.send(
+                      brokerEnvelope("ctrl", {
+                        p: { t: "resize", cols: ctrl.cols, rows: ctrl.rows },
+                      }),
+                    );
+                  } else if (ctrl.t === "close") {
+                    close(ctrl.intent === "kill" ? "kill" : "detach");
+                    settle({ kind: "completed", code: 0 });
+                  }
+                } catch {
+                  // Malformed control — drop and keep streaming.
+                }
+                pipeCtrlBuf = "";
+                break;
+              }
+              pipeCtrlBuf += String.fromCharCode(b);
+              if (pipeCtrlBuf.length > 512) pipeCtrlBuf = ""; // refuse runaway
+            }
+            continue;
+          }
+          // Batch contiguous non-control bytes into one send.
+          const start = i;
+          while (i < chunk.length && chunk[i] !== 0x1e) i += 1;
+          if (i > start) ws.send(Buffer.from(chunk.subarray(start, i)));
+        }
+        return;
+      }
       const scanned = scanDetachBytes(new Uint8Array(chunk));
       if (scanned.bytes.length > 0) ws.send(Buffer.from(scanned.bytes));
       if (scanned.detach) onDetachSignal();
     };
 
-    const enterRawMode = (): void => {
+    const enterIo = (): void => {
+      if (pipe) {
+        // Parent owns the stdio pipe — no raw mode, no SIGWINCH, no announce.
+        io.stdin.resume();
+        io.stdin.on("data", onData);
+        process.on("SIGINT", onDetachSignal);
+        process.on("SIGTERM", onDetachSignal);
+        return;
+      }
       if (!io.stdin.isTTY) return;
       io.stdin.setRawMode(true);
       raw = true;
@@ -297,12 +370,12 @@ export const attachBrokerSession = async (args: {
         }
         acknowledged = true;
         if (timer !== undefined) clearTimeout(timer);
-        if (args.announce) {
+        if (args.announce && !pipe) {
           io.stderr.write(
             `[openllm] session ${args.open.session_id} attached — Ctrl-] to detach\n`,
           );
         }
-        enterRawMode();
+        enterIo();
         return;
       }
       if (envelope.t === "exit") {

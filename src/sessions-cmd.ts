@@ -25,10 +25,13 @@ export type TBrokerSessionRow = {
 };
 
 const SESSIONS_USAGE = `usage: openllm sessions [list]
-       openllm sessions attach <id>
+       openllm sessions attach <id> [--pipe] [--cols N] [--rows N]
        openllm sessions kill <id>
 
 List, attach to, or kill live local durable sessions.
+  --pipe  fd-agnostic attach for a parent process (daemon) that pipes
+          stdio; skips TTY raw mode and accepts RS-framed resize/close
+          controls on stdin (see packages/cli/src/clients/attach.ts).
 `;
 
 const truncate = (value: string, max: number): string =>
@@ -122,7 +125,16 @@ const requireSession = (
   return resolved;
 };
 
-const attach = async (session: TBrokerSessionRow): Promise<number> => {
+type TAttachOpts = {
+  readonly pipe: boolean;
+  readonly cols: number;
+  readonly rows: number;
+};
+
+const attach = async (
+  session: TBrokerSessionRow,
+  opts: TAttachOpts,
+): Promise<number> => {
   if (
     !session.live ||
     !session.attachable ||
@@ -133,9 +145,10 @@ const attach = async (session: TBrokerSessionRow): Promise<number> => {
     return 1;
   }
   if (
-    !process.stdin.isTTY ||
-    !process.stdout.isTTY ||
-    process.platform === "win32"
+    !opts.pipe &&
+    (!process.stdin.isTTY ||
+      !process.stdout.isTTY ||
+      process.platform === "win32")
   ) {
     process.stderr.write(
       "[openllm] attaching requires an interactive non-Windows terminal\n",
@@ -147,15 +160,44 @@ const attach = async (session: TBrokerSessionRow): Promise<number> => {
     open: {
       session_id: session.id,
       cli: session.cli,
-      cols: process.stdout.columns ?? 80,
-      rows: process.stdout.rows ?? 24,
+      cols: opts.cols,
+      rows: opts.rows,
       mode: "attach",
     },
-    announce: true,
+    announce: !opts.pipe,
+    pipe: opts.pipe,
   });
   if (result.kind === "completed") return result.code;
   process.stderr.write("[openllm] session host is unavailable\n");
   return 1;
+};
+
+const parseAttachOpts = (args: readonly string[]): TAttachOpts | null => {
+  let pipe = false;
+  let cols = process.stdout.columns ?? 80;
+  let rows = process.stdout.rows ?? 24;
+  for (let i = 0; i < args.length; i += 1) {
+    const arg = args[i];
+    if (arg === "--pipe") {
+      pipe = true;
+      continue;
+    }
+    if (arg === "--cols" || arg === "--rows") {
+      const raw = args[i + 1];
+      const n = raw === undefined ? Number.NaN : Number(raw);
+      if (!Number.isInteger(n) || n < 1 || n > 999) {
+        process.stderr.write(`[openllm] ${arg} expects a positive integer\n`);
+        return null;
+      }
+      if (arg === "--cols") cols = n;
+      else rows = n;
+      i += 1;
+      continue;
+    }
+    process.stderr.write(`[openllm] unknown attach flag: ${arg}\n`);
+    return null;
+  }
+  return { pipe, cols, rows };
 };
 
 const sleep = async (ms: number): Promise<void> =>
@@ -209,5 +251,8 @@ export const runSessionsCommand = async (
   }
   const session = requireSession(sessions, args[1]);
   if (session === null) return 1;
-  return verb === "attach" ? attach(session) : kill(session);
+  if (verb === "kill") return kill(session);
+  const opts = parseAttachOpts(args.slice(2));
+  if (opts === null) return 2;
+  return attach(session, opts);
 };
