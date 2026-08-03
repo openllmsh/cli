@@ -217,11 +217,15 @@ const launchDurableSessionHost = async (args: {
   const binary = findDaemonBinary();
   if (binary === null) return null;
   const id = crypto.randomUUID();
+  const terminalCols = process.stdout.columns ?? 80;
+  const terminalRows = process.stdout.rows ?? 24;
   const spawned = spawnSessionHost({
     binary,
     argv: sessionHostSpawnArgv({
       id,
       cli,
+      cols: terminalCols,
+      rows: terminalRows,
       cwd: process.cwd(),
       title: basename(process.cwd()),
       dangerous: args.dangerous,
@@ -245,8 +249,8 @@ const launchDurableSessionHost = async (args: {
     open: {
       session_id: id,
       cli,
-      cols: process.stdout.columns ?? 80,
-      rows: process.stdout.rows ?? 24,
+      cols: terminalCols,
+      rows: terminalRows,
       mode: "attach",
     },
     announce: true,

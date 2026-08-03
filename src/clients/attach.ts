@@ -263,6 +263,9 @@ export const attachBrokerSession = async (args: {
                         p: { t: "resize", cols: ctrl.cols, rows: ctrl.rows },
                       }),
                     );
+                  } else if (ctrl.t === "focus") {
+                    // Browser owns focus in pipe mode — forward opaquely.
+                    ws.send(brokerEnvelope("ctrl", { p: { t: "focus" } }));
                   } else if (ctrl.t === "close") {
                     close(ctrl.intent === "kill" ? "kill" : "detach");
                     settle({ kind: "completed", code: 0 });
@@ -293,6 +296,7 @@ export const attachBrokerSession = async (args: {
     const enterIo = (): void => {
       if (pipe) {
         // Parent owns the stdio pipe — no raw mode, no SIGWINCH, no announce.
+        // Focus is owned by the browser bridge; do not auto-claim primary here.
         io.stdin.resume();
         io.stdin.on("data", onData);
         process.on("SIGINT", onDetachSignal);
@@ -307,6 +311,11 @@ export const attachBrokerSession = async (args: {
       process.on("SIGWINCH", onResize);
       process.on("SIGINT", onDetachSignal);
       process.on("SIGTERM", onDetachSignal);
+      // A freshly-attached local human almost certainly wants to drive the PTY
+      // size — claim primary immediately without waiting for a keystroke.
+      if (ws?.readyState === WebSocket.OPEN) {
+        ws.send(brokerEnvelope("ctrl", { p: { t: "focus" } }));
+      }
     };
 
     try {

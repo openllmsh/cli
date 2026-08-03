@@ -177,6 +177,8 @@ export const findDaemonBinary = (): string | null => {
 export const sessionHostSpawnArgv = (args: {
   readonly id: string;
   readonly cli: TDaemonCli;
+  readonly cols: number;
+  readonly rows: number;
   readonly cwd: string;
   readonly title: string;
   readonly dangerous: boolean;
@@ -192,6 +194,10 @@ export const sessionHostSpawnArgv = (args: {
   args.cwd,
   "--title",
   args.title,
+  "--cols",
+  String(args.cols),
+  "--rows",
+  String(args.rows),
   ...(args.dangerous ? ["--dangerous"] : []),
   ...(args.resumeSessionId === undefined
     ? []
