@@ -22,7 +22,9 @@ import {
 import { constants as osConstants } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { openllmDir, userHome } from "../env";
+import type { TLiveSessionHost } from "../session-host";
 import {
+  discoverLiveSessionHosts,
   findDaemonBinary,
   sessionHostSpawnArgv,
   spawnSessionHost,
@@ -33,7 +35,15 @@ import { contextStateDir, fetchModelCatalog, resolveGateway } from "./gateway";
 import { HOOK_SCRIPTS } from "./hooks";
 import { buildLaunchPlan, type TLaunchPlan } from "./launch";
 import { buildLiveJson, writeLiveJson } from "./live";
-import type { TClient, TClientFlags } from "./registry";
+import type { TClient, TClientFlags, TDaemonCli } from "./registry";
+import {
+  buildSessionChoices,
+  defaultPick,
+  formatSessionPrompt,
+  resolveById,
+  resolvePick,
+  type TSessionChoice,
+} from "./session-picker";
 
 /** `~/.openllm/run` — every ephemeral per-launch overlay lives here. */
 export const runRoot = (): string => join(openllmDir(), "run");
@@ -265,6 +275,142 @@ const launchDurableSessionHost = async (args: {
 };
 
 /**
+ * Attach this terminal to an ALREADY-RUNNING durable session. Returns the exit
+ * code, or null when the host went away between discovery and dial (raced
+ * teardown) so the caller can fall through to starting a fresh session.
+ */
+const attachRunningSession = async (
+  session: TLiveSessionHost,
+): Promise<number | null> => {
+  const result = await attachBrokerSession({
+    target: session.socketPath,
+    open: {
+      session_id: session.id,
+      cli: session.cli,
+      cols: process.stdout.columns ?? 80,
+      rows: process.stdout.rows ?? 24,
+      mode: "attach",
+    },
+    announce: true,
+  });
+  return result.kind === "completed" ? result.code : null;
+};
+
+/**
+ * Read one line from the terminal. Deliberately hand-rolled rather than
+ * `node:readline`: this runs microseconds before `attachBrokerSession` takes
+ * stdin into raw mode, and readline's interface leaves listeners and mode
+ * changes behind that the attach path would then have to undo. Here stdin is
+ * returned to exactly the state it was found in.
+ */
+const readLine = async (): Promise<string> =>
+  new Promise<string>((resolve) => {
+    const stdin = process.stdin;
+    let buffer = "";
+    const finish = (value: string): void => {
+      stdin.off("data", onData);
+      stdin.pause();
+      resolve(value);
+    };
+    const onData = (chunk: Buffer): void => {
+      for (const byte of chunk) {
+        // Ctrl-C / Ctrl-D at the prompt: decline the offer, start fresh.
+        if (byte === 0x03 || byte === 0x04) {
+          process.stdout.write("\n");
+          finish("n");
+          return;
+        }
+        if (byte === 0x0a || byte === 0x0d) {
+          process.stdout.write("\n");
+          finish(buffer);
+          return;
+        }
+        if (byte === 0x7f || byte === 0x08) {
+          if (buffer.length > 0) {
+            buffer = buffer.slice(0, -1);
+            process.stdout.write("\b \b");
+          }
+          continue;
+        }
+        if (byte < 0x20) continue;
+        const char = String.fromCharCode(byte);
+        buffer += char;
+        process.stdout.write(char);
+      }
+    };
+    stdin.setRawMode(true);
+    stdin.resume();
+    stdin.on("data", onData);
+  }).then((value) => {
+    if (process.stdin.isTTY) process.stdin.setRawMode(false);
+    return value;
+  });
+
+/**
+ * Offer the sessions already running on this machine for this client.
+ *
+ * Returns the session to attach to, or null to start a new one. Re-prompts on
+ * unusable input rather than guessing — attaching to the wrong session drops
+ * the user into someone else's working directory.
+ */
+const chooseRunningSession = async (args: {
+  readonly client: TClient;
+  readonly cli: TDaemonCli;
+  readonly flags: TClientFlags;
+  readonly vendorArgs: readonly string[];
+}): Promise<TLiveSessionHost | null> => {
+  if (args.flags.fresh) return null;
+  // Client arguments describe a NEW invocation (`--resume x`, a prompt, a
+  // model). An attach reaches an already-running process that can never receive
+  // them, so silently swallowing them would be worse than not offering.
+  // `--attach` is an explicit override and still wins.
+  if (args.vendorArgs.length > 0 && args.flags.attach === null) return null;
+  const choices = buildSessionChoices(
+    discoverLiveSessionHosts(),
+    args.cli,
+    process.cwd(),
+  );
+  if (choices.length === 0) return null;
+
+  if (args.flags.attach !== null) {
+    if (args.flags.attach.length === 0) {
+      const preferred = defaultPick(choices);
+      return preferred.kind === "attach"
+        ? preferred.session
+        : ((choices[0] as TSessionChoice).session ?? null);
+    }
+    const resolved = resolveById(
+      choices.map((choice) => choice.session),
+      args.flags.attach,
+    );
+    if (resolved === "missing" || resolved === "ambiguous") {
+      process.stderr.write(
+        `[openllm] --attach ${args.flags.attach} is ${resolved === "missing" ? "not a running session" : "ambiguous"} — starting a new session\n`,
+      );
+      return null;
+    }
+    return resolved;
+  }
+
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    process.stdout.write(
+      `\n${formatSessionPrompt(choices, {
+        clientName: args.client.name,
+        nowMs: Date.now(),
+        ...(process.env.HOME === undefined ? {} : { home: process.env.HOME }),
+      })}`,
+    );
+    const pick = resolvePick(await readLine(), choices);
+    if (pick.kind === "attach") return pick.session;
+    if (pick.kind === "new") return null;
+    process.stdout.write(
+      "[openllm] pick a listed number, or n for a new session\n",
+    );
+  }
+  return null;
+};
+
+/**
  * Run a session client: interactive local sessions get a detached durable host;
  * all other invocations retain the direct, inherited-stdio launch contract.
  */
@@ -306,6 +452,26 @@ export const runSessionClient = async (
       deviceSessionId: process.env.OPENLLM_DEVICE_SESSION_ID,
     })
   ) {
+    // Sessions already running on this machine — started here OR by the
+    // browser, since both origins publish to the same filesystem registry —
+    // are offered before a new one is spawned. Attaching joins the live PTY
+    // alongside any existing viewer; no vendor `--resume` is involved.
+    const cli = client.daemonCli;
+    if (cli !== undefined) {
+      const existing = await chooseRunningSession({
+        client,
+        cli,
+        flags,
+        vendorArgs: forwarded,
+      });
+      if (existing !== null) {
+        const code = await attachRunningSession(existing);
+        if (code !== null) return code;
+        process.stderr.write(
+          "[openllm] that session went away — starting a new one\n",
+        );
+      }
+    }
     const code = await launchDurableSessionHost({
       client,
       forwarded,

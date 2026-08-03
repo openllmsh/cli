@@ -116,7 +116,19 @@ const clientUsage = (id: string): string => {
     client.dangerousFlag !== undefined
       ? `  openllm -d ${id}    skip every approval prompt (${client.dangerousFlag})\n`
       : "";
-  return `usage: openllm [-d] [-r] ${id} [...args]
+  const sessionSelection =
+    client.daemonCli === undefined
+      ? ""
+      : `  openllm --new ${id}          always start a fresh session
+  openllm --attach ${id}       attach to the best match without being asked
+  openllm --attach <id> ${id}  attach to a specific session (id or prefix)
+
+When ${client.name} sessions are already running on this machine — started here
+OR from the browser — they are offered before a new one starts. Attaching joins
+the LIVE session alongside any other viewer; it is not a vendor \`--resume\`.
+List them any time with \`openllm sessions list\`.
+`;
+  return `usage: openllm [-d] [-r] [--new|--attach [id]] ${id} [...args]
 
 Runs ${client.name} through OpenLLM. EVERY argument after \`${id}\` is forwarded
 to ${client.bin} verbatim, so \`openllm ${id} <args>\` behaves exactly like
@@ -126,6 +138,8 @@ ${client.note}
 
 openllm's own flags go BEFORE the client name:
 ${dangerous}  openllm -r ${id}    route the session via the cloud gateway
+
+${sessionSelection}
 
 The session points at your local daemon by default, so subscription models
 serve locally with no cloud round trip. \`-r\` points it at the cloud origin,

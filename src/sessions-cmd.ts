@@ -7,6 +7,7 @@
 
 import { attachBrokerSession } from "./clients/attach";
 import type { TDaemonCli } from "./clients/registry";
+import { resolveById } from "./clients/session-picker";
 import {
   discoverLiveSessionHosts,
   sessionHostProcessAlive,
@@ -83,13 +84,8 @@ export const formatSessionRows = (
 export const resolveSessionId = (
   sessions: readonly TBrokerSessionRow[],
   supplied: string,
-): TBrokerSessionRow | "missing" | "ambiguous" => {
-  const exact = sessions.find((session) => session.id === supplied);
-  if (exact !== undefined) return exact;
-  const matches = sessions.filter((session) => session.id.startsWith(supplied));
-  if (matches.length === 1) return matches[0] as TBrokerSessionRow;
-  return matches.length === 0 ? "missing" : "ambiguous";
-};
+): TBrokerSessionRow | "missing" | "ambiguous" =>
+  resolveById(sessions, supplied);
 
 /** Read and validate live process-owned directories, reaping stale entries. */
 export const listSessionHosts = (): readonly TBrokerSessionRow[] =>

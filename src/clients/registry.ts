@@ -186,6 +186,15 @@ export type TClientFlags = {
   /** `-r` — point the session at the CLOUD gateway instead of this machine's
    *  daemon, so subscription hops take the cloud's 307-redirect path. */
   readonly remote: boolean;
+  /** `--new` — always start a fresh session; never offer to attach to one
+   *  already running on this machine. */
+  readonly fresh: boolean;
+  /**
+   * `--attach [id]` — attach to a running session without being asked. An id
+   * (or unique prefix) picks one; a bare `--attach` takes the best match for
+   * this client and directory. Null means the flag was absent.
+   */
+  readonly attach: string | null;
   /** Everything from the client name onward, in order and untouched. */
   readonly rest: readonly string[];
 };
@@ -202,6 +211,8 @@ export type TClientFlags = {
 export const parseClientFlags = (args: readonly string[]): TClientFlags => {
   let dangerous = false;
   let remote = false;
+  let fresh = false;
+  let attach: string | null = null;
   let i = 0;
   for (; i < args.length; i += 1) {
     const arg = args[i];
@@ -213,6 +224,27 @@ export const parseClientFlags = (args: readonly string[]): TClientFlags => {
       remote = true;
       continue;
     }
+    // Long-form on purpose: `-n`/`-a` would be plausible client flags, and
+    // these live in the same position as `-d`/`-r`, so a collision would be
+    // silent. Session selection is rare enough that spelling it out is fine.
+    if (arg === "--new") {
+      fresh = true;
+      continue;
+    }
+    if (arg === "--attach") {
+      // A bare `--attach` means "best match"; an id may follow. The next token
+      // is only consumed when it cannot be the client name or another flag.
+      const next = args[i + 1];
+      const takesValue =
+        next !== undefined &&
+        !next.startsWith("-") &&
+        !isClientId(next) &&
+        // Session ids are uuids; a prefix is only usable at 4+ chars anyway.
+        /^[A-Za-z0-9][A-Za-z0-9_-]{3,}$/.test(next);
+      attach = takesValue ? (next as string) : "";
+      if (takesValue) i += 1;
+      continue;
+    }
     // Combined short form (`-dr`), since these are ours and take no values.
     if (/^-[dr]+$/.test(arg)) {
       dangerous = dangerous || arg.includes("d");
@@ -221,5 +253,5 @@ export const parseClientFlags = (args: readonly string[]): TClientFlags => {
     }
     break; // the client name (or an unknown flag) — everything from here is not ours
   }
-  return { dangerous, remote, rest: args.slice(i) };
+  return { dangerous, remote, fresh, attach, rest: args.slice(i) };
 };

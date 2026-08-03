@@ -91,6 +91,32 @@ local daemon's broker by default, so the daemon is the canonical session
 manager. If the daemon is unavailable, the CLI transparently falls back to the
 existing inherited-stdio launch; it never requires the daemon.
 
+**Joining a session already running here.** Before spawning a new durable host,
+`openllm <client>` scans the filesystem session registry
+(`discoverLiveSessionHosts()` — `~/.openllm/sessions/<id>/meta.json` + a live
+pid + `ctl.sock`) for hosts of the SAME `daemonCli` and offers them. The
+registry is shared by both origins — a browser-started session is spawned by
+the daemon's `spawnSessionHostProc`, a local one by the CLI, and both write
+under `OPENLLM_DAEMON_STATE_DIR ?? ~/.openllm` — so a local terminal can join a
+session the browser started and vice versa. Joining is a real ATTACH to the
+live PTY (the same path as `openllm sessions attach`), never a vendor
+`--resume`: the host fans output out to every consumer and reflows a private
+screen per consumer size, so a second viewer neither kicks the first nor
+disturbs its geometry.
+
+Ordering and the bare-Enter default are directory-first, because attaching
+adopts the SESSION's cwd rather than the caller's — a same-cwd session is the
+only one that behaves like the command the user just typed. `--new` skips the
+offer; `--attach [id]` takes it without asking. Passing any client argument
+(`openllm claude --resume x`) also skips it — those describe a NEW invocation
+that an already-running process can never receive. The prompt is skipped
+entirely
+for any invocation `brokerEligible` already rejects (non-TTY, `-r`, print mode,
+and — critically — inside a device session, where `OPENLLM_DEVICE_SESSION_ID`
+prevents a session from offering itself). Picker logic lives in
+`clients/session-picker.ts` (pure, unit-tested); `clients/session.ts` owns the
+terminal read.
+
 ## 3. The generated SDK (why the mirror is self-contained)
 
 `scripts/generate-sdk.ts` runs ONLY in the monorepo: it derives the OpenAPI
