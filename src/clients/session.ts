@@ -370,7 +370,14 @@ const chooseRunningSession = async (args: {
     args.cli,
     process.cwd(),
   );
-  if (choices.length === 0) return null;
+  if (choices.length === 0) {
+    if (args.flags.attach !== null && args.flags.attach.length > 0) {
+      process.stderr.write(
+        `[openllm] --attach ${args.flags.attach} is not a running session — starting a new session\n`,
+      );
+    }
+    return null;
+  }
 
   if (args.flags.attach !== null) {
     if (args.flags.attach.length === 0) {

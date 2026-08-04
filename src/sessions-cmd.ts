@@ -38,6 +38,9 @@ List, attach to, or kill live local durable sessions.
 const truncate = (value: string, max: number): string =>
   value.length <= max ? value : `${value.slice(0, Math.max(0, max - 1))}…`;
 
+const truncateId = (value: string, max: number): string =>
+  value.length <= max ? value : value.slice(0, max);
+
 const relativeAge = (updatedAtMs: number, nowMs: number): string => {
   const seconds = Math.max(0, Math.floor((nowMs - updatedAtMs) / 1_000));
   if (seconds < 60) return `${seconds}s ago`;
@@ -60,7 +63,7 @@ export const formatSessionRows = (
 ): string => {
   if (sessions.length === 0) return "No local durable sessions.\n";
   const rows = sessions.map((session) => [
-    truncate(session.id, 12),
+    truncateId(session.id, 12),
     session.cli,
     session.live ? "live●" : "dead",
     session.attachable ? "yes" : "no",

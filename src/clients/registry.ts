@@ -52,7 +52,13 @@ export type TSessionStrategy =
  *  Mirrors DeviceSessionCli in packages/protocol/daemon.ts — this compiled
  *  binary carries no workspace deps, so the set is restated here once and
  *  every CLI-side consumer imports THIS alias. */
-export type TDaemonCli = "claude_code" | "chatgpt" | "grok" | "opencode";
+export const DAEMON_CLIS = [
+  "claude_code",
+  "chatgpt",
+  "grok",
+  "opencode",
+] as const;
+export type TDaemonCli = (typeof DAEMON_CLIS)[number];
 
 export type TClient = {
   readonly id: TClientId;

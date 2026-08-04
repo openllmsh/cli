@@ -116,6 +116,8 @@ const clientUsage = (id: string): string => {
     client.dangerousFlag !== undefined
       ? `  openllm -d ${id}    skip every approval prompt (${client.dangerousFlag})\n`
       : "";
+  const sessionFlags =
+    client.daemonCli === undefined ? "" : "[--new|--attach [id]] ";
   const sessionSelection =
     client.daemonCli === undefined
       ? ""
@@ -128,7 +130,7 @@ OR from the browser — they are offered before a new one starts. Attaching join
 the LIVE session alongside any other viewer; it is not a vendor \`--resume\`.
 List them any time with \`openllm sessions list\`.
 `;
-  return `usage: openllm [-d] [-r] [--new|--attach [id]] ${id} [...args]
+  return `usage: openllm [-d] [-r] ${sessionFlags}${id} [...args]
 
 Runs ${client.name} through OpenLLM. EVERY argument after \`${id}\` is forwarded
 to ${client.bin} verbatim, so \`openllm ${id} <args>\` behaves exactly like

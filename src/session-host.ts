@@ -7,8 +7,9 @@ import {
   rmSync,
   statSync,
 } from "node:fs";
-import { join } from "node:path";
+import { extname, isAbsolute, join } from "node:path";
 import type { TDaemonCli } from "./clients/registry";
+import { DAEMON_CLIS } from "./clients/registry";
 import { daemonStateDir } from "./env";
 
 export type TSessionHostMeta = {
@@ -34,10 +35,24 @@ export const sessionHostSocketPath = (id: string): string =>
   join(sessionHostDir(id), "ctl.sock");
 
 const isDaemonCli = (value: unknown): value is TDaemonCli =>
-  value === "claude_code" ||
-  value === "chatgpt" ||
-  value === "grok" ||
-  value === "opencode";
+  typeof value === "string" &&
+  (DAEMON_CLIS as readonly string[]).includes(value);
+
+const validSessionHostSpawnArgs = (args: {
+  readonly cwd: string;
+  readonly title: string;
+  readonly vendorArgs: readonly string[];
+}): boolean =>
+  isAbsolute(args.cwd) &&
+  args.cwd.length >= 1 &&
+  args.cwd.length <= 1_024 &&
+  !args.cwd.includes("\0") &&
+  args.title.length <= 80 &&
+  !args.title.includes("\0") &&
+  args.vendorArgs.length <= 64 &&
+  args.vendorArgs.every(
+    (arg) => arg.length >= 1 && arg.length <= 512 && !arg.includes("\0"),
+  );
 
 /** Validate metadata before treating an on-disk entry as a live host. */
 export const isSessionHostMeta = (
@@ -197,26 +212,31 @@ export const sessionHostSpawnArgv = (args: {
   readonly dangerous: boolean;
   readonly resumeSessionId?: string;
   readonly vendorArgs: readonly string[];
-}): readonly string[] => [
-  "__session-host",
-  "--id",
-  args.id,
-  "--cli",
-  args.cli,
-  "--cwd",
-  args.cwd,
-  "--title",
-  args.title,
-  "--cols",
-  String(args.cols),
-  "--rows",
-  String(args.rows),
-  ...(args.dangerous ? ["--dangerous"] : []),
-  ...(args.resumeSessionId === undefined
-    ? []
-    : ["--resume", args.resumeSessionId]),
-  ...args.vendorArgs.flatMap((arg) => ["--vendor-arg", arg]),
-];
+}): readonly string[] => {
+  if (!validSessionHostSpawnArgs(args)) {
+    throw new Error("Invalid session-host spawn arguments");
+  }
+  return [
+    "__session-host",
+    "--id",
+    args.id,
+    "--cli",
+    args.cli,
+    "--cwd",
+    args.cwd,
+    "--title",
+    args.title,
+    "--cols",
+    String(args.cols),
+    "--rows",
+    String(args.rows),
+    ...(args.dangerous ? ["--dangerous"] : []),
+    ...(args.resumeSessionId === undefined
+      ? []
+      : ["--resume", args.resumeSessionId]),
+    ...args.vendorArgs.flatMap((arg) => ["--vendor-arg", arg]),
+  ];
+};
 
 /**
  * Spawn the host as a sibling process so it survives the invoking CLI.
@@ -227,7 +247,12 @@ export const spawnSessionHost = (args: {
   readonly argv: readonly string[];
 }): ReturnType<typeof Bun.spawn> | null => {
   try {
-    const proc = Bun.spawn([args.binary, ...args.argv], {
+    const command =
+      process.platform === "win32" &&
+      extname(args.binary).toLowerCase() === ".cmd"
+        ? ["cmd.exe", "/c", args.binary, ...args.argv]
+        : [args.binary, ...args.argv];
+    const proc = Bun.spawn(command, {
       detached: true,
       stdio: ["ignore", "ignore", "ignore"],
     });
