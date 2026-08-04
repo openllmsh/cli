@@ -40,6 +40,28 @@ export type TAttachIo = {
 
 const CTRL_DETACH = 0x1d;
 
+/** How long this terminal must be idle before a keystroke re-claims focus. */
+export const FOCUS_CLAIM_IDLE_MS = 1_000;
+
+/**
+ * Whether a keystroke should re-claim focus for this terminal.
+ *
+ * A terminal emits no focus events, so typing is the only signal that this is
+ * the pane being used — the browser gets it for free from `focusin` and cannot
+ * use this rule, which is precisely why it is safe here: exactly one side of a
+ * shared session infers focus, so the two cannot trade the PTY size back and
+ * forth while you type in one of them.
+ *
+ * Rate-limited to the FIRST keystroke of a burst. Claiming per key is the churn
+ * that made the size oscillate; claiming once when you start typing again is
+ * the intent. The keystroke itself is untouched and still forwarded exactly
+ * once — the claim rides alongside it, it does not consume it.
+ */
+export const shouldClaimFocusOnInput = (
+  nowMs: number,
+  lastClaimAtMs: number,
+): boolean => nowMs - lastClaimAtMs > FOCUS_CLAIM_IDLE_MS;
+
 const PIPE_CTRL = 0x1e;
 const OPEN_ACK_TIMEOUT_MS = 5_000;
 
@@ -236,6 +258,8 @@ export const attachBrokerSession = async (args: {
      * Interactive mode still scans for Ctrl-] detach.
      */
     let pipeCtrlBuf = "";
+    /** When this terminal last claimed focus — see `shouldClaimFocusOnInput`. */
+    let lastFocusClaimAtMs = 0;
     const onData = (chunk: Buffer): void => {
       if (ws?.readyState !== WebSocket.OPEN) return;
       if (pipe) {
@@ -289,6 +313,13 @@ export const attachBrokerSession = async (args: {
         }
         return;
       }
+      // Interactive terminal only — in pipe mode the browser owns focus and
+      // has real events for it (this branch is past the `pipe` return above).
+      const now = Date.now();
+      if (shouldClaimFocusOnInput(now, lastFocusClaimAtMs)) {
+        lastFocusClaimAtMs = now;
+        ws.send(brokerEnvelope("ctrl", { p: { t: "focus" } }));
+      }
       const scanned = scanDetachBytes(new Uint8Array(chunk));
       if (scanned.bytes.length > 0) ws.send(Buffer.from(scanned.bytes));
       if (scanned.detach) onDetachSignal();
@@ -317,6 +348,7 @@ export const attachBrokerSession = async (args: {
       // announce this terminal's LIVE size so the daemon adopts it now rather
       // than only on the next SIGWINCH (which may never fire).
       if (ws?.readyState === WebSocket.OPEN) {
+        lastFocusClaimAtMs = Date.now();
         ws.send(brokerEnvelope("ctrl", { p: { t: "focus" } }));
         const { cols, rows } = terminalSize(io.stdout);
         ws.send(brokerEnvelope("ctrl", { p: { t: "resize", cols, rows } }));
