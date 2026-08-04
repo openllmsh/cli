@@ -40,9 +40,6 @@ export type TAttachIo = {
 
 const CTRL_DETACH = 0x1d;
 
-/** How long this terminal must be idle before typing re-claims focus (and with
- *  it the PTY size). Long enough that continuous typing sends exactly one. */
-const FOCUS_CLAIM_IDLE_MS = 1_000;
 const PIPE_CTRL = 0x1e;
 const OPEN_ACK_TIMEOUT_MS = 5_000;
 
@@ -239,7 +236,6 @@ export const attachBrokerSession = async (args: {
      * Interactive mode still scans for Ctrl-] detach.
      */
     let pipeCtrlBuf = "";
-    let lastFocusClaimAtMs = 0;
     const onData = (chunk: Buffer): void => {
       if (ws?.readyState !== WebSocket.OPEN) return;
       if (pipe) {
@@ -293,18 +289,6 @@ export const attachBrokerSession = async (args: {
         }
         return;
       }
-      // A terminal has no focus events to forward, so typing after a lull is
-      // the only signal that this pane is the one being used. The daemon gives
-      // the PTY size to whichever viewer focused last and ignores input
-      // entirely, so without this a local terminal sharing a session with a
-      // browser pane could never take the size back. Rate-limited to once per
-      // idle gap: a focus claim per keystroke is exactly the churn the daemon
-      // stopped doing. Pipe mode is excluded — the browser owns focus there.
-      const now = Date.now();
-      if (now - lastFocusClaimAtMs > FOCUS_CLAIM_IDLE_MS) {
-        lastFocusClaimAtMs = now;
-        ws.send(brokerEnvelope("ctrl", { p: { t: "focus" } }));
-      }
       const scanned = scanDetachBytes(new Uint8Array(chunk));
       if (scanned.bytes.length > 0) ws.send(Buffer.from(scanned.bytes));
       if (scanned.detach) onDetachSignal();
@@ -333,7 +317,6 @@ export const attachBrokerSession = async (args: {
       // announce this terminal's LIVE size so the daemon adopts it now rather
       // than only on the next SIGWINCH (which may never fire).
       if (ws?.readyState === WebSocket.OPEN) {
-        lastFocusClaimAtMs = Date.now();
         ws.send(brokerEnvelope("ctrl", { p: { t: "focus" } }));
         const { cols, rows } = terminalSize(io.stdout);
         ws.send(brokerEnvelope("ctrl", { p: { t: "resize", cols, rows } }));
