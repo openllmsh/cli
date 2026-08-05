@@ -98,6 +98,21 @@ const processStartTime = (pid: number): string | null => {
   }
 };
 
+/** PID liveness only — used for legacy meta that predates processStartTime. */
+const pidAlive = (pid: number): boolean => {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return (
+      error !== null &&
+      typeof error === "object" &&
+      "code" in error &&
+      (error as { readonly code?: unknown }).code === "EPERM"
+    );
+  }
+};
+
 export const sessionHostProcessAlive = (
   meta: Pick<TSessionHostMeta, "pid" | "processStartTime">,
 ): boolean => {
@@ -108,12 +123,56 @@ export const sessionHostProcessAlive = (
 export const sessionHostProcessStartTime = (): string | null =>
   processStartTime(process.pid);
 
-const readSessionHostMeta = (dir: string): TSessionHostMeta | null => {
+/**
+ * Pre-processStartTime meta.json shape. Kept only for reap decisions: the host
+ * process may still be alive after an upgrade, but attach requires the current
+ * identity fields so these records stay non-attachable until the process exits.
+ */
+type TLegacySessionHostMeta = {
+  readonly id: string;
+  readonly pid: number;
+  readonly startedAtMs: number | null;
+};
+
+const readLegacySessionHostMeta = (
+  value: unknown,
+): TLegacySessionHostMeta | null => {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return null;
+  }
+  const meta = value as Record<string, unknown>;
+  if (
+    typeof meta.id !== "string" ||
+    !/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(meta.id) ||
+    typeof meta.pid !== "number" ||
+    !Number.isInteger(meta.pid) ||
+    meta.pid <= 0
+  ) {
+    return null;
+  }
+  return {
+    id: meta.id,
+    pid: meta.pid,
+    startedAtMs:
+      typeof meta.startedAtMs === "number" && Number.isFinite(meta.startedAtMs)
+        ? meta.startedAtMs
+        : null,
+  };
+};
+
+const readSessionHostMeta = (
+  dir: string,
+):
+  | { readonly kind: "current"; readonly meta: TSessionHostMeta }
+  | { readonly kind: "legacy"; readonly meta: TLegacySessionHostMeta }
+  | null => {
   try {
     const parsed: unknown = JSON.parse(
       readFileSync(join(dir, "meta.json"), "utf8"),
     );
-    return isSessionHostMeta(parsed) ? parsed : null;
+    if (isSessionHostMeta(parsed)) return { kind: "current", meta: parsed };
+    const legacy = readLegacySessionHostMeta(parsed);
+    return legacy === null ? null : { kind: "legacy", meta: legacy };
   } catch {
     return null;
   }
@@ -121,7 +180,9 @@ const readSessionHostMeta = (dir: string): TSessionHostMeta | null => {
 
 /**
  * Scan the process-owned registry. Invalid, dead, or socket-less entries are
- * stale and are removed here; a live entry is never touched.
+ * stale and are removed here; a live entry is never touched. Legacy records
+ * (missing processStartTime) are preserved while their pid is alive but never
+ * returned as attachable — they are reaped only after the process exits.
  */
 const HOST_STARTUP_GRACE_MS = 10_000;
 
@@ -151,20 +212,38 @@ export const discoverLiveSessionHosts = (): readonly TLiveSessionHost[] => {
   const sessions: TLiveSessionHost[] = [];
   for (const name of entries) {
     const directory = sessionHostDir(name);
-    const meta = readSessionHostMeta(directory);
+    const record = readSessionHostMeta(directory);
     const socketPath = join(directory, "ctl.sock");
 
-    // A directory with no valid metadata may be mid-write. Leave it alone until
-    // the grace period expires so a concurrent scan cannot delete a host that is
-    // still starting.
-    if (meta === null || meta.id !== name) {
+    // A directory with no recognizable metadata may be mid-write. Leave it
+    // alone until the grace period expires so a concurrent scan cannot delete
+    // a host that is still starting.
+    if (record === null) {
       if (directoryAgeMs(directory) > HOST_STARTUP_GRACE_MS) {
         reapDirectory(directory);
       }
       continue;
     }
 
-    // A dead pid is unambiguously stale regardless of age.
+    if (record.kind === "legacy") {
+      // Non-attachable: keep while the recorded pid is alive, reap once gone.
+      // processStartTime is required for attach/kill identity, so legacy stays
+      // out of the live list even though the host process may still be running.
+      if (record.meta.id !== name || !pidAlive(record.meta.pid)) {
+        reapDirectory(directory);
+      }
+      continue;
+    }
+
+    const meta = record.meta;
+    if (meta.id !== name) {
+      if (directoryAgeMs(directory) > HOST_STARTUP_GRACE_MS) {
+        reapDirectory(directory);
+      }
+      continue;
+    }
+
+    // A dead (or recycled) pid is unambiguously stale regardless of age.
     if (!sessionHostProcessAlive(meta)) {
       reapDirectory(directory);
       continue;

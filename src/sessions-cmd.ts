@@ -204,40 +204,146 @@ const parseAttachOpts = (args: readonly string[]): TAttachOpts | null => {
 const sleep = async (ms: number): Promise<void> =>
   new Promise((resolve) => setTimeout(resolve, ms));
 
-/** Stop the standalone host; its SIGTERM handler closes the owned PTY cleanly. */
+/**
+ * Stop the standalone host through its private control socket.
+ *
+ * PID-only signals are intentionally not used: after
+ * {@link sessionHostProcessAlive} the pid can still be recycled before
+ * `process.kill`, so identity is preserved only by dialing the host-owned
+ * `ctl.sock` and sending a kill close. Returns false when identity cannot be
+ * preserved (missing fields, dead process, or socket unreachable).
+ */
 export const killSessionHost = async (
-  session: Pick<TBrokerSessionRow, "pid" | "process_start_time">,
+  session: Pick<
+    TBrokerSessionRow,
+    "id" | "cli" | "pid" | "process_start_time" | "socket_path"
+  >,
 ): Promise<boolean> => {
   if (
     session.pid === undefined ||
     session.process_start_time === undefined ||
+    session.socket_path === undefined ||
     !sessionHostProcessAlive({
       pid: session.pid,
       processStartTime: session.process_start_time,
     })
-  )
-    return false;
-  try {
-    process.kill(session.pid, "SIGTERM");
-  } catch {
+  ) {
     return false;
   }
-  for (let elapsed = 0; elapsed < 1_000; elapsed += 50) {
-    await sleep(50);
-    if (
-      !sessionHostProcessAlive({
-        pid: session.pid,
-        processStartTime: session.process_start_time,
-      })
-    )
-      return true;
-  }
-  try {
-    process.kill(session.pid, "SIGKILL");
-    return true;
-  } catch {
-    return false;
-  }
+
+  const socketPath = session.socket_path;
+  const pid = session.pid;
+  const processStartTime = session.process_start_time;
+  const alive = (): boolean =>
+    sessionHostProcessAlive({ pid, processStartTime });
+
+  const killed = await new Promise<boolean>((resolve) => {
+    let settled = false;
+    const settle = (ok: boolean): void => {
+      if (settled) return;
+      settled = true;
+      resolve(ok);
+    };
+
+    let ws: WebSocket;
+    try {
+      ws = new WebSocket(
+        socketPath.startsWith("/") ? `ws+unix://${socketPath}` : socketPath,
+      );
+    } catch {
+      settle(false);
+      return;
+    }
+
+    const timer = setTimeout(() => {
+      try {
+        ws.close();
+      } catch {
+        /* ignore */
+      }
+      settle(!alive());
+    }, 2_000);
+
+    ws.binaryType = "arraybuffer";
+    ws.onopen = (): void => {
+      // Final identity check immediately before sending control — refuse if
+      // the process exited or the pid was recycled after discovery.
+      if (!alive()) {
+        clearTimeout(timer);
+        try {
+          ws.close();
+        } catch {
+          /* ignore */
+        }
+        settle(false);
+        return;
+      }
+      ws.send(
+        JSON.stringify({
+          t: "open",
+          open: {
+            session_id: session.id,
+            cli: session.cli,
+            cols: 80,
+            rows: 24,
+            mode: "attach",
+          },
+        }),
+      );
+    };
+    ws.onmessage = (event: MessageEvent): void => {
+      if (typeof event.data !== "string") return;
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(event.data);
+      } catch {
+        return;
+      }
+      if (
+        typeof parsed !== "object" ||
+        parsed === null ||
+        (parsed as { t?: unknown }).t !== "ctrl"
+      ) {
+        return;
+      }
+      const p = (parsed as { p?: { t?: unknown; ok?: unknown } }).p;
+      if (p?.t !== "open_ack") return;
+      if (p.ok !== true) {
+        clearTimeout(timer);
+        try {
+          ws.close();
+        } catch {
+          /* ignore */
+        }
+        settle(false);
+        return;
+      }
+      ws.send(JSON.stringify({ t: "ctrl", p: { t: "close", intent: "kill" } }));
+      try {
+        ws.close();
+      } catch {
+        /* ignore */
+      }
+    };
+    ws.onerror = (): void => {
+      clearTimeout(timer);
+      settle(false);
+    };
+    ws.onclose = (): void => {
+      clearTimeout(timer);
+      void (async () => {
+        for (let elapsed = 0; elapsed < 1_000; elapsed += 50) {
+          await sleep(50);
+          if (!alive()) {
+            settle(true);
+            return;
+          }
+        }
+        settle(false);
+      })();
+    };
+  });
+  return killed;
 };
 
 const kill = async (session: TBrokerSessionRow): Promise<number> => {
