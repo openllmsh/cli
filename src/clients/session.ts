@@ -38,11 +38,9 @@ import { buildLiveJson, writeLiveJson } from "./live";
 import type { TClient, TClientFlags, TDaemonCli } from "./registry";
 import {
   buildSessionChoices,
-  defaultPick,
   formatSessionPrompt,
   resolveById,
   resolvePick,
-  type TSessionChoice,
 } from "./session-picker";
 
 /** `~/.openllm/run` — every ephemeral per-launch overlay lives here. */
@@ -380,11 +378,12 @@ const chooseRunningSession = async (args: {
   }
 
   if (args.flags.attach !== null) {
+    // Bare `--attach` (no id) still means "join something" — prefer the
+    // same-cwd session when one exists, otherwise the first listed row.
+    // Interactive Enter defaults to NEW; only the explicit flag auto-attaches.
     if (args.flags.attach.length === 0) {
-      const preferred = defaultPick(choices);
-      return preferred.kind === "attach"
-        ? preferred.session
-        : ((choices[0] as TSessionChoice).session ?? null);
+      const preferred = choices.find((choice) => choice.sameCwd) ?? choices[0];
+      return preferred?.session ?? null;
     }
     const resolved = resolveById(
       choices.map((choice) => choice.session),

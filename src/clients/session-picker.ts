@@ -38,9 +38,9 @@ export type TSessionPick =
 /**
  * Sessions for THIS client, most-relevant first: same working directory before
  * anything else, then newest. Attaching adopts the session's cwd, not the
- * caller's, so a same-cwd session is the only one that behaves like the
- * `openllm <client>` the user just typed — hence it sorts first and is the
- * default.
+ * caller's, so a same-cwd session is the closest match to the command the user
+ * just typed — it sorts first and is the natural number to type. It is NOT the
+ * bare-Enter default: Enter always starts a new session (see {@link defaultPick}).
  */
 export const buildSessionChoices = (
   sessions: readonly TLiveSessionHost[],
@@ -57,18 +57,13 @@ export const buildSessionChoices = (
     .map((choice, position) => ({ ...choice, index: position + 1 }));
 
 /**
- * Bare Enter attaches to a same-cwd session when one exists, and otherwise
- * starts a new one — never silently drop the user into a CLI rooted in some
- * unrelated directory.
+ * Bare Enter always starts a new session. Attach only when the user types a
+ * listed number (or a unique session-id prefix) — never hijack an existing
+ * PTY by accident on a reflexive Enter.
  */
 export const defaultPick = (
-  choices: readonly TSessionChoice[],
-): TSessionPick => {
-  const preferred = choices.find((choice) => choice.sameCwd);
-  return preferred === undefined
-    ? { kind: "new" }
-    : { kind: "attach", session: preferred.session };
-};
+  _choices: readonly TSessionChoice[],
+): TSessionPick => ({ kind: "new" });
 
 /** Resolve an exact id or a unique non-empty prefix. */
 export const resolveById = <T extends { readonly id: string }>(
@@ -158,16 +153,11 @@ export const formatSessionPrompt = (
       )}  ${row.age}${row.here ? "  ← this directory" : ""}`,
   );
   const noun = choices.length === 1 ? "session is" : "sessions are";
-  const fallback = defaultPick(choices);
-  const hint =
-    fallback.kind === "new"
-      ? "[number to attach, Enter for a new session]"
-      : "[number to attach, n for a new session, Enter to attach the one in this directory]";
   return [
     `${choices.length} ${args.clientName} ${noun} already running on this machine:`,
     ...lines,
     `  ${pad("n", numberWidth)}  start a new session`,
     "",
-    `${hint} `,
+    "[number to attach, Enter for a new session] ",
   ].join("\n");
 };

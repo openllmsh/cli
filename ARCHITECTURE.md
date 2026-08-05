@@ -104,18 +104,20 @@ live PTY (the same path as `openllm sessions attach`), never a vendor
 screen per consumer size, so a second viewer neither kicks the first nor
 disturbs its geometry.
 
-Ordering and the bare-Enter default are directory-first, because attaching
-adopts the SESSION's cwd rather than the caller's — a same-cwd session is the
-only one that behaves like the command the user just typed. `--new` skips the
-offer; `--attach [id]` takes it without asking. Passing any client argument
-(`openllm claude --resume x`) also skips it — those describe a NEW invocation
-that an already-running process can never receive. The prompt is skipped
-entirely
-for any invocation `brokerEligible` already rejects (non-TTY, `-r`, print mode,
-and — critically — inside a device session, where `OPENLLM_DEVICE_SESSION_ID`
-prevents a session from offering itself). Picker logic lives in
-`clients/session-picker.ts` (pure, unit-tested); `clients/session.ts` owns the
-terminal read.
+Ordering is directory-first (same cwd, then newest) so the most relevant
+session is listed as `1`, but bare Enter always starts a NEW session — attach
+only when the user types a listed number (or a unique id prefix). Attaching
+adopts the SESSION's cwd rather than the caller's, so auto-attaching on a
+reflexive Enter would silently drop the user into another project's tree.
+`--new` skips the offer; `--attach [id]` takes it without asking (bare
+`--attach` prefers same-cwd, else the first listed row). Passing any client
+argument (`openllm claude --resume x`) also skips it — those describe a NEW
+invocation that an already-running process can never receive. The prompt is
+skipped entirely for any invocation `brokerEligible` already rejects
+(non-TTY, `-r`, print mode, and — critically — inside a device session, where
+`OPENLLM_DEVICE_SESSION_ID` prevents a session from offering itself). Picker
+logic lives in `clients/session-picker.ts` (pure, unit-tested);
+`clients/session.ts` owns the terminal read.
 
 ## 3. The generated SDK (why the mirror is self-contained)
 
