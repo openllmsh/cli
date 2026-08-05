@@ -153,6 +153,10 @@ which 307-redirects subscription hops back to a live daemon.
 };
 
 const main = async (): Promise<void> => {
+  if (clientFlags.sessionSelectionError !== undefined) {
+    process.stderr.write(`[openllm] ${clientFlags.sessionSelectionError}\n`);
+    process.exit(2);
+  }
   const rest = clientFlags.rest.slice(1);
 
   // Client subcommands are dispatched from the registry (the SSOT) rather than

@@ -227,19 +227,18 @@ const launchDurableSessionHost = async (args: {
   const id = crypto.randomUUID();
   const terminalCols = process.stdout.columns ?? 80;
   const terminalRows = process.stdout.rows ?? 24;
-  const spawned = spawnSessionHost({
-    binary,
-    argv: sessionHostSpawnArgv({
-      id,
-      cli,
-      cols: terminalCols,
-      rows: terminalRows,
-      cwd: process.cwd(),
-      title: basename(process.cwd()),
-      dangerous: args.dangerous,
-      vendorArgs: args.forwarded,
-    }),
+  const argv = sessionHostSpawnArgv({
+    id,
+    cli,
+    cols: terminalCols,
+    rows: terminalRows,
+    cwd: process.cwd(),
+    title: basename(process.cwd()),
+    dangerous: args.dangerous,
+    vendorArgs: args.forwarded,
   });
+  if (argv === null) return null;
+  const spawned = spawnSessionHost({ binary, argv });
   if (spawned === null) return null;
   const socketPath = await waitForSessionHostSocket(id);
   if (socketPath === null) {
@@ -513,7 +512,11 @@ export const runSessionClient = async (
       // `bun main.ts`), `process.execPath` is `bun`, which would make those MCP
       // entries launch bun with no script. The daemon carries the shim path in
       // `OPENLLM_BIN_OVERRIDE` so MCP resolves to a real runnable `openllm`.
-      binPath: process.env.OPENLLM_BIN_OVERRIDE ?? process.execPath,
+      binPath:
+        process.env.OPENLLM_BIN_OVERRIDE !== undefined &&
+        process.env.OPENLLM_BIN_OVERRIDE.length > 0
+          ? process.env.OPENLLM_BIN_OVERRIDE
+          : process.execPath,
       runDir,
       stateDir: contextStateDir(),
       userConfig: readUserConfig(client),

@@ -201,6 +201,8 @@ export type TClientFlags = {
    * this client and directory. Null means the flag was absent.
    */
   readonly attach: string | null;
+  /** Incompatible session-selection flags detected before client dispatch. */
+  readonly sessionSelectionError?: string;
   /** Everything from the client name onward, in order and untouched. */
   readonly rest: readonly string[];
 };
@@ -219,6 +221,7 @@ export const parseClientFlags = (args: readonly string[]): TClientFlags => {
   let remote = false;
   let fresh = false;
   let attach: string | null = null;
+  let sessionSelectionError: string | undefined;
   let i = 0;
   for (; i < args.length; i += 1) {
     const arg = args[i];
@@ -235,20 +238,27 @@ export const parseClientFlags = (args: readonly string[]): TClientFlags => {
     // silent. Session selection is rare enough that spelling it out is fine.
     if (arg === "--new") {
       fresh = true;
+      if (attach !== null)
+        sessionSelectionError = "--new cannot be combined with --attach";
       continue;
     }
     if (arg === "--attach") {
+      if (fresh)
+        sessionSelectionError = "--new cannot be combined with --attach";
       // A bare `--attach` means "best match"; an id may follow. The next token
       // is only consumed when it cannot be the client name or another flag.
       const next = args[i + 1];
-      const takesValue =
-        next !== undefined &&
-        !next.startsWith("-") &&
-        !isClientId(next) &&
+      if (next !== undefined && !next.startsWith("-") && !isClientId(next)) {
         // Session ids are uuids; a prefix is only usable at 4+ chars anyway.
-        /^[A-Za-z0-9][A-Za-z0-9_-]{3,}$/.test(next);
-      attach = takesValue ? (next as string) : "";
-      if (takesValue) i += 1;
+        if (!/^[A-Za-z0-9][A-Za-z0-9_-]{3,}$/.test(next)) {
+          sessionSelectionError = `invalid --attach selector: ${next}`;
+          break;
+        }
+        attach = next;
+        i += 1;
+        continue;
+      }
+      attach = "";
       continue;
     }
     // Combined short form (`-dr`), since these are ours and take no values.
@@ -259,5 +269,12 @@ export const parseClientFlags = (args: readonly string[]): TClientFlags => {
     }
     break; // the client name (or an unknown flag) — everything from here is not ours
   }
-  return { dangerous, remote, fresh, attach, rest: args.slice(i) };
+  return {
+    dangerous,
+    remote,
+    fresh,
+    attach,
+    ...(sessionSelectionError === undefined ? {} : { sessionSelectionError }),
+    rest: args.slice(i),
+  };
 };

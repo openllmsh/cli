@@ -221,6 +221,13 @@ export const attachBrokerSession = async (args: {
       process.off("SIGWINCH", onResize);
       process.off("SIGINT", onDetachSignal);
       process.off("SIGTERM", onDetachSignal);
+      if (
+        ws !== null &&
+        ws.readyState !== WebSocket.CLOSING &&
+        ws.readyState !== WebSocket.CLOSED
+      ) {
+        ws.close();
+      }
       if (raw) restoreTerminal(io.stdin, io.stdout);
       resolve(result);
     };
@@ -258,6 +265,7 @@ export const attachBrokerSession = async (args: {
      * Interactive mode still scans for Ctrl-] detach.
      */
     let pipeCtrlBuf = "";
+    let pipeCtrlOverflow = false;
     /** When this terminal last claimed focus — see `shouldClaimFocusOnInput`. */
     let lastFocusClaimAtMs = 0;
     const onData = (chunk: Buffer): void => {
@@ -265,44 +273,52 @@ export const attachBrokerSession = async (args: {
       if (pipe) {
         let i = 0;
         while (i < chunk.length) {
-          if (pipeCtrlBuf.length > 0 || chunk[i] === 0x1e) {
-            if (pipeCtrlBuf.length === 0) i += 1; // skip RS
+          if (pipeCtrlOverflow || pipeCtrlBuf.length > 0 || chunk[i] === 0x1e) {
+            if (!pipeCtrlOverflow && pipeCtrlBuf.length === 0) i += 1; // skip RS
             while (i < chunk.length) {
               const b = chunk[i] ?? 0;
               i += 1;
               if (b === 0x0a) {
-                try {
-                  const ctrl = JSON.parse(pipeCtrlBuf) as {
-                    t?: string;
-                    cols?: number;
-                    rows?: number;
-                    intent?: string;
-                  };
-                  if (
-                    ctrl.t === "resize" &&
-                    typeof ctrl.cols === "number" &&
-                    typeof ctrl.rows === "number"
-                  ) {
-                    ws.send(
-                      brokerEnvelope("ctrl", {
-                        p: { t: "resize", cols: ctrl.cols, rows: ctrl.rows },
-                      }),
-                    );
-                  } else if (ctrl.t === "focus") {
-                    // Browser owns focus in pipe mode — forward opaquely.
-                    ws.send(brokerEnvelope("ctrl", { p: { t: "focus" } }));
-                  } else if (ctrl.t === "close") {
-                    close(ctrl.intent === "kill" ? "kill" : "detach");
-                    settle({ kind: "completed", code: 0 });
+                if (!pipeCtrlOverflow) {
+                  try {
+                    const ctrl = JSON.parse(pipeCtrlBuf) as {
+                      t?: string;
+                      cols?: number;
+                      rows?: number;
+                      intent?: string;
+                    };
+                    if (
+                      ctrl.t === "resize" &&
+                      typeof ctrl.cols === "number" &&
+                      typeof ctrl.rows === "number"
+                    ) {
+                      ws.send(
+                        brokerEnvelope("ctrl", {
+                          p: { t: "resize", cols: ctrl.cols, rows: ctrl.rows },
+                        }),
+                      );
+                    } else if (ctrl.t === "focus") {
+                      // Browser owns focus in pipe mode — forward opaquely.
+                      ws.send(brokerEnvelope("ctrl", { p: { t: "focus" } }));
+                    } else if (ctrl.t === "close") {
+                      close(ctrl.intent === "kill" ? "kill" : "detach");
+                      settle({ kind: "completed", code: 0 });
+                    }
+                  } catch {
+                    // Malformed control — drop and keep streaming.
                   }
-                } catch {
-                  // Malformed control — drop and keep streaming.
                 }
                 pipeCtrlBuf = "";
+                pipeCtrlOverflow = false;
                 break;
               }
-              pipeCtrlBuf += String.fromCharCode(b);
-              if (pipeCtrlBuf.length > 512) pipeCtrlBuf = ""; // refuse runaway
+              if (!pipeCtrlOverflow) {
+                pipeCtrlBuf += String.fromCharCode(b);
+                if (pipeCtrlBuf.length > 512) {
+                  pipeCtrlBuf = "";
+                  pipeCtrlOverflow = true;
+                }
+              }
             }
             continue;
           }

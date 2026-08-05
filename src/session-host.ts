@@ -20,6 +20,8 @@ export type TSessionHostMeta = {
   readonly vendorSessionId: string | null;
   readonly title: string | null;
   readonly startedAtMs: number;
+  /** Process start identity, preventing a reused pid from impersonating a host. */
+  readonly processStartTime: string;
   readonly generation: number;
 };
 
@@ -74,20 +76,37 @@ export const isSessionHostMeta = (
     (meta.title === null || typeof meta.title === "string") &&
     typeof meta.startedAtMs === "number" &&
     Number.isFinite(meta.startedAtMs) &&
+    typeof meta.processStartTime === "string" &&
+    meta.processStartTime.length > 0 &&
     typeof meta.generation === "number" &&
     Number.isInteger(meta.generation) &&
     meta.generation >= 1
   );
 };
 
-export const sessionHostProcessAlive = (pid: number): boolean => {
+const processStartTime = (pid: number): string | null => {
   try {
-    process.kill(pid, 0);
-    return true;
+    const output = Bun.spawnSync(["ps", "-o", "lstart=", "-p", String(pid)], {
+      stdout: "pipe",
+      stderr: "ignore",
+    });
+    if (output.exitCode !== 0) return null;
+    const value = new TextDecoder().decode(output.stdout).trim();
+    return value.length > 0 ? value : null;
   } catch {
-    return false;
+    return null;
   }
 };
+
+export const sessionHostProcessAlive = (
+  meta: Pick<TSessionHostMeta, "pid" | "processStartTime">,
+): boolean => {
+  const startTime = processStartTime(meta.pid);
+  return startTime !== null && startTime === meta.processStartTime;
+};
+
+export const sessionHostProcessStartTime = (): string | null =>
+  processStartTime(process.pid);
 
 const readSessionHostMeta = (dir: string): TSessionHostMeta | null => {
   try {
@@ -146,7 +165,7 @@ export const discoverLiveSessionHosts = (): readonly TLiveSessionHost[] => {
     }
 
     // A dead pid is unambiguously stale regardless of age.
-    if (!sessionHostProcessAlive(meta.pid)) {
+    if (!sessionHostProcessAlive(meta)) {
       reapDirectory(directory);
       continue;
     }
@@ -212,10 +231,8 @@ export const sessionHostSpawnArgv = (args: {
   readonly dangerous: boolean;
   readonly resumeSessionId?: string;
   readonly vendorArgs: readonly string[];
-}): readonly string[] => {
-  if (!validSessionHostSpawnArgs(args)) {
-    throw new Error("Invalid session-host spawn arguments");
-  }
+}): readonly string[] | null => {
+  if (!validSessionHostSpawnArgs(args)) return null;
   return [
     "__session-host",
     "--id",

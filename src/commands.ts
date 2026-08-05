@@ -85,7 +85,7 @@ export const COMMANDS: readonly TCommand[] = [
   },
   {
     name: "sessions",
-    args: "[list|attach <id>|kill <id>]",
+    args: "[list|attach|kill]",
     description: "List, attach, or kill local daemon sessions",
   },
   {

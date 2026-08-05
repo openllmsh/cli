@@ -23,6 +23,7 @@ export type TBrokerSessionRow = {
   readonly attachable: boolean;
   readonly socket_path?: string;
   readonly pid?: number;
+  readonly process_start_time?: string;
 };
 
 const SESSIONS_USAGE = `usage: openllm sessions [list]
@@ -102,6 +103,7 @@ export const listSessionHosts = (): readonly TBrokerSessionRow[] =>
     attachable: true,
     socket_path: session.socketPath,
     pid: session.pid,
+    process_start_time: session.processStartTime,
   }));
 
 const requireSession = (
@@ -203,18 +205,35 @@ const sleep = async (ms: number): Promise<void> =>
   new Promise((resolve) => setTimeout(resolve, ms));
 
 /** Stop the standalone host; its SIGTERM handler closes the owned PTY cleanly. */
-export const killSessionHost = async (pid: number): Promise<boolean> => {
+export const killSessionHost = async (
+  session: Pick<TBrokerSessionRow, "pid" | "process_start_time">,
+): Promise<boolean> => {
+  if (
+    session.pid === undefined ||
+    session.process_start_time === undefined ||
+    !sessionHostProcessAlive({
+      pid: session.pid,
+      processStartTime: session.process_start_time,
+    })
+  )
+    return false;
   try {
-    process.kill(pid, "SIGTERM");
+    process.kill(session.pid, "SIGTERM");
   } catch {
     return false;
   }
   for (let elapsed = 0; elapsed < 1_000; elapsed += 50) {
     await sleep(50);
-    if (!sessionHostProcessAlive(pid)) return true;
+    if (
+      !sessionHostProcessAlive({
+        pid: session.pid,
+        processStartTime: session.process_start_time,
+      })
+    )
+      return true;
   }
   try {
-    process.kill(pid, "SIGKILL");
+    process.kill(session.pid, "SIGKILL");
     return true;
   } catch {
     return false;
@@ -222,7 +241,7 @@ export const killSessionHost = async (pid: number): Promise<boolean> => {
 };
 
 const kill = async (session: TBrokerSessionRow): Promise<number> => {
-  if (session.pid === undefined || !(await killSessionHost(session.pid))) {
+  if (!(await killSessionHost(session))) {
     process.stderr.write(`[openllm] could not kill session ${session.id}\n`);
     return 1;
   }
