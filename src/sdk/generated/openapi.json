@@ -10315,7 +10315,12 @@
                           "device_access_pubkey": {
                             "anyOf": [
                               {
-                                "type": "string"
+                                "type": "string",
+                                "description": "a string matching the pattern ^[A-Za-z0-9+/]{59}=$",
+                                "title": "maxLength(60)",
+                                "minLength": 60,
+                                "maxLength": 60,
+                                "pattern": "^[A-Za-z0-9+/]{59}=$"
                               },
                               {
                                 "type": "null"
@@ -10554,7 +10559,7 @@
         "security": [],
         "responses": {
           "201": {
-            "description": "Success",
+            "description": "device_access_provisioned must match device_access_pubkey presence",
             "content": {
               "application/json": {
                 "schema": {
@@ -10565,7 +10570,8 @@
                     "alias",
                     "vault_version",
                     "created_at",
-                    "device_access_provisioned"
+                    "device_access_provisioned",
+                    "device_access_pubkey"
                   ],
                   "properties": {
                     "id": {
@@ -10592,6 +10598,21 @@
                     },
                     "device_access_provisioned": {
                       "type": "boolean"
+                    },
+                    "device_access_pubkey": {
+                      "anyOf": [
+                        {
+                          "type": "string",
+                          "description": "a string matching the pattern ^[A-Za-z0-9+/]{59}=$",
+                          "title": "maxLength(60)",
+                          "minLength": 60,
+                          "maxLength": 60,
+                          "pattern": "^[A-Za-z0-9+/]{59}=$"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
                     }
                   },
                   "additionalProperties": false
@@ -10848,10 +10869,11 @@
                   },
                   "device_access_pubkey": {
                     "type": "string",
-                    "description": "a string at most 64 character(s) long",
-                    "title": "maxLength(64)",
-                    "minLength": 1,
-                    "maxLength": 64
+                    "description": "a string matching the pattern ^[A-Za-z0-9+/]{59}=$",
+                    "title": "maxLength(60)",
+                    "minLength": 60,
+                    "maxLength": 60,
+                    "pattern": "^[A-Za-z0-9+/]{59}=$"
                   }
                 },
                 "additionalProperties": false
@@ -11408,7 +11430,7 @@
         "security": [],
         "responses": {
           "200": {
-            "description": "Success",
+            "description": "device_access_provisioned must match device_access_pubkey presence",
             "content": {
               "application/json": {
                 "schema": {
@@ -11625,7 +11647,12 @@
                     "device_access_pubkey": {
                       "anyOf": [
                         {
-                          "type": "string"
+                          "type": "string",
+                          "description": "a string matching the pattern ^[A-Za-z0-9+/]{59}=$",
+                          "title": "maxLength(60)",
+                          "minLength": 60,
+                          "maxLength": 60,
+                          "pattern": "^[A-Za-z0-9+/]{59}=$"
                         },
                         {
                           "type": "null"
@@ -11862,10 +11889,11 @@
                 "properties": {
                   "device_access_pubkey": {
                     "type": "string",
-                    "description": "a string at most 64 character(s) long",
-                    "title": "maxLength(64)",
-                    "minLength": 1,
-                    "maxLength": 64
+                    "description": "a string matching the pattern ^[A-Za-z0-9+/]{59}=$",
+                    "title": "maxLength(60)",
+                    "minLength": 60,
+                    "maxLength": 60,
+                    "pattern": "^[A-Za-z0-9+/]{59}=$"
                   },
                   "vault_version": {
                     "type": "number"
