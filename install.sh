@@ -115,10 +115,13 @@ else
     || die "checksum mismatch (expected $PUBLISHED, got $ACTUAL) — refusing to install"
   chmod 0755 "$BIN"
   mv -f "$BIN" "$DEST"
+  # Preserve a valid Developer ID / notarized signature; only ad-hoc when invalid.
   if [ "$OS" = "darwin" ]; then
     xattr -d com.apple.quarantine "$DEST" >/dev/null 2>&1 || true
-    codesign --force --sign - "$DEST" >/dev/null 2>&1 || true
-    printf '%s %s\n' "$PUBLISHED" "$(sha256_of "$DEST")" > "$STAMP" 2>/dev/null || true
+    if ! codesign --verify "$DEST" >/dev/null 2>&1; then
+      codesign --force --sign - "$DEST" >/dev/null 2>&1 || true
+      printf '%s %s\n' "$PUBLISHED" "$(sha256_of "$DEST")" > "$STAMP" 2>/dev/null || true
+    fi
   fi
   echo "  openllm installed → $DEST"
 fi
