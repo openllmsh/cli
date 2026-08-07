@@ -29,7 +29,7 @@ import {
 } from "./claude-context";
 import {
   handleOpenllmTool,
-  isOpenllmTool,
+  isMcpListedTool,
   openllmToolDefs,
 } from "./openllm/tools";
 import {
@@ -84,7 +84,7 @@ export const runMcpServer = async (groups: readonly TMcpGroup[]) => {
     if (groups.includes("supermemory") && isSupermemoryTool(name)) {
       return handleSupermemoryTool(name, a, supermemoryConfig);
     }
-    if (groups.includes("openllm") && isOpenllmTool(name)) {
+    if (groups.includes("openllm") && isMcpListedTool(name)) {
       return handleOpenllmTool(name, a, gatewayConfig);
     }
     return {

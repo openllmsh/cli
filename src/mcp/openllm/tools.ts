@@ -83,7 +83,13 @@ const isMcpExposed = (op: TApiOperation): boolean => {
   return true;
 };
 
-const toolDef = (op: TApiOperation) => ({
+type TToolDef = {
+  name: string;
+  description: string;
+  inputSchema: Record<string, unknown>;
+};
+
+const toolDef = (op: TApiOperation): TToolDef => ({
   name: toolNameFor(op),
   description: descriptionFor(op),
   inputSchema: inputSchemaFor(op),
@@ -98,7 +104,22 @@ export const openllmToolDefsAll = API_OPERATIONS.map(toolDef);
  *  `openllm mcp` server lists THIS. */
 export const openllmToolDefs = API_OPERATIONS.filter(isMcpExposed).map(toolDef);
 
+/** Names in the MCP-exposed subset. The `openllm mcp` server gates CallTool
+ *  on THIS — not `isOpenllmTool` — so a client cannot invoke a hidden
+ *  (generated-but-untrimmed) operation it was never offered. */
+const mcpListedNames = new Set(openllmToolDefs.map((t) => t.name));
+
+/** True when `name` is a native-API tool the CLI can EXECUTE. The full set
+ *  (every generated operation) — used by the browser chat bridge, which
+ *  exposes the whole surface. NOT an authorization gate for the MCP server;
+ *  that uses `isMcpListedTool`. */
 export const isOpenllmTool = (name: string): boolean => byToolName.has(name);
+
+/** True when `name` is in the MCP-LISTED subset (`openllmToolDefs`). The
+ *  `openllm mcp` CallTool handler uses this to reject tools it never
+ *  advertised, so trimming ListTools also trims what can be invoked. */
+export const isMcpListedTool = (name: string): boolean =>
+  mcpListedNames.has(name);
 
 export const handleOpenllmTool = async (
   name: string,
