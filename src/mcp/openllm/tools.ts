@@ -1,9 +1,14 @@
 /**
- * openllm native-API tool group — every operation in the generated OpenAPI
- * spec becomes an MCP tool. The tool surface is DERIVED from the committed
- * SDK artifacts (`../../sdk/generated/operations.ts`), so coverage tracks
- * the spec automatically — no hand-picked subset. Mutating operations
- * (post/put/patch/delete) carry explicit consent copy in their descriptions.
+ * openllm native-API tool group — derived from the committed SDK artifacts
+ * (`../../sdk/generated/operations.ts`), so it tracks the spec automatically.
+ * Two surfaces are exported:
+ *   - `openllmToolDefsAll` — every operation (browser chat + execution).
+ *   - `openllmToolDefs`    — the MCP-listed subset (`isMcpExposed`), trimmed
+ *                            to cut agent context bloat.
+ * Execution (`byToolName` / `handleOpenllmTool`) always covers the FULL set,
+ * so trimming ListTools never makes an operation uncallable. Mutating
+ * operations (post/put/patch/delete) carry explicit consent copy in their
+ * descriptions.
  */
 
 import { callOperation } from "../../sdk/client";
@@ -63,11 +68,35 @@ const byToolName = new Map<string, TApiOperation>(
   API_OPERATIONS.map((op) => [toolNameFor(op), op]),
 );
 
-export const openllmToolDefs = API_OPERATIONS.map((op) => ({
+/** Which operations surface as MCP tools an agent SEES (ListTools). This
+ *  trims context bloat; it does NOT gate execution — `byToolName` above
+ *  keeps every operation callable, and the browser chat imports the full
+ *  `openllmToolDefsAll` below. Denylist:
+ *   1. `/plugins/*` — the curated `claude-context` + `supermemory` MCP
+ *      groups already expose these better; the raw HTTP mirrors are dupes.
+ *   2. Non-`/v1/*` mutations (post/put/patch/delete) — account/config/
+ *      vault/keys/sessions/credentials writes an agent shouldn't drive
+ *      through MCP. Inference (`/v1/*`) and all read-only GETs stay. */
+const isMcpExposed = (op: TApiOperation): boolean => {
+  if (op.path.startsWith("/plugins/")) return false;
+  if (MUTATING.has(op.method) && !op.path.startsWith("/v1/")) return false;
+  return true;
+};
+
+const toolDef = (op: TApiOperation) => ({
   name: toolNameFor(op),
   description: descriptionFor(op),
   inputSchema: inputSchemaFor(op),
-}));
+});
+
+/** The FULL native-API tool surface — every operation. Consumed by the
+ *  browser chat tool bridge (`lib/chat/tools.ts`), which intentionally
+ *  exposes inference + account ops for in-chat delegation. */
+export const openllmToolDefsAll = API_OPERATIONS.map(toolDef);
+
+/** The MCP-exposed surface — trimmed to reduce agent context. The
+ *  `openllm mcp` server lists THIS. */
+export const openllmToolDefs = API_OPERATIONS.filter(isMcpExposed).map(toolDef);
 
 export const isOpenllmTool = (name: string): boolean => byToolName.has(name);
 

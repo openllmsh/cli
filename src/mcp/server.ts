@@ -3,8 +3,10 @@
  * single stdio transport, registered in `~/.claude.json` as the single
  * `mcpServers.openllm` entry:
  *
- *   - openllm         — the native gateway API (EVERY operation in the
- *                       generated OpenAPI spec; coverage tracks the spec)
+ *   - openllm         — the native gateway API (the MCP-exposed subset of
+ *                       the generated OpenAPI spec — inference + read-only
+ *                       ops; account/config writes + raw plugin mirrors are
+ *                       trimmed to cut context. See `openllm/tools.ts`.)
  *   - claude-context  — semantic code + docs search (gateway dispatch)
  *   - supermemory     — persistent memory / recall (gateway dispatch)
  *

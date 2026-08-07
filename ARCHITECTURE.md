@@ -8,8 +8,9 @@
 >     its embedded `setup/<client>/` overlay at RUN time — session clients never
 >     have their config written, and Raycast (the one always-on client) gets an
 >     explicit, reversible in-place apply;
->  2. serves ONE MCP server exposing the full native gateway API plus the
->     claude-context and supermemory tool groups.
+>  2. serves ONE MCP server exposing the MCP-relevant subset of the native
+>     gateway API (inference + read-only ops; §MCP) plus the claude-context
+>     and supermemory tool groups.
 >
 > Installed by `install.sh` at the repo root (or by the daemon's installer,
 > which installs both binaries), self-updating against the gateway's pinned
@@ -58,7 +59,7 @@ packages/cli/
     │   └── client.ts     # thin fetch wrapper over the operations table
     └── mcp/
         ├── server.ts     # the ONE server: composes every tool group over stdio
-        ├── openllm/      # native-API tools — generated from ALL spec operations
+        ├── openllm/      # native-API tools — MCP-exposed subset of spec ops
         ├── claude-context/  # code+docs search tools + the ctx hook CLI
         └── supermemory/     # memory/recall/whoAmI tools
 ```
@@ -131,9 +132,15 @@ COMMITTED artifacts into `src/sdk/generated/`:
 - `operations.ts` — a dependency-free typed table: one row per spec operation
   (method, path, params, body-presence). Deterministically sorted.
 
-`src/mcp/openllm/tools.ts` derives one MCP tool per row — **every** spec
-operation, no hand-picked subset; coverage tracks the spec. Mutating
-operations carry explicit consent copy in their tool descriptions.
+`src/mcp/openllm/tools.ts` derives one tool def per row and exports two
+surfaces: `openllmToolDefsAll` (**every** operation — the browser chat and the
+execution map use it) and `openllmToolDefs`, the MCP-listed subset. The MCP
+subset (`isMcpExposed`) keeps inference (`/v1/*`) + read-only ops and drops
+account/config/vault writes plus the raw `/plugins/*` HTTP mirrors (the curated
+`claude-context` + `supermemory` groups already cover those) — trimming ListTools
+to cut agent context. Execution still recognizes every operation, so a trimmed
+tool is never uncallable. Mutating operations carry explicit consent copy in
+their tool descriptions.
 
 Because the artifacts are committed, `packages/cli` has **zero runtime
 workspace deps** — the public `cli` mirror builds standalone
