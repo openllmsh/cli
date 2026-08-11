@@ -31,7 +31,12 @@ import {
   waitForSessionHostSocket,
 } from "../session-host";
 import { attachBrokerSession } from "./attach";
-import { contextStateDir, fetchModelCatalog, resolveGateway } from "./gateway";
+import {
+  contextStateDir,
+  fetchModelCatalog,
+  fetchTier,
+  resolveGateway,
+} from "./gateway";
 import { HOOK_SCRIPTS } from "./hooks";
 import { buildLaunchPlan, type TLaunchPlan } from "./launch";
 import { buildLiveJson, writeLiveJson } from "./live";
@@ -494,10 +499,14 @@ export const runSessionClient = async (
     return 127;
   }
 
-  const catalog =
+  // Catalog + tier are independent gateway reads — fetch them together. Tier
+  // gates the code-search MCP group (free tier drops it); both fail open.
+  const [catalog, tier] = await Promise.all([
     client.catalogSlug === undefined
-      ? null
-      : await fetchModelCatalog(gateway, client.catalogSlug);
+      ? Promise.resolve(null)
+      : fetchModelCatalog(gateway, client.catalogSlug),
+    fetchTier(gateway),
+  ]);
 
   const runDir = createRunDir(client.id);
   let code = 1;
@@ -521,6 +530,7 @@ export const runSessionClient = async (
       stateDir: contextStateDir(),
       userConfig: readUserConfig(client),
       catalog: catalog ?? undefined,
+      tier,
     });
     materialize(plan, runDir);
 
