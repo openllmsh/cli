@@ -20023,7 +20023,9 @@
                     "cancel_at_period_end",
                     "free_tier_cap",
                     "free_tier_tokens_used",
-                    "free_tier_period"
+                    "free_tier_period",
+                    "device_cap",
+                    "device_count"
                   ],
                   "properties": {
                     "status": {
@@ -20170,6 +20172,12 @@
                     },
                     "free_tier_period": {
                       "type": "string"
+                    },
+                    "device_cap": {
+                      "type": "number"
+                    },
+                    "device_count": {
+                      "type": "number"
                     }
                   },
                   "additionalProperties": false
