@@ -22,10 +22,12 @@ import { OVERLAYS } from "./overlays";
 import type { TClient } from "./registry";
 
 /**
- * Account tier, mirrored locally rather than imported from `@openllm/schema` —
- * the CLI ships as a source-free binary with a committed SDK and no workspace
- * runtime imports (see `packages/cli/ARCHITECTURE.md`). Kept in sync with the
- * schema's `TTier` by the launch tests. Only `"free"` changes launch behavior.
+ * Account tier. Only `"free"` changes launch behavior.
+ *
+ * Defined locally, NOT imported from `@openllm/schema`: the CLI ships as a
+ * self-contained binary with no workspace deps (the generated SDK is
+ * committed), so it cannot depend on `schema` even for types. Keep this union
+ * in sync with `Tier` in `packages/schema/billing.ts`.
  */
 export type TTier = "free" | "trial" | "pro";
 
@@ -366,8 +368,9 @@ const planOpenCode = (inputs: TLaunchInputs): TLaunchPlan => {
     ).replaceAll('"{{MODELS}}"', MODELS_SLOT),
     vars,
   );
-  const overlayText = substituted.replaceAll(
-    MODELS_SLOT,
+  // Callback form: a string replacement interprets `$&`/`$``/`$'`/`$n` in the
+  // catalog; a function return is inserted verbatim.
+  const overlayText = substituted.replaceAll(MODELS_SLOT, () =>
     inputs.catalog === undefined
       ? "{}"
       : fillCatalogTokens(inputs.catalog, inputs),
