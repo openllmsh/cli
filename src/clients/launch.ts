@@ -227,11 +227,7 @@ const planClaude = (inputs: TLaunchInputs): TLaunchPlan => {
       // real args ARRAY via `substituteJsonValue`, then the remaining string
       // tokens (`{{OPENLLM_BIN}}`, `{{STATE_DIR}}`) fill normally.
       "mcp.json": substitute(
-        substituteJsonValue(
-          OVERLAYS.claude.mcp,
-          "MCP_ARGS",
-          mcpArgsJson(inputs.tier),
-        ),
+        substituteJsonValue(OVERLAYS.claude.mcp, "MCP_ARGS", vars.MCP_ARGS),
         vars,
       ),
       "prompt-prefix.md": OVERLAYS.claude.promptPrefix,
@@ -354,20 +350,29 @@ const planGrok = (inputs: TLaunchInputs): TLaunchPlan => {
  */
 const planOpenCode = (inputs: TLaunchInputs): TLaunchPlan => {
   const vars = overlayVars(inputs);
-  const overlayText = substituteJsonValue(
-    substituteJsonValue(
-      OVERLAYS.opencode.config,
-      "MODELS",
-      inputs.catalog === undefined
-        ? "{}"
-        : fillCatalogTokens(inputs.catalog, inputs),
-    ),
+  // The catalog carries USER-configured model IDs/names, which may contain
+  // `{{…}}`-like sequences. It must be injected ONLY AFTER every template
+  // substitution pass has run, so `substitute` (which throws on an unknown
+  // `{{…}}`) never scans it. The models slot is parked behind a non-placeholder
+  // sentinel across the substitution passes, then filled last.
+  const MODELS_SLOT = '"__OPENLLM_MODELS_SLOT__"';
+  const substituted = substitute(
     // opencode's MCP `command` bundles the binary + args in one array; the
     // quoted `"{{MCP_COMMAND}}"` becomes that array, tier-gated.
-    "MCP_COMMAND",
-    mcpCommandJson(inputs.binPath, inputs.tier),
+    substituteJsonValue(
+      OVERLAYS.opencode.config,
+      "MCP_COMMAND",
+      mcpCommandJson(inputs.binPath, inputs.tier),
+    ).replaceAll('"{{MODELS}}"', MODELS_SLOT),
+    vars,
   );
-  const overlay = JSON.parse(substitute(overlayText, vars)) as TJsonObject;
+  const overlayText = substituted.replaceAll(
+    MODELS_SLOT,
+    inputs.catalog === undefined
+      ? "{}"
+      : fillCatalogTokens(inputs.catalog, inputs),
+  );
+  const overlay = JSON.parse(overlayText) as TJsonObject;
   const user =
     inputs.userConfig === undefined
       ? {}
