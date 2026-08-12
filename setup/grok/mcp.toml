@@ -4,5 +4,5 @@
 
 [mcp_servers.openllm]
 command = "{{OPENLLM_BIN}}"
-args = ["mcp"]
+args = {{MCP_ARGS}}
 env = { CLAUDE_CONTEXT_STATE_DIR = "{{STATE_DIR}}" }

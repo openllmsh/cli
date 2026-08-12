@@ -21,6 +21,48 @@ import {
 import { OVERLAYS } from "./overlays";
 import type { TClient } from "./registry";
 
+/**
+ * Account tier. Only `"free"` changes launch behavior.
+ *
+ * Defined locally, NOT imported from `@openllm/schema`: the CLI ships as a
+ * self-contained binary with no workspace deps (the generated SDK is
+ * committed), so it cannot depend on `schema` even for types. Keep this union
+ * in sync with `Tier` in `packages/schema/billing.ts`.
+ */
+export type TTier = "free" | "trial" | "pro";
+
+/** The MCP tool groups the free tier is allowed — code-search is paid-only. */
+const FREE_TIER_MCP_GROUPS = ["openllm", "supermemory"] as const;
+
+/**
+ * The `openllm mcp` argv for a tier. Paid tiers get the bare `["mcp"]` (all
+ * groups); free tier narrows to `["mcp","--only","openllm","--only",
+ * "supermemory"]`, excluding the paid `claude-context` code-search group. One
+ * definition → one surface for every client.
+ */
+export const mcpArgs = (tier: TTier | undefined): readonly string[] =>
+  tier === "free"
+    ? ["mcp", ...FREE_TIER_MCP_GROUPS.flatMap((g) => ["--only", g])]
+    : ["mcp"];
+
+/**
+ * The MCP argv as a JSON array literal — the value substituted into each
+ * overlay's `"{{MCP_ARGS}}"` (JSON, via `substituteJsonValue`) or `{{MCP_ARGS}}`
+ * (TOML, via `substitute`). A JSON array literal is also a valid TOML array
+ * literal, so one string serves both.
+ */
+export const mcpArgsJson = (tier: TTier | undefined): string =>
+  JSON.stringify(mcpArgs(tier));
+
+/**
+ * opencode folds the binary into the same `command` array as the args, so it
+ * gets its own `["<bin>", "mcp", …]` literal.
+ */
+export const mcpCommandJson = (
+  binPath: string,
+  tier: TTier | undefined,
+): string => JSON.stringify([binPath, ...mcpArgs(tier)]);
+
 export type TLaunchInputs = {
   readonly client: TClient;
   /** Gateway base origin (local daemon or cloud), no trailing slash. */
@@ -36,6 +78,14 @@ export type TLaunchInputs = {
   readonly userConfig?: string;
   /** Client-shaped model catalog body from the gateway, when available. */
   readonly catalog?: string;
+  /**
+   * The account tier this launch runs under. FREE tier excludes the paid
+   * code-search MCP group (`claude-context`) from the one `openllm mcp` server;
+   * `trial`/`pro` (and an unknown/undefined tier) get the full surface. Only
+   * `"free"` narrows — anything else is treated as paid, so a failed tier fetch
+   * fails OPEN to the full toolset rather than silently degrading a paying user.
+   */
+  readonly tier?: TTier;
 };
 
 export type TLaunchPlan = {
@@ -108,6 +158,11 @@ const overlayVars = (
   STATE_DIR: inputs.stateDir,
   HOOKS_DIR: `${inputs.runDir}/hooks`,
   MODEL_CATALOG_PATH: `${inputs.runDir}/models.json`,
+  // TOML overlays (grok, codex) carry `args = {{MCP_ARGS}}` at an array
+  // position; `substitute` fills it with the JSON/TOML array literal. JSON
+  // overlays instead use `substituteJsonValue` on the quoted `"{{MCP_ARGS}}"`
+  // (see each plan) so the raw overlay stays valid JSON.
+  MCP_ARGS: mcpArgsJson(inputs.tier),
 });
 
 /**
@@ -170,7 +225,13 @@ const planClaude = (inputs: TLaunchInputs): TLaunchPlan => {
         null,
         2,
       )}\n`,
-      "mcp.json": substitute(OVERLAYS.claude.mcp, vars),
+      // The quoted `"{{MCP_ARGS}}"` (valid JSON in the raw overlay) becomes the
+      // real args ARRAY via `substituteJsonValue`, then the remaining string
+      // tokens (`{{OPENLLM_BIN}}`, `{{STATE_DIR}}`) fill normally.
+      "mcp.json": substitute(
+        substituteJsonValue(OVERLAYS.claude.mcp, "MCP_ARGS", vars.MCP_ARGS),
+        vars,
+      ),
       "prompt-prefix.md": OVERLAYS.claude.promptPrefix,
     },
     execFiles: { [CLAUDE_KEY_HELPER_REL]: CLAUDE_KEY_HELPER },
@@ -291,14 +352,30 @@ const planGrok = (inputs: TLaunchInputs): TLaunchPlan => {
  */
 const planOpenCode = (inputs: TLaunchInputs): TLaunchPlan => {
   const vars = overlayVars(inputs);
-  const overlayText = substituteJsonValue(
-    OVERLAYS.opencode.config,
-    "MODELS",
+  // The catalog carries USER-configured model IDs/names, which may contain
+  // `{{…}}`-like sequences. It must be injected ONLY AFTER every template
+  // substitution pass has run, so `substitute` (which throws on an unknown
+  // `{{…}}`) never scans it. The models slot is parked behind a non-placeholder
+  // sentinel across the substitution passes, then filled last.
+  const MODELS_SLOT = '"__OPENLLM_MODELS_SLOT__"';
+  const substituted = substitute(
+    // opencode's MCP `command` bundles the binary + args in one array; the
+    // quoted `"{{MCP_COMMAND}}"` becomes that array, tier-gated.
+    substituteJsonValue(
+      OVERLAYS.opencode.config,
+      "MCP_COMMAND",
+      mcpCommandJson(inputs.binPath, inputs.tier),
+    ).replaceAll('"{{MODELS}}"', MODELS_SLOT),
+    vars,
+  );
+  // Callback form: a string replacement interprets `$&`/`$``/`$'`/`$n` in the
+  // catalog; a function return is inserted verbatim.
+  const overlayText = substituted.replaceAll(MODELS_SLOT, () =>
     inputs.catalog === undefined
       ? "{}"
       : fillCatalogTokens(inputs.catalog, inputs),
   );
-  const overlay = JSON.parse(substitute(overlayText, vars)) as TJsonObject;
+  const overlay = JSON.parse(overlayText) as TJsonObject;
   const user =
     inputs.userConfig === undefined
       ? {}

@@ -15,7 +15,7 @@
   "mcp": {
     "openllm": {
       "type": "local",
-      "command": ["{{OPENLLM_BIN}}", "mcp"],
+      "command": "{{MCP_COMMAND}}",
       "environment": {
         "CLAUDE_CONTEXT_STATE_DIR": "{{STATE_DIR}}"
       }

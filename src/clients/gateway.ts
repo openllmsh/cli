@@ -125,6 +125,34 @@ export const fetchModelCatalog = async (
   }
 };
 
+/**
+ * The account tier for this launch, read from `/api/user`'s `tier` field. Only
+ * `"free"` changes launch behavior (drops the paid code-search MCP group), so
+ * every failure mode — no key, non-200, missing/unknown field, timeout — returns
+ * `undefined`, which the launch planner treats as PAID. Failing open keeps a
+ * paying user's full toolset on a flaky read; the backend gate is the real
+ * authority either way. Best-effort and fast: a slow gateway must not stall a
+ * launch (same `CATALOG_TIMEOUT_MS` budget as the catalog fetch).
+ */
+export const fetchTier = async (
+  gateway: TGateway,
+): Promise<"free" | "trial" | "pro" | undefined> => {
+  if (gateway.apiKey.length === 0) return undefined;
+  try {
+    const res = await fetch(`${gateway.cloudOrigin}/api/user`, {
+      headers: { authorization: `Bearer ${gateway.apiKey}` },
+      signal: AbortSignal.timeout(CATALOG_TIMEOUT_MS),
+    });
+    if (!res.ok) return undefined;
+    const body = (await res.json()) as { tier?: unknown };
+    return body.tier === "free" || body.tier === "trial" || body.tier === "pro"
+      ? body.tier
+      : undefined;
+  } catch {
+    return undefined;
+  }
+};
+
 /** claude-context's on-disk state dir (wire-stable name, every client). */
 export const contextStateDir = (): string =>
   process.env.CLAUDE_CONTEXT_STATE_DIR ??
