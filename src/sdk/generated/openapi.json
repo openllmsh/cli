@@ -8771,6 +8771,14 @@
                         "additionalProperties": false
                       }
                     },
+                    "tier": {
+                      "type": "string",
+                      "enum": [
+                        "free",
+                        "trial",
+                        "pro"
+                      ]
+                    },
                     "terms_accepted_at": {
                       "anyOf": [
                         {
@@ -20012,7 +20020,12 @@
                     "trial_end",
                     "invite_trial_days",
                     "cancel_at",
-                    "cancel_at_period_end"
+                    "cancel_at_period_end",
+                    "free_tier_cap",
+                    "free_tier_tokens_used",
+                    "free_tier_period",
+                    "device_cap",
+                    "device_count"
                   ],
                   "properties": {
                     "status": {
@@ -20150,6 +20163,21 @@
                     },
                     "cancel_at_period_end": {
                       "type": "boolean"
+                    },
+                    "free_tier_cap": {
+                      "type": "number"
+                    },
+                    "free_tier_tokens_used": {
+                      "type": "number"
+                    },
+                    "free_tier_period": {
+                      "type": "string"
+                    },
+                    "device_cap": {
+                      "type": "number"
+                    },
+                    "device_count": {
+                      "type": "number"
                     }
                   },
                   "additionalProperties": false
