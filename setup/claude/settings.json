@@ -1,5 +1,8 @@
 {
-  "model": "ultra[1m]",
+  "model": "ultra",
+  "env": {
+    "CLAUDE_CODE_MAX_CONTEXT_TOKENS": "1000000"
+  },
   "statusLine": {
     "type": "command",
     "command": "{{HOOKS_DIR}}/statusline.sh"
