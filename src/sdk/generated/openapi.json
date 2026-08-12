@@ -14305,6 +14305,16 @@
                           },
                           "created_at": {
                             "type": "string"
+                          },
+                          "filename": {
+                            "anyOf": [
+                              {
+                                "type": "string"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
                           }
                         },
                         "additionalProperties": false
