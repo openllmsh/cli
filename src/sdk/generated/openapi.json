@@ -430,6 +430,9 @@
                                                     },
                                                     "filename": {
                                                       "type": "string"
+                                                    },
+                                                    "url": {
+                                                      "type": "string"
                                                     }
                                                   },
                                                   "additionalProperties": false
@@ -1093,6 +1096,9 @@
                                               },
                                               "filename": {
                                                 "type": "string"
+                                              },
+                                              "url": {
+                                                "type": "string"
                                               }
                                             },
                                             "additionalProperties": false
@@ -1336,6 +1342,9 @@
                                                 "type": "string"
                                               },
                                               "filename": {
+                                                "type": "string"
+                                              },
+                                              "url": {
                                                 "type": "string"
                                               }
                                             },
@@ -1581,6 +1590,9 @@
                                                     "type": "string"
                                                   },
                                                   "filename": {
+                                                    "type": "string"
+                                                  },
+                                                  "url": {
                                                     "type": "string"
                                                   }
                                                 },
@@ -1954,6 +1966,9 @@
                                                 "type": "string"
                                               },
                                               "filename": {
+                                                "type": "string"
+                                              },
+                                              "url": {
                                                 "type": "string"
                                               }
                                             },
@@ -14234,7 +14249,8 @@
               "enum": [
                 "image",
                 "audio",
-                "video"
+                "video",
+                "document"
               ]
             },
             "required": false
@@ -14274,7 +14290,8 @@
                             "enum": [
                               "image",
                               "audio",
-                              "video"
+                              "video",
+                              "document"
                             ]
                           },
                           "url": {
