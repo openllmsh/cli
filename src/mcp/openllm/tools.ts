@@ -14,7 +14,7 @@
 import { callOperation } from "../../sdk/client";
 import type { TApiOperation } from "../../sdk/generated/operations";
 import { API_OPERATIONS } from "../../sdk/generated/operations";
-import type { TToolResult } from "../types";
+import type { TToolResult, TToolResultContent } from "../types";
 
 /** MCP tool names must match `[a-zA-Z0-9_-]+` — sanitize the operation id.
  *  Exported: the browser chat's tool bridge maps operations back to tool
@@ -23,6 +23,8 @@ export const toolNameFor = (op: TApiOperation): string =>
   `api_${op.id.replace(/[^a-zA-Z0-9_-]+/g, "_")}`;
 
 const MUTATING = new Set(["post", "put", "patch", "delete"]);
+const MEDIA_FETCH_TIMEOUT_MS = 30_000;
+const REQUEST_TIMEOUT_MS = 120_000;
 
 const descriptionFor = (op: TApiOperation): string => {
   const base =
@@ -121,6 +123,179 @@ export const isOpenllmTool = (name: string): boolean => byToolName.has(name);
 export const isMcpListedTool = (name: string): boolean =>
   mcpListedNames.has(name);
 
+const textResult = (text: string, isError = false): TToolResult => ({
+  content: [{ type: "text", text }],
+  ...(isError ? { isError: true } : {}),
+});
+
+const base64FromBytes = (bytes: ArrayBuffer): string => {
+  const byteString = Array.from(new Uint8Array(bytes), (byte) =>
+    String.fromCharCode(byte),
+  ).join("");
+  return btoa(byteString);
+};
+
+const resolveRawOperationUrl = (
+  config: { readonly baseUrl: string },
+  op: TApiOperation,
+  args: Record<string, unknown>,
+): string => {
+  let path = op.path;
+  for (const param of op.pathParams) {
+    const value = args[param];
+    if (value === undefined || value === null || String(value).length === 0) {
+      throw new Error(`missing required path parameter "${param}"`);
+    }
+    path = path.replace(`{${param}}`, encodeURIComponent(String(value)));
+  }
+  const url = new URL(
+    path.startsWith("/v1/") ? path : `/api${path}`,
+    config.baseUrl,
+  );
+  for (const query of op.queryParams) {
+    const value = args[query.name];
+    if (value === undefined || value === null) {
+      if (query.required) {
+        throw new Error(`missing required query parameter "${query.name}"`);
+      }
+      continue;
+    }
+    url.searchParams.set(query.name, String(value));
+  }
+  return url.toString();
+};
+
+const responseErrorResult = async (res: Response): Promise<TToolResult> => {
+  const text = await res.text().catch(() => "");
+  return textResult(`HTTP ${res.status}: ${text}`, true);
+};
+
+const imageContentFromUrl = async (
+  url: string,
+): Promise<Extract<TToolResultContent, { type: "image" }>> => {
+  const res = await fetch(url, {
+    signal: AbortSignal.timeout(MEDIA_FETCH_TIMEOUT_MS),
+  });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  return {
+    type: "image",
+    data: base64FromBytes(await res.arrayBuffer()),
+    mimeType: res.headers.get("content-type") ?? "image/png",
+  };
+};
+
+type TImageGenerationItem = {
+  readonly url?: unknown;
+  readonly b64_json?: unknown;
+  readonly revised_prompt?: unknown;
+};
+
+const isImageGenerationBody = (
+  body: unknown,
+): body is { readonly data: ReadonlyArray<TImageGenerationItem> } =>
+  typeof body === "object" &&
+  body !== null &&
+  "data" in body &&
+  Array.isArray(body.data);
+
+const imageResult = async (body: unknown): Promise<TToolResult> => {
+  if (!isImageGenerationBody(body)) {
+    return textResult(JSON.stringify(body, null, 2));
+  }
+
+  const urls: string[] = [];
+  const revisedPrompts: string[] = [];
+  const content: TToolResultContent[] = [];
+  for (const item of body.data) {
+    const url = typeof item.url === "string" ? item.url : null;
+    if (url !== null) urls.push(url);
+    if (typeof item.revised_prompt === "string") {
+      revisedPrompts.push(item.revised_prompt);
+    }
+
+    if (typeof item.b64_json === "string") {
+      content.push({
+        type: "image",
+        data: item.b64_json,
+        mimeType: "image/png",
+      });
+      continue;
+    }
+    if (url === null) continue;
+
+    try {
+      content.push(await imageContentFromUrl(url));
+    } catch {
+      // The durable URL remains useful even if a transient fetch failure means
+      // it cannot be embedded in this response.
+    }
+  }
+
+  const notes = [
+    "Image generated.",
+    ...urls,
+    ...revisedPrompts.map((prompt) => `Revised prompt: ${prompt}`),
+  ];
+  return { content: [{ type: "text", text: notes.join(" ") }, ...content] };
+};
+
+type TMediaRedirectKind = "audio" | "video";
+
+const mediaRedirectKindFor = (op: TApiOperation): TMediaRedirectKind | null => {
+  if (op.path === "/v1/audio/speech") return "audio";
+  if (op.path === "/v1/videos/{video_id}/content") return "video";
+  return null;
+};
+
+const mediaRedirectResult = async (
+  config: { readonly baseUrl: string; readonly apiKey: string },
+  op: TApiOperation,
+  args: Record<string, unknown>,
+  kind: TMediaRedirectKind,
+): Promise<TToolResult> => {
+  const url = resolveRawOperationUrl(config, op, args);
+  const body =
+    op.hasBody && args.body !== undefined
+      ? JSON.stringify(args.body)
+      : undefined;
+  const res = await fetch(url, {
+    method: op.method.toUpperCase(),
+    headers: {
+      authorization: `Bearer ${config.apiKey}`,
+      ...(body === undefined ? {} : { "content-type": "application/json" }),
+    },
+    ...(body === undefined ? {} : { body }),
+    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+  });
+  if (!res.ok) return responseErrorResult(res);
+
+  await res.body?.cancel();
+  const mediaUrl = res.headers.get("x-openllm-media-url");
+  if (mediaUrl === null || mediaUrl.length === 0) {
+    return textResult(`HTTP ${res.status}: missing media url header`, true);
+  }
+  const durableUrl = new URL(mediaUrl, config.baseUrl).toString();
+  if (kind === "video") return textResult(`Video generated — ${durableUrl}`);
+
+  const media = await fetch(durableUrl, {
+    signal: AbortSignal.timeout(MEDIA_FETCH_TIMEOUT_MS),
+  });
+  if (!media.ok) {
+    const error = await media.text().catch(() => "");
+    return textResult(`HTTP ${media.status}: ${error} ${durableUrl}`, true);
+  }
+  return {
+    content: [
+      { type: "text", text: `Audio generated — ${durableUrl}` },
+      {
+        type: "audio",
+        data: base64FromBytes(await media.arrayBuffer()),
+        mimeType: media.headers.get("content-type") ?? "audio/mpeg",
+      },
+    ],
+  };
+};
+
 export const handleOpenllmTool = async (
   name: string,
   args: Record<string, unknown>,
@@ -128,31 +303,24 @@ export const handleOpenllmTool = async (
 ): Promise<TToolResult> => {
   const op = byToolName.get(name);
   if (op === undefined) {
-    return {
-      content: [{ type: "text" as const, text: `Unknown tool: ${name}` }],
-      isError: true,
-    };
+    return textResult(`Unknown tool: ${name}`, true);
   }
   try {
+    const mediaRedirectKind = mediaRedirectKindFor(op);
+    if (mediaRedirectKind !== null) {
+      return await mediaRedirectResult(config, op, args, mediaRedirectKind);
+    }
+
     const res = await callOperation(config, op, args);
     const text =
       typeof res.body === "string"
         ? res.body
         : JSON.stringify(res.body, null, 2);
-    if (!res.ok) {
-      return {
-        content: [
-          { type: "text" as const, text: `HTTP ${res.status}: ${text}` },
-        ],
-        isError: true,
-      };
-    }
-    return { content: [{ type: "text" as const, text }] };
+    if (!res.ok) return textResult(`HTTP ${res.status}: ${text}`, true);
+    if (op.path === "/v1/images/generations") return imageResult(res.body);
+    return textResult(text);
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    return {
-      content: [{ type: "text" as const, text: `Error: ${msg}` }],
-      isError: true,
-    };
+    return textResult(`Error: ${msg}`, true);
   }
 };
