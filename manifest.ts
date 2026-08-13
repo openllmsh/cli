@@ -10,7 +10,7 @@ import type { TCliRelease } from "./release-types";
 
 export const CLI_RELEASE: TCliRelease = {
   repo: "openllmsh/cli",
-  tag: "v2.1.4-alpha.0",
+  tag: "v2.1.4",
   targets: [
     "darwin-arm64",
     "darwin-x64-baseline",
@@ -19,12 +19,12 @@ export const CLI_RELEASE: TCliRelease = {
   ],
   sha256: {
     "darwin-arm64":
-      "d5828dee9f65e5fa1fa9114d7745777bd9b542a91b06a1e7595c4f31cb754fcf",
+      "1ba4e4df75c7930fe160b00d1f805bbe4194bc6b157bf6273e2f72c5e54d21fc",
     "darwin-x64-baseline":
-      "fa2885acc7df390afde51179994a204d3d01b4f421f6cf6dcf34c519a671f73a",
+      "832fb1abcb6c75998abb211ccb3e1d52a06ecfc3d975b718acda69a46a73ee9c",
     "linux-x64-baseline":
-      "e51a109dc7e3e4a34c421118f763c2cf26126916f304b07fc9ab5d679ea47332",
+      "f0ea3862d25b70e1374669832757939d1be71a5cb4755ae541a3ea6ea1d6fb96",
     "linux-arm64":
-      "b497fb488d9cee0825a44fc7d36e53d9c9dde2d909a099d11951891d2daaae87",
+      "853696f768c40a799d8dba15e2d3cd7edf4fc6d1f8adff3f61c693006ac7d46c",
   },
 };
