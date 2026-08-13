@@ -170,12 +170,52 @@ const responseErrorResult = async (res: Response): Promise<TToolResult> => {
   return textResult(`HTTP ${res.status}: ${text}`, true);
 };
 
+const sleep = async (ms: number): Promise<void> =>
+  new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
+
+const isApiMediaUrl = (url: string, baseUrl: string): boolean => {
+  try {
+    return new URL(url, baseUrl).pathname.startsWith("/api/media/");
+  } catch {
+    return false;
+  }
+};
+
+const fetchDurableMedia = async (
+  url: string,
+  baseUrl: string,
+  retry: boolean,
+): Promise<Response> => {
+  const durableUrl = new URL(url, baseUrl);
+
+  let response: Response | null = null;
+  for (let attempt = 1; attempt <= 4; attempt += 1) {
+    response = await fetch(durableUrl, {
+      signal: AbortSignal.timeout(MEDIA_FETCH_TIMEOUT_MS),
+    });
+
+    if (response.ok || retry === false || attempt === 4) {
+      return response;
+    }
+
+    await response.body?.cancel().catch(() => {});
+    await sleep(attempt % 2 === 0 ? 250 : 500);
+  }
+
+  return response ?? new Response(null, { status: 500 });
+};
+
 const imageContentFromUrl = async (
   url: string,
+  baseUrl: string,
 ): Promise<Extract<TToolResultContent, { type: "image" }>> => {
-  const res = await fetch(url, {
-    signal: AbortSignal.timeout(MEDIA_FETCH_TIMEOUT_MS),
-  });
+  const res = await fetchDurableMedia(
+    url,
+    baseUrl,
+    isApiMediaUrl(url, baseUrl),
+  );
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
   return {
     type: "image",
@@ -198,7 +238,10 @@ const isImageGenerationBody = (
   "data" in body &&
   Array.isArray(body.data);
 
-const imageResult = async (body: unknown): Promise<TToolResult> => {
+const imageResult = async (
+  body: unknown,
+  config: { readonly baseUrl: string },
+): Promise<TToolResult> => {
   if (!isImageGenerationBody(body)) {
     return textResult(JSON.stringify(body, null, 2));
   }
@@ -224,7 +267,7 @@ const imageResult = async (body: unknown): Promise<TToolResult> => {
     if (url === null) continue;
 
     try {
-      content.push(await imageContentFromUrl(url));
+      content.push(await imageContentFromUrl(url, config.baseUrl));
     } catch {
       // The durable URL remains useful even if a transient fetch failure means
       // it cannot be embedded in this response.
@@ -277,12 +320,12 @@ const mediaRedirectResult = async (
   const durableUrl = new URL(mediaUrl, config.baseUrl).toString();
   if (kind === "video") return textResult(`Video generated — ${durableUrl}`);
 
-  const media = await fetch(durableUrl, {
-    signal: AbortSignal.timeout(MEDIA_FETCH_TIMEOUT_MS),
-  });
+  const media = await fetchDurableMedia(durableUrl, config.baseUrl, true);
   if (!media.ok) {
-    const error = await media.text().catch(() => "");
-    return textResult(`HTTP ${media.status}: ${error} ${durableUrl}`, true);
+    await media.body?.cancel().catch(() => {});
+    return textResult(
+      `Audio generated — ${durableUrl} (still finalizing; open the url shortly)`,
+    );
   }
   return {
     content: [
@@ -317,7 +360,8 @@ export const handleOpenllmTool = async (
         ? res.body
         : JSON.stringify(res.body, null, 2);
     if (!res.ok) return textResult(`HTTP ${res.status}: ${text}`, true);
-    if (op.path === "/v1/images/generations") return imageResult(res.body);
+    if (op.path === "/v1/images/generations")
+      return imageResult(res.body, config);
     return textResult(text);
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
