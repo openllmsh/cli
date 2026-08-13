@@ -7425,6 +7425,21 @@
                   },
                   "size": {
                     "type": "string"
+                  },
+                  "input_image": {
+                    "type": "string"
+                  },
+                  "reference_images": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "reference_voices": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
                   }
                 },
                 "additionalProperties": false
