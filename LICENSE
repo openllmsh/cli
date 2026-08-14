@@ -1,8 +1,8 @@
 Business Source License 1.1
 
-Licensor: Quantide LLC
+Licensor: OpenLLM, INC
 Licensed Work: OpenLLM CLI
-              The Licensed Work is (c) 2026 Quantide LLC.
+              The Licensed Work is (c) 2026 OpenLLM, INC.
 Additional Use Grant: You may use the Licensed Work for internal business purposes, personal use, development, testing, evaluation, non-production deployments, and self-hosted production deployments that are not offered to third parties as a hosted, managed, or paid service that competes with OpenLLM or any substantially similar AI model gateway, proxy, credential-management, routing, memory, indexing, or inference orchestration product or service. In addition, further uses may be listed and defined at https://github.com/openllmsh/license-grants.
 Change Date: The earlier of the fourth anniversary of the first publicly available distribution of a specific version of the Licensed Work, or a date specified at https://github.com/openllmsh/license-grants.
 Change License: MIT License
@@ -27,7 +27,7 @@ TO THE EXTENT PERMITTED BY APPLICABLE LAW, THE LICENSED WORK IS PROVIDED ON AN "
 
 Business Source License 1.1 Parameters
 
-Licensor: Quantide LLC
+Licensor: OpenLLM, INC
 Licensed Work: OpenLLM CLI
 Change Date: The earlier of the fourth anniversary of first publication, or a date specified at https://github.com/openllmsh/license-grants.
 Change License: MIT License
