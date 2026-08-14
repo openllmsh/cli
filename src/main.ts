@@ -251,7 +251,7 @@ const main = async (): Promise<void> => {
     case "uninstall":
       return process.exit(await runUninstall(rest));
     case "doctor":
-      return process.exit(runDoctor(rest));
+      return process.exit(await runDoctor(rest));
     case "version":
     case "-v":
     case "--version":

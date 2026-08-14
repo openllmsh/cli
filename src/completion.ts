@@ -21,12 +21,12 @@ import { basename, dirname, join } from "node:path";
 import type { TCompletionShell } from "./commands";
 import {
   CLIENT_FLAGS,
+  COMMAND_ARGS,
   COMMANDS,
   COMPLETION_SHELLS,
   EXEC_GROUPS,
   EXEC_VERBS,
   FLAGS,
-  MCP_ONLY_GROUPS,
 } from "./commands";
 import { userHome } from "./env";
 
@@ -37,7 +37,15 @@ const TOP_LEVEL = [
   // Client flags live BEFORE the subcommand, so they belong here.
   ...CLIENT_FLAGS.map((f) => f.name),
 ];
-const COMPLETION_ARGS = [...COMPLETION_SHELLS, "install"];
+const HELP_FLAGS = ["-h", "--help"] as const;
+
+const commandArgLines = (): ReadonlyArray<
+  readonly [string, readonly string[]]
+> =>
+  COMMANDS.filter((command) => command.name !== "exec").map((command) => {
+    const extra = COMMAND_ARGS[command.name] ?? [];
+    return [command.name, [...extra, ...HELP_FLAGS]] as const;
+  });
 
 const bashScript = (): string => {
   const top = TOP_LEVEL.join(" ");
@@ -45,6 +53,12 @@ const bashScript = (): string => {
     (g) =>
       `      ${g}) [ "$pos" -eq 3 ] && COMPREPLY=( $(compgen -W "${EXEC_VERBS[g].join(" ")}" -- "$cur") ) ;;`,
   ).join("\n");
+  const argCases = commandArgLines()
+    .map(
+      ([command, args]) =>
+        `    ${command}) COMPREPLY=( $(compgen -W "${args.join(" ")}" -- "$cur") ) ;;`,
+    )
+    .join("\n");
   // `-d|-r` — the alternation the flag-skipping loop matches on.
   const clientFlagPattern = CLIENT_FLAGS.map((f) => f.name).join("|");
   return `# openllm bash completion
@@ -67,11 +81,7 @@ _openllm() {
   fi
   pos=$((COMP_CWORD - off))
   case "$cmd" in
-    completion) COMPREPLY=( $(compgen -W "${COMPLETION_ARGS.join(" ")}" -- "$cur") ) ;;
-    mcp) COMPREPLY=( $(compgen -W "--only ${MCP_ONLY_GROUPS.join(" ")}" -- "$cur") ) ;;
-    api) COMPREPLY=( $(compgen -W "--spec" -- "$cur") ) ;;
-    raycast) COMPREPLY=( $(compgen -W "uninstall status" -- "$cur") ) ;;
-    sessions) COMPREPLY=( $(compgen -W "list attach kill" -- "$cur") ) ;;
+${argCases}
     exec)
       if [ "$pos" -eq 2 ]; then
         COMPREPLY=( $(compgen -W "${EXEC_GROUPS.join(" ")}" -- "$cur") )
@@ -126,11 +136,11 @@ _openllm() {
   fi
   (( pos = CURRENT - off + 1 ))
   case "$cmd" in
-    completion) _values 'shell' ${COMPLETION_ARGS.join(" ")} ;;
-    mcp) _values 'group' --only ${MCP_ONLY_GROUPS.join(" ")} ;;
-    api) _values 'flag' --spec ;;
-    raycast) _values 'verb' uninstall status ;;
-    sessions) _values 'verb' list attach kill ;;
+${commandArgLines()
+  .map(
+    ([command, args]) => `    ${command}) _values 'arg' ${args.join(" ")} ;;`,
+  )
+  .join("\n")}
     exec)
       if (( pos == 3 )); then
         _values 'group' ${EXEC_GROUPS.join(" ")}
@@ -151,10 +161,10 @@ const fishScript = (): string => {
       `complete -c openllm -n __fish_use_subcommand -a ${c.name} -d '${zq(c.description)}'`,
   );
   lines.push(
-    `complete -c openllm -n '__fish_seen_subcommand_from completion' -a '${COMPLETION_ARGS.join(" ")}'`,
-    `complete -c openllm -n '__fish_seen_subcommand_from mcp' -a '--only ${MCP_ONLY_GROUPS.join(" ")}'`,
-    `complete -c openllm -n '__fish_seen_subcommand_from api' -a '--spec'`,
-    `complete -c openllm -n '__fish_seen_subcommand_from sessions' -a 'list attach kill'`,
+    ...commandArgLines().map(
+      ([command, args]) =>
+        `complete -c openllm -n '__fish_seen_subcommand_from ${command}' -a '${args.join(" ")}'`,
+    ),
     `complete -c openllm -n '__fish_seen_subcommand_from exec' -a '${EXEC_GROUPS.join(" ")}'`,
     ...EXEC_GROUPS.map(
       (g) =>

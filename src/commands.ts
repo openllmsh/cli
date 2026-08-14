@@ -95,8 +95,8 @@ export const COMMANDS: readonly TCommand[] = [
   },
   {
     name: "doctor",
-    args: "[--scrub-legacy]",
-    description: "Report or clean up leftovers from the old install model",
+    args: "[--fix] [--no-ai] [-c]",
+    description: "Diagnose the local daemon and report leftover install state",
   },
   { name: "version", description: "Print the version" },
   { name: "help", description: "Show help" },
@@ -135,43 +135,87 @@ export type TMcpGroup = (typeof MCP_ONLY_GROUPS)[number];
 export const COMPLETION_SHELLS = ["bash", "zsh", "fish"] as const;
 export type TCompletionShell = (typeof COMPLETION_SHELLS)[number];
 
+/**
+ * Per-command second-level completion tokens. Keys are canonical subcommand
+ * names. Completion generators append `-h/--help` to every command.
+ */
+export const COMMAND_ARGS: Readonly<Record<string, readonly string[]>> = {
+  completion: [...COMPLETION_SHELLS, "install"],
+  mcp: ["--only", ...MCP_ONLY_GROUPS],
+  api: ["--spec"],
+  raycast: ["uninstall", "status"],
+  sessions: ["list", "attach", "kill"],
+  doctor: ["--fix", "--no-ai", "-c", "--copy"],
+  uninstall: ["--yes", "-y"],
+};
+
+const padRight = (value: string, width: number): string =>
+  value.length >= width ? value : `${value}${" ".repeat(width - value.length)}`;
+
+const helpRows = (
+  rows: ReadonlyArray<{ readonly left: string; readonly right: string }>,
+): string => {
+  const width = Math.max(1, ...rows.map((row) => row.left.length));
+  return rows
+    .map((row) => `  ${padRight(row.left, width)}  ${row.right}`)
+    .join("\n");
+};
+
 /** Render the top-level help text from the definitions above. */
 export const helpText = (version: string): string => {
-  const rows = COMMANDS.map((c) => {
-    const invocation = c.args === undefined ? c.name : `${c.name} ${c.args}`;
-    return `  openllm ${invocation.padEnd(30)} ${c.description}`;
-  }).join("\n");
-  const clientFlagRows = CLIENT_FLAGS.map(
-    (f) => `  ${f.name.padEnd(4)} ${f.description}`,
-  ).join("\n");
-  return `openllm v${version} — the OpenLLM CLI (also available as \`ollm\`)
+  const commandRows = helpRows(
+    COMMANDS.map((c) => ({
+      left: c.args === undefined ? c.name : `${c.name} ${c.args}`,
+      right: c.description,
+    })),
+  );
+  const clientFlagRows = helpRows(
+    CLIENT_FLAGS.map((f) => ({ left: f.name, right: f.description })),
+  );
+  const flagRows = helpRows(
+    FLAGS.map((f) => ({ left: f.name, right: f.description })),
+  );
+  const envRows = helpRows([
+    {
+      left: "OPENLLM_CLOUD_ORIGIN",
+      right: "gateway origin (default: the baked cloud origin)",
+    },
+    { left: "OPENLLM_API_KEY", right: "your sk-llm-... API key" },
+    {
+      left: "OPENLLM_GATEWAY",
+      right: "force local or cloud (default: local when the daemon is up)",
+    },
+  ]);
+  return `openllm v${version}  —  the OpenLLM CLI (also ollm)
 
-Usage: openllm [-d] [-r] <command> [...]
-${rows}
+Usage
+  openllm [-d] [-r] <command> [...]
 
-Client flags (BEFORE the client name — everything after it is the client's):
+Commands
+${commandRows}
+
+Client flags  (before the client name — everything after it is the client's)
 ${clientFlagRows}
 
-  e.g. \`openllm -d claude\`, \`openllm -r codex\`, \`openllm -dr grok\`.
-  They sit before the name on purpose: -d/-r are also claude's --debug and
-  --resume, so \`openllm claude -r\` passes -r STRAIGHT THROUGH to claude.
+  Examples:  openllm -d claude    openllm -r codex    openllm -dr grok
+  They sit before the name on purpose: -d/-r are also claude --debug/--resume,
+  so \`openllm claude -r\` passes -r straight through to claude.
 
-Running a client:
+Running a client
   Every argument after the client name is forwarded verbatim, so
   \`openllm claude --resume\` behaves exactly like \`claude --resume\`.
-  Your client's own config is never modified — the OpenLLM settings are
-  applied for the lifetime of that one launch. Raycast is the exception: it
+  Your client's own config is never modified. Raycast is the exception: it
   runs continuously, so \`openllm raycast\` applies to its config and
   \`openllm raycast uninstall\` removes it again.
 
-Exec groups:
+Exec groups
 ${EXEC_GROUPS.map((g) => `  openllm exec ${g} <${EXEC_VERBS[g].join("|")}>`).join("\n")}
 
-Config (env, or the shared ~/.openllm/.env):
-  OPENLLM_CLOUD_ORIGIN  gateway origin (default: the baked cloud origin)
-  OPENLLM_API_KEY       your sk-llm-... API key
-  OPENLLM_GATEWAY       force \`local\` or \`cloud\` (default: local when the
-                        daemon is reachable, else cloud)
+Flags
+${flagRows}
+
+Config  (env, or the shared ~/.openllm/.env)
+${envRows}
 
 Every command accepts -h/--help.
 `;

@@ -71,7 +71,7 @@ packages/cli/
 | `openllm <claude\|codex\|grok\|opencode> [...args]` | run that client through OpenLLM — args forwarded VERBATIM, config never written |
 | `openllm raycast [uninstall\|status]` | the always-on client: apply in place, or reverse exactly what apply wrote |
 | `openllm uninstall [--yes]` | remove the CLI (reverses always-on wiring first) |
-| `openllm doctor [--scrub-legacy]` | report/clean leftovers from the old install model |
+| `openllm doctor [--fix]` | report/clean leftovers from the old install model |
 | `openllm mcp [--only <group>]` | the unified MCP server over stdio (groups: `openllm`, `claude-context`, `supermemory`; default all — `--only` is debug) |
 | `openllm exec ctx <index\|search\|status\|index-docs> …` | claude-context hook verbs — what the `openllm` bundle's hooks shell out to (`ctx` kept as a hidden alias for older bundles) |
 | `openllm setup` | PATH symlink + shell completion — run automatically by the curl installer; shown as a copyable follow-up on the dashboard card for sandboxed one-click installs |

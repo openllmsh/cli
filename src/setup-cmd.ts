@@ -21,6 +21,7 @@
 
 import {
   existsSync,
+  lstatSync,
   mkdirSync,
   readFileSync,
   readlinkSync,
@@ -47,6 +48,16 @@ const LINK_NAMES = ["openllm", "ollm"] as const;
 
 const pathDirCandidates = (): readonly string[] =>
   ["/usr/local/bin", join(userHome(), ".local", "bin")] as const;
+
+/** True when a path exists, including as a dangling symlink. */
+const pathExists = (path: string): boolean => {
+  try {
+    lstatSync(path);
+    return true;
+  } catch {
+    return false;
+  }
+};
 
 /** True when `link` is a symlink whose target is one of OUR binaries (the
  *  new path, the legacy path, or a sibling `openllm` link). */
@@ -90,16 +101,15 @@ const linkName = (name: string): string | null => {
 /**
  * Legacy-name migration: wherever an `openllmc` PATH symlink points at our
  * bin, repoint it at the renamed binary (transitional — dropped next major).
- * Also leaves a `openllmc → openllm` symlink inside ~/.openllm/bin when a
- * legacy binary file was replaced by the rename, so absolute-path callers
- * (old MCP entries, old hooks) keep working.
+ * Also rewrites an existing `openllmc → ...` link/file in ~/.openllm/bin when we
+ * need compatibility for absolute-path callers (old MCP entries, old hooks).
  */
 const migrateLegacyLinks = (): void => {
   for (const dir of pathDirCandidates()) {
     const link = join(dir, "openllmc");
     try {
       const path = binPath();
-      if (existsSync(link) && pointsAtOurs(link)) {
+      if (pathExists(link) && pointsAtOurs(link)) {
         unlinkSync(link);
         symlinkSync(path, link);
       }
@@ -110,17 +120,21 @@ const migrateLegacyLinks = (): void => {
   try {
     const path = binPath();
     const legacyPath = legacyBinPath();
-    // ~/.openllm/bin/openllmc: replace a stale regular file (the pre-rename
-    // binary) or wrong-target link with a transitional symlink to openllm.
-    if (existsSync(legacyPath)) {
-      try {
-        if (readlinkSync(legacyPath) === path) return; // already done
-      } catch {
-        // regular file (old binary) — replace below
-      }
-      unlinkSync(legacyPath);
+
+    if (!pathExists(legacyPath)) {
+      return;
     }
-    if (existsSync(path)) symlinkSync(path, legacyPath);
+
+    try {
+      if (readlinkSync(legacyPath) === path) {
+        return;
+      }
+    } catch {
+      // regular file (old binary) or broken symlink → replace below
+    }
+
+    unlinkSync(legacyPath);
+    symlinkSync(path, legacyPath);
   } catch {
     // best-effort
   }
