@@ -23,6 +23,7 @@ import {
 import { join } from "node:path";
 import { daemonPort } from "./clients/gateway";
 import { removeRegion } from "./clients/merge";
+import { padRight } from "./commands";
 import { cliBinPath, cliConfig, openllmDir, userHome } from "./env";
 
 type TLegacyRegion = {
@@ -114,6 +115,8 @@ const SPINNER_LABEL = "AI diagnosis (lite) — reading logs…";
 const DOCTOR_USAGE = `openllm doctor [--fix] [--no-ai] [-c]
 
 Diagnose the local daemon and leftover install state.
+Default AI diagnosis sends the redacted report and recent daemon logs
+for processing; --no-ai keeps them on this machine.
 
   openllm doctor          report only — changes nothing
   openllm doctor --fix    apply safe fixes (remove leftover install artifacts)
@@ -128,11 +131,23 @@ Diagnose the local daemon and leftover install state.
 in those files are kept.
 `;
 
+const WARNING_LEVEL = /^(warn|error|fatal)$/i;
+const WARNING_LOOSE = /(warn|error|fatal)/i;
+
 const isWarningLine = (line: string): boolean => {
-  return (
-    /(warn|error|fatal)/i.test(line) ||
-    /"level"\s*:\s*"(warn|error|fatal)"/i.test(line)
-  );
+  const trimmed = line.trim();
+  if (trimmed.startsWith("{")) {
+    try {
+      const parsed: unknown = JSON.parse(trimmed);
+      if (parsed !== null && typeof parsed === "object") {
+        const level = (parsed as Record<string, unknown>).level;
+        return typeof level === "string" && WARNING_LEVEL.test(level);
+      }
+    } catch {
+      // not JSON — fall through to the loose match
+    }
+  }
+  return WARNING_LOOSE.test(line);
 };
 
 const formatUptime = (seconds: number): string => {
@@ -149,9 +164,6 @@ const formatHealthValue = (value: unknown): string => {
   if (value === undefined || value === null) return "unknown";
   return String(value);
 };
-
-const padRight = (value: string, width: number): string =>
-  value.length >= width ? value : `${value}${" ".repeat(width - value.length)}`;
 
 const alignRows = (
   rows: ReadonlyArray<{ readonly label: string; readonly value: string }>,
@@ -295,20 +307,21 @@ const redact = (text: string): string => {
   return out;
 };
 
-const readRecentDaemonWarnings = (): readonly string[] => {
-  const recentLines: string[] = [];
+const tailLogLines = (maxLines: number): readonly string[] => {
+  const lines: string[] = [];
   for (const path of daemonLogPaths()) {
     const text = readFileTail(path, LOG_TAIL_MAX_BYTES);
     if (text === null) continue;
     for (const line of text.split(/\r?\n/)) {
-      recentLines.push(line);
-      if (recentLines.length > LOG_WARNING_TAIL_LINES) {
-        recentLines.shift();
-      }
+      lines.push(line);
+      if (lines.length > maxLines) lines.shift();
     }
   }
+  return lines;
+};
 
-  const warnings = recentLines
+const readRecentDaemonWarnings = (): readonly string[] => {
+  const warnings = tailLogLines(LOG_WARNING_TAIL_LINES)
     .filter(isWarningLine)
     .slice(-LOG_WARNING_OUTPUT_LIMIT);
   return warnings.map(redact);
@@ -408,21 +421,8 @@ const boundLogChunk = (text: string): string => {
     : redacted;
 };
 
-const collectRecentDaemonLogsFromFiles = (): string => {
-  const lines: string[] = [];
-  for (const path of daemonLogPaths()) {
-    const text = readFileTail(path, LOG_TAIL_MAX_BYTES);
-    if (text === null) continue;
-    for (const line of text.split(/\r?\n/)) {
-      lines.push(line);
-      if (lines.length > DAEMON_LOG_LINES) {
-        lines.shift();
-      }
-    }
-  }
-
-  return boundLogChunk(lines.join("\n"));
-};
+const collectRecentDaemonLogsFromFiles = (): string =>
+  boundLogChunk(tailLogLines(DAEMON_LOG_LINES).join("\n"));
 
 const collectRecentDaemonLogs = async (): Promise<string> => {
   const openllmdBin = join(openllmDir(), "bin", "openllmd");
@@ -537,7 +537,11 @@ export const aiDiagnosis = async (report: string): Promise<string | null> => {
   if (!existsSync(bin) || apiKey.length === 0) return null;
 
   const daemonLogs = await collectRecentDaemonLogs();
-  const prompt = `You are diagnosing a local OpenLLM daemon ("openllmd") for a support ticket.\n\nDoctor report:\n${hideHome(report)}\n\nRecent daemon logs (already redacted, newest last):\n${hideHome(daemonLogs)}\n\nWrite exactly one information-dense paragraph — no preamble, no markdown headings, no bullet points, no code fences — suitable to paste into an OpenLLM support ticket. If the logs include daemon version lines and span more than one version, attribute each problem to the specific version it occurred under and keep the diagnosis segmented per version.`;
+  const prompt = `You are diagnosing a local OpenLLM daemon ("openllmd") for a support ticket.\n\nDoctor report:\n${hideHome(redact(report))}\n\nRecent daemon logs (already redacted, newest last):\n${hideHome(redact(daemonLogs))}\n\nWrite exactly one information-dense paragraph — no preamble, no markdown headings, no bullet points, no code fences — suitable to paste into an OpenLLM support ticket. If the logs include daemon version lines and span more than one version, attribute each problem to the specific version it occurred under and keep the diagnosis segmented per version.`;
+
+  process.stderr.write(
+    "AI diagnosis sends the report and recent daemon logs for processing.\n",
+  );
 
   let timeout: ReturnType<typeof setTimeout> | undefined;
   let timedOut = false;

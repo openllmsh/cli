@@ -29,7 +29,7 @@ export const EXEC_VERBS: Record<TExecGroup, readonly string[]> = {
 
 export type TFlag = { readonly name: string; readonly description: string };
 
-export const COMMANDS: readonly TCommand[] = [
+export const COMMANDS = [
   {
     name: "claude",
     args: "[...args]",
@@ -100,7 +100,9 @@ export const COMMANDS: readonly TCommand[] = [
   },
   { name: "version", description: "Print the version" },
   { name: "help", description: "Show help" },
-] as const;
+] as const satisfies readonly TCommand[];
+
+export type TCommandName = (typeof COMMANDS)[number]["name"];
 
 /**
  * openllm's own flags for a client invocation, which sit BEFORE the client name
@@ -139,7 +141,9 @@ export type TCompletionShell = (typeof COMPLETION_SHELLS)[number];
  * Per-command second-level completion tokens. Keys are canonical subcommand
  * names. Completion generators append `-h/--help` to every command.
  */
-export const COMMAND_ARGS: Readonly<Record<string, readonly string[]>> = {
+export const COMMAND_ARGS: Readonly<
+  Partial<Record<TCommandName, readonly string[]>>
+> = {
   completion: [...COMPLETION_SHELLS, "install"],
   mcp: ["--only", ...MCP_ONLY_GROUPS],
   api: ["--spec"],
@@ -149,7 +153,7 @@ export const COMMAND_ARGS: Readonly<Record<string, readonly string[]>> = {
   uninstall: ["--yes", "-y"],
 };
 
-const padRight = (value: string, width: number): string =>
+export const padRight = (value: string, width: number): string =>
   value.length >= width ? value : `${value}${" ".repeat(width - value.length)}`;
 
 const helpRows = (
@@ -164,7 +168,7 @@ const helpRows = (
 /** Render the top-level help text from the definitions above. */
 export const helpText = (version: string): string => {
   const commandRows = helpRows(
-    COMMANDS.map((c) => ({
+    COMMANDS.map((c: TCommand) => ({
       left: c.args === undefined ? c.name : `${c.name} ${c.args}`,
       right: c.description,
     })),
