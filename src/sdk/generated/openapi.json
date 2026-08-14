@@ -17111,6 +17111,14 @@
               "type": "string"
             },
             "required": false
+          },
+          {
+            "name": "tz",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            },
+            "required": false
           }
         ],
         "security": [],
@@ -17601,6 +17609,14 @@
               "type": "string"
             },
             "required": true
+          },
+          {
+            "name": "tz",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            },
+            "required": false
           }
         ],
         "security": [],
@@ -17858,7 +17874,16 @@
           "stats"
         ],
         "operationId": "stats.admin",
-        "parameters": [],
+        "parameters": [
+          {
+            "name": "tz",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            },
+            "required": false
+          }
+        ],
         "security": [],
         "responses": {
           "200": {
