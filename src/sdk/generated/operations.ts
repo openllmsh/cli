@@ -595,6 +595,10 @@ export const API_OPERATIONS: readonly TApiOperation[] = [
       {
         "name": "keyId",
         "required": false
+      },
+      {
+        "name": "tz",
+        "required": false
       }
     ],
     "hasBody": false
@@ -608,7 +612,12 @@ export const API_OPERATIONS: readonly TApiOperation[] = [
       "stats"
     ],
     "pathParams": [],
-    "queryParams": [],
+    "queryParams": [
+      {
+        "name": "tz",
+        "required": false
+      }
+    ],
     "hasBody": false
   },
   {
@@ -622,7 +631,12 @@ export const API_OPERATIONS: readonly TApiOperation[] = [
     "pathParams": [
       "id"
     ],
-    "queryParams": [],
+    "queryParams": [
+      {
+        "name": "tz",
+        "required": false
+      }
+    ],
     "hasBody": false
   },
   {
