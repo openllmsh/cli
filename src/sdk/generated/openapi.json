@@ -2205,6 +2205,17 @@
                       "title": "unknown"
                     }
                   },
+                  "responses_additional_tools": {
+                    "type": "array",
+                    "items": {
+                      "$id": "/schemas/unknown",
+                      "title": "unknown"
+                    }
+                  },
+                  "responses_client_metadata": {
+                    "$id": "/schemas/unknown",
+                    "title": "unknown"
+                  },
                   "stream_options": {
                     "type": "object",
                     "required": [],
@@ -6372,6 +6383,74 @@
                                 }
                               },
                               "additionalProperties": false
+                            },
+                            {
+                              "type": "object",
+                              "required": [
+                                "type",
+                                "role",
+                                "tools"
+                              ],
+                              "properties": {
+                                "type": {
+                                  "type": "string",
+                                  "enum": [
+                                    "additional_tools"
+                                  ]
+                                },
+                                "role": {
+                                  "type": "string",
+                                  "enum": [
+                                    "developer"
+                                  ]
+                                },
+                                "tools": {
+                                  "type": "array",
+                                  "items": {
+                                    "type": "object",
+                                    "required": [
+                                      "type"
+                                    ],
+                                    "properties": {
+                                      "type": {
+                                        "type": "string"
+                                      },
+                                      "name": {
+                                        "type": "string"
+                                      },
+                                      "description": {
+                                        "anyOf": [
+                                          {
+                                            "type": "string"
+                                          },
+                                          {
+                                            "type": "null"
+                                          }
+                                        ]
+                                      },
+                                      "parameters": {
+                                        "$id": "/schemas/unknown",
+                                        "title": "unknown"
+                                      },
+                                      "strict": {
+                                        "anyOf": [
+                                          {
+                                            "type": "boolean"
+                                          },
+                                          {
+                                            "type": "null"
+                                          }
+                                        ]
+                                      }
+                                    },
+                                    "additionalProperties": {
+                                      "$id": "/schemas/unknown",
+                                      "title": "unknown"
+                                    }
+                                  }
+                                }
+                              },
+                              "additionalProperties": false
                             }
                           ]
                         }
@@ -6557,6 +6636,10 @@
                         "type": "null"
                       }
                     ]
+                  },
+                  "client_metadata": {
+                    "$id": "/schemas/unknown",
+                    "title": "unknown"
                   },
                   "store": {
                     "anyOf": [
