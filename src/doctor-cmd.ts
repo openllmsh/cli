@@ -24,7 +24,13 @@ import { join } from "node:path";
 import { daemonPort } from "./clients/gateway";
 import { removeRegion } from "./clients/merge";
 import { padRight } from "./commands";
-import { cliBinPath, cliConfig, openllmDir, userHome } from "./env";
+import {
+  cliBinPath,
+  cliConfig,
+  openllmDir,
+  sharedFileConfig,
+  userHome,
+} from "./env";
 
 type TLegacyRegion = {
   readonly path: string;
@@ -96,14 +102,38 @@ const daemonLogPaths = (): readonly string[] => [
   join(openllmDir(), "openllmd.err.log"),
 ];
 
+const openllmDaemonBinary = (): string => join(openllmDir(), "bin", "openllmd");
+
 const DAEMON_STATUS_TIMEOUT_MS = 1_500;
+const DAEMON_STATUS_COMMAND_TIMEOUT_MS = 2_000;
 const LOG_WARNING_TAIL_LINES = 400;
 const LOG_WARNING_OUTPUT_LIMIT = 8;
 const AI_TIMEOUT_MS = 90_000;
 const DAEMON_LOG_TIMEOUT_MS = 8_000;
 const DAEMON_LOG_LINES = 200;
 const DAEMON_LOG_CHAR_LIMIT = 24_000;
+const DAEMON_STATUS_COMMAND_CHAR_LIMIT = 12_000;
 const LOG_TAIL_MAX_BYTES = 256_000;
+
+const resolveDaemonPort = (): {
+  readonly port: number;
+  readonly source: string | null;
+} => {
+  if (process.env.OPENLLM_DAEMON_PORT !== undefined) {
+    return { port: daemonPort(), source: "OPENLLM_DAEMON_PORT env" };
+  }
+
+  if (sharedFileConfig().OPENLLM_DAEMON_PORT !== undefined) {
+    return {
+      port: daemonPort(),
+      source: "~/.openllm/.env OPENLLM_DAEMON_PORT",
+    };
+  }
+
+  return { port: daemonPort(), source: null };
+};
+
+const daemonStatusLinePrefix = (line: string): string => `  ${line}`;
 
 const collectRecentLogCommand = "logs";
 const collectRecentLogLinesCommand = `${DAEMON_LOG_LINES}`;
@@ -320,6 +350,13 @@ const tailLogLines = (maxLines: number): readonly string[] => {
   return lines;
 };
 
+const daemonLogFilesReadable = (): boolean => {
+  for (const path of daemonLogPaths()) {
+    if (readFileTail(path, 1) !== null) return true;
+  }
+  return false;
+};
+
 const readRecentDaemonWarnings = (): readonly string[] => {
   const warnings = tailLogLines(LOG_WARNING_TAIL_LINES)
     .filter(isWarningLine)
@@ -327,16 +364,146 @@ const readRecentDaemonWarnings = (): readonly string[] => {
   return warnings.map(redact);
 };
 
+const runWithTimeout = async (
+  argv: readonly string[],
+  timeoutMs: number,
+): Promise<{
+  readonly stdout: string;
+  readonly stderr: string;
+  readonly code: number | null;
+  readonly timedOut: boolean;
+}> => {
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  let proc: ReturnType<typeof Bun.spawn> | null = null;
+
+  try {
+    proc = Bun.spawn([...argv], {
+      stdout: "pipe",
+      stderr: "pipe",
+      detached: true,
+    });
+
+    const stdoutStream = proc.stdout;
+    const stderrStream = proc.stderr;
+    if (
+      stdoutStream === undefined ||
+      stderrStream === undefined ||
+      typeof stdoutStream === "number" ||
+      typeof stderrStream === "number"
+    ) {
+      killProcess(proc);
+      return {
+        stdout: "",
+        stderr: "",
+        code: null,
+        timedOut: false,
+      };
+    }
+
+    const done = Promise.all([
+      readBoundedStream(stdoutStream, DAEMON_STATUS_COMMAND_CHAR_LIMIT, () =>
+        killProcess(proc),
+      ),
+      readBoundedStream(stderrStream, DAEMON_STATUS_COMMAND_CHAR_LIMIT, () =>
+        killProcess(proc),
+      ),
+      proc.exited,
+    ]);
+    const timeoutResult = new Promise<null>((resolve) => {
+      timeout = setTimeout(() => {
+        killProcess(proc);
+        resolve(null);
+      }, timeoutMs);
+    });
+
+    const result = await Promise.race([done, timeoutResult]);
+    if (result === null) {
+      return {
+        stdout: "",
+        stderr: "",
+        code: null,
+        timedOut: true,
+      };
+    }
+
+    const [stdout, stderr, code] = result;
+    return {
+      stdout,
+      stderr,
+      code,
+      timedOut: false,
+    };
+  } finally {
+    if (timeout !== undefined) {
+      clearTimeout(timeout);
+    }
+  }
+};
+
+const collectOpenllmdStatus = async (): Promise<readonly string[]> => {
+  const openllmdBin = openllmDaemonBinary();
+  if (!existsSync(openllmdBin)) {
+    return [
+      daemonStatusLinePrefix(
+        `openllmd binary not found at ${openllmdBin} — daemon was never installed`,
+      ),
+    ];
+  }
+
+  try {
+    const result = await runWithTimeout(
+      [openllmdBin, "status"],
+      DAEMON_STATUS_COMMAND_TIMEOUT_MS,
+    );
+
+    if (result.timedOut) {
+      return [
+        daemonStatusLinePrefix(
+          `openllmd status check timed out after ${DAEMON_STATUS_COMMAND_TIMEOUT_MS}ms`,
+        ),
+      ];
+    }
+
+    const rawOutput = [result.stdout, result.stderr]
+      .join("\n")
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter((line) => line.length > 0);
+
+    if (rawOutput.length === 0) {
+      return [
+        daemonStatusLinePrefix(
+          `openllmd status failed with exit ${result.code}`,
+        ),
+      ];
+    }
+
+    return rawOutput.map(daemonStatusLinePrefix);
+  } catch {
+    return [daemonStatusLinePrefix("openllmd status check failed")];
+  }
+};
+
 const gatherDaemonHealth = async (): Promise<readonly string[]> => {
-  const port = daemonPort();
+  const portInfo = resolveDaemonPort();
+  const port = portInfo.port;
   const endpoint = `http://127.0.0.1:${port}/status`;
+  const portResolution =
+    portInfo.source === null
+      ? []
+      : [`  resolved daemon port: ${port} (from ${portInfo.source})`];
 
   try {
     const res = await fetch(endpoint, {
       signal: AbortSignal.timeout(DAEMON_STATUS_TIMEOUT_MS),
     });
     if (!res.ok) {
-      return [`  daemon not responding on ${endpoint} (is openllmd running?)`];
+      const statusRows = await collectOpenllmdStatus();
+      return [
+        `  daemon not responding on ${endpoint} (is openllmd running?)`,
+        ...portResolution,
+        ...statusRows,
+      ];
     }
     const raw = (await res.json()) as Partial<TDaemonHealth>;
     const version = typeof raw.version === "string" ? raw.version : "unknown";
@@ -365,7 +532,12 @@ const gatherDaemonHealth = async (): Promise<readonly string[]> => {
       { label: "uptime", value: uptime },
     ]);
   } catch {
-    return [`  daemon not responding on ${endpoint} (is openllmd running?)`];
+    const statusRows = await collectOpenllmdStatus();
+    return [
+      `  daemon not responding on ${endpoint} (is openllmd running?)`,
+      ...portResolution,
+      ...statusRows,
+    ];
   }
 };
 
@@ -425,7 +597,7 @@ const collectRecentDaemonLogsFromFiles = (): string =>
   boundLogChunk(tailLogLines(DAEMON_LOG_LINES).join("\n"));
 
 const collectRecentDaemonLogs = async (): Promise<string> => {
-  const openllmdBin = join(openllmDir(), "bin", "openllmd");
+  const openllmdBin = openllmDaemonBinary();
   if (!existsSync(openllmdBin)) {
     return collectRecentDaemonLogsFromFiles();
   }
@@ -742,8 +914,11 @@ export const runDoctor = async (args: readonly string[]): Promise<number> => {
   output.push("", "Daemon health", ...daemonHealth);
 
   const warningLines = readRecentDaemonWarnings();
+  const hasReadableLogFiles = daemonLogFilesReadable();
   output.push("", "Recent warnings");
-  if (warningLines.length === 0) {
+  if (!hasReadableLogFiles) {
+    output.push("  no daemon logs found (daemon may never have started)");
+  } else if (warningLines.length === 0) {
     output.push("  none found");
   } else {
     for (const line of warningLines) {

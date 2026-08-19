@@ -18,16 +18,35 @@ const CATALOG_TIMEOUT_MS = 8_000;
 
 const DEFAULT_DAEMON_PORT = 8787;
 
+/**
+ * Parse a raw daemon port from either CLI env/shared config or file values.
+ *
+ * Must match the daemon-side parser in `packages/daemon/src/env.ts` so both
+ * the CLI and daemon resolve the same loopback port from the same raw value.
+ */
+const parseDaemonPort = (raw: string, fallback: number): number => {
+  const trimmed = raw.trim();
+  const unquoted =
+    trimmed.startsWith("\"") && trimmed.endsWith("\"") && trimmed.length >= 2
+      ? trimmed.slice(1, -1)
+      : trimmed.startsWith("'") && trimmed.endsWith("'") && trimmed.length >= 2
+        ? trimmed.slice(1, -1)
+        : trimmed;
+  const stripped = unquoted.replace(/^(.*)\s#.*$/, "$1").trim();
+  if (!/^\d+$/.test(stripped)) return fallback;
+  const parsed = Number.parseInt(stripped, 10);
+  return Number.isInteger(parsed) && parsed >= 1 && parsed <= 65535
+    ? parsed
+    : fallback;
+};
+
 /** Load daemon configuration from env + shared file, defaulting to 8787. */
 export const daemonPort = (): number => {
   const raw =
     process.env.OPENLLM_DAEMON_PORT ??
     sharedFileConfig().OPENLLM_DAEMON_PORT ??
     String(DEFAULT_DAEMON_PORT);
-  const parsed = Number.parseInt(raw, 10);
-  return Number.isFinite(parsed) && parsed >= 1 && parsed <= 65535
-    ? parsed
-    : DEFAULT_DAEMON_PORT;
+  return parseDaemonPort(raw, DEFAULT_DAEMON_PORT);
 };
 
 export type TGateway = {
