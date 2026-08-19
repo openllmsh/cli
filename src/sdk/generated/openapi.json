@@ -8779,6 +8779,13 @@
                             "search_provider": {
                               "type": "string"
                             },
+                            "context_overflow_strategy": {
+                              "type": "string",
+                              "enum": [
+                                "hop_to_larger_context",
+                                "compact_in_place"
+                              ]
+                            },
                             "custom_apis": {
                               "type": "array",
                               "items": {
@@ -20055,6 +20062,13 @@
                     "properties": {
                       "search_provider": {
                         "type": "string"
+                      },
+                      "context_overflow_strategy": {
+                        "type": "string",
+                        "enum": [
+                          "hop_to_larger_context",
+                          "compact_in_place"
+                        ]
                       },
                       "custom_apis": {
                         "type": "array",
