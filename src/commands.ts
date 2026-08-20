@@ -139,6 +139,23 @@ export const MCP_ONLY_GROUPS = [
 ] as const;
 export type TMcpGroup = (typeof MCP_ONLY_GROUPS)[number];
 
+/**
+ * Groups a free-tier key is allowed to expose. Semantic code search
+ * (`claude-context`) is Pro. ONE list — overlay `mcpArgs()` and the MCP
+ * server itself both read this, so a persisted client config that launches
+ * `openllm mcp` with no `--only` still drops code search for free users.
+ */
+export const FREE_TIER_MCP_GROUPS = ["openllm", "supermemory"] as const;
+
+export const mcpGroupsForTier = (
+  groups: readonly TMcpGroup[],
+  tier: "free" | "trial" | "pro" | undefined,
+): TMcpGroup[] => {
+  if (tier !== "free") return [...groups];
+  const allowed: ReadonlySet<string> = new Set(FREE_TIER_MCP_GROUPS);
+  return groups.filter((g) => allowed.has(g));
+};
+
 export const COMPLETION_SHELLS = ["bash", "zsh", "fish"] as const;
 export type TCompletionShell = (typeof COMPLETION_SHELLS)[number];
 

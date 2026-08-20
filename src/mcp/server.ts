@@ -20,7 +20,9 @@ import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
+import { fetchTier } from "../clients/gateway";
 import type { TMcpGroup } from "../commands";
+import { mcpGroupsForTier } from "../commands";
 import { CLI_VERSION, requireKeyedConfig } from "../env";
 import {
   claudeContextGroupToolDefs,
@@ -45,7 +47,7 @@ export { MCP_ONLY_GROUPS as MCP_GROUPS } from "../commands";
 const isSupermemoryTool = (name: string): boolean =>
   supermemoryToolDefs.some((t) => t.name === name);
 
-export const runMcpServer = async (groups: readonly TMcpGroup[]) => {
+export const runMcpServer = async (requested: readonly TMcpGroup[]) => {
   // stdout is reserved for MCP JSON-RPC; push all logs to stderr.
   console.log = (...a: unknown[]) =>
     process.stderr.write(`[LOG] ${a.join(" ")}\n`);
@@ -56,6 +58,15 @@ export const runMcpServer = async (groups: readonly TMcpGroup[]) => {
 
   const cfg = requireKeyedConfig();
   const gatewayConfig = { baseUrl: cfg.gatewayUrl, apiKey: cfg.apiKey };
+  // Authoritative free-tier gate: drop code search even when a client overlay
+  // (or a persisted Hermes profile) launched us as bare `openllm mcp`.
+  const tier = await fetchTier({
+    base: cfg.gatewayUrl,
+    apiKey: cfg.apiKey,
+    cloudOrigin: cfg.gatewayUrl,
+    local: false,
+  });
+  const groups = mcpGroupsForTier(requested, tier);
   const supermemoryConfig = {
     name: "openllm",
     version: CLI_VERSION,

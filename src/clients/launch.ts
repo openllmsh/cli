@@ -9,6 +9,7 @@
  * only. Nothing here ever produces a write outside the ephemeral run dir.
  */
 
+import { FREE_TIER_MCP_GROUPS } from "../commands";
 import {
   deepMerge,
   parseJsonLoose,
@@ -33,14 +34,11 @@ import type { TClient } from "./registry";
  */
 export type TTier = "free" | "trial" | "pro";
 
-/** The MCP tool groups the free tier is allowed — code-search is paid-only. */
-const FREE_TIER_MCP_GROUPS = ["openllm", "supermemory"] as const;
-
 /**
  * The `openllm mcp` argv for a tier. Paid tiers get the bare `["mcp"]` (all
- * groups); free tier narrows to `["mcp","--only","openllm","--only",
- * "supermemory"]`, excluding the paid `claude-context` code-search group. One
- * definition → one surface for every client.
+ * groups); free tier narrows with `--only` per `FREE_TIER_MCP_GROUPS`,
+ * excluding paid `claude-context` code-search. Overlay argv AND the MCP
+ * server (`mcpGroupsForTier`) share that list so every MCP client is gated.
  */
 export const mcpArgs = (tier: TTier | undefined): readonly string[] =>
   tier === "free"
