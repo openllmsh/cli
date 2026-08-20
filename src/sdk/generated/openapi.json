@@ -19639,6 +19639,9 @@
                           "max_output_tokens": {
                             "type": "number"
                           },
+                          "prefer_catalog_window": {
+                            "type": "boolean"
+                          },
                           "pricing": {
                             "type": "object",
                             "required": [],
