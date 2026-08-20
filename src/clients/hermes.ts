@@ -27,13 +27,8 @@ import { CLI_VERSION, openllmDir, userHome } from "../env";
 import { contextStateDir, fetchTier, resolveGateway } from "./gateway";
 import type { TLaunchInputs } from "./launch";
 import { overlayVars } from "./launch";
-import {
-  deepMerge,
-  parseYaml,
-  serializeYaml,
-  substitute,
-} from "./merge";
 import type { TJsonObject } from "./merge";
+import { deepMerge, parseYaml, serializeYaml, substitute } from "./merge";
 import { OVERLAYS } from "./overlays";
 import type { TClientFlags } from "./registry";
 import { CLIENTS } from "./registry";
@@ -52,8 +47,20 @@ const hermesRoot = (): string =>
 
 const ledgerPath = (): string => join(openllmDir(), "clients", "hermes.json");
 
-const profileDir = (name: string): string =>
-  name === "default" ? hermesRoot() : join(hermesRoot(), "profiles", name);
+/** Hermes profile ids: `default` or the same charset as `hermes profile create`. */
+const PROFILE_ID_RE = /^[a-z0-9][a-z0-9_-]{0,63}$/;
+
+export const isHermesProfileName = (name: string): boolean =>
+  name === "default" || PROFILE_ID_RE.test(name);
+
+const profileDir = (name: string): string => {
+  if (!isHermesProfileName(name)) {
+    throw new Error(`refusing unsafe Hermes profile name: ${name}`);
+  }
+  return name === "default"
+    ? hermesRoot()
+    : join(hermesRoot(), "profiles", name);
+};
 
 const activeProfilePath = (): string => join(hermesRoot(), "active_profile");
 
@@ -69,7 +76,14 @@ export const readHermesLedger = (): THermesLedger | null => {
   try {
     const parsed: unknown = JSON.parse(readFileSync(ledgerPath(), "utf-8"));
     if (typeof parsed !== "object" || parsed === null) return null;
-    return parsed as THermesLedger;
+    const ledger = parsed as THermesLedger;
+    if (
+      !isHermesProfileName(ledger.previousProfile) ||
+      !isHermesProfileName(ledger.profileName)
+    ) {
+      return null;
+    }
+    return ledger;
   } catch {
     return null;
   }
@@ -84,7 +98,8 @@ const writeLedger = (ledger: THermesLedger): void => {
 export const readActiveProfile = (): string => {
   try {
     const name = readFileSync(activeProfilePath(), "utf-8").trim();
-    return name.length > 0 ? name : "default";
+    if (name.length === 0 || !isHermesProfileName(name)) return "default";
+    return name;
   } catch {
     return "default";
   }
@@ -345,6 +360,12 @@ export const runHermesCommand = async (
   }
   if (verb === "uninstall") return uninstallHermes();
   if (verb === "status") return statusHermes();
+  if (flags?.dangerous === true) {
+    process.stderr.write(
+      "-d does not apply to hermes — it has no skip-approvals flag.\n",
+    );
+    return 2;
+  }
   const noPersist = args.includes("--no-persist");
   const forwarded = args.filter((a) => a !== "--no-persist");
   if (noPersist) {
@@ -363,12 +384,6 @@ export const runHermesCommand = async (
         `The openllm profile is in place; run hermes after installing it.\n`,
     );
     return 127;
-  }
-  if (flags?.dangerous === true) {
-    process.stderr.write(
-      "-d does not apply to hermes — it has no skip-approvals flag.\n",
-    );
-    return 2;
   }
   return execClient(
     bin,

@@ -40,11 +40,12 @@ const appliedAlwaysOnClients = (): string[] => {
 const UNINSTALL_USAGE = `usage: openllm uninstall [--yes]
 
 Remove the openllm CLI from this machine: reverse any always-on client wiring
-(Raycast), drop the openllm/ollm PATH symlinks, strip the managed shell-rc
-block and completion, and delete ~/.openllm/{bin/openllm,run,clients}.
+(Raycast providers region; Hermes sticky openllm profile), drop the openllm/ollm
+PATH symlinks, strip the managed shell-rc block and completion, and delete
+~/.openllm/{bin/openllm,run,clients}.
 
 Left alone: ~/.openllm/.env (shared with the daemon), the daemon itself, and
-every third-party client config.
+third-party configs we did not write.
 
 Requires a TTY unless --yes is passed.
 `;
