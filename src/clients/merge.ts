@@ -174,7 +174,7 @@ export const parseYaml = (text: string): TJsonObject | null => {
 };
 
 export const serializeYaml = (doc: TJsonObject): string => {
-  const raw = Bun.YAML.stringify(doc);
+  const raw = Bun.YAML.stringify(doc, null, 2);
   return raw.endsWith("\n") ? raw : `${raw}\n`;
 };
 

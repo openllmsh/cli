@@ -23,8 +23,15 @@ import {
   writeFileSync,
 } from "node:fs";
 import { join } from "node:path";
-import { CLI_VERSION, openllmDir, userHome } from "../env";
+import { CLI_VERSION, openllmDir } from "../env";
 import { contextStateDir, fetchTier, resolveGateway } from "./gateway";
+import {
+  hermesActiveProfilePath,
+  hermesProfileDir,
+  hermesRoot,
+  isHermesProfileName,
+  readActiveProfile,
+} from "./hermes-home";
 import type { TLaunchInputs } from "./launch";
 import { overlayVars } from "./launch";
 import type { TJsonObject } from "./merge";
@@ -34,35 +41,18 @@ import type { TClientFlags } from "./registry";
 import { CLIENTS } from "./registry";
 import { execClient, findClientBinary, runSessionClient } from "./session";
 
+export {
+  hermesProfileConfigPath,
+  isHermesProfileName,
+  readActiveProfile,
+} from "./hermes-home";
+
 const DEFAULT_PROFILE_NAME = "openllm";
 const COLLISION_PROFILE_NAME = "openllm-gateway";
 const CLONE_FILES = ["config.yaml", ".env", "SOUL.md"] as const;
 const CLONE_DIRS = ["skills"] as const;
 
-const hermesRoot = (): string =>
-  process.env.OPENLLM_HERMES_HOME !== undefined &&
-  process.env.OPENLLM_HERMES_HOME.length > 0
-    ? process.env.OPENLLM_HERMES_HOME
-    : join(userHome(), ".hermes");
-
 const ledgerPath = (): string => join(openllmDir(), "clients", "hermes.json");
-
-/** Hermes profile ids: `default` or the same charset as `hermes profile create`. */
-const PROFILE_ID_RE = /^[a-z0-9][a-z0-9_-]{0,63}$/;
-
-export const isHermesProfileName = (name: string): boolean =>
-  name === "default" || PROFILE_ID_RE.test(name);
-
-const profileDir = (name: string): string => {
-  if (!isHermesProfileName(name)) {
-    throw new Error(`refusing unsafe Hermes profile name: ${name}`);
-  }
-  return name === "default"
-    ? hermesRoot()
-    : join(hermesRoot(), "profiles", name);
-};
-
-const activeProfilePath = (): string => join(hermesRoot(), "active_profile");
 
 export type THermesLedger = {
   readonly version: 1;
@@ -95,18 +85,8 @@ const writeLedger = (ledger: THermesLedger): void => {
   writeFileSync(path, `${JSON.stringify(ledger, null, 2)}\n`, { mode: 0o600 });
 };
 
-export const readActiveProfile = (): string => {
-  try {
-    const name = readFileSync(activeProfilePath(), "utf-8").trim();
-    if (name.length === 0 || !isHermesProfileName(name)) return "default";
-    return name;
-  } catch {
-    return "default";
-  }
-};
-
 export const setActiveProfile = (name: string): void => {
-  const path = activeProfilePath();
+  const path = hermesActiveProfilePath();
   mkdirSync(hermesRoot(), { recursive: true, mode: 0o700 });
   if (name === "default") {
     rmSync(path, { force: true });
@@ -137,7 +117,7 @@ const copyIfExists = (from: string, to: string): void => {
 };
 
 const cloneProfile = (sourceName: string, destDir: string): void => {
-  const sourceDir = profileDir(sourceName);
+  const sourceDir = hermesProfileDir(sourceName);
   mkdirSync(destDir, { recursive: true, mode: 0o700 });
   for (const file of CLONE_FILES) {
     copyIfExists(join(sourceDir, file), join(destDir, file));
@@ -161,7 +141,7 @@ const upsertEnvKey = (envPath: string, key: string, value: string): void => {
 
 const pickProfileName = (ledger: THermesLedger | null): string => {
   if (ledger !== null) return ledger.profileName;
-  if (!existsSync(profileDir(DEFAULT_PROFILE_NAME)))
+  if (!existsSync(hermesProfileDir(DEFAULT_PROFILE_NAME)))
     return DEFAULT_PROFILE_NAME;
   return COLLISION_PROFILE_NAME;
 };
@@ -227,14 +207,14 @@ export const applyHermes = async (opts?: {
   if (
     ledger === null &&
     name === COLLISION_PROFILE_NAME &&
-    existsSync(profileDir(COLLISION_PROFILE_NAME))
+    existsSync(hermesProfileDir(COLLISION_PROFILE_NAME))
   ) {
     process.stderr.write(
       "Hermes already has profiles named openllm and openllm-gateway; refuse to clobber. Rename one, then re-run.\n",
     );
     return { code: 1 };
   }
-  const dest = profileDir(name);
+  const dest = hermesProfileDir(name);
   const created = !existsSync(dest);
   const sourceName = previousProfile === name ? "default" : previousProfile;
   if (created) cloneProfile(sourceName, dest);
@@ -242,13 +222,13 @@ export const applyHermes = async (opts?: {
     // Pull newly added source files (skills / SOUL) without clobbering
     // profile-only extras; config is merged below.
     for (const dir of CLONE_DIRS) {
-      const from = join(profileDir(sourceName), dir);
+      const from = join(hermesProfileDir(sourceName), dir);
       const to = join(dest, dir);
       if (existsSync(from) && !existsSync(to)) copyIfExists(from, to);
     }
     for (const file of CLONE_FILES) {
       if (file === "config.yaml" || file === ".env") continue;
-      const from = join(profileDir(sourceName), file);
+      const from = join(hermesProfileDir(sourceName), file);
       const to = join(dest, file);
       if (existsSync(from) && !existsSync(to)) copyIfExists(from, to);
     }
@@ -261,10 +241,13 @@ export const applyHermes = async (opts?: {
     stateDir: contextStateDir(),
     tier,
   });
-  const sourceCfg = parseConfig(join(profileDir(sourceName), "config.yaml"));
+  const sourceCfg = parseConfig(
+    join(hermesProfileDir(sourceName), "config.yaml"),
+  );
   const existing = parseConfig(join(dest, "config.yaml"));
+  // Source fills gaps; existing profile edits win on conflict; overlay last.
   const merged = deepMerge(
-    deepMerge(existing, sourceCfg),
+    deepMerge(sourceCfg, existing),
     overlay,
   ) as TJsonObject;
   writeFileSync(join(dest, "config.yaml"), serializeYaml(merged), {
@@ -299,7 +282,7 @@ export const uninstallHermes = (): number => {
     return 0;
   }
   setActiveProfile(ledger.previousProfile);
-  const dest = profileDir(ledger.profileName);
+  const dest = hermesProfileDir(ledger.profileName);
   if (ledger.createdProfile) {
     rmSync(dest, { recursive: true, force: true });
   }
@@ -325,7 +308,7 @@ export const statusHermes = (): number => {
               cli_version: ledger.cli_version,
               previousProfile: ledger.previousProfile,
               profileName: ledger.profileName,
-              profile_exists: existsSync(profileDir(ledger.profileName)),
+              profile_exists: existsSync(hermesProfileDir(ledger.profileName)),
             }),
       },
       null,
@@ -389,7 +372,8 @@ export const runHermesCommand = async (
     bin,
     forwarded,
     {
-      HERMES_HOME: applied.profileHome ?? profileDir(DEFAULT_PROFILE_NAME),
+      HERMES_HOME:
+        applied.profileHome ?? hermesProfileDir(DEFAULT_PROFILE_NAME),
       OPENLLM_API_KEY: applied.apiKey ?? "",
       OPENLLM_BIN: openllmBinPath(),
       CLAUDE_CONTEXT_STATE_DIR: contextStateDir(),

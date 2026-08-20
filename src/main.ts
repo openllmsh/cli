@@ -111,13 +111,6 @@ rc (~/.zshrc, ~/.bashrc) / fish completions dir automatically.
 const clientUsage = (id: string): string => {
   const client = CLIENTS[id as keyof typeof CLIENTS];
   if (client.mode === "always-on") {
-    if (id === "hermes") {
-      return `usage: openllm hermes [--no-persist] [...args]
-       openllm hermes [uninstall|status]
-
-${client.note}
-`;
-    }
     return `usage: openllm ${id} [uninstall|status]\n\n${client.note}\n`;
   }
   const dangerous =

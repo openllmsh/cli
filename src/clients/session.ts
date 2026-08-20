@@ -37,6 +37,7 @@ import {
   fetchTier,
   resolveGateway,
 } from "./gateway";
+import { hermesProfileConfigPath } from "./hermes-home";
 import { HOOK_SCRIPTS } from "./hooks";
 import { buildLaunchPlan, type TLaunchPlan } from "./launch";
 import { buildLiveJson, writeLiveJson } from "./live";
@@ -168,31 +169,11 @@ const materialize = (plan: TLaunchPlan, runDir: string): void => {
   }
 };
 
-/** Sticky Hermes profile config, if the name is a safe profile id. */
-const hermesUserConfigPath = (): string => {
-  const root =
-    process.env.OPENLLM_HERMES_HOME !== undefined &&
-    process.env.OPENLLM_HERMES_HOME.length > 0
-      ? process.env.OPENLLM_HERMES_HOME
-      : join(userHome(), ".hermes");
-  let sticky = "default";
-  try {
-    const name = readFileSync(join(root, "active_profile"), "utf-8").trim();
-    if (name.length > 0) sticky = name;
-  } catch {
-    // no sticky file → default profile
-  }
-  if (sticky !== "default" && /^[a-z0-9][a-z0-9_-]{0,63}$/.test(sticky)) {
-    return join(root, "profiles", sticky, "config.yaml");
-  }
-  return join(root, "config.yaml");
-};
-
 /** The user's existing config text for a client, when readable. */
 const readUserConfig = (client: TClient): string | undefined => {
   const paths: Partial<Record<string, string>> = {
     grok: join(userHome(), ".grok", "config.toml"),
-    hermes: hermesUserConfigPath(),
+    hermes: hermesProfileConfigPath(),
     opencode: join(
       process.env.XDG_CONFIG_HOME ?? join(userHome(), ".config"),
       "opencode",
