@@ -5,9 +5,9 @@
  * through session).
  */
 
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
-import { userHome } from "../env";
+import { existsSync, readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { openllmDir, userHome } from "../env";
 
 export const hermesRoot = (): string =>
   process.env.OPENLLM_HERMES_HOME !== undefined &&
@@ -46,3 +46,36 @@ export const readActiveProfile = (): string => {
 /** Config.yaml of the sticky profile (default → `~/.hermes/config.yaml`). */
 export const hermesProfileConfigPath = (): string =>
   join(hermesProfileDir(readActiveProfile()), "config.yaml");
+
+export const hermesLedgerPath = (): string =>
+  join(openllmDir(), "clients", "hermes.json");
+
+/**
+ * Profile name written by `openllm hermes install`, or null when there is no
+ * valid ledger / the profile dir is gone. Session overlay reads this so a
+ * launch after install does not pin `active_profile` to `default`.
+ */
+export const readHermesStickyProfile = (): string | null => {
+  try {
+    const parsed: unknown = JSON.parse(
+      readFileSync(hermesLedgerPath(), "utf-8"),
+    );
+    if (typeof parsed !== "object" || parsed === null) return null;
+    const name = (parsed as { profileName?: unknown }).profileName;
+    if (typeof name !== "string" || !isHermesProfileName(name)) return null;
+    if (name === "default") return null;
+    if (!existsSync(hermesProfileDir(name))) return null;
+    return name;
+  } catch {
+    return null;
+  }
+};
+
+/**
+ * Prebuilt TUI next to the `hermes` binary (`hermes_cli/tui_dist/entry.js`).
+ * When set as `HERMES_TUI_DIR`, native Hermes skips `npm install` on `--tui`.
+ */
+export const hermesBundledTuiDir = (bin: string): string | undefined => {
+  const dir = join(dirname(bin), "..", "hermes_cli", "tui_dist");
+  return existsSync(join(dir, "entry.js")) ? dir : undefined;
+};

@@ -359,8 +359,9 @@ const planHermes = (inputs: TLaunchInputs): TLaunchPlan => {
   return {
     files: {
       "config.yaml": serializeYaml(merged),
-      // Own this file so a sticky non-default `active_profile` symlink cannot
-      // send Hermes into ~/.hermes/profiles/<name> and skip our overlay.
+      // Own this file so a sticky `active_profile` cannot send Hermes into
+      // ~/.hermes/profiles/<name> and skip this overlay. After install, launch
+      // skips the overlay and sets HERMES_HOME to the profile instead.
       active_profile: "default\n",
     },
     args: [],

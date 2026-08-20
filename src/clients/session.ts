@@ -37,7 +37,7 @@ import {
   fetchTier,
   resolveGateway,
 } from "./gateway";
-import { hermesProfileConfigPath } from "./hermes-home";
+import { hermesBundledTuiDir, hermesProfileConfigPath } from "./hermes-home";
 import { HOOK_SCRIPTS } from "./hooks";
 import { buildLaunchPlan, type TLaunchPlan } from "./launch";
 import { buildLiveJson, writeLiveJson } from "./live";
@@ -535,6 +535,10 @@ export const runSessionClient = async (
       tier,
     });
     materialize(plan, runDir);
+    const tuiDir =
+      client.id === "hermes" ? hermesBundledTuiDir(bin) : undefined;
+    const env =
+      tuiDir === undefined ? plan.env : { ...plan.env, HERMES_TUI_DIR: tuiDir };
 
     // `-d` becomes the client's OWN flag, ahead of the user's args so their
     // explicit choices still win on anything that conflicts.
@@ -559,7 +563,7 @@ export const runSessionClient = async (
     code = await execClient(
       bin,
       [...plan.args, ...dangerous, ...forwarded],
-      plan.env,
+      env,
       plan.unsetEnv,
     );
   } finally {
