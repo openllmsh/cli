@@ -13454,7 +13454,8 @@
                       "chatgpt",
                       "grok",
                       "opencode",
-                      "hermes"
+                      "hermes",
+                      "shell"
                     ]
                   }
                 },
