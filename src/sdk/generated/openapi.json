@@ -22246,6 +22246,14 @@
               "type": "string"
             },
             "required": true
+          },
+          {
+            "name": "branch",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            },
+            "required": false
           }
         ],
         "security": [],

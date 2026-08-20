@@ -297,6 +297,10 @@ export const API_OPERATIONS: readonly TApiOperation[] = [
       {
         "name": "codebaseId",
         "required": true
+      },
+      {
+        "name": "branch",
+        "required": false
       }
     ],
     "hasBody": false
