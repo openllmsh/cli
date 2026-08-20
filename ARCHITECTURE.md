@@ -12,9 +12,9 @@
 >     gateway API (inference + read-only ops; §MCP) plus the claude-context
 >     and supermemory tool groups.
 >
-> Installed by `install.sh` at the repo root (or by the daemon's installer,
-> which installs both binaries), self-updating against the gateway's pinned
-> release — the extension-side twin of
+> Installed by [`packages/cli/install.sh`](install.sh) (or by the daemon's
+> installer, which installs both binaries), self-updating against the gateway's
+> pinned release — the extension-side twin of
 > [`packages/daemon`](../daemon/ARCHITECTURE.md). Design:
 > [`docs/proposals/remove-registry-runtime-config-merge.md`](../../docs/proposals/remove-registry-runtime-config-merge.md).
 
@@ -37,16 +37,21 @@ packages/cli/
 │   └── generate-sdk.ts   # MONOREPO-ONLY: HttpApi → committed SDK artifacts
 └── src/
     ├── main.ts           # entry: <client> | mcp | exec | api | setup | completion
-    │                      #        | uninstall | doctor | self-update | version
+    │                      #        | sessions | uninstall | doctor | self-update | version
     ├── clients/          # the runtime client commands
     │   ├── registry.ts   #   SSOT: which clients, session vs always-on
     │   ├── overlays.ts   #   the embedded setup/** text
     │   ├── merge.ts      #   pure merge primitives (substitute/deepMerge/TOML)
     │   ├── launch.ts     #   pure per-client launch plans
-    │   ├── session.ts    #   run dir + exec with full arg passthrough
+    │   ├── session.ts    #   overlay launch + durable-session selection
+    │   ├── session-picker.ts # pure, unit-tested session-choice logic
+    │   ├── attach.ts     #   terminal/pipe attach to a durable session host
+    │   ├── live.ts       #   live-process registry for direct client launches
     │   ├── raycast.ts    #   the always-on apply/uninstall/status
     │   ├── gateway.ts    #   per-launch local-vs-cloud resolution
     │   └── hooks.ts      #   embedded hook scripts
+    ├── session-host.ts   # durable session-host discovery and spawning
+    ├── sessions-cmd.ts   # `sessions list|attach|kill` management command
     ├── uninstall-cmd.ts  # teardown (reverses always-on clients first)
     ├── doctor-cmd.ts     # report/scrub pre-runtime-merge leftovers
     ├── commands.ts       # SSOT of the command surface (help + completion derive)
@@ -55,7 +60,7 @@ packages/cli/
     ├── env.ts            # config resolution (env → shared ~/.openllm/.env → baked origin)
     ├── self-update.ts    # converge to /api/cli/version (checksum-gated atomic swap)
     ├── sdk/
-    │   ├── generated/    # COMMITTED: openapi.json + operations.ts (58 ops)
+    │   ├── generated/    # COMMITTED: openapi.json + operations.ts (69 ops)
     │   └── client.ts     # thin fetch wrapper over the operations table
     └── mcp/
         ├── server.ts     # the ONE server: composes every tool group over stdio
@@ -78,6 +83,7 @@ packages/cli/
 | `openllm completion <bash\|zsh\|fish\|install>` | shell completion (derived from `commands.ts`, the single command-surface source) |
 | `openllm api --spec` | print the embedded OpenAPI spec |
 | `openllm self-update` | converge to the gateway's pinned release |
+| `openllm sessions [list\|attach\|kill]` | list, attach to, or kill durable local sessions (`attach` requires an id) |
 | `openllm version` | print the baked version |
 
 Config: `OPENLLM_CLOUD_ORIGIN` / `OPENLLM_API_KEY` env (the same contract the
@@ -87,10 +93,12 @@ to the compile-time cloud-origin bake.
 
 ### Brokered session launches
 
-For a plain interactive local TTY launch, `openllm <client>` uses the reachable
-local daemon's broker by default, so the daemon is the canonical session
-manager. If the daemon is unavailable, the CLI transparently falls back to the
-existing inherited-stdio launch; it never requires the daemon.
+For a plain interactive local TTY launch, `openllm <client>` starts a detached
+durable host through an available `openllmd` binary. This does not require the
+daemon service to be running: the filesystem registry and the host's private
+control socket are the session manager. If no daemon binary is available, or
+the host cannot start or attach, the CLI transparently falls back to the
+existing inherited-stdio launch.
 
 **Joining a session already running here.** Before spawning a new durable host,
 `openllm <client>` scans the filesystem session registry
@@ -100,7 +108,7 @@ registry is shared by both origins — a browser-started session is spawned by
 the daemon's `spawnSessionHostProc`, a local one by the CLI, and both write
 under `OPENLLM_DAEMON_STATE_DIR ?? ~/.openllm` — so a local terminal can join a
 session the browser started and vice versa. Joining is a real ATTACH to the
-live PTY (the same path as `openllm sessions attach`), never a vendor
+live PTY (the same path as `openllm sessions attach <id>`), never a vendor
 `--resume`: the host fans output out to every consumer and reflows a private
 screen per consumer size, so a second viewer neither kicks the first nor
 disturbs its geometry.
@@ -159,9 +167,10 @@ Everything follows `packages/daemon` exactly — see
 - 4 targets (`CLI_TARGETS`), compiled in parallel, gzipped release assets
   `openllm-<target>.gz` on `openllmsh/cli`; the manifest pins the
   sha256 of the DECOMPRESSED binary.
-- Change-gated on `CLI_BINARY_SOURCES` (`cli/src` + `release-types.ts` +
-  `package.json` — the actual import closure, no workspace packages): an
-  unchanged CLI keeps its lagging pin.
+- Change-gated on `CLI_BINARY_SOURCES`: `cli/src`, embedded `cli/setup`, the
+  public-mirror `cli/install.sh` (not compiled, but released at the pinned tag),
+  `release-types.ts`, and `package.json`. The compiled binary has no
+  workspace-package dependency; an unchanged CLI keeps its lagging pin.
 - Mirror: `subtreeSplitAndPush` of `packages/cli` (manifest stamped, no
   depRefs rewrites needed) → binary publish attaches to the mirror's tag.
 - Merge gate: the `cli-pins-match` job in
