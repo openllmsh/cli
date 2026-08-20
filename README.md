@@ -107,7 +107,7 @@ Exit code is `0` only when every checked binary matches its pinned digest.
 ## License
 
 **Source-available** under the [Business Source License 1.1](./LICENSE)
-(© Quantide LLC) — converts to MIT on the Change Date. Not OSI open-source.
+(© OpenLLM, INC) — converts to MIT on the Change Date. Not OSI open-source.
 
 ---
 
