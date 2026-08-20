@@ -325,9 +325,13 @@ Clones your active Hermes profile into a sticky 'openllm' profile and points
 Hermes at the OpenLLM gateway. Default ~/.hermes/config.yaml is never edited.
 
   openllm hermes                 apply (idempotent) and run hermes
+  openllm hermes -z "prompt"     apply and run a one-shot prompt
   openllm hermes uninstall       restore the previous sticky profile
   openllm hermes status          report whether OpenLLM is wired in
   openllm hermes --no-persist    one-off session overlay; no sticky write
+
+Points at this machine's daemon by default. Cloud \`-r\` 307-redirects to
+the daemon; Hermes does not follow POST 307s, so use the local default.
 
 ${CLIENTS.hermes.note}
 `;
@@ -343,12 +347,6 @@ export const runHermesCommand = async (
   }
   if (verb === "uninstall") return uninstallHermes();
   if (verb === "status") return statusHermes();
-  if (flags?.dangerous === true) {
-    process.stderr.write(
-      "-d does not apply to hermes — it has no skip-approvals flag.\n",
-    );
-    return 2;
-  }
   const noPersist = args.includes("--no-persist");
   const forwarded = args.filter((a) => a !== "--no-persist");
   if (noPersist) {
@@ -368,9 +366,13 @@ export const runHermesCommand = async (
     );
     return 127;
   }
+  const dangerous =
+    flags?.dangerous === true && CLIENTS.hermes.dangerousFlag !== undefined
+      ? [CLIENTS.hermes.dangerousFlag]
+      : [];
   return execClient(
     bin,
-    forwarded,
+    [...dangerous, ...forwarded],
     {
       HERMES_HOME:
         applied.profileHome ?? hermesProfileDir(DEFAULT_PROFILE_NAME),

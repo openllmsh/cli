@@ -143,10 +143,11 @@ export const CLIENTS: Readonly<Record<TClientId, TClient>> = {
     name: "Hermes",
     mode: "always-on",
     strategy: "config-dir",
-    nonInteractiveMarkers: ["run", "cron", "webhook", "gateway"],
+    nonInteractiveMarkers: ["-z", "run", "cron", "webhook", "gateway"],
     bin: "hermes",
     binPaths: ["~/.hermes/bin/hermes", "~/.local/bin/hermes"],
     installHint: "https://hermes-agent.nousresearch.com/install.sh",
+    dangerousFlag: "--yolo",
     note: "clones a sticky openllm profile; default ~/.hermes config is never edited",
   },
   opencode: {
