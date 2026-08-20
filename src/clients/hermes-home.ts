@@ -5,7 +5,7 @@
  * through session).
  */
 
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, realpathSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { openllmDir, userHome } from "../env";
 
@@ -72,10 +72,27 @@ export const readHermesStickyProfile = (): string | null => {
 };
 
 /**
- * Prebuilt TUI next to the `hermes` binary (`hermes_cli/tui_dist/entry.js`).
- * When set as `HERMES_TUI_DIR`, native Hermes skips `npm install` on `--tui`.
+ * Directory to export as `HERMES_TUI_DIR`. Native Hermes only skips
+ * `npm install` when `<dir>/dist/entry.js` exists (`hermes_cli/main.py`
+ * `_make_tui_argv`). Curl installs keep that bundle at `ui-tui/dist/`;
+ * a wheel's `tui_dist/entry.js` is a different layout and is picked up
+ * by native `_find_bundled_tui` without this env.
  */
 export const hermesBundledTuiDir = (bin: string): string | undefined => {
-  const dir = join(dirname(bin), "..", "hermes_cli", "tui_dist");
-  return existsSync(join(dir, "entry.js")) ? dir : undefined;
+  const roots: string[] = [];
+  const push = (dir: string): void => {
+    if (!roots.includes(dir)) roots.push(dir);
+  };
+  push(join(dirname(bin), ".."));
+  try {
+    push(join(dirname(realpathSync(bin)), ".."));
+  } catch {
+    // bin missing or not resolvable
+  }
+  push(hermesRoot());
+  for (const root of roots) {
+    const ui = join(root, "ui-tui");
+    if (existsSync(join(ui, "dist", "entry.js"))) return ui;
+  }
+  return undefined;
 };
