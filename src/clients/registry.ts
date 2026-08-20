@@ -52,13 +52,15 @@ export type TSessionStrategy =
 /** The daemon broker's session vocabulary for launchable clients.
  *  Mirrors DeviceSessionCli in packages/protocol/daemon.ts — this compiled
  *  binary carries no workspace deps, so the set is restated here once and
- *  every CLI-side consumer imports THIS alias. */
+ *  every CLI-side consumer imports THIS alias. Overlay clients remain
+ *  vendor-only; shell deliberately has no `CLIENTS` entry. */
 export const DAEMON_CLIS = [
   "claude_code",
   "chatgpt",
   "grok",
   "opencode",
   "hermes",
+  "shell",
 ] as const;
 export type TDaemonCli = (typeof DAEMON_CLIS)[number];
 
