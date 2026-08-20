@@ -172,6 +172,7 @@ const materialize = (plan: TLaunchPlan, runDir: string): void => {
 const readUserConfig = (client: TClient): string | undefined => {
   const paths: Partial<Record<string, string>> = {
     grok: join(userHome(), ".grok", "config.toml"),
+    hermes: join(userHome(), ".hermes", "config.yaml"),
     opencode: join(
       process.env.XDG_CONFIG_HOME ?? join(userHome(), ".config"),
       "opencode",
@@ -602,7 +603,7 @@ export const mergeSessionEnv = (
  * child maps to the conventional 128+signo so shell callers see the same thing
  * they would from a direct invocation.
  */
-const execClient = (
+export const execClient = (
   bin: string,
   args: readonly string[],
   env: Readonly<Record<string, string>>,

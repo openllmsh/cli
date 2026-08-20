@@ -18,6 +18,7 @@
 
 import { existsSync, readdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
+import { uninstallHermes } from "./clients/hermes";
 import { uninstallRaycast } from "./clients/raycast";
 import { removeCompletion } from "./completion";
 import { openllmDir } from "./env";
@@ -97,6 +98,10 @@ export const runUninstall = async (
     if (client === "raycast") {
       process.stdout.write("Reversing Raycast wiring...\n");
       uninstallRaycast();
+    }
+    if (client === "hermes") {
+      process.stdout.write("Reversing Hermes profile wiring...\n");
+      uninstallHermes();
     }
   }
 

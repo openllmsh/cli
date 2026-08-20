@@ -163,6 +163,21 @@ export const tomlLeaves = (doc: TJsonObject, prefix = ""): string[] => {
  * requires them before any table header), then one `[table]` per nested
  * object, depth-first with quoted keys where needed.
  */
+export const parseYaml = (text: string): TJsonObject | null => {
+  try {
+    const parsed: unknown = Bun.YAML.parse(text);
+    if (!isPlainObject(parsed)) return null;
+    return parsed;
+  } catch {
+    return null;
+  }
+};
+
+export const serializeYaml = (doc: TJsonObject): string => {
+  const raw = Bun.YAML.stringify(doc);
+  return raw.endsWith("\n") ? raw : `${raw}\n`;
+};
+
 export const serializeToml = (doc: TJsonObject): string => {
   const scalars: string[] = [];
   const tables: string[] = [];

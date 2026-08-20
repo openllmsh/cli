@@ -46,6 +46,11 @@ export const COMMANDS = [
     description: "Run Grok Build through OpenLLM",
   },
   {
+    name: "hermes",
+    args: "[--no-persist|uninstall|status] [...args]",
+    description: "Run Hermes through OpenLLM",
+  },
+  {
     name: "opencode",
     args: "[...args]",
     description: "Run OpenCode through OpenLLM",
@@ -148,6 +153,7 @@ export const COMMAND_ARGS: Readonly<
   mcp: ["--only", ...MCP_ONLY_GROUPS],
   api: ["--spec"],
   raycast: ["uninstall", "status"],
+  hermes: ["uninstall", "status", "--no-persist"],
   sessions: ["list", "attach", "kill"],
   doctor: ["--fix", "--no-ai", "-c", "--copy"],
   uninstall: ["--yes", "-y"],

@@ -1,0 +1,20 @@
+# Hermes overlay — merged into ~/.hermes/profiles/<openllm>/config.yaml
+# (cloned from the user's active profile). Default ~/.hermes/config.yaml is
+# never edited. The key stays in the profile .env via key_env, never here.
+
+providers:
+  openllm:
+    api: "{{OPENLLM_API_BASE}}/v1"
+    key_env: OPENLLM_API_KEY
+    transport: chat_completions
+
+model:
+  default: ultra
+  provider: custom:openllm
+
+mcp_servers:
+  openllm:
+    command: "{{OPENLLM_BIN}}"
+    args: {{MCP_ARGS}}
+    env:
+      CLAUDE_CONTEXT_STATE_DIR: "{{STATE_DIR}}"

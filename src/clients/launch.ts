@@ -12,7 +12,9 @@
 import {
   deepMerge,
   parseJsonLoose,
+  parseYaml,
   serializeToml,
+  serializeYaml,
   substitute,
   substituteJsonValue,
   type TJsonObject,
@@ -149,7 +151,7 @@ const parseGrokCatalog = (
 };
 
 /** The placeholder values every overlay may reference. */
-const overlayVars = (
+export const overlayVars = (
   inputs: TLaunchInputs,
 ): Readonly<Record<string, string>> => ({
   OPENLLM_API_BASE: inputs.apiBase,
@@ -346,6 +348,35 @@ const planGrok = (inputs: TLaunchInputs): TLaunchPlan => {
 };
 
 /**
+ * Hermes (`--no-persist`) — private `HERMES_HOME` over a symlink farm of
+ * `~/.hermes`. The persist path (`openllm hermes` without the flag) does not
+ * use this plan; it clones a sticky profile instead.
+ */
+const planHermes = (inputs: TLaunchInputs): TLaunchPlan => {
+  const vars = overlayVars(inputs);
+  const overlayText = substitute(OVERLAYS.hermes.config, vars);
+  const overlay = parseYaml(overlayText) ?? {};
+  const user =
+    inputs.userConfig === undefined ? {} : (parseYaml(inputs.userConfig) ?? {});
+  const merged = deepMerge(user, overlay) as TJsonObject;
+  return {
+    files: {
+      "config.yaml": serializeYaml(merged),
+    },
+    args: [],
+    env: {
+      HERMES_HOME: inputs.runDir,
+      OPENLLM_API_KEY: inputs.apiKey,
+      OPENLLM_BIN: inputs.binPath,
+      CLAUDE_CONTEXT_STATE_DIR: inputs.stateDir,
+    },
+    unsetEnv: ["OPENAI_API_KEY", "OPENAI_BASE_URL"],
+    mirrorDir: "~/.hermes",
+    hooks: false,
+  };
+};
+
+/**
  * OpenCode — `OPENCODE_CONFIG` points at a single config file, so we merge the
  * user's document with our provider block in memory and write the result into
  * the run dir. An unparseable user config degrades to our overlay alone.
@@ -401,7 +432,9 @@ export const buildLaunchPlan = (inputs: TLaunchInputs): TLaunchPlan => {
     case "config-overrides":
       return planCodex(inputs);
     case "config-dir":
-      return planGrok(inputs);
+      return inputs.client.id === "hermes"
+        ? planHermes(inputs)
+        : planGrok(inputs);
     case "config-file":
       return planOpenCode(inputs);
     default:

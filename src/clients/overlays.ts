@@ -26,6 +26,12 @@ import grokConfig from "../../setup/grok/config.toml" with { type: "text" };
 import grokGuidance from "../../setup/grok/guidance.md" with { type: "text" };
 import grokHooks from "../../setup/grok/hooks.json" with { type: "text" };
 import grokMcp from "../../setup/grok/mcp.toml" with { type: "text" };
+import hermesGuidance from "../../setup/hermes/guidance.md" with {
+  type: "text",
+};
+import hermesConfig from "../../setup/hermes/openllm.yaml" with {
+  type: "text",
+};
 import opencodeConfig from "../../setup/opencode/opencode.json" with {
   type: "text",
 };
@@ -61,6 +67,10 @@ export const OVERLAYS = {
     mcp: grokMcp,
     hooks: asText(grokHooks),
     guidance: grokGuidance,
+  },
+  hermes: {
+    config: hermesConfig,
+    guidance: hermesGuidance,
   },
   opencode: { config: asText(opencodeConfig) },
   raycast: { providers: raycastProviders },

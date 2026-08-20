@@ -25,6 +25,7 @@ export const CLIENT_IDS = [
   "claude",
   "codex",
   "grok",
+  "hermes",
   "opencode",
   "raycast",
 ] as const;
@@ -136,6 +137,17 @@ export const CLIENTS: Readonly<Record<TClientId, TClient>> = {
     catalogSlug: "grok-build",
     dangerousFlag: "--always-approve",
     note: "your ~/.grok config and auth.json are never modified",
+  },
+  hermes: {
+    id: "hermes",
+    name: "Hermes",
+    mode: "always-on",
+    strategy: "config-dir",
+    nonInteractiveMarkers: ["run", "cron", "webhook", "gateway"],
+    bin: "hermes",
+    binPaths: ["~/.hermes/bin/hermes", "~/.local/bin/hermes"],
+    installHint: "https://hermes-agent.nousresearch.com/install.sh",
+    note: "clones a sticky openllm profile; default ~/.hermes config is never edited",
   },
   opencode: {
     id: "opencode",

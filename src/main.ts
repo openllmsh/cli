@@ -18,6 +18,7 @@
  * independently.
  */
 
+import { runHermesCommand } from "./clients/hermes";
 import { runRaycastCommand } from "./clients/raycast";
 import { CLIENTS, isClientId, parseClientFlags } from "./clients/registry";
 import { runSessionClient } from "./clients/session";
@@ -110,6 +111,13 @@ rc (~/.zshrc, ~/.bashrc) / fish completions dir automatically.
 const clientUsage = (id: string): string => {
   const client = CLIENTS[id as keyof typeof CLIENTS];
   if (client.mode === "always-on") {
+    if (id === "hermes") {
+      return `usage: openllm hermes [--no-persist] [...args]
+       openllm hermes [uninstall|status]
+
+${client.note}
+`;
+    }
     return `usage: openllm ${id} [uninstall|status]\n\n${client.note}\n`;
   }
   const dangerous =
@@ -164,6 +172,9 @@ const main = async (): Promise<void> => {
   if (cmd !== undefined && isClientId(cmd)) {
     const client = CLIENTS[cmd];
     if (client.mode === "always-on") {
+      if (client.id === "hermes") {
+        return process.exit(await runHermesCommand(rest, clientFlags));
+      }
       return process.exit(await runRaycastCommand(rest, clientFlags));
     }
     // ONLY a LEADING -h/--help is ours; anywhere else it belongs to the client
