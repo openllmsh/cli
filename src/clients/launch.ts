@@ -346,9 +346,8 @@ const planGrok = (inputs: TLaunchInputs): TLaunchPlan => {
 };
 
 /**
- * Hermes (`--no-persist`) — private `HERMES_HOME` over a symlink farm of
- * `~/.hermes`. The persist path (`openllm hermes` without the flag) does not
- * use this plan; it clones a sticky profile instead.
+ * Hermes session overlay — private `HERMES_HOME` over a symlink farm of
+ * `~/.hermes`. Sticky profile writes live on `openllm hermes install`.
  */
 const planHermes = (inputs: TLaunchInputs): TLaunchPlan => {
   const vars = overlayVars(inputs);

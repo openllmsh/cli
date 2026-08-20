@@ -58,6 +58,7 @@ export const DAEMON_CLIS = [
   "chatgpt",
   "grok",
   "opencode",
+  "hermes",
 ] as const;
 export type TDaemonCli = (typeof DAEMON_CLIS)[number];
 
@@ -141,14 +142,15 @@ export const CLIENTS: Readonly<Record<TClientId, TClient>> = {
   hermes: {
     id: "hermes",
     name: "Hermes",
-    mode: "always-on",
+    mode: "session",
     strategy: "config-dir",
+    daemonCli: "hermes",
     nonInteractiveMarkers: ["-z", "run", "cron", "webhook", "gateway"],
     bin: "hermes",
     binPaths: ["~/.hermes/bin/hermes", "~/.local/bin/hermes"],
     installHint: "https://hermes-agent.nousresearch.com/install.sh",
     dangerousFlag: "--yolo",
-    note: "clones a sticky openllm profile; default ~/.hermes config is never edited",
+    note: "session overlay; openllm hermes install writes a sticky profile without touching default config",
   },
   opencode: {
     id: "opencode",

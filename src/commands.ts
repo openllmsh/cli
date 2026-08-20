@@ -47,8 +47,8 @@ export const COMMANDS = [
   },
   {
     name: "hermes",
-    args: "[--no-persist|uninstall|status] [...args]",
-    description: "Run Hermes through OpenLLM",
+    args: "[install|uninstall|status|--no-persist] [...args]",
+    description: "Run Hermes TUI through OpenLLM",
   },
   {
     name: "opencode",
@@ -170,7 +170,7 @@ export const COMMAND_ARGS: Readonly<
   mcp: ["--only", ...MCP_ONLY_GROUPS],
   api: ["--spec"],
   raycast: ["uninstall", "status"],
-  hermes: ["uninstall", "status", "--no-persist"],
+  hermes: ["install", "uninstall", "status", "--no-persist"],
   sessions: ["list", "attach", "kill"],
   doctor: ["--fix", "--no-ai", "-c", "--copy"],
   uninstall: ["--yes", "-y"],

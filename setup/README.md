@@ -47,7 +47,7 @@ setup/
 ├── claude/     settings.json · mcp.json · guidance.md · prompt-prefix.md
 ├── codex/      overrides.toml
 ├── grok/       config.toml · mcp.toml · hooks.json · guidance.md
-├── hermes/     openllm.yaml · guidance.md   (always-on sticky profile)
+├── hermes/     openllm.yaml · guidance.md   (session overlay + optional sticky profile)
 ├── opencode/   opencode.json
 └── raycast/    providers.yaml      (always-on client — applied in place)
 ```

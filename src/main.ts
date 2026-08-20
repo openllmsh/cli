@@ -164,10 +164,10 @@ const main = async (): Promise<void> => {
   // hand-written cases, so help/completion/dispatch can't drift.
   if (cmd !== undefined && isClientId(cmd)) {
     const client = CLIENTS[cmd];
+    if (client.id === "hermes") {
+      return process.exit(await runHermesCommand(rest, clientFlags));
+    }
     if (client.mode === "always-on") {
-      if (client.id === "hermes") {
-        return process.exit(await runHermesCommand(rest, clientFlags));
-      }
       return process.exit(await runRaycastCommand(rest, clientFlags));
     }
     // ONLY a LEADING -h/--help is ours; anywhere else it belongs to the client

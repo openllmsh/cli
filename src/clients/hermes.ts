@@ -2,15 +2,15 @@
  * Hermes — ledger-tracked sticky profile (proposal
  * `docs/proposals/hermes-client-integration.md`).
  *
- * Default `openllm hermes` clones the currently active Hermes profile into
- * `~/.hermes/profiles/openllm`, overlays OpenLLM routing + MCP, then
- * `hermes profile use` so later `hermes` / the root-home gateway keep using
- * the gateway across restarts. Default `~/.hermes/config.yaml` is never
- * edited. `openllm hermes uninstall` restores the previous sticky profile
- * and deletes only our profile dir.
+ * Default `openllm hermes` launches the Hermes TUI through a session overlay
+ * (`planHermes` in launch.ts) and forwards every native arg except our reserved
+ * verbs. `openllm hermes install` clones the active Hermes profile into a
+ * sticky `openllm` profile so later `hermes` / the gateway keep using the
+ * gateway. Default `~/.hermes/config.yaml` is never edited. `openllm hermes
+ * uninstall` restores the previous sticky profile and deletes only our profile
+ * dir. Native `hermes profile install|uninstall` is forwarded verbatim.
  *
- * `--no-persist` skips all of that and uses the grok-twin session overlay
- * (`planHermes` in launch.ts).
+ * `--no-persist` is an alias of the default session overlay.
  */
 
 import { execFileSync } from "node:child_process";
@@ -39,7 +39,7 @@ import { deepMerge, parseYaml, serializeYaml, substitute } from "./merge";
 import { OVERLAYS } from "./overlays";
 import type { TClientFlags } from "./registry";
 import { CLIENTS } from "./registry";
-import { execClient, findClientBinary, runSessionClient } from "./session";
+import { findClientBinary, runSessionClient } from "./session";
 
 export {
   hermesProfileConfigPath,
@@ -268,6 +268,7 @@ export const applyHermes = async (opts?: {
   process.stdout.write(
     `Hermes profile '${name}' now routes through OpenLLM.\n` +
       `  sticky profile: ${name} (was ${previousProfile})\n` +
+      `  launch TUI: openllm hermes\n` +
       `  uninstall: openllm hermes uninstall\n`,
   );
   return { code: 0, profileHome: dest, apiKey: gateway.apiKey };
@@ -318,23 +319,34 @@ export const statusHermes = (): number => {
   return 0;
 };
 
-const HERMES_USAGE = `usage: openllm hermes [--no-persist] [...args]
-       openllm hermes uninstall | status
+const HERMES_USAGE = `usage: openllm hermes [...args]
+       openllm hermes install | uninstall | status
 
-Clones your active Hermes profile into a sticky 'openllm' profile and points
-Hermes at the OpenLLM gateway. Default ~/.hermes/config.yaml is never edited.
+Launches Hermes TUI through OpenLLM. EVERY argument after hermes is forwarded
+to hermes except our reserved verbs (install, uninstall, status). Native
+commands such as profile, gateway, chat, and --tui/--cli are never overwritten.
 
-  openllm hermes                 apply (idempotent) and run hermes
-  openllm hermes -z "prompt"     apply and run a one-shot prompt
+  openllm hermes                 launch Hermes TUI (session overlay)
+  openllm hermes --tui           same; --tui is implied when argv is empty
+  openllm hermes -z "prompt"     one-shot prompt (native -z)
+  openllm hermes profile list    native profile command, forwarded
+  openllm hermes install         sticky openllm profile (gateway/cron)
   openllm hermes uninstall       restore the previous sticky profile
-  openllm hermes status          report whether OpenLLM is wired in
-  openllm hermes --no-persist    one-off session overlay; no sticky write
+  openllm hermes status          report whether the sticky profile is wired
+  openllm hermes --no-persist    session overlay (same as the default launch)
 
-Points at this machine's daemon by default. Cloud \`-r\` 307-redirects to
-the daemon; Hermes does not follow POST 307s, so use the local default.
+Default ~/.hermes/config.yaml is never edited. Points at this machine's
+daemon by default.
 
 ${CLIENTS.hermes.note}
 `;
+
+/** Empty launch (or only our overlay flag) → native TUI. Never inject --tui
+ *  when the user already picked an interface or a native subcommand. */
+const withImpliedTui = (forwarded: readonly string[]): readonly string[] => {
+  if (forwarded.length > 0) return forwarded;
+  return ["--tui"];
+};
 
 export const runHermesCommand = async (
   args: readonly string[],
@@ -345,42 +357,17 @@ export const runHermesCommand = async (
     process.stdout.write(HERMES_USAGE);
     return 0;
   }
+  if (verb === "install") {
+    const applied = await applyHermes({ remote: flags?.remote });
+    return applied.code;
+  }
   if (verb === "uninstall") return uninstallHermes();
   if (verb === "status") return statusHermes();
-  const noPersist = args.includes("--no-persist");
   const forwarded = args.filter((a) => a !== "--no-persist");
-  if (noPersist) {
-    return runSessionClient(
-      CLIENTS.hermes,
-      forwarded,
-      flags ?? parseEmptyFlags(),
-    );
-  }
-  const applied = await applyHermes({ remote: flags?.remote });
-  if (applied.code !== 0) return applied.code;
-  const bin = findClientBinary(CLIENTS.hermes);
-  if (bin === null) {
-    process.stderr.write(
-      `${CLIENTS.hermes.name} is not installed. Install it first:\n  ${CLIENTS.hermes.installHint}\n\n` +
-        `The openllm profile is in place; run hermes after installing it.\n`,
-    );
-    return 127;
-  }
-  const dangerous =
-    flags?.dangerous === true && CLIENTS.hermes.dangerousFlag !== undefined
-      ? [CLIENTS.hermes.dangerousFlag]
-      : [];
-  return execClient(
-    bin,
-    [...dangerous, ...forwarded],
-    {
-      HERMES_HOME:
-        applied.profileHome ?? hermesProfileDir(DEFAULT_PROFILE_NAME),
-      OPENLLM_API_KEY: applied.apiKey ?? "",
-      OPENLLM_BIN: openllmBinPath(),
-      CLAUDE_CONTEXT_STATE_DIR: contextStateDir(),
-    },
-    ["OPENAI_API_KEY", "OPENAI_BASE_URL"],
+  return runSessionClient(
+    CLIENTS.hermes,
+    withImpliedTui(forwarded),
+    flags ?? parseEmptyFlags(),
   );
 };
 
