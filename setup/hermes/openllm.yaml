@@ -7,10 +7,22 @@ providers:
     api: "{{OPENLLM_API_BASE}}/v1"
     key_env: OPENLLM_API_KEY
     transport: chat_completions
+    # Per-model override Hermes reads on /model switch. Top-level
+    # model.context_length is still the session authority (step 0).
+    models:
+      ultra:
+        context_length: 1000000
+      plus:
+        context_length: 1000000
+      lite:
+        context_length: 1000000
 
 model:
   default: ultra
   provider: custom:openllm
+  # OpenLLM is the compactor. Hermes otherwise probes /v1/models and can
+  # pick a Codex live window (~272k, shown as ~275k) and compact too early.
+  context_length: 1000000
 
 mcp_servers:
   openllm:
