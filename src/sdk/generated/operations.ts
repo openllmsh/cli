@@ -800,6 +800,18 @@ export const API_OPERATIONS: readonly TApiOperation[] = [
     "hasBody": false
   },
   {
+    "id": "user.authMethods",
+    "method": "get",
+    "path": "/user/auth-methods",
+    "summary": "",
+    "tags": [
+      "user"
+    ],
+    "pathParams": [],
+    "queryParams": [],
+    "hasBody": false
+  },
+  {
     "id": "user.dismissOnboarding",
     "method": "post",
     "path": "/user/dismiss-onboarding",

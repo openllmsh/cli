@@ -70,6 +70,13 @@ const byToolName = new Map<string, TApiOperation>(
   API_OPERATIONS.map((op) => [toolNameFor(op), op]),
 );
 
+/** Endpoints that require a browser SESSION, not an `sk-llm-…` key, and so
+ *  always 401 from the CLI. `/user/auth-methods` reads the auth service's
+ *  `list-accounts` with the caller's cookies (see `authMethodsHandler`) and
+ *  refuses the key path outright. Execution stays possible via `byToolName`;
+ *  this only keeps them out of ListTools. */
+const SESSION_ONLY_PATHS: ReadonlySet<string> = new Set(["/user/auth-methods"]);
+
 /** Which operations surface as MCP tools an agent SEES (ListTools). This
  *  trims context bloat; it does NOT gate execution — `byToolName` above
  *  keeps every operation callable, and the browser chat imports the full
@@ -78,10 +85,15 @@ const byToolName = new Map<string, TApiOperation>(
  *      groups already expose these better; the raw HTTP mirrors are dupes.
  *   2. Non-`/v1/*` mutations (post/put/patch/delete) — account/config/
  *      vault/keys/sessions/credentials writes an agent shouldn't drive
- *      through MCP. Inference (`/v1/*`) and all read-only GETs stay. */
+ *      through MCP. Inference (`/v1/*`) and all read-only GETs stay.
+ *   3. {@link SESSION_ONLY_PATHS} — read-only GETs the gateway serves ONLY to
+ *      a browser session. The CLI authenticates with an API key and has no
+ *      session cookie, so listing them spends an agent's context on a call
+ *      that can only ever come back 401. */
 const isMcpExposed = (op: TApiOperation): boolean => {
   if (op.path.startsWith("/plugins/")) return false;
   if (MUTATING.has(op.method) && !op.path.startsWith("/v1/")) return false;
+  if (SESSION_ONLY_PATHS.has(op.path)) return false;
   return true;
 };
 
