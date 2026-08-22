@@ -246,6 +246,18 @@ export const API_OPERATIONS: readonly TApiOperation[] = [
     "hasBody": true
   },
   {
+    "id": "keys.provisionDefault",
+    "method": "post",
+    "path": "/keys/default",
+    "summary": "",
+    "tags": [
+      "keys"
+    ],
+    "pathParams": [],
+    "queryParams": [],
+    "hasBody": true
+  },
+  {
     "id": "media.list",
     "method": "get",
     "path": "/media",
