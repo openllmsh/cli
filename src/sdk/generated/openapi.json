@@ -8827,6 +8827,16 @@
                                 "additionalProperties": false
                               }
                             },
+                            "notification_prefs": {
+                              "type": "object",
+                              "required": [],
+                              "properties": {
+                                "auth_loss_email": {
+                                  "type": "boolean"
+                                }
+                              },
+                              "additionalProperties": false
+                            },
                             "subscription_providers": {
                               "type": "array",
                               "items": {
@@ -20115,6 +20125,16 @@
                           },
                           "additionalProperties": false
                         }
+                      },
+                      "notification_prefs": {
+                        "type": "object",
+                        "required": [],
+                        "properties": {
+                          "auth_loss_email": {
+                            "type": "boolean"
+                          }
+                        },
+                        "additionalProperties": false
                       },
                       "subscription_providers": {
                         "type": "array",
