@@ -8833,6 +8833,9 @@
                               "properties": {
                                 "auth_loss_email": {
                                   "type": "boolean"
+                                },
+                                "quota_email": {
+                                  "type": "boolean"
                                 }
                               },
                               "additionalProperties": false
@@ -20131,6 +20134,9 @@
                         "required": [],
                         "properties": {
                           "auth_loss_email": {
+                            "type": "boolean"
+                          },
+                          "quota_email": {
                             "type": "boolean"
                           }
                         },
