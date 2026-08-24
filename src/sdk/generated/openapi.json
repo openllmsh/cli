@@ -2041,6 +2041,9 @@
                   "top_p": {
                     "type": "number"
                   },
+                  "top_k": {
+                    "type": "number"
+                  },
                   "n": {
                     "type": "number"
                   },
