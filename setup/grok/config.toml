@@ -19,4 +19,7 @@ model = "ultra"
 name = "ultra (OpenLLM)"
 base_url = "{{OPENLLM_API_BASE}}/v1"
 api_key = "{{OPENLLM_API_KEY}}"
-context_window = 262144
+# Report the highest window and let the OpenLLM proxy own compaction (same as
+# Claude Code's CLAUDE_CODE_MAX_CONTEXT_TOKENS). `ultra` is a multi-provider
+# chain, so no single model's window is authoritative — defer to the gateway.
+context_window = 1000000
