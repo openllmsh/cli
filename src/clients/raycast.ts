@@ -50,17 +50,24 @@ const providersPath = (): string =>
 
 const ledgerPath = (): string => join(openllmDir(), "clients", "raycast.json");
 
+/**
+ * Fallback tier-alias window when the live catalog is unavailable. Report the
+ * highest limit and let the OpenLLM proxy own compaction (aligns with the grok
+ * overlay + Claude's CLAUDE_CODE_MAX_CONTEXT_TOKENS).
+ */
+const FALLBACK_CONTEXT = 1_000_000;
+
 /** Fallback `models:` block when the live catalog is unavailable. */
 const FALLBACK_MODELS = [
   '      - id: "ultra"',
   '        name: "Ultra (OpenLLM)"',
-  "        context: 262144",
+  `        context: ${FALLBACK_CONTEXT}`,
   '      - id: "plus"',
   '        name: "Plus (OpenLLM)"',
-  "        context: 262144",
+  `        context: ${FALLBACK_CONTEXT}`,
   '      - id: "lite"',
   '        name: "Lite (OpenLLM)"',
-  "        context: 262144",
+  `        context: ${FALLBACK_CONTEXT}`,
 ].join("\n");
 
 /**

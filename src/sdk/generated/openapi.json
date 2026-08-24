@@ -8827,6 +8827,19 @@
                                 "additionalProperties": false
                               }
                             },
+                            "notification_prefs": {
+                              "type": "object",
+                              "required": [],
+                              "properties": {
+                                "auth_loss_email": {
+                                  "type": "boolean"
+                                },
+                                "quota_email": {
+                                  "type": "boolean"
+                                }
+                              },
+                              "additionalProperties": false
+                            },
                             "subscription_providers": {
                               "type": "array",
                               "items": {
@@ -20254,6 +20267,34 @@
                           "max_output_tokens": {
                             "type": "number"
                           },
+                          "caps": {
+                            "type": "object",
+                            "required": [],
+                            "properties": {
+                              "deniedParams": {
+                                "type": "array",
+                                "items": {
+                                  "type": "string"
+                                }
+                              },
+                              "maxTokensField": {
+                                "type": "string",
+                                "enum": [
+                                  "max_tokens",
+                                  "max_completion_tokens"
+                                ]
+                              },
+                              "temperature": {
+                                "type": "string",
+                                "enum": [
+                                  "only-1",
+                                  "clamp-0-1",
+                                  "drop"
+                                ]
+                              }
+                            },
+                            "additionalProperties": false
+                          },
                           "prefer_catalog_window": {
                             "type": "boolean"
                           },
@@ -20728,6 +20769,19 @@
                           },
                           "additionalProperties": false
                         }
+                      },
+                      "notification_prefs": {
+                        "type": "object",
+                        "required": [],
+                        "properties": {
+                          "auth_loss_email": {
+                            "type": "boolean"
+                          },
+                          "quota_email": {
+                            "type": "boolean"
+                          }
+                        },
+                        "additionalProperties": false
                       },
                       "subscription_providers": {
                         "type": "array",
