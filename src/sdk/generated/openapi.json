@@ -20301,6 +20301,9 @@
                           "prefer_catalog_window": {
                             "type": "boolean"
                           },
+                          "strip_subagent_isolation": {
+                            "type": "boolean"
+                          },
                           "pricing": {
                             "type": "object",
                             "required": [],
