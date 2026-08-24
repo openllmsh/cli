@@ -54,13 +54,13 @@ const ledgerPath = (): string => join(openllmDir(), "clients", "raycast.json");
 const FALLBACK_MODELS = [
   '      - id: "ultra"',
   '        name: "Ultra (OpenLLM)"',
-  "        context: 262144",
+  "        context: 1000000",
   '      - id: "plus"',
   '        name: "Plus (OpenLLM)"',
-  "        context: 262144",
+  "        context: 1000000",
   '      - id: "lite"',
   '        name: "Lite (OpenLLM)"',
-  "        context: 262144",
+  "        context: 1000000",
 ].join("\n");
 
 /**
