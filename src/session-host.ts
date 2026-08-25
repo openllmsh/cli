@@ -348,9 +348,17 @@ export const spawnSessionHost = (args: {
       extname(args.binary).toLowerCase() === ".cmd"
         ? ["cmd.exe", "/c", args.binary, ...args.argv]
         : [args.binary, ...args.argv];
+    const reapWithHarness =
+      process.env.OPENLLM_SESSION_HOST_KILL_ON_PARENT_EXIT === "1";
     const proc = Bun.spawn(command, {
       detached: true,
       stdio: ["ignore", "ignore", "ignore"],
+      env: {
+        ...process.env,
+        ...(reapWithHarness
+          ? { OPENLLM_SESSION_HOST_OWNER_PID: String(process.pid) }
+          : {}),
+      },
     });
     proc.unref();
     return proc;
