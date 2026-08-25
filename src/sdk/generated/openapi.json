@@ -8821,6 +8821,12 @@
                                             "embeddings",
                                             "image_openai"
                                           ]
+                                        },
+                                        "max_input_tokens": {
+                                          "type": "number"
+                                        },
+                                        "max_output_tokens": {
+                                          "type": "number"
                                         }
                                       },
                                       "additionalProperties": false
@@ -15655,6 +15661,12 @@
                                     "embeddings",
                                     "image_openai"
                                   ]
+                                },
+                                "max_input_tokens": {
+                                  "type": "number"
+                                },
+                                "max_output_tokens": {
+                                  "type": "number"
                                 }
                               },
                               "additionalProperties": false
@@ -16093,6 +16105,12 @@
                             "embeddings",
                             "image_openai"
                           ]
+                        },
+                        "max_input_tokens": {
+                          "type": "number"
+                        },
+                        "max_output_tokens": {
+                          "type": "number"
                         }
                       },
                       "additionalProperties": false
@@ -16135,7 +16153,22 @@
                     "models": {
                       "type": "array",
                       "items": {
-                        "type": "string"
+                        "type": "object",
+                        "required": [
+                          "id"
+                        ],
+                        "properties": {
+                          "id": {
+                            "type": "string"
+                          },
+                          "max_input_tokens": {
+                            "type": "number"
+                          },
+                          "max_output_tokens": {
+                            "type": "number"
+                          }
+                        },
+                        "additionalProperties": false
                       }
                     }
                   },
@@ -20767,6 +20800,12 @@
                                       "embeddings",
                                       "image_openai"
                                     ]
+                                  },
+                                  "max_input_tokens": {
+                                    "type": "number"
+                                  },
+                                  "max_output_tokens": {
+                                    "type": "number"
                                   }
                                 },
                                 "additionalProperties": false
