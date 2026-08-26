@@ -37,11 +37,17 @@ export const isUsableApiKey = (value: string | null | undefined): boolean =>
 const signInUrl = (config: TCliConfig = cliConfig()): string =>
   `${config.gatewayUrl}/sign-in`;
 
+const keyDiagnostic = (
+  problem: "required" | "invalid",
+  config?: TCliConfig,
+): string =>
+  `[openllm] ${problem === "required" ? "API key required." : "API key format is invalid."}\nRun \`openllm start\` in an interactive terminal and sign in at ${signInUrl(config)}. New users receive a key during onboarding; returning users can open Keys after signing in. Paste the key when prompted.\n`;
+
 export const missingKeyDiagnostic = (config?: TCliConfig): string =>
-  `[openllm] API key required.\nRun \`openllm start\` in an interactive terminal and sign in at ${signInUrl(config)}. New users receive a key during onboarding; returning users can open Keys after signing in. Paste the key when prompted.\n`;
+  keyDiagnostic("required", config);
 
 export const invalidKeyDiagnostic = (config?: TCliConfig): string =>
-  `[openllm] API key format is invalid.\nRun \`openllm start\` in an interactive terminal and sign in at ${signInUrl(config)}. New users receive a key during onboarding; returning users can open Keys after signing in. Paste the key when prompted.\n`;
+  keyDiagnostic("invalid", config);
 
 type THiddenInputSignalProcess = {
   readonly on: (signal: NodeJS.Signals, listener: () => void) => unknown;

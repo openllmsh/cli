@@ -24,6 +24,7 @@ import { join } from "node:path";
 import { daemonPort } from "./clients/gateway";
 import { removeRegion } from "./clients/merge";
 import { padRight } from "./commands";
+import { managedDaemonBinary } from "./daemon-delegation";
 import {
   cliBinPath,
   cliConfig,
@@ -101,8 +102,6 @@ const daemonLogPaths = (): readonly string[] => [
   join(openllmDir(), "openllmd.out.log"),
   join(openllmDir(), "openllmd.err.log"),
 ];
-
-const openllmDaemonBinary = (): string => join(openllmDir(), "bin", "openllmd");
 
 const DAEMON_STATUS_TIMEOUT_MS = 1_500;
 const DAEMON_STATUS_COMMAND_TIMEOUT_MS = 2_000;
@@ -441,7 +440,7 @@ const runWithTimeout = async (
 };
 
 const collectOpenllmdStatus = async (): Promise<readonly string[]> => {
-  const openllmdBin = openllmDaemonBinary();
+  const openllmdBin = managedDaemonBinary();
   if (!existsSync(openllmdBin)) {
     return [
       daemonStatusLinePrefix(
@@ -597,7 +596,7 @@ const collectRecentDaemonLogsFromFiles = (): string =>
   boundLogChunk(tailLogLines(DAEMON_LOG_LINES).join("\n"));
 
 const collectRecentDaemonLogs = async (): Promise<string> => {
-  const openllmdBin = openllmDaemonBinary();
+  const openllmdBin = managedDaemonBinary();
   if (!existsSync(openllmdBin)) {
     return collectRecentDaemonLogsFromFiles();
   }

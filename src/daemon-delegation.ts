@@ -12,11 +12,6 @@ export type TDaemonLifecycleCommand =
 export const managedDaemonBinary = (): string =>
   join(daemonStateDir(), "bin", "openllmd");
 
-const daemonCommand = (
-  command: TDaemonLifecycleCommand | "auto-update",
-  args: readonly string[],
-): readonly string[] => [command, ...args];
-
 /**
  * Delegate a public lifecycle command to the product-managed daemon binary.
  * The daemon owns service and automatic-update policy; this function only
@@ -35,7 +30,7 @@ export const runManagedDaemonCommand = async (
   }
 
   try {
-    const proc = Bun.spawn([binary, ...daemonCommand(command, args)], {
+    const proc = Bun.spawn([binary, command, ...args], {
       stdin: "inherit",
       stdout: "inherit",
       stderr: "inherit",

@@ -10,6 +10,7 @@ import {
 import { extname, isAbsolute, join } from "node:path";
 import type { TDaemonCli } from "./clients/registry";
 import { DAEMON_CLIS } from "./clients/registry";
+import { managedDaemonBinary } from "./daemon-delegation";
 import { daemonStateDir } from "./env";
 
 export type TSessionHostMeta = {
@@ -290,7 +291,7 @@ export const findDaemonBinary = (): string | null => {
   const override = process.env.OPENLLM_DAEMON_BIN_OVERRIDE;
   if (override !== undefined && override.length > 0 && existsSync(override))
     return override;
-  const installed = join(daemonStateDir(), "bin", "openllmd");
+  const installed = managedDaemonBinary();
   if (existsSync(installed)) return installed;
   for (const directory of (process.env.PATH ?? "").split(":")) {
     if (directory.length === 0) continue;
