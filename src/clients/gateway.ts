@@ -9,9 +9,9 @@
  * that comes and goes therefore needs no reinstall.
  */
 
-import { parseOpenllmDaemonPort } from "@openllmsh/protocol";
 import type { TCliConfig } from "../env";
 import { cliConfig, openllmDir, sharedFileConfig } from "../env";
+import { parseOpenllmDaemonPort } from "../runtime-contracts";
 
 /** How long to wait for the local daemon's /status before falling back. */
 const PROBE_TIMEOUT_MS = 400;

@@ -9,23 +9,22 @@ import {
   readFileSync,
   readSync,
   renameSync,
-  rmdirSync,
   unlinkSync,
   writeFileSync,
 } from "node:fs";
 import { dirname, join } from "node:path";
+import type { TCliConfig } from "./env";
+import { cliConfig, sharedEnvFile } from "./env";
 import type {
   TCredentialGateMode,
   TCredentialGateTerminal,
-} from "@openllmsh/protocol";
-import { isUsableOpenllmApiKey } from "@openllmsh/protocol";
-import type { TCliConfig } from "./env";
-import { cliConfig, sharedEnvFile } from "./env";
+} from "./runtime-contracts";
+import { isUsableOpenllmApiKey } from "./runtime-contracts";
 
 export type {
   TCredentialGateMode,
   TCredentialGateTerminal,
-} from "@openllmsh/protocol";
+} from "./runtime-contracts";
 
 export type TCredentialGateResult =
   | { readonly ok: true; readonly config: TCliConfig }
@@ -131,8 +130,8 @@ const defaultTerminal: TCredentialGateTerminal = {
   },
 };
 
-const ENV_UPDATE_LOCK_TIMEOUT_MS = 5_000;
-const ENV_UPDATE_LOCK_RETRY_MS = 25;
+const ENV_UPDATE_LOCK_ATTEMPTS = 500;
+const ENV_UPDATE_LOCK_RETRY_MS = 10;
 const ENV_UPDATE_LOCK_STALE_MS = 30_000;
 
 /** Block briefly between lock attempts without spawning a shell process. */
@@ -146,10 +145,8 @@ const waitForEnvUpdateLock = (): void => {
 };
 
 /**
- * Serialize read-modify-rename updates across CLI processes. Re-reading only
- * after acquiring the lock prevents one interactive setup from erasing another
- * writer's unrelated daemon configuration. The final rename remains atomic for
- * daemon readers that do not participate in the lock.
+ * Serialize read-modify-rename updates with the daemon-compatible file lock.
+ * A killed writer leaves a stale regular file that is recovered after 30 seconds.
  */
 const updateEnvFile = (key: string): boolean => {
   const target = sharedEnvFile();
@@ -158,28 +155,21 @@ const updateEnvFile = (key: string): boolean => {
   try {
     if (/[\r\n\0]/.test(key)) return false;
     mkdirSync(dirname(target), { recursive: true, mode: 0o700 });
-    const deadline = Date.now() + ENV_UPDATE_LOCK_TIMEOUT_MS;
-    while (!locked && Date.now() < deadline) {
+    for (let attempts = 0; attempts < ENV_UPDATE_LOCK_ATTEMPTS; attempts += 1) {
       try {
-        mkdirSync(lock, { mode: 0o700 });
+        const fd = openSync(lock, "wx", 0o600);
+        closeSync(fd);
         locked = true;
+        break;
       } catch (error) {
-        if (
-          !(
-            error instanceof Error &&
-            "code" in error &&
-            error.code === "EEXIST"
-          )
-        )
-          return false;
+        if ((error as NodeJS.ErrnoException).code !== "EEXIST") return false;
         try {
           const held = lstatSync(lock);
           if (
-            held.isDirectory() &&
+            held.isFile() &&
             Date.now() - held.mtimeMs > ENV_UPDATE_LOCK_STALE_MS
-          ) {
-            rmdirSync(lock);
-          }
+          )
+            unlinkSync(lock);
         } catch {
           // Another writer may have released or replaced the lock.
         }
@@ -194,10 +184,7 @@ const updateEnvFile = (key: string): boolean => {
       if (!stat.isFile() || stat.isSymbolicLink()) return false;
       lines = readFileSync(target, "utf8").split("\n");
     } catch (error) {
-      if (
-        !(error instanceof Error && "code" in error && error.code === "ENOENT")
-      )
-        return false;
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") return false;
     }
     let replaced = false;
     const next = lines.flatMap((line): string[] => {
@@ -221,6 +208,12 @@ const updateEnvFile = (key: string): boolean => {
       } finally {
         closeSync(fd);
       }
+      try {
+        const stat = lstatSync(target);
+        if (!stat.isFile() || stat.isSymbolicLink()) return false;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") return false;
+      }
       renameSync(temp, target);
       chmodSync(target, 0o600);
       return true;
@@ -236,9 +229,9 @@ const updateEnvFile = (key: string): boolean => {
   } finally {
     if (locked) {
       try {
-        rmdirSync(lock);
+        unlinkSync(lock);
       } catch {
-        // Preserve a lock we cannot prove is removable.
+        // Stale-lock recovery prevents a permanent wedge.
       }
     }
   }

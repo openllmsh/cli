@@ -10,7 +10,7 @@ import {
 import { extname, isAbsolute, join } from "node:path";
 import type { TDaemonCli } from "./clients/registry";
 import { DAEMON_CLIS } from "./clients/registry";
-import { managedDaemonBinary } from "./daemon-delegation";
+import { findDaemonBinary as findManagedDaemonBinary } from "./daemon-delegation";
 import { daemonStateDir } from "./env";
 
 export type TSessionHostMeta = {
@@ -277,29 +277,10 @@ export const waitForSessionHostSocket = async (
 };
 
 /**
- * Resolve the durable-host binary, allowing a normal PATH install.
- *
- * `OPENLLM_DAEMON_BIN_OVERRIDE` wins first: in the source-watch dev harness
- * (`scripts/dev.ts` / `scripts/dev-cli.ts`) it points at an executable shim
- * (`.dev/openllmd` → `exec bun packages/daemon/src/main.ts "$@"`), so a LOCAL
- * `openllm <client>` session spawns a host running THIS working tree's daemon
- * source instead of the stale compiled `~/.openllm/bin/openllmd`. The shim must
- * be executable — `spawnSessionHost` runs `Bun.spawn([binary, ...argv])`, so
- * `[shim, "__session-host", …]` execs `bun main.ts __session-host …`.
+ * Resolve the durable-host binary, allowing an explicit dev override or a
+ * normal PATH installation. Shared with lifecycle delegation for one policy.
  */
-export const findDaemonBinary = (): string | null => {
-  const override = process.env.OPENLLM_DAEMON_BIN_OVERRIDE;
-  if (override !== undefined && override.length > 0 && existsSync(override))
-    return override;
-  const installed = managedDaemonBinary();
-  if (existsSync(installed)) return installed;
-  for (const directory of (process.env.PATH ?? "").split(":")) {
-    if (directory.length === 0) continue;
-    const candidate = join(directory, "openllmd");
-    if (existsSync(candidate)) return candidate;
-  }
-  return null;
-};
+export const findDaemonBinary = (): string | null => findManagedDaemonBinary();
 
 export const sessionHostSpawnArgv = (args: {
   readonly id: string;

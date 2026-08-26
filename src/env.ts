@@ -79,7 +79,7 @@ export const daemonStateDir = (): string => {
  */
 export const sharedEnvFile = (): string => {
   const override = process.env.OPENLLM_DAEMON_ENV_FILE;
-  return override !== undefined && override.length > 0
+  return override !== undefined && override.length > 0 && isAbsolute(override)
     ? override
     : join(openllmDir(), ".env");
 };
