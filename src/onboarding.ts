@@ -14,25 +14,25 @@ import {
   writeFileSync,
 } from "node:fs";
 import { dirname, join } from "node:path";
-import { isOpenllmApiKeySyntax } from "@openllmsh/protocol";
+import type {
+  TCredentialGateMode,
+  TCredentialGateTerminal,
+} from "@openllmsh/protocol";
+import { isUsableOpenllmApiKey } from "@openllmsh/protocol";
 import type { TCliConfig } from "./env";
 import { cliConfig, sharedEnvFile } from "./env";
 
-export type TCredentialGateMode = "human" | "machine";
-
-export type TCredentialGateTerminal = {
-  readonly isInteractive: () => boolean;
-  readonly promptForKey: () => string | null;
-  readonly write: (message: string) => void;
-};
+export type {
+  TCredentialGateMode,
+  TCredentialGateTerminal,
+} from "@openllmsh/protocol";
 
 export type TCredentialGateResult =
   | { readonly ok: true; readonly config: TCliConfig }
   | { readonly ok: false; readonly message: string };
 
 /** A local envelope check only; the gateway remains authoritative for validity. */
-export const isUsableApiKey = (value: string | null | undefined): boolean =>
-  value !== null && value !== undefined && isOpenllmApiKeySyntax(value.trim());
+export const isUsableApiKey = isUsableOpenllmApiKey;
 
 const signInUrl = (config: TCliConfig = cliConfig()): string =>
   `${config.gatewayUrl}/sign-in`;
@@ -133,6 +133,7 @@ const defaultTerminal: TCredentialGateTerminal = {
 
 const ENV_UPDATE_LOCK_TIMEOUT_MS = 5_000;
 const ENV_UPDATE_LOCK_RETRY_MS = 25;
+const ENV_UPDATE_LOCK_STALE_MS = 30_000;
 
 /** Block briefly between lock attempts without spawning a shell process. */
 const waitForEnvUpdateLock = (): void => {
@@ -171,6 +172,17 @@ const updateEnvFile = (key: string): boolean => {
           )
         )
           return false;
+        try {
+          const held = lstatSync(lock);
+          if (
+            held.isDirectory() &&
+            Date.now() - held.mtimeMs > ENV_UPDATE_LOCK_STALE_MS
+          ) {
+            rmdirSync(lock);
+          }
+        } catch {
+          // Another writer may have released or replaced the lock.
+        }
         waitForEnvUpdateLock();
       }
     }
