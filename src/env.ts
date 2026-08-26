@@ -78,8 +78,12 @@ export const daemonStateDir = (): string => {
  * `OPENLLM_DAEMON_ENV_FILE`; honouring that override keeps CLI onboarding and
  * daemon persistence on the one configured file (including custom installs).
  */
-export const sharedEnvFile = (): string =>
-  process.env.OPENLLM_DAEMON_ENV_FILE ?? join(openllmDir(), ".env");
+export const sharedEnvFile = (): string => {
+  const override = process.env.OPENLLM_DAEMON_ENV_FILE;
+  return override !== undefined && override.length > 0
+    ? override
+    : join(openllmDir(), ".env");
+};
 export const cliBinPath = (): string => join(openllmDir(), "bin", "openllm");
 
 /** Parse a KEY=VALUE env file (comments + blank lines ignored). */
