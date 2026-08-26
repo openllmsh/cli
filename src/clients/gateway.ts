@@ -9,6 +9,7 @@
  * that comes and goes therefore needs no reinstall.
  */
 
+import type { TCliConfig } from "../env";
 import { cliConfig, openllmDir, sharedFileConfig } from "../env";
 
 /** How long to wait for the local daemon's /status before falling back. */
@@ -27,7 +28,7 @@ const DEFAULT_DAEMON_PORT = 8787;
 const parseDaemonPort = (raw: string, fallback: number): number => {
   const trimmed = raw.trim();
   const unquoted =
-    trimmed.startsWith("\"") && trimmed.endsWith("\"") && trimmed.length >= 2
+    trimmed.startsWith('"') && trimmed.endsWith('"') && trimmed.length >= 2
       ? trimmed.slice(1, -1)
       : trimmed.startsWith("'") && trimmed.endsWith("'") && trimmed.length >= 2
         ? trimmed.slice(1, -1)
@@ -91,8 +92,11 @@ const daemonReachable = async (port: number): Promise<boolean> => {
  */
 export const resolveGateway = async (opts?: {
   readonly remote?: boolean;
+  /** Credential-gate result for this launch; prevents a second config read from
+   * reviving a stale higher-precedence legacy alias after interactive setup. */
+  readonly config?: TCliConfig;
 }): Promise<TGateway> => {
-  const { gatewayUrl, apiKey } = cliConfig();
+  const { gatewayUrl, apiKey } = opts?.config ?? cliConfig();
   const port = daemonPort();
   const localBase = `http://127.0.0.1:${port}`;
   const cloud = {

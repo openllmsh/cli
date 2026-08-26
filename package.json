@@ -18,6 +18,7 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",
+    "@openllmsh/protocol": "workspace:*",
     "cheerio": "^1.2.0",
     "turndown": "^7.2.4"
   },

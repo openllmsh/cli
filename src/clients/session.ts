@@ -446,7 +446,10 @@ export const runSessionClient = async (
     process.stderr.write(credential.message);
     return 1;
   }
-  const gateway = await resolveGateway({ remote: flags.remote });
+  const gateway = await resolveGateway({
+    remote: flags.remote,
+    config: credential.config,
+  });
 
   const forwarded = forwardedVendorArgs(userArgs);
   // Durable local sessions do not need a running daemon. An explicit cloud

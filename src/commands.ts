@@ -184,7 +184,7 @@ export const COMMAND_ARGS: Readonly<
   Partial<Record<TCommandName, readonly string[]>>
 > = {
   completion: [...COMPLETION_SHELLS, "install"],
-  "auto-update": ["on", "off", "status"],
+  "auto-update": [...AUTO_UPDATE_ACTIONS],
   mcp: ["--only", ...MCP_ONLY_GROUPS],
   api: ["--spec"],
   raycast: ["uninstall", "status"],

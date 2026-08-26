@@ -73,9 +73,13 @@ export const daemonStateDir = (): string => {
     ? override
     : openllmDir();
 };
-/** The SHARED OpenLLM env file (same file the daemon boots from) — the CLI
- *  never writes it. */
-export const sharedEnvFile = (): string => join(openllmDir(), ".env");
+/**
+ * The shared OpenLLM environment file. An installed daemon pins this path in
+ * `OPENLLM_DAEMON_ENV_FILE`; honouring that override keeps CLI onboarding and
+ * daemon persistence on the one configured file (including custom installs).
+ */
+export const sharedEnvFile = (): string =>
+  process.env.OPENLLM_DAEMON_ENV_FILE ?? join(openllmDir(), ".env");
 export const cliBinPath = (): string => join(openllmDir(), "bin", "openllm");
 
 /** Parse a KEY=VALUE env file (comments + blank lines ignored). */

@@ -9,10 +9,12 @@ import {
   readFileSync,
   readSync,
   renameSync,
+  rmdirSync,
   unlinkSync,
   writeFileSync,
 } from "node:fs";
 import { dirname, join } from "node:path";
+import { isOpenllmApiKeySyntax } from "@openllmsh/protocol";
 import type { TCliConfig } from "./env";
 import { cliConfig, sharedEnvFile } from "./env";
 
@@ -29,23 +31,57 @@ export type TCredentialGateResult =
   | { readonly ok: false; readonly message: string };
 
 /** A local envelope check only; the gateway remains authoritative for validity. */
-export const isUsableApiKey = (value: string | null | undefined): boolean => {
-  if (value === null || value === undefined) return false;
-  const trimmed = value.trim();
-  return (
-    trimmed.length > "sk-llm-".length &&
-    !/[\r\n\0\s]/.test(trimmed) &&
-    /^sk-llm-[A-Za-z0-9._-]+$/.test(trimmed)
-  );
+export const isUsableApiKey = (value: string | null | undefined): boolean =>
+  value !== null && value !== undefined && isOpenllmApiKeySyntax(value.trim());
+
+const signInUrl = (config: TCliConfig = cliConfig()): string =>
+  `${config.gatewayUrl}/sign-in`;
+
+export const missingKeyDiagnostic = (config?: TCliConfig): string =>
+  `[openllm] API key required.\nRun \`openllm start\` in an interactive terminal and sign in at ${signInUrl(config)}. New users receive a key during onboarding; returning users can open Keys after signing in. Paste the key when prompted.\n`;
+
+export const invalidKeyDiagnostic = (config?: TCliConfig): string =>
+  `[openllm] API key format is invalid.\nRun \`openllm start\` in an interactive terminal and sign in at ${signInUrl(config)}. New users receive a key during onboarding; returning users can open Keys after signing in. Paste the key when prompted.\n`;
+
+type THiddenInputSignalProcess = {
+  readonly on: (signal: NodeJS.Signals, listener: () => void) => unknown;
+  readonly off: (signal: NodeJS.Signals, listener: () => void) => unknown;
+  readonly kill: (pid: number, signal: NodeJS.Signals) => boolean;
 };
 
-const signInUrl = (): string => `${cliConfig().gatewayUrl}/sign-in`;
-
-export const missingKeyDiagnostic = (): string =>
-  `[openllm] API key required.\nRun \`openllm start\` in an interactive terminal and sign in at ${signInUrl()}. New users receive a key during onboarding; returning users can open Keys after signing in. Paste the key when prompted.\n`;
-
-export const invalidKeyDiagnostic = (): string =>
-  `[openllm] API key format is invalid.\nRun \`openllm start\` in an interactive terminal and sign in at ${signInUrl()}. New users receive a key during onboarding; returning users can open Keys after signing in. Paste the key when prompted.\n`;
+/**
+ * Restore echo before forwarding a terminating signal. Hidden input uses a
+ * synchronous terminal read, so this handler must be installed before that
+ * read begins rather than relying solely on the normal `finally` path.
+ */
+export const restoreEchoOnSignal = (
+  restore: () => void,
+  signalProcess: THiddenInputSignalProcess = process,
+): (() => void) => {
+  let restored = false;
+  const restoreOnce = (): void => {
+    if (restored) return;
+    restored = true;
+    restore();
+  };
+  const forward = (signal: NodeJS.Signals): void => {
+    cleanup();
+    restoreOnce();
+    signalProcess.kill(process.pid, signal);
+  };
+  const onSigint = (): void => forward("SIGINT");
+  const onSigterm = (): void => forward("SIGTERM");
+  const cleanup = (): void => {
+    signalProcess.off("SIGINT", onSigint);
+    signalProcess.off("SIGTERM", onSigterm);
+  };
+  signalProcess.on("SIGINT", onSigint);
+  signalProcess.on("SIGTERM", onSigterm);
+  return (): void => {
+    cleanup();
+    restoreOnce();
+  };
+};
 
 const readHiddenLine = (): string | null => {
   let fd: number | null = null;
@@ -53,6 +89,10 @@ const readHiddenLine = (): string | null => {
     fd = openSync("/dev/tty", "r+");
     if (spawnSync("stty", ["-echo"], { stdio: [fd, fd, fd] }).status !== 0)
       return null;
+    const restore = (): void => {
+      spawnSync("stty", ["echo"], { stdio: [fd, fd, fd] });
+    };
+    const cleanupSignals = restoreEchoOnSignal(restore);
     try {
       const bytes: number[] = [];
       const byte = Buffer.alloc(1);
@@ -63,7 +103,7 @@ const readHiddenLine = (): string | null => {
       }
       return Buffer.from(bytes).toString("utf8");
     } finally {
-      spawnSync("stty", ["echo"], { stdio: [fd, fd, fd] });
+      cleanupSignals();
       process.stderr.write("\n");
     }
   } catch {
@@ -85,11 +125,51 @@ const defaultTerminal: TCredentialGateTerminal = {
   },
 };
 
+const ENV_UPDATE_LOCK_TIMEOUT_MS = 5_000;
+const ENV_UPDATE_LOCK_RETRY_MS = 25;
+
+/** Block briefly between lock attempts without spawning a shell process. */
+const waitForEnvUpdateLock = (): void => {
+  Atomics.wait(
+    new Int32Array(new SharedArrayBuffer(4)),
+    0,
+    0,
+    ENV_UPDATE_LOCK_RETRY_MS,
+  );
+};
+
+/**
+ * Serialize read-modify-rename updates across CLI processes. Re-reading only
+ * after acquiring the lock prevents one interactive setup from erasing another
+ * writer's unrelated daemon configuration. The final rename remains atomic for
+ * daemon readers that do not participate in the lock.
+ */
 const updateEnvFile = (key: string): boolean => {
   const target = sharedEnvFile();
+  const lock = `${target}.lock`;
+  let locked = false;
   try {
     if (/[\r\n\0]/.test(key)) return false;
     mkdirSync(dirname(target), { recursive: true, mode: 0o700 });
+    const deadline = Date.now() + ENV_UPDATE_LOCK_TIMEOUT_MS;
+    while (!locked && Date.now() < deadline) {
+      try {
+        mkdirSync(lock, { mode: 0o700 });
+        locked = true;
+      } catch (error) {
+        if (
+          !(
+            error instanceof Error &&
+            "code" in error &&
+            error.code === "EEXIST"
+          )
+        )
+          return false;
+        waitForEnvUpdateLock();
+      }
+    }
+    if (!locked) return false;
+
     let lines: string[] = [];
     try {
       const stat = lstatSync(target);
@@ -135,6 +215,14 @@ const updateEnvFile = (key: string): boolean => {
     }
   } catch {
     return false;
+  } finally {
+    if (locked) {
+      try {
+        rmdirSync(lock);
+      } catch {
+        // Preserve a lock we cannot prove is removable.
+      }
+    }
   }
 };
 
@@ -157,7 +245,9 @@ export const requireCliApiKey = (
   if (mode === "machine" || !terminal.isInteractive()) {
     return {
       ok: false,
-      message: invalid ? invalidKeyDiagnostic() : missingKeyDiagnostic(),
+      message: invalid
+        ? invalidKeyDiagnostic(configured)
+        : missingKeyDiagnostic(configured),
     };
   }
   if (invalid)
@@ -165,7 +255,7 @@ export const requireCliApiKey = (
       "The configured API key format is invalid. Please paste a new key.\n",
     );
   terminal.write(
-    `OpenLLM needs an API key.\nSign in at ${signInUrl()}.\nNew users will receive a key during onboarding. Already have an account? Open Keys after signing in.\n`,
+    `OpenLLM needs an API key.\nSign in at ${signInUrl(configured)}.\nNew users will receive a key during onboarding. Already have an account? Open Keys after signing in.\n`,
   );
   while (true) {
     const pasted = terminal.promptForKey();
@@ -180,6 +270,6 @@ export const requireCliApiKey = (
       return { ok: false, message: "[openllm] Could not save the API key.\n" };
     process.env.OPENLLM_API_KEY = key;
     terminal.write("API key saved.\n");
-    return { ok: true, config: { ...cliConfig(), apiKey: key } };
+    return { ok: true, config: { ...configured, apiKey: key } };
   }
 };

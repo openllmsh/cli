@@ -157,7 +157,10 @@ export const applyRaycast = async (opts?: {
     process.stderr.write(credential.message);
     return 1;
   }
-  const gateway = await resolveGateway({ remote: opts?.remote });
+  const gateway = await resolveGateway({
+    remote: opts?.remote,
+    config: credential.config,
+  });
   const catalog = await fetchModelCatalog(gateway, "raycast");
   const models = catalog ?? FALLBACK_MODELS;
   const block = substitute(

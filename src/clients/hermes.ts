@@ -198,7 +198,10 @@ export const applyHermes = async (opts?: {
     process.stderr.write(credential.message);
     return { code: 1 };
   }
-  const gateway = await resolveGateway({ remote: opts?.remote });
+  const gateway = await resolveGateway({
+    remote: opts?.remote,
+    config: credential.config,
+  });
   const ledger = readHermesLedger();
   const sticky = readActiveProfile();
   const previousProfile =
@@ -386,7 +389,10 @@ export const runHermesCommand = async (
       process.stderr.write(credential.message);
       return 1;
     }
-    const gateway = await resolveGateway({ remote: clientFlags.remote });
+    const gateway = await resolveGateway({
+      remote: clientFlags.remote,
+      config: credential.config,
+    });
     const dangerous =
       clientFlags.dangerous === true &&
       CLIENTS.hermes.dangerousFlag !== undefined
