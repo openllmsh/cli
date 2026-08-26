@@ -10,7 +10,9 @@
  *   openllm api --spec               print the embedded OpenAPI spec
  *   openllm setup                    PATH symlink + shell completion
  *   openllm completion <shell|install>
- *   openllm self-update              converge to the gateway's pinned release
+ *   openllm start|stop|restart       delegate daemon lifecycle management
+ *   openllm auto-update <on|off|status>
+ *   openllm self-update              converge this CLI to the pinned release
  *   openllm version
  *
  * `openllm ctx …` is kept as a hidden alias of `openllm exec ctx …` — the
@@ -23,8 +25,15 @@ import { runRaycastCommand } from "./clients/raycast";
 import { CLIENTS, isClientId, parseClientFlags } from "./clients/registry";
 import { runSessionClient } from "./clients/session";
 import type { TExecGroup } from "./commands";
-import { EXEC_GROUPS, EXEC_VERBS, helpText } from "./commands";
+import {
+  AUTO_UPDATE_ACTIONS,
+  EXEC_GROUPS,
+  EXEC_VERBS,
+  helpText,
+} from "./commands";
 import { runCompletionCommand } from "./completion";
+import type { TDaemonLifecycleCommand } from "./daemon-delegation";
+import { runManagedDaemonCommand } from "./daemon-delegation";
 import { runDoctor } from "./doctor-cmd";
 import { CLI_VERSION } from "./env";
 import { runClaudeContextCli } from "./mcp/claude-context";
@@ -64,7 +73,7 @@ const MCP_USAGE = `usage: openllm mcp [--only <group>]
 
 Run the unified MCP server over stdio (what mcpServers.openllm executes).
 Groups: ${MCP_GROUPS.join(" | ")} (default: all; --only is for debugging).
-Requires OPENLLM_API_KEY (env or the shared ~/.openllm/.env).
+Requires a configured API key. Run \`openllm start\` interactively to sign in and paste one when prompted.
 `;
 
 const EXEC_USAGE = `usage: openllm exec <group> <verb> [...]
@@ -99,6 +108,18 @@ const SELF_UPDATE_USAGE = `usage: openllm self-update
 Converge this binary to the gateway's pinned release: fetch
 /api/cli/version, download + sha256-verify the target, atomic swap.
 Source builds (0.0.0-dev) never self-update.
+`;
+
+const DAEMON_LIFECYCLE_USAGE = (
+  command: string,
+): string => `usage: openllm ${command}
+
+Delegate ${command} to the managed openllmd daemon.
+`;
+
+const AUTO_UPDATE_USAGE = `usage: openllm auto-update <on|off|status>
+
+Read or change the managed daemon automatic-update preference.
 `;
 
 const COMPLETION_USAGE = `usage: openllm completion <bash|zsh|fish|install>
@@ -246,6 +267,27 @@ const main = async (): Promise<void> => {
     case "completion":
       if (wantsHelp(rest)) return usage(COMPLETION_USAGE, 0);
       return process.exit(runCompletionCommand(rest));
+    case "start":
+    case "stop":
+    case "restart":
+      if (wantsHelp(rest)) return usage(DAEMON_LIFECYCLE_USAGE(cmd), 0);
+      if (rest.length > 0) return usage(DAEMON_LIFECYCLE_USAGE(cmd), 2);
+      return process.exit(
+        await runManagedDaemonCommand(cmd as TDaemonLifecycleCommand),
+      );
+    case "auto-update": {
+      if (wantsHelp(rest)) return usage(AUTO_UPDATE_USAGE, 0);
+      const action = rest[0] ?? "";
+      if (
+        rest.length !== 1 ||
+        !(AUTO_UPDATE_ACTIONS as readonly string[]).includes(action)
+      ) {
+        return usage(AUTO_UPDATE_USAGE, 2);
+      }
+      return process.exit(
+        await runManagedDaemonCommand("auto-update", [action]),
+      );
+    }
     case "self-update":
       if (wantsHelp(rest)) return usage(SELF_UPDATE_USAGE, 0);
       await runSelfUpdate();

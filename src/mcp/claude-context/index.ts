@@ -14,7 +14,7 @@
  */
 
 import * as fs from "node:fs";
-import { requireKeyedConfig } from "../../env";
+import { requireCliApiKey } from "../../onboarding";
 import {
   buildSearchRefs,
   claudeContextToolDefs,
@@ -50,8 +50,15 @@ const FAILED_RETRY_COOLDOWN_MS = ((): number => {
 // hook path — `exec ctx index` fires from SessionStart with NO env vars, so
 // it must fall back to the daemon-paired key in the shared file.
 function resolveGatewayConfig(): { baseUrl: string; apiKey: string } {
-  const cfg = requireKeyedConfig();
-  return { baseUrl: cfg.gatewayUrl, apiKey: cfg.apiKey };
+  const credential = requireCliApiKey("machine");
+  if (!credential.ok) {
+    process.stderr.write(credential.message);
+    process.exit(1);
+  }
+  return {
+    baseUrl: credential.config.gatewayUrl,
+    apiKey: credential.config.apiKey,
+  };
 }
 
 // ── Tool registry ─────────────────────────────────────────────────────────────

@@ -20,6 +20,7 @@ import {
 } from "node:fs";
 import { join } from "node:path";
 import { CLI_VERSION } from "../env";
+import { requireCliApiKey } from "../onboarding";
 import { contextStateDir, fetchTier, resolveGateway } from "./gateway";
 import {
   hermesActiveProfilePath,
@@ -192,13 +193,12 @@ export const applyHermes = async (opts?: {
   readonly remote?: boolean;
   readonly restartGateway?: boolean;
 }): Promise<THermesApplyResult> => {
-  const gateway = await resolveGateway({ remote: opts?.remote });
-  if (gateway.apiKey.length === 0) {
-    process.stderr.write(
-      "No OpenLLM API key configured — set OPENLLM_API_KEY, or pair the daemon so ~/.openllm/.env carries it.\n",
-    );
+  const credential = requireCliApiKey("human");
+  if (!credential.ok) {
+    process.stderr.write(credential.message);
     return { code: 1 };
   }
+  const gateway = await resolveGateway({ remote: opts?.remote });
   const ledger = readHermesLedger();
   const sticky = readActiveProfile();
   const previousProfile =
@@ -381,13 +381,12 @@ export const runHermesCommand = async (
       );
       return 127;
     }
-    const gateway = await resolveGateway({ remote: clientFlags.remote });
-    if (gateway.apiKey.length === 0) {
-      process.stderr.write(
-        "No OpenLLM API key configured — set OPENLLM_API_KEY, or pair the daemon so ~/.openllm/.env carries it.\n",
-      );
+    const credential = requireCliApiKey("human");
+    if (!credential.ok) {
+      process.stderr.write(credential.message);
       return 1;
     }
+    const gateway = await resolveGateway({ remote: clientFlags.remote });
     const dangerous =
       clientFlags.dangerous === true &&
       CLIENTS.hermes.dangerousFlag !== undefined

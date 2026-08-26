@@ -28,6 +28,7 @@ import {
 } from "node:fs";
 import { join } from "node:path";
 import { CLI_VERSION, openllmDir, userHome } from "../env";
+import { requireCliApiKey } from "../onboarding";
 import { contextStateDir, fetchModelCatalog, resolveGateway } from "./gateway";
 import { removeRegion, substitute, upsertRegion } from "./merge";
 import { OVERLAYS } from "./overlays";
@@ -151,13 +152,12 @@ export const applyRaycast = async (opts?: {
     process.stderr.write("openllm raycast is macOS-only.\n");
     return 1;
   }
-  const gateway = await resolveGateway({ remote: opts?.remote });
-  if (gateway.apiKey.length === 0) {
-    process.stderr.write(
-      "No OpenLLM API key configured — set OPENLLM_API_KEY, or pair the daemon so ~/.openllm/.env carries it.\n",
-    );
+  const credential = requireCliApiKey("human");
+  if (!credential.ok) {
+    process.stderr.write(credential.message);
     return 1;
   }
+  const gateway = await resolveGateway({ remote: opts?.remote });
   const catalog = await fetchModelCatalog(gateway, "raycast");
   const models = catalog ?? FALLBACK_MODELS;
   const block = substitute(

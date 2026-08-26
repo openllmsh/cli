@@ -85,8 +85,22 @@ export const COMMANDS = [
     description: "Print or install shell completion",
   },
   {
+    name: "start",
+    description: "Start OpenLLM and guide credential setup when needed",
+  },
+  { name: "stop", description: "Stop OpenLLM" },
+  {
+    name: "restart",
+    description: "Restart OpenLLM after completing credential setup",
+  },
+  {
+    name: "auto-update",
+    args: "<on|off|status>",
+    description: "Read or change daemon automatic updates",
+  },
+  {
     name: "self-update",
-    description: "Update to the pinned gateway release",
+    description: "Update this CLI binary to the pinned gateway release",
   },
   {
     name: "sessions",
@@ -159,6 +173,9 @@ export const mcpGroupsForTier = (
 export const COMPLETION_SHELLS = ["bash", "zsh", "fish"] as const;
 export type TCompletionShell = (typeof COMPLETION_SHELLS)[number];
 
+export const AUTO_UPDATE_ACTIONS = ["on", "off", "status"] as const;
+export type TAutoUpdateAction = (typeof AUTO_UPDATE_ACTIONS)[number];
+
 /**
  * Per-command second-level completion tokens. Keys are canonical subcommand
  * names. Completion generators append `-h/--help` to every command.
@@ -167,6 +184,7 @@ export const COMMAND_ARGS: Readonly<
   Partial<Record<TCommandName, readonly string[]>>
 > = {
   completion: [...COMPLETION_SHELLS, "install"],
+  "auto-update": ["on", "off", "status"],
   mcp: ["--only", ...MCP_ONLY_GROUPS],
   api: ["--spec"],
   raycast: ["uninstall", "status"],

@@ -22,6 +22,7 @@ import {
 import { constants as osConstants } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { openllmDir, userHome } from "../env";
+import { requireCliApiKey } from "../onboarding";
 import type { TLiveSessionHost } from "../session-host";
 import {
   discoverLiveSessionHosts,
@@ -440,13 +441,12 @@ export const runSessionClient = async (
     );
     return 2;
   }
-  const gateway = await resolveGateway({ remote: flags.remote });
-  if (gateway.apiKey.length === 0) {
-    process.stderr.write(
-      "No OpenLLM API key configured — set OPENLLM_API_KEY, or pair the daemon so ~/.openllm/.env carries it.\n",
-    );
+  const credential = requireCliApiKey("human");
+  if (!credential.ok) {
+    process.stderr.write(credential.message);
     return 1;
   }
+  const gateway = await resolveGateway({ remote: flags.remote });
 
   const forwarded = forwardedVendorArgs(userArgs);
   // Durable local sessions do not need a running daemon. An explicit cloud

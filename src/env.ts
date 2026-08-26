@@ -125,15 +125,3 @@ export const cliConfig = (): TCliConfig => {
     "";
   return { gatewayUrl, apiKey };
 };
-
-/** Resolve config and fail loud (stderr + exit 1) when no key is present. */
-export const requireKeyedConfig = (): TCliConfig => {
-  const cfg = cliConfig();
-  if (cfg.apiKey.length === 0) {
-    process.stderr.write(
-      "[openllm] No API key configured — set OPENLLM_API_KEY (env), or pair the daemon so ~/.openllm/.env carries OPENLLM_API_KEY\n",
-    );
-    process.exit(1);
-  }
-  return cfg;
-};

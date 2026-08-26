@@ -23,7 +23,8 @@ import {
 import { fetchTier } from "../clients/gateway";
 import type { TMcpGroup } from "../commands";
 import { mcpGroupsForTier } from "../commands";
-import { CLI_VERSION, requireKeyedConfig } from "../env";
+import { CLI_VERSION } from "../env";
+import { requireCliApiKey } from "../onboarding";
 import {
   claudeContextGroupToolDefs,
   handleClaudeContextGroupTool,
@@ -47,7 +48,9 @@ export { MCP_ONLY_GROUPS as MCP_GROUPS } from "../commands";
 const isSupermemoryTool = (name: string): boolean =>
   supermemoryToolDefs.some((t) => t.name === name);
 
-export const runMcpServer = async (requested: readonly TMcpGroup[]) => {
+export const runMcpServer = async (
+  requested: readonly TMcpGroup[],
+): Promise<void> => {
   // stdout is reserved for MCP JSON-RPC; push all logs to stderr.
   console.log = (...a: unknown[]) =>
     process.stderr.write(`[LOG] ${a.join(" ")}\n`);
@@ -56,7 +59,13 @@ export const runMcpServer = async (requested: readonly TMcpGroup[]) => {
   console.error = (...a: unknown[]) =>
     process.stderr.write(`[ERR] ${a.join(" ")}\n`);
 
-  const cfg = requireKeyedConfig();
+  const credential = requireCliApiKey("machine");
+  if (!credential.ok) {
+    process.stderr.write(credential.message);
+    process.exitCode = 1;
+    return;
+  }
+  const cfg = credential.config;
   const gatewayConfig = { baseUrl: cfg.gatewayUrl, apiKey: cfg.apiKey };
   // Authoritative free-tier gate: drop code search even when a client overlay
   // (or a persisted Hermes profile) launched us as bare `openllm mcp`.
