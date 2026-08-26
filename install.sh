@@ -4,20 +4,20 @@
 #   curl -fsSL https://raw.githubusercontent.com/openllmsh/cli/main/install.sh | bash
 #
 # Most people want the full install (daemon + CLI), which is:
-#   curl -fsSL https://openllm.sh/install | bash
+#   curl -fsSL https://www.openllm.sh/install | bash
 # Use THIS script when you want the CLI alone — to script against the gateway
 # API, to run clients through OpenLLM without the local subscription daemon, or
 # to pre-provision a machine.
 #
 # Env (all optional):
-#   OPENLLM_CLOUD_ORIGIN   gateway origin (default https://openllm.sh)
+#   OPENLLM_CLOUD_ORIGIN   gateway origin (default https://www.openllm.sh)
 #   OPENLLM_API_KEY        written to the shared ~/.openllm/.env when given
 #
 # It knows nothing about clients (claude / codex / grok / …) and never edits a
 # third-party config — `openllm <client>` applies OpenLLM at run time instead.
 set -euo pipefail
 
-ORIGIN="${OPENLLM_CLOUD_ORIGIN:-https://openllm.sh}"
+ORIGIN="${OPENLLM_CLOUD_ORIGIN:-https://www.openllm.sh}"
 ORIGIN="${ORIGIN%/}"
 OPENLLM_DIR="$HOME/.openllm"
 BIN_DIR="$OPENLLM_DIR/bin"

@@ -30,7 +30,7 @@ const PKG_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const ENTRY = join(PKG_ROOT, "src", "main.ts");
 const OUT_DIR = join(PKG_ROOT, "dist");
 
-const DEFAULT_CLOUD_ORIGIN = "https://openllm.sh";
+const DEFAULT_CLOUD_ORIGIN = "https://www.openllm.sh";
 
 // OpenLLM's own Vercel preview deployments — the same anchor as the daemon's
 // compile script (`packages/daemon/scripts/compile.ts`); keep in sync.

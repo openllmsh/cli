@@ -45,7 +45,7 @@ export const runManagedDaemonCommand = async (
   const binary = findDaemonBinary();
   if (binary === null) {
     process.stderr.write(
-      `[openllm] managed daemon binary not found at ${managedDaemonBinary()}; reinstall OpenLLM with \`curl -fsSL https://openllm.sh/install | bash\`\n`,
+      `[openllm] managed daemon binary not found at ${managedDaemonBinary()}; reinstall OpenLLM with \`curl -fsSL https://www.openllm.sh/install | bash\`\n`,
     );
     return 1;
   }

@@ -32,7 +32,7 @@ export const CLI_VERSION: string =
 const CLOUD_ORIGIN_DEFAULT: string =
   typeof __OPENLLM_CLOUD_ORIGIN_DEFAULT__ === "string"
     ? __OPENLLM_CLOUD_ORIGIN_DEFAULT__
-    : "https://openllm.sh";
+    : "https://www.openllm.sh";
 
 /**
  * The user's home directory, `$HOME` first.
