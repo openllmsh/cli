@@ -1,19 +1,23 @@
 /**
- * `openllm uninstall` — remove the CLI from this machine.
+ * `openllm uninstall` — the top-level, product-wide uninstall. The CLI OWNS the
+ * top-level command but not the daemon's teardown: it delegates that to
+ * `openllmd uninstall` (which owns its own confirm + keep-logins prompt), then
+ * removes its OWN surface. Each binary knows only its own state — no binary
+ * enumerates the other's — so the two teardowns compose without cross-mapping.
  *
- * Ordering matters: ALWAYS-ON clients are reversed FIRST, while the binary and
- * its ledgers still exist. Skipping that would strand a live `sk-llm` key
- * inside Raycast's `providers.yaml` with no tool left to remove it.
+ * Order:
+ *   1. delegate to `openllmd uninstall` — it prompts (confirm + keep-logins),
+ *      stops/unregisters the service, and removes DAEMON-owned state, leaving
+ *      the CLI's client ledgers in place. A nonzero exit (user aborted, or the
+ *      daemon failed) stops the whole uninstall before any CLI change.
+ *   2. reverse always-on client wiring (Raycast region; Hermes sticky profile) —
+ *      still readable because the daemon left `clients/*.json` untouched.
+ *   3. drop the openllm/ollm PATH symlinks, the managed rc block, and completion.
+ *   4. remove CLI-owned state, then the shared `~/.openllm` root if it is now
+ *      empty (a kept `cli/` keeps it around).
  *
- * Scope is deliberately narrow — we remove only what we own:
- *   - always-on client wiring (per its ownership ledger),
- *   - the PATH symlinks that point at OUR binary (openllm, ollm, and any
- *     transitional openllmc),
- *   - the owned shell-rc block + completion entries,
- *   - ~/.openllm/{bin/openllm,run,clients}.
- *
- * NOT touched: `~/.openllm/.env` (shared with the daemon — removing it would
- * unpair the daemon too), the daemon binary, and every third-party config.
+ * When no daemon is installed, step 1 is skipped and the CLI owns the
+ * confirmation itself.
  */
 
 import { existsSync, readdirSync, rmSync } from "node:fs";
@@ -21,6 +25,7 @@ import { join } from "node:path";
 import { uninstallHermes } from "./clients/hermes";
 import { uninstallRaycast } from "./clients/raycast";
 import { removeCompletion } from "./completion";
+import { findDaemonBinary, runManagedDaemonCommand } from "./daemon-delegation";
 import { openllmDir } from "./env";
 import { removeOwnedLinks, removeRcBlock } from "./setup-cmd";
 
@@ -37,20 +42,47 @@ const appliedAlwaysOnClients = (): string[] => {
   }
 };
 
-const UNINSTALL_USAGE = `usage: openllm uninstall [--yes]
+/**
+ * The CLI's OWN state under `~/.openllm` — the exact set this command removes.
+ * Self-contained: the CLI enumerates only its own entries and never the
+ * daemon's. `bin/` is shared, so only the CLI binaries are dropped from it.
+ */
+const CLI_STATE_ENTRIES: readonly string[] = [
+  "clients", // always-on client ownership ledgers
+  "run", // CLI run dir
+  "backups", // config backups
+  "installed", // install markers
+  "setup", // setup overlay cache
+];
+const CLI_BINARIES: readonly string[] = ["openllm", "openllmc"];
 
-Remove the openllm CLI from this machine: reverse any always-on client wiring
-(Raycast providers region; Hermes sticky openllm profile), drop the openllm/ollm
-PATH symlinks, strip the managed shell-rc block and completion, and delete
-~/.openllm/{bin/openllm,run,clients}.
+/** Flags the daemon owns — forwarded verbatim so it can honour them in its own
+ *  confirm + keep-logins prompts. */
+const DAEMON_FLAGS = new Set([
+  "--yes",
+  "-y",
+  "--keep-logins",
+  "--remove-logins",
+]);
 
-Left alone: ~/.openllm/.env (shared with the daemon), the daemon itself, and
-third-party configs we did not write.
+const UNINSTALL_USAGE = `usage: openllm uninstall [--yes] [--keep-logins|--remove-logins]
+
+Uninstall OpenLLM from this machine. Delegates daemon teardown to \`openllmd
+uninstall\` (which stops the service and removes daemon state, asking whether to
+keep your subscription logins), then removes the CLI: reverse any always-on
+client wiring (Raycast providers region; Hermes sticky openllm profile), drop
+the openllm/ollm PATH symlinks, strip the managed shell-rc block and completion,
+and delete CLI state under ~/.openllm.
+
+  --yes, -y            skip the confirmation prompt
+  --keep-logins        keep ~/.openllm/cli so a reinstall reuses subscription logins
+  --remove-logins      remove them (the default under --yes)
 
 Requires a TTY unless --yes is passed.
 `;
 
-/** Prompt for a typed confirmation. Returns false unless the user types yes. */
+/** Prompt for a typed confirmation. Returns false unless the user types yes.
+ *  Only used when no daemon is present (otherwise the daemon owns the prompt). */
 const confirm = async (): Promise<boolean> => {
   process.stdout.write(
     "This removes the openllm CLI from this machine.\nType 'yes' to continue: ",
@@ -72,6 +104,35 @@ const confirm = async (): Promise<boolean> => {
   return line.trim().toLowerCase() === "yes";
 };
 
+/** Remove CLI-owned files, then the shared `~/.openllm` root if it is now empty
+ *  (a kept `cli/` leaves the root in place). */
+const removeCliState = (): void => {
+  const dir = openllmDir();
+  for (const entry of CLI_STATE_ENTRIES) {
+    rmSync(join(dir, entry), { recursive: true, force: true });
+  }
+  const binDir = join(dir, "bin");
+  for (const bin of CLI_BINARIES) {
+    rmSync(join(binDir, bin), { force: true });
+  }
+  // Drop the shared bin/ only when we emptied it.
+  try {
+    if (existsSync(binDir) && readdirSync(binDir).length === 0) {
+      rmSync(binDir, { recursive: true, force: true });
+    }
+  } catch {
+    // best-effort — a leftover bin/ is harmless
+  }
+  // Remove the shared root only when nothing remains (kept logins keep it).
+  try {
+    if (existsSync(dir) && readdirSync(dir).length === 0) {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  } catch {
+    // best-effort
+  }
+};
+
 export const runUninstall = async (
   args: readonly string[],
 ): Promise<number> => {
@@ -80,21 +141,41 @@ export const runUninstall = async (
     return 0;
   }
   const yes = args.includes("--yes") || args.includes("-y");
-  if (!yes) {
-    // Refuse in a non-TTY rather than reading a misleading blank line.
-    if (!process.stdin.isTTY) {
-      process.stderr.write(
-        "Refusing to uninstall without a TTY — re-run with --yes.\n",
+  const daemon = findDaemonBinary();
+
+  // 1. Delegate daemon teardown — the daemon owns the destructive confirmation
+  //    AND the keep-logins question. We only forward the flags it understands.
+  if (daemon !== null) {
+    const forwarded = args.filter((a) => DAEMON_FLAGS.has(a));
+    const code = await runManagedDaemonCommand("uninstall", forwarded, {
+      OPENLLM_UNINSTALL_DELEGATED: "1",
+    });
+    if (code !== 0) {
+      // User aborted at the daemon prompt, or daemon teardown failed — stop
+      // before touching anything CLI-owned.
+      process.stdout.write(
+        "Uninstall stopped — nothing further was removed.\n",
       );
-      return 1;
+      return code;
     }
-    if (!(await confirm())) {
-      process.stdout.write("Aborted.\n");
-      return 1;
+  } else {
+    // No daemon on this machine — the CLI owns the confirmation itself.
+    if (!yes) {
+      if (!process.stdin.isTTY) {
+        process.stderr.write(
+          "Refusing to uninstall without a TTY — re-run with --yes.\n",
+        );
+        return 1;
+      }
+      if (!(await confirm())) {
+        process.stdout.write("Aborted.\n");
+        return 1;
+      }
     }
+    process.stdout.write("No daemon installed — removing the openllm CLI.\n");
   }
 
-  // 1. Always-on clients FIRST — while the ledgers and this binary still exist.
+  // 2. Always-on clients FIRST — while the ledgers and this binary still exist.
   for (const client of appliedAlwaysOnClients()) {
     if (client === "raycast") {
       process.stdout.write("Reversing Raycast wiring...\n");
@@ -106,27 +187,20 @@ export const runUninstall = async (
     }
   }
 
-  // 2. Shell surface we own.
+  // 3. Shell surface we own.
   removeOwnedLinks();
   removeRcBlock();
   removeCompletion();
 
-  // 3. Our own files. The shared .env stays (the daemon boots from it).
-  for (const path of [
-    join(openllmDir(), "bin", "openllm"),
-    join(openllmDir(), "run"),
-    CLIENTS_DIR(),
-  ]) {
-    rmSync(path, { recursive: true, force: true });
-  }
+  // 4. CLI-owned state (+ the shared root if it is now empty).
+  removeCliState();
 
-  const envFile = join(openllmDir(), ".env");
+  const keptLogins = existsSync(join(openllmDir(), "cli"));
   process.stdout.write(
-    "✓ openllm CLI removed\n" +
-      (existsSync(envFile)
-        ? `  kept ${envFile} (shared with the daemon)\n`
-        : "") +
-      "  the daemon (openllmd) is untouched — remove it with: openllmd uninstall\n",
+    "✓ OpenLLM fully removed\n" +
+      (keptLogins
+        ? `  kept your subscription logins (${join(openllmDir(), "cli")}) for a future reinstall\n`
+        : ""),
   );
   return 0;
 };

@@ -113,8 +113,8 @@ export const COMMANDS = [
   },
   {
     name: "uninstall",
-    args: "[--yes]",
-    description: "Remove the openllm CLI from this machine",
+    args: "[--yes] [--keep-logins|--remove-logins]",
+    description: "Uninstall OpenLLM (daemon + CLI) from this machine",
   },
   {
     name: "doctor",
@@ -195,7 +195,7 @@ export const COMMAND_ARGS: Readonly<
   hermes: ["install", "uninstall", "status", "--no-persist"],
   sessions: ["list", "attach", "kill"],
   doctor: ["--fix", "--no-ai", "-c", "--copy"],
-  uninstall: ["--yes", "-y"],
+  uninstall: ["--yes", "-y", "--keep-logins", "--remove-logins"],
 };
 
 export const padRight = (value: string, width: number): string =>

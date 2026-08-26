@@ -38,8 +38,9 @@ export const findDaemonBinary = (): string | null => {
  * preserves its stdout, stderr, and exit status for the CLI caller.
  */
 export const runManagedDaemonCommand = async (
-  command: TDaemonLifecycleCommand | "auto-update",
+  command: TDaemonLifecycleCommand | "auto-update" | "uninstall",
   args: readonly string[] = [],
+  extraEnv: Readonly<Record<string, string>> = {},
 ): Promise<number> => {
   const binary = findDaemonBinary();
   if (binary === null) {
@@ -54,7 +55,7 @@ export const runManagedDaemonCommand = async (
       stdin: "inherit",
       stdout: "inherit",
       stderr: "inherit",
-      env: process.env,
+      env: { ...process.env, ...extraEnv },
     });
     return await proc.exited;
   } catch (error) {
