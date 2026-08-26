@@ -71,8 +71,8 @@ const daemonReachable = async (port: number): Promise<boolean> => {
  */
 export const resolveGateway = async (opts?: {
   readonly remote?: boolean;
-  /** Credential-gate result for this launch; prevents a second config read from
-   * reviving a stale higher-precedence legacy alias after interactive setup. */
+  /** Credential-gate result for this launch; keeps the validated snapshot and
+   * avoids a second configuration-file read after interactive setup. */
   readonly config?: TCliConfig;
 }): Promise<TGateway> => {
   const { gatewayUrl, apiKey } = opts?.config ?? cliConfig();

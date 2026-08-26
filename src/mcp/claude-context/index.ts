@@ -45,7 +45,7 @@ const FAILED_RETRY_COOLDOWN_MS = ((): number => {
 // ── Gateway credentials ───────────────────────────────────────────────────────
 
 // Resolution is owned by `src/env.ts` (`cliConfig`): process env
-// (OPENLLM_* / legacy GATEWAY_*), then the shared
+// (OPENLLM_*), then the shared
 // `~/.openllm/.env`, then the baked cloud-origin default. Critical for the
 // hook path — `exec ctx index` fires from SessionStart with NO env vars, so
 // it must fall back to the daemon-paired key in the shared file.
