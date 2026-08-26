@@ -40,21 +40,26 @@ export const parseOpenllmDaemonPort = (
   fallback: number,
 ): number => {
   const trimmed = raw.trim();
-  // Strip an inline `# comment` suffix BEFORE outer quotes so a quoted value
-  // followed by a comment (`"59321" # local`) unwraps to its number rather than
-  // failing on the trailing quote. Must match packages/protocol/daemon-port.ts.
-  const decommented = trimmed.replace(/^(.*)\s#.*$/, "$1").trim();
-  const unquoted =
-    decommented.startsWith('"') &&
-    decommented.endsWith('"') &&
-    decommented.length >= 2
-      ? decommented.slice(1, -1)
-      : decommented.startsWith("'") &&
-          decommented.endsWith("'") &&
-          decommented.length >= 2
+  // Must match packages/protocol/daemon-port.ts. Order depends on WHERE the
+  // comment sits relative to the quotes:
+  //   "59321 # local"  → comment INSIDE quotes → unwrap first, then de-comment
+  //   "59321" # local  → comment OUTSIDE quotes → de-comment first, then unwrap
+  //   59321 # local    → bare value with a trailing comment
+  const wrapped = (s: string, q: string): boolean =>
+    s.length >= 2 && s.startsWith(q) && s.endsWith(q);
+  const deComment = (s: string): string =>
+    s.replace(/^(.*)\s#.*$/, "$1").trim();
+  let value: string;
+  if (wrapped(trimmed, '"') || wrapped(trimmed, "'")) {
+    value = deComment(trimmed.slice(1, -1));
+  } else {
+    const decommented = deComment(trimmed);
+    value =
+      wrapped(decommented, '"') || wrapped(decommented, "'")
         ? decommented.slice(1, -1)
         : decommented;
-  const stripped = unquoted.trim();
+  }
+  const stripped = value.trim();
   if (!/^\d+$/.test(stripped)) return fallback;
   const parsed = Number.parseInt(stripped, 10);
   return Number.isInteger(parsed) && parsed >= 1 && parsed <= 65535
