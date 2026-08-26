@@ -46,7 +46,7 @@ const GZIP_MAGIC = Buffer.from([0x1f, 0x8b]);
 /** Self-update downloads + swaps the running binary — the origin must be
  *  HTTPS (plain HTTP only for loopback dev gateways), or a network MITM
  *  could serve both the binary AND the checksum it's verified against. */
-const isSecureOrigin = (raw: string): boolean => {
+export const isSecureOrigin = (raw: string): boolean => {
   try {
     const url = new URL(raw);
     if (url.protocol === "https:") return true;

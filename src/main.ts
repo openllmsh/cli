@@ -43,6 +43,7 @@ import { runSelfUpdate } from "./self-update";
 import { runSessionsCommand } from "./sessions-cmd";
 import { runSetup } from "./setup-cmd";
 import { runUninstall } from "./uninstall-cmd";
+import { runUpdate } from "./update-cmd";
 
 const HELP = helpText(CLI_VERSION);
 
@@ -108,6 +109,15 @@ const SELF_UPDATE_USAGE = `usage: openllm self-update
 Converge this binary to the gateway's pinned release: fetch
 /api/cli/version, download + sha256-verify the target, atomic swap.
 Source builds (0.0.0-dev) never self-update.
+`;
+
+const UPDATE_USAGE = `usage: openllm update
+
+Update the FULL product: rerun the trusted installer from your configured
+gateway origin so the daemon AND CLI binaries converge and install invariants
+are re-enforced. Distinct from \`self-update\` (CLI binary only) and from the
+daemon's background \`auto-update\` preference. Preserves your env file and
+never installs vendor CLIs or edits your shell.
 `;
 
 const DAEMON_LIFECYCLE_USAGE = (
@@ -288,6 +298,10 @@ const main = async (): Promise<void> => {
         await runManagedDaemonCommand("auto-update", [action]),
       );
     }
+    case "update":
+      if (wantsHelp(rest)) return usage(UPDATE_USAGE, 0);
+      if (rest.length > 0) return usage(UPDATE_USAGE, 2);
+      return process.exit(await runUpdate());
     case "self-update":
       if (wantsHelp(rest)) return usage(SELF_UPDATE_USAGE, 0);
       await runSelfUpdate();

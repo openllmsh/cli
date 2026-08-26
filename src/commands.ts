@@ -99,6 +99,10 @@ export const COMMANDS = [
     description: "Read or change daemon automatic updates",
   },
   {
+    name: "update",
+    description: "Update the full OpenLLM product from the configured gateway",
+  },
+  {
     name: "self-update",
     description: "Update this CLI binary to the pinned gateway release",
   },
