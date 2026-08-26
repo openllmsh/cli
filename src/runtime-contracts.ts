@@ -40,13 +40,21 @@ export const parseOpenllmDaemonPort = (
   fallback: number,
 ): number => {
   const trimmed = raw.trim();
+  // Strip an inline `# comment` suffix BEFORE outer quotes so a quoted value
+  // followed by a comment (`"59321" # local`) unwraps to its number rather than
+  // failing on the trailing quote. Must match packages/protocol/daemon-port.ts.
+  const decommented = trimmed.replace(/^(.*)\s#.*$/, "$1").trim();
   const unquoted =
-    trimmed.startsWith('"') && trimmed.endsWith('"') && trimmed.length >= 2
-      ? trimmed.slice(1, -1)
-      : trimmed.startsWith("'") && trimmed.endsWith("'") && trimmed.length >= 2
-        ? trimmed.slice(1, -1)
-        : trimmed;
-  const stripped = unquoted.replace(/^(.*)\s#.*$/, "$1").trim();
+    decommented.startsWith('"') &&
+    decommented.endsWith('"') &&
+    decommented.length >= 2
+      ? decommented.slice(1, -1)
+      : decommented.startsWith("'") &&
+          decommented.endsWith("'") &&
+          decommented.length >= 2
+        ? decommented.slice(1, -1)
+        : decommented;
+  const stripped = unquoted.trim();
   if (!/^\d+$/.test(stripped)) return fallback;
   const parsed = Number.parseInt(stripped, 10);
   return Number.isInteger(parsed) && parsed >= 1 && parsed <= 65535
