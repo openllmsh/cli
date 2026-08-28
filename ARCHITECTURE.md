@@ -9,8 +9,8 @@
 >     have their config written, and Raycast (the one always-on client) gets an
 >     explicit, reversible in-place apply;
 >  2. serves ONE MCP server exposing the MCP-relevant subset of the native
->     gateway API (inference + read-only ops; §MCP) plus the claude-context
->     and supermemory tool groups.
+>     gateway API (inference + read-only ops; §MCP) plus the openllm-context
+>     and openllm-memory tool groups.
 >
 > Installed by [`packages/cli/install.sh`](install.sh) (or by the daemon's
 > installer, which installs both binaries), self-updating against the gateway's
@@ -77,7 +77,7 @@ packages/cli/
 | `openllm raycast [uninstall\|status]` | the always-on client: apply in place, or reverse exactly what apply wrote |
 | `openllm uninstall [--yes]` | remove the CLI (reverses always-on wiring first) |
 | `openllm doctor [--fix]` | report/clean leftovers from the old install model |
-| `openllm mcp [--only <group>]` | the unified MCP server over stdio (groups: `openllm`, `claude-context`, `supermemory`; default all — `--only` is debug) |
+| `openllm mcp [--only <group>]` | the unified MCP server over stdio (groups: `openllm`, `openllm-context`, `openllm-memory`; default all — `--only` is debug) |
 | `openllm exec ctx <index\|search\|status\|index-docs> …` | claude-context hook verbs — what the `openllm` bundle's hooks shell out to (`ctx` kept as a hidden alias for older bundles) |
 | `openllm setup` | PATH symlink + shell completion — run automatically by the curl installer; shown as a copyable follow-up on the dashboard card for sandboxed one-click installs |
 | `openllm completion <bash\|zsh\|fish\|install>` | shell completion (derived from `commands.ts`, the single command-surface source) |
@@ -145,7 +145,7 @@ surfaces: `openllmToolDefsAll` (**every** operation — the browser chat and the
 execution map use it) and `openllmToolDefs`, the MCP-listed subset. The MCP
 subset (`isMcpExposed`) keeps inference (`/v1/*`) + read-only ops and drops
 account/config/vault writes plus the raw `/plugins/*` HTTP mirrors (the curated
-`claude-context` + `supermemory` groups already cover those) — trimming ListTools
+`openllm-context` + `openllm-memory` groups already cover those) — trimming ListTools
 to cut agent context. Execution still recognizes every operation, so a trimmed
 tool is never uncallable. Mutating operations carry explicit consent copy in
 their tool descriptions.

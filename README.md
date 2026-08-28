@@ -18,8 +18,8 @@
 One compiled binary that carries **every OpenLLM extension**: a single MCP
 server (`openllm mcp`) exposing the **full native gateway API** (one tool
 per OpenAPI operation, generated from the same schema the gateway serves at
-`/api/swagger`), **semantic code + docs search** (claude-context), and
-**persistent cross-session memory** (supermemory) — plus the hook
+`/api/swagger`), **semantic code + docs search** (openllm-context), and
+**persistent cross-session memory** (openllm-memory) — plus the hook
 subcommands the `openllm` plugin's session hooks shell out to.
 
 Self-contained by construction: the SDK is **generated and committed**
@@ -69,7 +69,7 @@ directly or point `mcpServers.openllm` at your `dist/openllm`.
 
 | Command | What |
 | --- | --- |
-| `openllm mcp [--only <group>]` | the unified MCP server over stdio — groups: `openllm` (native API), `claude-context`, `supermemory` (default all) |
+| `openllm mcp [--only <group>]` | the unified MCP server over stdio — groups: `openllm` (native API), `openllm-context`, `openllm-memory` (default all) |
 | `openllm exec ctx <index\|search\|status\|index-docs> …` | code/docs-search hook verbs (what the plugin's hooks call) |
 | `openllm setup` | PATH symlink + shell completion (idempotent) |
 | `openllm completion <bash\|zsh\|fish\|install>` | print or install shell completion |
