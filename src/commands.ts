@@ -149,21 +149,47 @@ export const FLAGS: readonly TFlag[] = [
  * The MCP tool groups `mcp --only` accepts. Owned HERE (the command-surface
  * source of truth, dependency-free) so `completion.ts` doesn't pull the MCP
  * SDK graph; `mcp/server.ts` re-exports it as `MCP_GROUPS` for dispatch.
+ *
+ * The group STRINGS are the openllm-branded selector vocabulary
+ * (`openllm-context`, `openllm-memory`) — distinct from the internal backend
+ * plugin slugs (`/api/plugins/claude-context`, `…/supermemory`), env vars, and
+ * on-disk state dirs, all of which stay on their historical wire-stable names.
  */
 export const MCP_ONLY_GROUPS = [
   "openllm",
-  "claude-context",
-  "supermemory",
+  "openllm-context",
+  "openllm-memory",
 ] as const;
 export type TMcpGroup = (typeof MCP_ONLY_GROUPS)[number];
 
 /**
+ * Legacy group selectors accepted for backward compatibility. Free-tier client
+ * overlays persisted `--only supermemory` (and code search `claude-context`)
+ * into their configs before the rename, so `normalizeMcpGroup` maps those old
+ * strings onto the current names rather than rejecting an already-installed
+ * client.
+ */
+const MCP_GROUP_ALIASES: Readonly<Record<string, TMcpGroup>> = {
+  "claude-context": "openllm-context",
+  supermemory: "openllm-memory",
+};
+
+/**
+ * Resolve a `--only` value to a canonical group, accepting the legacy aliases.
+ * Returns `undefined` for an unknown group.
+ */
+export const normalizeMcpGroup = (s: string): TMcpGroup | undefined => {
+  if ((MCP_ONLY_GROUPS as readonly string[]).includes(s)) return s as TMcpGroup;
+  return MCP_GROUP_ALIASES[s];
+};
+
+/**
  * Groups a free-tier key is allowed to expose. Semantic code search
- * (`claude-context`) is Pro. ONE list — overlay `mcpArgs()` and the MCP
+ * (`openllm-context`) is Pro. ONE list — overlay `mcpArgs()` and the MCP
  * server itself both read this, so a persisted client config that launches
  * `openllm mcp` with no `--only` still drops code search for free users.
  */
-export const FREE_TIER_MCP_GROUPS = ["openllm", "supermemory"] as const;
+export const FREE_TIER_MCP_GROUPS = ["openllm", "openllm-memory"] as const;
 
 export const mcpGroupsForTier = (
   groups: readonly TMcpGroup[],

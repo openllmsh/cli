@@ -7,8 +7,8 @@
  *                       the generated OpenAPI spec — inference + read-only
  *                       ops; account/config writes + raw plugin mirrors are
  *                       trimmed to cut context. See `openllm/tools.ts`.)
- *   - claude-context  — semantic code + docs search (gateway dispatch)
- *   - supermemory     — persistent memory / recall (gateway dispatch)
+ *   - openllm-context — semantic code + docs search (gateway dispatch)
+ *   - openllm-memory  — persistent memory / recall (gateway dispatch)
  *
  * `--only <group>` narrows the surface for debugging; the install script
  * always registers the full server.
@@ -85,8 +85,8 @@ export const runMcpServer = async (
 
   const tools = [
     ...(groups.includes("openllm") ? openllmToolDefs : []),
-    ...(groups.includes("claude-context") ? claudeContextGroupToolDefs : []),
-    ...(groups.includes("supermemory") ? supermemoryToolDefs : []),
+    ...(groups.includes("openllm-context") ? claudeContextGroupToolDefs : []),
+    ...(groups.includes("openllm-memory") ? supermemoryToolDefs : []),
   ];
 
   const server = new Server(
@@ -98,10 +98,10 @@ export const runMcpServer = async (
   server.setRequestHandler(CallToolRequestSchema, async (req) => {
     const { name, arguments: args = {} } = req.params;
     const a = args as Record<string, unknown>;
-    if (groups.includes("claude-context") && isClaudeContextGroupTool(name)) {
+    if (groups.includes("openllm-context") && isClaudeContextGroupTool(name)) {
       return handleClaudeContextGroupTool(name, a, gatewayConfig);
     }
-    if (groups.includes("supermemory") && isSupermemoryTool(name)) {
+    if (groups.includes("openllm-memory") && isSupermemoryTool(name)) {
       return handleSupermemoryTool(name, a, supermemoryConfig);
     }
     if (groups.includes("openllm") && isMcpListedTool(name)) {

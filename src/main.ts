@@ -30,6 +30,7 @@ import {
   EXEC_GROUPS,
   EXEC_VERBS,
   helpText,
+  normalizeMcpGroup,
 } from "./commands";
 import { runCompletionCommand } from "./completion";
 import type { TDaemonLifecycleCommand } from "./daemon-delegation";
@@ -55,8 +56,6 @@ const argv = process.argv.slice(2);
 const clientFlags = parseClientFlags(argv);
 const cmd = clientFlags.rest[0];
 
-const isGroup = (s: string): s is TMcpGroup =>
-  (MCP_GROUPS as readonly string[]).includes(s);
 
 const isExecGroup = (s: string): s is TExecGroup =>
   (EXEC_GROUPS as readonly string[]).includes(s);
@@ -215,10 +214,11 @@ const main = async (): Promise<void> => {
       const onlyIdx = rest.indexOf("--only");
       let groups: readonly TMcpGroup[] = MCP_GROUPS;
       if (onlyIdx >= 0) {
-        const g = rest[onlyIdx + 1] ?? "";
-        if (!isGroup(g)) {
+        const raw = rest[onlyIdx + 1] ?? "";
+        const g = normalizeMcpGroup(raw);
+        if (!g) {
           process.stderr.write(
-            `unknown group "${g}" — expected one of: ${MCP_GROUPS.join(", ")}\n`,
+            `unknown group "${raw}" — expected one of: ${MCP_GROUPS.join(", ")}\n`,
           );
           process.exit(2);
         }
