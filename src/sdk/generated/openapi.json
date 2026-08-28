@@ -103,6 +103,16 @@
                           },
                           "context_window": {
                             "type": "number"
+                          },
+                          "meta": {
+                            "type": "object",
+                            "required": [],
+                            "properties": {
+                              "n_ctx": {
+                                "type": "number"
+                              }
+                            },
+                            "additionalProperties": false
                           }
                         },
                         "additionalProperties": false
