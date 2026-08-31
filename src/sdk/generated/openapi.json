@@ -8721,7 +8721,8 @@
                     "cookie_consent_version",
                     "cookie_consent_value",
                     "cookie_consent_at",
-                    "onboarding_dismissed_at"
+                    "onboarding_dismissed_at",
+                    "created_at"
                   ],
                   "properties": {
                     "id": {
@@ -9049,6 +9050,9 @@
                           "type": "null"
                         }
                       ]
+                    },
+                    "created_at": {
+                      "type": "string"
                     }
                   },
                   "additionalProperties": false
@@ -9539,11 +9543,33 @@
                       "items": {
                         "type": "object",
                         "required": [
-                          "provider"
+                          "provider",
+                          "label",
+                          "linked_at"
                         ],
                         "properties": {
                           "provider": {
                             "type": "string"
+                          },
+                          "label": {
+                            "anyOf": [
+                              {
+                                "type": "string"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "linked_at": {
+                            "anyOf": [
+                              {
+                                "type": "string"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
                           }
                         },
                         "additionalProperties": false
