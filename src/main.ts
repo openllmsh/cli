@@ -329,20 +329,23 @@ const main = async (): Promise<void> => {
     case "version":
     case "-v":
     case "--version": {
-      process.stdout.write(`openllm v${CLI_VERSION}\n`);
+      // `daemonVersion()` is best-effort human sugar (it spawns a bounded
+      // `openllmd --version` child). The daemon's converger probes this command
+      // and only needs the `openllm vX.Y.Z` line, so build the whole report,
+      // write it in ONE shot, and exit EXPLICITLY — never rely on natural
+      // event-loop drain, or a lingering handle from the child probe could keep
+      // the process alive past the daemon's 5s probe cap and read as null
+      // ("did not report a version — skipping").
       const daemonLine = await daemonVersion();
-      if (daemonLine !== null) {
-        process.stdout.write(`${daemonLine}\n`);
-      } else {
-        // Null covers two cases the user should see differently: no daemon
-        // binary at all vs. an installed binary whose version probe failed.
-        process.stdout.write(
-          findDaemonBinary() === null
-            ? "openllmd not installed\n"
-            : "openllmd version unavailable\n",
-        );
-      }
-      break;
+      // Null covers two cases the user should see differently: no daemon
+      // binary at all vs. an installed binary whose version probe failed.
+      const daemonReport =
+        daemonLine ??
+        (findDaemonBinary() === null
+          ? "openllmd not installed"
+          : "openllmd version unavailable");
+      process.stdout.write(`openllm v${CLI_VERSION}\n${daemonReport}\n`);
+      return process.exit(0);
     }
     case undefined:
     case "help":
