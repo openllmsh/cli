@@ -37,7 +37,7 @@ packages/cli/
 │   └── generate-sdk.ts   # MONOREPO-ONLY: HttpApi → committed SDK artifacts
 └── src/
     ├── main.ts           # entry: <client> | mcp | exec | api | setup | completion
-    │                      #        | sessions | uninstall | doctor | self-update | version
+    │                      #        | sessions | status | uninstall | doctor | self-update | version
     ├── clients/          # the runtime client commands
     │   ├── registry.ts   #   SSOT: which clients, session vs always-on
     │   ├── overlays.ts   #   the embedded setup/** text
@@ -84,7 +84,8 @@ packages/cli/
 | `openllm api --spec` | print the embedded OpenAPI spec |
 | `openllm self-update` | converge to the gateway's pinned release |
 | `openllm sessions [list\|attach\|kill]` | list, attach to, or kill durable local sessions (`attach` requires an id) |
-| `openllm version` | print the baked version |
+| `openllm status` | mirror of `openllmd status` — delegates to the managed daemon binary |
+| `openllm version` | print the CLI version AND the installed daemon version (`-v`/`--version`) |
 
 Config: `OPENLLM_CLOUD_ORIGIN` / `OPENLLM_API_KEY` env (the same contract the
 MCP mapping + hooks carry), falling back to the SHARED `~/.openllm/.env` (the

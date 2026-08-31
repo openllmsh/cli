@@ -11,6 +11,7 @@
  *   openllm setup                    PATH symlink + shell completion
  *   openllm completion <shell|install>
  *   openllm start|stop|restart       delegate daemon lifecycle management
+ *   openllm status                   mirror of `openllmd status`
  *   openllm auto-update <on|off|status>
  *   openllm self-update              converge this CLI to the pinned release
  *   openllm version
@@ -34,7 +35,11 @@ import {
 } from "./commands";
 import { runCompletionCommand } from "./completion";
 import type { TDaemonLifecycleCommand } from "./daemon-delegation";
-import { runManagedDaemonCommand } from "./daemon-delegation";
+import {
+  daemonVersion,
+  findDaemonBinary,
+  runManagedDaemonCommand,
+} from "./daemon-delegation";
 import { runDoctor } from "./doctor-cmd";
 import { CLI_VERSION } from "./env";
 import { runClaudeContextCli } from "./mcp/claude-context";
@@ -55,7 +60,6 @@ const argv = process.argv.slice(2);
 // with claude's --debug/--resume and grok's --resume).
 const clientFlags = parseClientFlags(argv);
 const cmd = clientFlags.rest[0];
-
 
 const isExecGroup = (s: string): s is TExecGroup =>
   (EXEC_GROUPS as readonly string[]).includes(s);
@@ -124,6 +128,12 @@ const DAEMON_LIFECYCLE_USAGE = (
 ): string => `usage: openllm ${command}
 
 Delegate ${command} to the managed openllmd daemon.
+`;
+
+const STATUS_USAGE = `usage: openllm status
+
+Show the local daemon status — a mirror of \`openllmd status\` (service
+registration, supervisor state, a live /status probe, and paths).
 `;
 
 const AUTO_UPDATE_USAGE = `usage: openllm auto-update <on|off|status>
@@ -285,6 +295,10 @@ const main = async (): Promise<void> => {
       return process.exit(
         await runManagedDaemonCommand(cmd as TDaemonLifecycleCommand),
       );
+    case "status":
+      if (wantsHelp(rest)) return usage(STATUS_USAGE, 0);
+      if (rest.length > 0) return usage(STATUS_USAGE, 2);
+      return process.exit(await runManagedDaemonCommand("status"));
     case "auto-update": {
       if (wantsHelp(rest)) return usage(AUTO_UPDATE_USAGE, 0);
       const action = rest[0] ?? "";
@@ -314,9 +328,22 @@ const main = async (): Promise<void> => {
       return process.exit(await runDoctor(rest));
     case "version":
     case "-v":
-    case "--version":
+    case "--version": {
       process.stdout.write(`openllm v${CLI_VERSION}\n`);
+      const daemonLine = await daemonVersion();
+      if (daemonLine !== null) {
+        process.stdout.write(`${daemonLine}\n`);
+      } else {
+        // Null covers two cases the user should see differently: no daemon
+        // binary at all vs. an installed binary whose version probe failed.
+        process.stdout.write(
+          findDaemonBinary() === null
+            ? "openllmd not installed\n"
+            : "openllmd version unavailable\n",
+        );
+      }
       break;
+    }
     case undefined:
     case "help":
     case "-h":
