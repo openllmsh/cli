@@ -528,6 +528,18 @@ export const API_OPERATIONS: readonly TApiOperation[] = [
     "hasBody": true
   },
   {
+    "id": "publicUsageIndex.usageIndex",
+    "method": "get",
+    "path": "/public/usage-index",
+    "summary": "",
+    "tags": [
+      "publicUsageIndex"
+    ],
+    "pathParams": [],
+    "queryParams": [],
+    "hasBody": false
+  },
+  {
     "id": "sessions.list",
     "method": "get",
     "path": "/sessions",
