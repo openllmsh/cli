@@ -10662,6 +10662,7 @@
                         "type": "object",
                         "required": [
                           "provider",
+                          "provider_slug",
                           "model",
                           "users",
                           "user_days",
@@ -10670,6 +10671,9 @@
                         ],
                         "properties": {
                           "provider": {
+                            "type": "string"
+                          },
+                          "provider_slug": {
                             "type": "string"
                           },
                           "model": {
@@ -10704,6 +10708,7 @@
                         "type": "object",
                         "required": [
                           "provider",
+                          "provider_slug",
                           "users",
                           "user_days",
                           "requests",
@@ -10711,6 +10716,9 @@
                         ],
                         "properties": {
                           "provider": {
+                            "type": "string"
+                          },
+                          "provider_slug": {
                             "type": "string"
                           },
                           "users": {
