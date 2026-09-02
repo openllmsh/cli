@@ -10756,7 +10756,8 @@
                           "accounts",
                           "pair_count",
                           "tightness",
-                          "pct_change"
+                          "pct_change",
+                          "history"
                         ],
                         "properties": {
                           "provider": {
@@ -10789,6 +10790,25 @@
                                 "type": "null"
                               }
                             ]
+                          },
+                          "history": {
+                            "type": "array",
+                            "items": {
+                              "type": "object",
+                              "required": [
+                                "period_end",
+                                "value_usd_30d"
+                              ],
+                              "properties": {
+                                "period_end": {
+                                  "type": "string"
+                                },
+                                "value_usd_30d": {
+                                  "type": "number"
+                                }
+                              },
+                              "additionalProperties": false
+                            }
                           }
                         },
                         "additionalProperties": false
