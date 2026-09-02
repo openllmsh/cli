@@ -10742,6 +10742,7 @@
                         "type": "object",
                         "required": [
                           "provider",
+                          "provider_slug",
                           "tier",
                           "value_usd_30d",
                           "accounts",
@@ -10751,6 +10752,9 @@
                         ],
                         "properties": {
                           "provider": {
+                            "type": "string"
+                          },
+                          "provider_slug": {
                             "type": "string"
                           },
                           "tier": {
