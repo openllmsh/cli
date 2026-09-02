@@ -6068,7 +6068,6 @@
                             {
                               "type": "object",
                               "required": [
-                                "type",
                                 "role",
                                 "content"
                               ],
@@ -8898,6 +8897,9 @@
                                   "lite"
                                 ]
                               }
+                            },
+                            "public_usage_index_opt_out": {
+                              "type": "boolean"
                             }
                           },
                           "additionalProperties": false
@@ -10473,6 +10475,365 @@
                     },
                     "error": {
                       "type": "string"
+                    }
+                  },
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request did not match the expected schema",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HttpApiDecodeError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "error"
+                  ],
+                  "properties": {
+                    "error": {
+                      "type": "object",
+                      "required": [
+                        "message"
+                      ],
+                      "properties": {
+                        "message": {
+                          "type": "string"
+                        },
+                        "type": {
+                          "type": "string"
+                        },
+                        "code": {
+                          "type": "string"
+                        }
+                      },
+                      "additionalProperties": false
+                    }
+                  },
+                  "additionalProperties": false
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/public/usage-index": {
+      "get": {
+        "tags": [
+          "publicUsageIndex"
+        ],
+        "operationId": "publicUsageIndex.usageIndex",
+        "parameters": [],
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "period_start",
+                    "period_end",
+                    "windows",
+                    "caption",
+                    "model_popularity",
+                    "provider_popularity",
+                    "value_by_tier"
+                  ],
+                  "properties": {
+                    "period_start": {
+                      "anyOf": [
+                        {
+                          "type": "string"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "period_end": {
+                      "anyOf": [
+                        {
+                          "type": "string"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "windows": {
+                      "type": "object",
+                      "required": [
+                        "model",
+                        "provider",
+                        "value"
+                      ],
+                      "properties": {
+                        "model": {
+                          "type": "object",
+                          "required": [
+                            "period_start",
+                            "period_end"
+                          ],
+                          "properties": {
+                            "period_start": {
+                              "anyOf": [
+                                {
+                                  "type": "string"
+                                },
+                                {
+                                  "type": "null"
+                                }
+                              ]
+                            },
+                            "period_end": {
+                              "anyOf": [
+                                {
+                                  "type": "string"
+                                },
+                                {
+                                  "type": "null"
+                                }
+                              ]
+                            }
+                          },
+                          "additionalProperties": false
+                        },
+                        "provider": {
+                          "type": "object",
+                          "required": [
+                            "period_start",
+                            "period_end"
+                          ],
+                          "properties": {
+                            "period_start": {
+                              "anyOf": [
+                                {
+                                  "type": "string"
+                                },
+                                {
+                                  "type": "null"
+                                }
+                              ]
+                            },
+                            "period_end": {
+                              "anyOf": [
+                                {
+                                  "type": "string"
+                                },
+                                {
+                                  "type": "null"
+                                }
+                              ]
+                            }
+                          },
+                          "additionalProperties": false
+                        },
+                        "value": {
+                          "type": "object",
+                          "required": [
+                            "period_start",
+                            "period_end"
+                          ],
+                          "properties": {
+                            "period_start": {
+                              "anyOf": [
+                                {
+                                  "type": "string"
+                                },
+                                {
+                                  "type": "null"
+                                }
+                              ]
+                            },
+                            "period_end": {
+                              "anyOf": [
+                                {
+                                  "type": "string"
+                                },
+                                {
+                                  "type": "null"
+                                }
+                              ]
+                            }
+                          },
+                          "additionalProperties": false
+                        }
+                      },
+                      "additionalProperties": false
+                    },
+                    "caption": {
+                      "type": "string",
+                      "enum": [
+                        "Trends measured across OpenLLM gateway activity"
+                      ]
+                    },
+                    "model_popularity": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "required": [
+                          "provider",
+                          "model",
+                          "users",
+                          "user_days",
+                          "requests",
+                          "pct_change"
+                        ],
+                        "properties": {
+                          "provider": {
+                            "type": "string"
+                          },
+                          "provider_slug": {
+                            "type": "string"
+                          },
+                          "model": {
+                            "type": "string"
+                          },
+                          "users": {
+                            "type": "number"
+                          },
+                          "user_days": {
+                            "type": "number"
+                          },
+                          "requests": {
+                            "type": "number"
+                          },
+                          "pct_change": {
+                            "anyOf": [
+                              {
+                                "type": "number"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          }
+                        },
+                        "additionalProperties": false
+                      }
+                    },
+                    "provider_popularity": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "required": [
+                          "provider",
+                          "users",
+                          "user_days",
+                          "requests",
+                          "pct_change"
+                        ],
+                        "properties": {
+                          "provider": {
+                            "type": "string"
+                          },
+                          "provider_slug": {
+                            "type": "string"
+                          },
+                          "users": {
+                            "type": "number"
+                          },
+                          "user_days": {
+                            "type": "number"
+                          },
+                          "requests": {
+                            "type": "number"
+                          },
+                          "pct_change": {
+                            "anyOf": [
+                              {
+                                "type": "number"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          }
+                        },
+                        "additionalProperties": false
+                      }
+                    },
+                    "value_by_tier": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "required": [
+                          "provider",
+                          "tier",
+                          "value_usd_30d",
+                          "accounts",
+                          "pair_count",
+                          "tightness",
+                          "pct_change"
+                        ],
+                        "properties": {
+                          "provider": {
+                            "type": "string"
+                          },
+                          "provider_slug": {
+                            "type": "string"
+                          },
+                          "tier": {
+                            "type": "string"
+                          },
+                          "value_usd_30d": {
+                            "type": "number"
+                          },
+                          "accounts": {
+                            "type": "number"
+                          },
+                          "pair_count": {
+                            "type": "number"
+                          },
+                          "tightness": {
+                            "type": "number"
+                          },
+                          "pct_change": {
+                            "anyOf": [
+                              {
+                                "type": "number"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "history": {
+                            "type": "array",
+                            "items": {
+                              "type": "object",
+                              "required": [
+                                "period_end",
+                                "value_usd_30d"
+                              ],
+                              "properties": {
+                                "period_end": {
+                                  "type": "string"
+                                },
+                                "value_usd_30d": {
+                                  "type": "number"
+                                }
+                              },
+                              "additionalProperties": false
+                            }
+                          }
+                        },
+                        "additionalProperties": false
+                      }
                     }
                   },
                   "additionalProperties": false
@@ -17960,6 +18321,16 @@
                           "provider": {
                             "type": "string"
                           },
+                          "account_hash": {
+                            "anyOf": [
+                              {
+                                "type": "string"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
                           "off_gateway_usd": {
                             "type": "number"
                           },
@@ -20902,6 +21273,9 @@
                             "lite"
                           ]
                         }
+                      },
+                      "public_usage_index_opt_out": {
+                        "type": "boolean"
                       }
                     },
                     "additionalProperties": false
@@ -25629,6 +26003,9 @@
     },
     {
       "name": "health"
+    },
+    {
+      "name": "publicUsageIndex"
     },
     {
       "name": "keys"

@@ -139,22 +139,46 @@ const collectRecentLogLinesCommand = `${DAEMON_LOG_LINES}`;
 
 const SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧"] as const;
 const SPINNER_INTERVAL_MS = 80;
-const SPINNER_LABEL = "AI diagnosis (lite) — reading logs…";
+const spinnerLabel = (model: string): string =>
+  `AI diagnosis (${model}) — reading logs…`;
 
-const DOCTOR_USAGE = `openllm doctor [--fix] [--no-ai] [-c]
+/** The model the AI diagnosis runs on when `--model` is not passed. `plus` is
+ *  the mid default-chain tier — a stronger read than the old `lite` default,
+ *  while `--model` lets a heavier (`ultra`) or cheaper (`lite`) tier, or any
+ *  explicit model id, be chosen per run. */
+const DEFAULT_DOCTOR_MODEL = "plus";
+
+/** Parse `--model <alias>`; default `plus`. Returns null (caller rejects) when
+ *  `--model` is given without a following value (a flag or nothing), or given
+ *  more than once — an ambiguous request should error, not silently pick one. */
+export const parseDoctorModel = (args: readonly string[]): string | null => {
+  const occurrences: number[] = [];
+  for (let i = 0; i < args.length; i += 1) {
+    if (args[i] === "--model") occurrences.push(i);
+  }
+  if (occurrences.length === 0) return DEFAULT_DOCTOR_MODEL;
+  if (occurrences.length > 1) return null;
+  const value = args[occurrences[0] + 1];
+  if (value === undefined || value.startsWith("-")) return null;
+  return value;
+};
+
+const DOCTOR_USAGE = `openllm doctor [--fix] [--no-ai] [--model <alias>] [-c]
 
 Diagnose the local daemon and leftover install state.
 Default AI diagnosis sends the redacted report and recent daemon logs
 for processing; --no-ai keeps them on this machine.
 
-  openllm doctor          report only — changes nothing
-  openllm doctor --fix    apply safe fixes (remove leftover install artifacts)
-  openllm doctor --no-ai  skip the AI diagnosis
-  openllm doctor -c       copy the full report to the clipboard
+  openllm doctor            report only — changes nothing
+  openllm doctor --fix      apply safe fixes (remove leftover install artifacts)
+  openllm doctor --no-ai    skip the AI diagnosis
+  openllm doctor --model ultra   run the AI diagnosis on a specific model
+  openllm doctor -c         copy the full report to the clipboard
 
-  --fix           apply safe fixes
-  --no-ai         disable the default AI diagnosis
-  -c, --copy      copy the printed report to the clipboard
+  --fix            apply safe fixes
+  --no-ai          disable the default AI diagnosis
+  --model <alias>  model for the AI diagnosis (default ${DEFAULT_DOCTOR_MODEL})
+  -c, --copy       copy the printed report to the clipboard
 
 --fix removes only OpenLLM-owned paths and managed regions; your own settings
 in those files are kept.
@@ -688,7 +712,11 @@ const startStderrSpinner = (label: string): (() => void) => {
   };
 };
 
-const formatAiSection = (diagnosis: string | null, reason?: string): string => {
+const formatAiSection = (
+  diagnosis: string | null,
+  model: string,
+  reason?: string,
+): string => {
   if (diagnosis !== null) {
     const wrapped = diagnosis
       .split(/\r?\n/)
@@ -696,13 +724,16 @@ const formatAiSection = (diagnosis: string | null, reason?: string): string => {
         line.trim().length === 0 ? "" : wrapParagraph(line.trim(), 88, "  "),
       )
       .join("\n");
-    return `\nAI diagnosis (lite)\n${wrapped}\n`;
+    return `\nAI diagnosis (${model})\n${wrapped}\n`;
   }
   const detail = reason ?? "AI diagnosis failed";
   return `\nAI diagnosis\n  unavailable (${detail})\n`;
 };
 
-export const aiDiagnosis = async (report: string): Promise<string | null> => {
+export const aiDiagnosis = async (
+  report: string,
+  model: string,
+): Promise<string | null> => {
   const bin = cliBinPath();
   const { apiKey } = cliConfig();
   if (!existsSync(bin) || apiKey.length === 0) return null;
@@ -719,7 +750,7 @@ export const aiDiagnosis = async (report: string): Promise<string | null> => {
   let proc: ReturnType<typeof Bun.spawn> | null = null;
 
   try {
-    proc = Bun.spawn([bin, "claude", "-p", prompt, "--model", "lite"], {
+    proc = Bun.spawn([bin, "claude", "-p", prompt, "--model", model], {
       stdout: "pipe",
       stderr: "pipe",
       detached: true,
@@ -801,6 +832,11 @@ export const runDoctor = async (args: readonly string[]): Promise<number> => {
   const fix = args.includes("--fix");
   const includeAi = !args.includes("--no-ai");
   const copy = args.includes("-c") || args.includes("--copy");
+  const model = parseDoctorModel(args);
+  if (model === null) {
+    process.stderr.write(DOCTOR_USAGE);
+    return 2;
+  }
   const chunks: string[] = [];
   const emit = (text: string): void => {
     chunks.push(text);
@@ -929,23 +965,23 @@ export const runDoctor = async (args: readonly string[]): Promise<number> => {
   emit(`${reportText}\n`);
 
   if (!includeAi) {
-    emit(formatAiSection(null, "disabled by --no-ai"));
+    emit(formatAiSection(null, model, "disabled by --no-ai"));
   } else if (!existsSync(cliBinPath())) {
-    emit(formatAiSection(null, "openllm CLI not found"));
+    emit(formatAiSection(null, model, "openllm CLI not found"));
   } else if (cliConfig().apiKey.length === 0) {
-    emit(formatAiSection(null, "no API key configured"));
+    emit(formatAiSection(null, model, "no API key configured"));
   } else {
-    const stopSpinner = startStderrSpinner(SPINNER_LABEL);
+    const stopSpinner = startStderrSpinner(spinnerLabel(model));
     let diagnosis: string | null = null;
     try {
-      diagnosis = await aiDiagnosis(reportText);
+      diagnosis = await aiDiagnosis(reportText, model);
     } finally {
       stopSpinner();
     }
     emit(
       diagnosis === null
-        ? formatAiSection(null)
-        : formatAiSection(redact(diagnosis)),
+        ? formatAiSection(null, model)
+        : formatAiSection(redact(diagnosis), model),
     );
   }
 

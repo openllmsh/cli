@@ -17,8 +17,38 @@
  * there is exactly one origin-security contract.
  */
 
-import { cliConfig } from "./env";
+import { CLI_VERSION, cliConfig } from "./env";
 import { isSecureOrigin } from "./self-update";
+
+/** Bound on the best-effort pinned-version probe so `update` never hangs on it. */
+const VERSION_FETCH_TIMEOUT_MS = 5_000;
+
+/**
+ * The gateway's pinned CLI version (`GET /api/cli/version`), normalized without
+ * a leading `v`, or null when it can't be read. Best-effort and never throws —
+ * it only feeds an informational "current → incoming" line, so a slow or broken
+ * gateway must not block or fail the actual update.
+ */
+const fetchPinnedCliVersion = async (
+  gatewayUrl: string,
+): Promise<string | null> => {
+  try {
+    const res = await fetch(`${gatewayUrl}/api/cli/version`, {
+      signal: AbortSignal.timeout(VERSION_FETCH_TIMEOUT_MS),
+    });
+    if (!res.ok) return null;
+    const payload = (await res.json().catch(() => null)) as {
+      latest_version?: unknown;
+    } | null;
+    if (payload === null || typeof payload.latest_version !== "string") {
+      return null;
+    }
+    const latest = payload.latest_version.replace(/^v/, "");
+    return latest.length > 0 ? latest : null;
+  } catch {
+    return null;
+  }
+};
 
 /** Kill the peer process if THIS one exits nonzero, then yield its code. */
 const guardExit = (
@@ -52,6 +82,18 @@ export const runUpdate = async (): Promise<number> => {
     );
     return 1;
   }
+
+  // Informational current → incoming line before we hand off to the installer.
+  // Best-effort: the pinned version covers the CLI binary; the installer also
+  // converges the daemon, which may pin its own version.
+  const incoming = await fetchPinnedCliVersion(gatewayUrl);
+  process.stderr.write(
+    incoming === null
+      ? `[update] current v${CLI_VERSION}\n`
+      : incoming === CLI_VERSION
+        ? `[update] current v${CLI_VERSION} (already the pinned release; reconverging)\n`
+        : `[update] current v${CLI_VERSION} → incoming v${incoming}\n`,
+  );
 
   const url = `${gatewayUrl}/install`;
   process.stderr.write(`[update] running the installer from ${url}\n`);

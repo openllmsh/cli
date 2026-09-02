@@ -94,6 +94,10 @@ export const COMMANDS = [
     description: "Restart OpenLLM after completing credential setup",
   },
   {
+    name: "status",
+    description: "Show the local daemon status",
+  },
+  {
     name: "auto-update",
     args: "<on|off|status>",
     description: "Read or change daemon automatic updates",
@@ -118,7 +122,7 @@ export const COMMANDS = [
   },
   {
     name: "doctor",
-    args: "[--fix] [--no-ai] [-c]",
+    args: "[--fix] [--no-ai] [--model <alias>] [-c]",
     description: "Diagnose the local daemon and report leftover install state",
   },
   { name: "version", description: "Print the version" },
@@ -220,7 +224,7 @@ export const COMMAND_ARGS: Readonly<
   raycast: ["uninstall", "status"],
   hermes: ["install", "uninstall", "status", "--no-persist"],
   sessions: ["list", "attach", "kill"],
-  doctor: ["--fix", "--no-ai", "-c", "--copy"],
+  doctor: ["--fix", "--no-ai", "--model", "-c", "--copy"],
   uninstall: ["--yes", "-y", "--keep-logins", "--remove-logins"],
 };
 
