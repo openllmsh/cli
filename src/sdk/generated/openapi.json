@@ -10522,6 +10522,7 @@
                   "required": [
                     "period_start",
                     "period_end",
+                    "windows",
                     "caption",
                     "model_popularity",
                     "provider_popularity",
@@ -10547,6 +10548,107 @@
                           "type": "null"
                         }
                       ]
+                    },
+                    "windows": {
+                      "type": "object",
+                      "required": [
+                        "model",
+                        "provider",
+                        "value"
+                      ],
+                      "properties": {
+                        "model": {
+                          "type": "object",
+                          "required": [
+                            "period_start",
+                            "period_end"
+                          ],
+                          "properties": {
+                            "period_start": {
+                              "anyOf": [
+                                {
+                                  "type": "string"
+                                },
+                                {
+                                  "type": "null"
+                                }
+                              ]
+                            },
+                            "period_end": {
+                              "anyOf": [
+                                {
+                                  "type": "string"
+                                },
+                                {
+                                  "type": "null"
+                                }
+                              ]
+                            }
+                          },
+                          "additionalProperties": false
+                        },
+                        "provider": {
+                          "type": "object",
+                          "required": [
+                            "period_start",
+                            "period_end"
+                          ],
+                          "properties": {
+                            "period_start": {
+                              "anyOf": [
+                                {
+                                  "type": "string"
+                                },
+                                {
+                                  "type": "null"
+                                }
+                              ]
+                            },
+                            "period_end": {
+                              "anyOf": [
+                                {
+                                  "type": "string"
+                                },
+                                {
+                                  "type": "null"
+                                }
+                              ]
+                            }
+                          },
+                          "additionalProperties": false
+                        },
+                        "value": {
+                          "type": "object",
+                          "required": [
+                            "period_start",
+                            "period_end"
+                          ],
+                          "properties": {
+                            "period_start": {
+                              "anyOf": [
+                                {
+                                  "type": "string"
+                                },
+                                {
+                                  "type": "null"
+                                }
+                              ]
+                            },
+                            "period_end": {
+                              "anyOf": [
+                                {
+                                  "type": "string"
+                                },
+                                {
+                                  "type": "null"
+                                }
+                              ]
+                            }
+                          },
+                          "additionalProperties": false
+                        }
+                      },
+                      "additionalProperties": false
                     },
                     "caption": {
                       "type": "string",
@@ -10643,6 +10745,8 @@
                           "tier",
                           "value_usd_30d",
                           "accounts",
+                          "pair_count",
+                          "tightness",
                           "pct_change"
                         ],
                         "properties": {
@@ -10656,6 +10760,12 @@
                             "type": "number"
                           },
                           "accounts": {
+                            "type": "number"
+                          },
+                          "pair_count": {
+                            "type": "number"
+                          },
+                          "tightness": {
                             "type": "number"
                           },
                           "pct_change": {
