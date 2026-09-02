@@ -6068,7 +6068,6 @@
                             {
                               "type": "object",
                               "required": [
-                                "type",
                                 "role",
                                 "content"
                               ],
