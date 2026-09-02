@@ -10661,7 +10661,6 @@
                         "type": "object",
                         "required": [
                           "provider",
-                          "provider_slug",
                           "model",
                           "users",
                           "user_days",
@@ -10707,7 +10706,6 @@
                         "type": "object",
                         "required": [
                           "provider",
-                          "provider_slug",
                           "users",
                           "user_days",
                           "requests",
@@ -10749,14 +10747,12 @@
                         "type": "object",
                         "required": [
                           "provider",
-                          "provider_slug",
                           "tier",
                           "value_usd_30d",
                           "accounts",
                           "pair_count",
                           "tightness",
-                          "pct_change",
-                          "history"
+                          "pct_change"
                         ],
                         "properties": {
                           "provider": {
