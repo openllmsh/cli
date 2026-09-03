@@ -86,6 +86,8 @@ export type TLaunchInputs = {
    * fails OPEN to the full toolset rather than silently degrading a paying user.
    */
   readonly tier?: TTier;
+  /** Opt-in sterile Claude launch: omit the OpenLLM MCP overlay. */
+  readonly bare?: boolean;
 };
 
 export type TLaunchPlan = {
@@ -228,17 +230,24 @@ const planClaude = (inputs: TLaunchInputs): TLaunchPlan => {
       // The quoted `"{{MCP_ARGS}}"` (valid JSON in the raw overlay) becomes the
       // real args ARRAY via `substituteJsonValue`, then the remaining string
       // tokens (`{{OPENLLM_BIN}}`, `{{STATE_DIR}}`) fill normally.
-      "mcp.json": substitute(
-        substituteJsonValue(OVERLAYS.claude.mcp, "MCP_ARGS", vars.MCP_ARGS),
-        vars,
-      ),
+      ...(inputs.bare
+        ? {}
+        : {
+            "mcp.json": substitute(
+              substituteJsonValue(
+                OVERLAYS.claude.mcp,
+                "MCP_ARGS",
+                vars.MCP_ARGS,
+              ),
+              vars,
+            ),
+          }),
     },
     execFiles: { [CLAUDE_KEY_HELPER_REL]: CLAUDE_KEY_HELPER },
     args: [
       "--settings",
       `${inputs.runDir}/settings.json`,
-      "--mcp-config",
-      `${inputs.runDir}/mcp.json`,
+      ...(inputs.bare ? [] : ["--mcp-config", `${inputs.runDir}/mcp.json`]),
     ],
     env: {
       ANTHROPIC_BASE_URL: inputs.apiBase,
