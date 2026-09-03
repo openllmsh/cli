@@ -8720,7 +8720,8 @@
                     "cookie_consent_version",
                     "cookie_consent_value",
                     "cookie_consent_at",
-                    "onboarding_dismissed_at"
+                    "onboarding_dismissed_at",
+                    "marketing_consent_at"
                   ],
                   "properties": {
                     "id": {
@@ -9043,6 +9044,16 @@
                       ]
                     },
                     "onboarding_dismissed_at": {
+                      "anyOf": [
+                        {
+                          "type": "string"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "marketing_consent_at": {
                       "anyOf": [
                         {
                           "type": "string"
