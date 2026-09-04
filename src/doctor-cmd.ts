@@ -14,12 +14,14 @@ import {
   closeSync,
   existsSync,
   fstatSync,
+  mkdtempSync,
   openSync,
   readFileSync,
   readSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { daemonPort } from "./clients/gateway";
 import { removeRegion } from "./clients/merge";
@@ -712,6 +714,24 @@ const startStderrSpinner = (label: string): (() => void) => {
   };
 };
 
+export const DIAGNOSIS_SENTINEL = "Diagnosis:";
+
+/** Defense in depth: retain only a prompt-mandated diagnosis, never exposed reasoning. */
+export const extractDiagnosisParagraph = (raw: string): string | null => {
+  // LAST occurrence on purpose: the failure this guards against is a provider
+  // dumping its reasoning BEFORE the answer, and that reasoning routinely
+  // quotes the prompt's own `Diagnosis:` instruction. A `startsWith` check
+  // would reject exactly the leaked output we need to salvage.
+  const lastSentinel = raw.lastIndexOf(DIAGNOSIS_SENTINEL);
+  if (lastSentinel < 0) return null;
+  const after = raw.slice(lastSentinel + DIAGNOSIS_SENTINEL.length);
+  // The contract is ONE paragraph. Split BEFORE trimming so a sentinel that is
+  // followed by a blank line yields an EMPTY diagnosis (→ null upstream)
+  // instead of promoting unmarked trailing output into the answer.
+  const firstParagraph = after.split(/\r?\n\s*\r?\n/, 1)[0] ?? "";
+  return firstParagraph.trim();
+};
+
 const formatAiSection = (
   diagnosis: string | null,
   model: string,
@@ -739,22 +759,53 @@ export const aiDiagnosis = async (
   if (!existsSync(bin) || apiKey.length === 0) return null;
 
   const daemonLogs = await collectRecentDaemonLogs();
-  const prompt = `You are diagnosing a local OpenLLM daemon ("openllmd") for a support ticket.\n\nDoctor report:\n${hideHome(redact(report))}\n\nRecent daemon logs (already redacted, newest last):\n${hideHome(redact(daemonLogs))}\n\nWrite exactly one information-dense paragraph — no preamble, no markdown headings, no bullet points, no code fences — suitable to paste into an OpenLLM support ticket. If the logs include daemon version lines and span more than one version, attribute each problem to the specific version it occurred under and keep the diagnosis segmented per version.`;
-
-  process.stderr.write(
-    "AI diagnosis sends the report and recent daemon logs for processing.\n",
-  );
-
+  const prompt = `You are diagnosing a local OpenLLM daemon ("openllmd") for a support ticket.\n\nDoctor report:\n${hideHome(redact(report))}\n\nRecent daemon logs (already redacted, newest last):\n${hideHome(redact(daemonLogs))}\n\nWrite exactly one information-dense paragraph suitable to paste into an OpenLLM support ticket. Start the paragraph with "${DIAGNOSIS_SENTINEL}" and output nothing else: no preamble, markdown headings, bullet points, or code fences. If the logs include daemon version lines and span more than one version, attribute each problem to the specific version it occurred under and keep the diagnosis segmented per version.`;
   let timeout: ReturnType<typeof setTimeout> | undefined;
   let timedOut = false;
   let proc: ReturnType<typeof Bun.spawn> | null = null;
+  // Created inside the guarded region so a failed mcp.json write (or any
+  // later throw) still reaches the `finally` that removes the directory.
+  let diagnosisDir: string | null = null;
 
   try {
-    proc = Bun.spawn([bin, "claude", "-p", prompt, "--model", model], {
-      stdout: "pipe",
-      stderr: "pipe",
-      detached: true,
-    });
+    diagnosisDir = mkdtempSync(join(tmpdir(), "openllm-doctor-"));
+    const mcpConfig = join(diagnosisDir, "mcp.json");
+    writeFileSync(mcpConfig, '{"mcpServers":{}}\n', { mode: 0o600 });
+    proc = Bun.spawn(
+      [
+        bin,
+        "--bare",
+        "claude",
+        "-p",
+        prompt,
+        "--model",
+        model,
+        // Vendor flag: must follow the client name so OpenLLM forwards it intact.
+        "--bare",
+        // `--bare` skips hooks; retain explicit controls below because they do not
+        // conflict with it and constrain MCP, tools, instructions, and persistence.
+        "--setting-sources",
+        "",
+        // No tools means neither local tools nor any loaded MCP tool can run.
+        "--tools",
+        "",
+        // This config and strict mode admit no MCP servers, including OpenLLM's overlay.
+        "--strict-mcp-config",
+        "--mcp-config",
+        mcpConfig,
+        // Avoid retaining a diagnosis session in the user's Claude Code history.
+        "--no-session-persistence",
+        // Replace Claude Code's default prompt with the single-purpose summarizer role.
+        "--system-prompt",
+        "You are a log summarizer; output only the paragraph.",
+      ],
+      {
+        cwd: diagnosisDir,
+        stdout: "pipe",
+        stderr: "pipe",
+        detached: true,
+      },
+    );
 
     const stdoutStream = proc.stdout;
     const stderrStream = proc.stderr;
@@ -790,12 +841,22 @@ export const aiDiagnosis = async (
     const [stdout, , code] = raced;
     if (timedOut || code !== 0) return null;
     const text = redact(stdout).trim();
-    return text.length > 0 ? text : null;
+    const diagnosis = extractDiagnosisParagraph(text);
+    return diagnosis !== null && diagnosis.length > 0 ? diagnosis : null;
   } catch {
     return null;
   } finally {
     if (timeout !== undefined) {
       clearTimeout(timeout);
+    }
+    if (diagnosisDir !== null) {
+      // Best effort: a stuck temp dir must not turn a finished (or already
+      // failed) diagnosis into a thrown error out of `openllm doctor`.
+      try {
+        rmSync(diagnosisDir, { recursive: true, force: true });
+      } catch {
+        // leave it for the OS temp cleaner
+      }
     }
   }
 };
@@ -971,6 +1032,9 @@ export const runDoctor = async (args: readonly string[]): Promise<number> => {
   } else if (cliConfig().apiKey.length === 0) {
     emit(formatAiSection(null, model, "no API key configured"));
   } else {
+    process.stderr.write(
+      `AI diagnosis sends the report and recent daemon logs through your gateway (model: ${model}) — use --no-ai to keep them local.\n`,
+    );
     const stopSpinner = startStderrSpinner(spinnerLabel(model));
     let diagnosis: string | null = null;
     try {

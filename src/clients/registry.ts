@@ -212,6 +212,9 @@ export type TClientFlags = {
   /** `--new` — always start a fresh session; never offer to attach to one
    *  already running on this machine. */
   readonly fresh: boolean;
+  /** `--bare` — sterile launch for internal summarizers — drops the OpenLLM MCP
+   *  overlay; ordinary launches never set it. */
+  readonly bare: boolean;
   /**
    * `--attach [id]` — attach to a running session without being asked. An id
    * (or unique prefix) picks one; a bare `--attach` takes the best match for
@@ -237,6 +240,7 @@ export const parseClientFlags = (args: readonly string[]): TClientFlags => {
   let dangerous = false;
   let remote = false;
   let fresh = false;
+  let bare = false;
   let attach: string | null = null;
   let sessionSelectionError: string | undefined;
   let i = 0;
@@ -253,6 +257,10 @@ export const parseClientFlags = (args: readonly string[]): TClientFlags => {
     // Long-form on purpose: `-n`/`-a` would be plausible client flags, and
     // these live in the same position as `-d`/`-r`, so a collision would be
     // silent. Session selection is rare enough that spelling it out is fine.
+    if (arg === "--bare") {
+      bare = true;
+      continue;
+    }
     if (arg === "--new") {
       fresh = true;
       if (attach !== null)
@@ -290,6 +298,7 @@ export const parseClientFlags = (args: readonly string[]): TClientFlags => {
     dangerous,
     remote,
     fresh,
+    bare,
     attach,
     ...(sessionSelectionError === undefined ? {} : { sessionSelectionError }),
     rest: args.slice(i),

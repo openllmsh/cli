@@ -206,6 +206,10 @@ export const brokerEligible = (args: {
   )
     return false;
   if (args.flags.remote) return false;
+  // A bare launch is an internal one-shot (doctor's summarizer): the durable
+  // session host and attach discovery know nothing of `bare`, so brokering it
+  // would start Claude with the normal MCP overlay. Direct launch only.
+  if (args.flags.bare) return false;
   if (!args.stdinIsTty || !args.stdoutIsTty || args.platform === "win32")
     return false;
   return !args.client.nonInteractiveMarkers?.some((marker) =>
@@ -536,6 +540,7 @@ export const runSessionClient = async (
       userConfig: readUserConfig(client),
       catalog: catalog ?? undefined,
       tier,
+      bare: flags.bare,
     });
     materialize(plan, runDir);
     const tuiDir =

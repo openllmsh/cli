@@ -419,6 +419,7 @@ const parseEmptyFlags = (): TClientFlags => ({
   dangerous: false,
   remote: false,
   fresh: false,
+  bare: false,
   attach: null,
   rest: ["hermes"],
 });
