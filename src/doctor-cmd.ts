@@ -302,20 +302,27 @@ const formatKeychainSpawns = (value: unknown): string | null => {
   return parts.join(" · ");
 };
 
+const REFRESH_SPAWN_COUNTERS = [
+  "attempts",
+  "ok",
+  "fail",
+  "abandoned",
+  "cooldown_skips",
+  "backoff_skips",
+  "fallbacks",
+  "lost",
+] as const;
+
 const formatRefreshSpawnsEntry = (value: unknown): string | null => {
   if (value === undefined || value === null || typeof value !== "object") {
     return null;
   }
   const rec = value as Record<string, unknown>;
-  const attempts = asFiniteNumber(rec.attempts);
-  const fail = asFiniteNumber(rec.fail);
-  const fallbacks = asFiniteNumber(rec.fallbacks);
-  if (attempts === null && fail === null && fallbacks === null) return null;
-  return [
-    `attempts ${attempts ?? 0}`,
-    `fail ${fail ?? 0}`,
-    `fallbacks ${fallbacks ?? 0}`,
-  ].join(" · ");
+  const counts = REFRESH_SPAWN_COUNTERS.map((key) => asFiniteNumber(rec[key]));
+  if (counts.every((n) => n === null)) return null;
+  return REFRESH_SPAWN_COUNTERS.map(
+    (key, i) => `${key} ${counts[i] ?? 0}`,
+  ).join(" · ");
 };
 
 /** Pure `/status` → aligned doctor rows. `listenPort` is the resolved local
