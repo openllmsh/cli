@@ -41,6 +41,31 @@ type TLegacyRegion = {
   readonly end: string;
 };
 
+/** Local copy of the daemon `/status` body. The CLI cannot import
+ *  `packages/daemon`; keep this in lockstep with `health.ts` and treat the
+ *  newer fields as optional so an older daemon still renders. */
+type TKeychainSpawns = {
+  readonly attempts: number;
+  readonly timeouts: number;
+  readonly aborted: number;
+  readonly skipped_expired: number;
+  readonly skipped: number;
+  readonly complete_ok: number;
+  readonly complete_fail: number;
+  readonly by_verb: Readonly<Record<string, number>>;
+};
+
+type TRefreshSpawnsEntry = {
+  readonly attempts: number;
+  readonly ok: number;
+  readonly fail: number;
+  readonly abandoned: number;
+  readonly cooldown_skips: number;
+  readonly backoff_skips: number;
+  readonly fallbacks: number;
+  readonly lost: number;
+};
+
 type TDaemonHealth = {
   readonly version: string;
   readonly port: number;
@@ -50,6 +75,9 @@ type TDaemonHealth = {
   readonly pty_sessions: boolean;
   readonly cloud_origin: string;
   readonly uptime_s: number;
+  readonly keychain_spawns?: TKeychainSpawns;
+  readonly refresh_spawns?: Readonly<Record<string, TRefreshSpawnsEntry>>;
+  readonly identity_conflict?: boolean;
 };
 
 /** OpenLLM-owned paths the old install model created. */
@@ -225,6 +253,121 @@ const alignRows = (
 ): readonly string[] => {
   const width = Math.max(1, ...rows.map((row) => row.label.length));
   return rows.map((row) => `  ${padRight(row.label, width)}  ${row.value}`);
+};
+
+const asFiniteNumber = (value: unknown): number | null =>
+  typeof value === "number" && Number.isFinite(value) ? value : null;
+
+const formatByVerb = (byVerb: unknown): string | null => {
+  if (byVerb === undefined || byVerb === null || typeof byVerb !== "object") {
+    return null;
+  }
+  const parts: string[] = [];
+  for (const [verb, count] of Object.entries(
+    byVerb as Record<string, unknown>,
+  )) {
+    const n = asFiniteNumber(count);
+    if (n === null) continue;
+    parts.push(`${verb} ${n}`);
+  }
+  return parts.length === 0 ? null : parts.join(", ");
+};
+
+const formatKeychainSpawns = (value: unknown): string | null => {
+  if (value === undefined || value === null || typeof value !== "object") {
+    return null;
+  }
+  const rec = value as Record<string, unknown>;
+  const attempts = asFiniteNumber(rec.attempts);
+  const timeouts = asFiniteNumber(rec.timeouts);
+  const skipped = asFiniteNumber(rec.skipped);
+  if (attempts === null && timeouts === null && skipped === null) return null;
+  const parts = [
+    `attempts ${attempts ?? 0}`,
+    `timeouts ${timeouts ?? 0}`,
+    `skipped ${skipped ?? 0}`,
+  ];
+  const byVerb = formatByVerb(rec.by_verb);
+  if (byVerb !== null) parts.push(`by verb ${byVerb}`);
+  return parts.join(" · ");
+};
+
+const formatRefreshSpawnsEntry = (value: unknown): string | null => {
+  if (value === undefined || value === null || typeof value !== "object") {
+    return null;
+  }
+  const rec = value as Record<string, unknown>;
+  const attempts = asFiniteNumber(rec.attempts);
+  const fail = asFiniteNumber(rec.fail);
+  const fallbacks = asFiniteNumber(rec.fallbacks);
+  if (attempts === null && fail === null && fallbacks === null) return null;
+  return [
+    `attempts ${attempts ?? 0}`,
+    `fail ${fail ?? 0}`,
+    `fallbacks ${fallbacks ?? 0}`,
+  ].join(" · ");
+};
+
+/** Pure `/status` → aligned doctor rows. `listenPort` is the resolved local
+ *  port (`resolveDaemonPort()`), never `raw.port`. */
+export const renderDaemonHealthRows = (
+  raw: Partial<TDaemonHealth>,
+  listenPort: number,
+): readonly string[] => {
+  const version = typeof raw.version === "string" ? raw.version : "unknown";
+  const cloudState =
+    typeof raw.cloud_state === "string" ? raw.cloud_state : "unknown";
+  const cloudOrigin =
+    typeof raw.cloud_origin === "string" ? raw.cloud_origin : "unknown";
+  const sandbox =
+    raw.sandbox === undefined ? "unknown" : formatHealthValue(raw.sandbox);
+  const keyConfigured =
+    raw.key_configured === undefined
+      ? "unknown"
+      : raw.key_configured
+        ? "yes"
+        : "no";
+  const uptime =
+    typeof raw.uptime_s === "number" ? formatUptime(raw.uptime_s) : "unknown";
+
+  const rows: Array<{ readonly label: string; readonly value: string }> = [
+    { label: "version", value: version },
+    { label: "listening", value: `yes on 127.0.0.1:${listenPort}` },
+    { label: "cloud", value: cloudState },
+    { label: "cloud origin", value: cloudOrigin },
+    { label: "sandbox", value: sandbox },
+    { label: "key", value: keyConfigured },
+    { label: "uptime", value: uptime },
+  ];
+
+  if (typeof raw.identity_conflict === "boolean") {
+    rows.push({
+      label: "identity conflict",
+      value: raw.identity_conflict
+        ? "yes — on the dashboard open Keys and press Reset daemon identity"
+        : "no",
+    });
+  }
+
+  const keychain = formatKeychainSpawns(raw.keychain_spawns);
+  if (keychain !== null) {
+    rows.push({ label: "keychain spawns", value: keychain });
+  }
+
+  const refresh = raw.refresh_spawns;
+  if (
+    refresh !== undefined &&
+    refresh !== null &&
+    typeof refresh === "object"
+  ) {
+    for (const [slug, entry] of Object.entries(refresh)) {
+      const line = formatRefreshSpawnsEntry(entry);
+      if (line === null) continue;
+      rows.push({ label: `refresh spawns (${slug})`, value: line });
+    }
+  }
+
+  return alignRows(rows);
 };
 
 const formatLogTs = (iso: string): string => {
@@ -531,31 +674,7 @@ const gatherDaemonHealth = async (): Promise<readonly string[]> => {
       ];
     }
     const raw = (await res.json()) as Partial<TDaemonHealth>;
-    const version = typeof raw.version === "string" ? raw.version : "unknown";
-    const cloudState =
-      typeof raw.cloud_state === "string" ? raw.cloud_state : "unknown";
-    const cloudOrigin =
-      typeof raw.cloud_origin === "string" ? raw.cloud_origin : "unknown";
-    const sandbox =
-      raw.sandbox === undefined ? "unknown" : formatHealthValue(raw.sandbox);
-    const keyConfigured =
-      raw.key_configured === undefined
-        ? "unknown"
-        : raw.key_configured
-          ? "yes"
-          : "no";
-    const uptime =
-      typeof raw.uptime_s === "number" ? formatUptime(raw.uptime_s) : "unknown";
-
-    return alignRows([
-      { label: "version", value: version },
-      { label: "listening", value: `yes on 127.0.0.1:${port}` },
-      { label: "cloud", value: cloudState },
-      { label: "cloud origin", value: cloudOrigin },
-      { label: "sandbox", value: sandbox },
-      { label: "key", value: keyConfigured },
-      { label: "uptime", value: uptime },
-    ]);
+    return renderDaemonHealthRows(raw, port);
   } catch {
     const statusRows = await collectOpenllmdStatus();
     return [
