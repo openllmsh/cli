@@ -258,6 +258,18 @@ const alignRows = (
 const asFiniteNumber = (value: unknown): number | null =>
   typeof value === "number" && Number.isFinite(value) ? value : null;
 
+const KEYCHAIN_SPAWN_COUNTERS = [
+  "attempts",
+  "timeouts",
+  "aborted",
+  "skipped_expired",
+  "skipped",
+  "complete_ok",
+  "complete_fail",
+] as const;
+
+const lexSort = (a: string, b: string): number => (a < b ? -1 : a > b ? 1 : 0);
+
 const formatByVerb = (byVerb: unknown): string | null => {
   if (byVerb === undefined || byVerb === null || typeof byVerb !== "object") {
     return null;
@@ -265,7 +277,7 @@ const formatByVerb = (byVerb: unknown): string | null => {
   const parts: string[] = [];
   for (const [verb, count] of Object.entries(
     byVerb as Record<string, unknown>,
-  )) {
+  ).sort(([left], [right]) => lexSort(left, right))) {
     const n = asFiniteNumber(count);
     if (n === null) continue;
     parts.push(`${verb} ${n}`);
@@ -278,16 +290,14 @@ const formatKeychainSpawns = (value: unknown): string | null => {
     return null;
   }
   const rec = value as Record<string, unknown>;
-  const attempts = asFiniteNumber(rec.attempts);
-  const timeouts = asFiniteNumber(rec.timeouts);
-  const skipped = asFiniteNumber(rec.skipped);
-  if (attempts === null && timeouts === null && skipped === null) return null;
-  const parts = [
-    `attempts ${attempts ?? 0}`,
-    `timeouts ${timeouts ?? 0}`,
-    `skipped ${skipped ?? 0}`,
-  ];
+  const counts = KEYCHAIN_SPAWN_COUNTERS.map((key) => asFiniteNumber(rec[key]));
   const byVerb = formatByVerb(rec.by_verb);
+  if (counts.every((n) => n === null) && byVerb === null) return null;
+  // Print every known counter, including zeros, so abort-only / expired-only
+  // snapshots are comparable to a full modern payload. Missing keys stay 0.
+  const parts = KEYCHAIN_SPAWN_COUNTERS.map(
+    (key, i) => `${key} ${counts[i] ?? 0}`,
+  );
   if (byVerb !== null) parts.push(`by verb ${byVerb}`);
   return parts.join(" · ");
 };
@@ -340,12 +350,10 @@ export const renderDaemonHealthRows = (
     { label: "uptime", value: uptime },
   ];
 
-  if (typeof raw.identity_conflict === "boolean") {
+  if (raw.identity_conflict === true) {
     rows.push({
       label: "identity conflict",
-      value: raw.identity_conflict
-        ? "yes — on the dashboard open Keys and press Reset daemon identity"
-        : "no",
+      value: "yes — on the dashboard open Keys and press Reset daemon identity",
     });
   }
 
@@ -360,7 +368,9 @@ export const renderDaemonHealthRows = (
     refresh !== null &&
     typeof refresh === "object"
   ) {
-    for (const [slug, entry] of Object.entries(refresh)) {
+    for (const [slug, entry] of Object.entries(refresh).sort(
+      ([left], [right]) => lexSort(left, right),
+    )) {
       const line = formatRefreshSpawnsEntry(entry);
       if (line === null) continue;
       rows.push({ label: `refresh spawns (${slug})`, value: line });
