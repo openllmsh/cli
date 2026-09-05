@@ -9053,6 +9053,9 @@
                         }
                       ]
                     },
+                    "created_at": {
+                      "type": "string"
+                    },
                     "marketing_consent_at": {
                       "anyOf": [
                         {
@@ -9552,11 +9555,33 @@
                       "items": {
                         "type": "object",
                         "required": [
-                          "provider"
+                          "provider",
+                          "label",
+                          "linked_at"
                         ],
                         "properties": {
                           "provider": {
                             "type": "string"
+                          },
+                          "label": {
+                            "anyOf": [
+                              {
+                                "type": "string"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "linked_at": {
+                            "anyOf": [
+                              {
+                                "type": "string"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
                           }
                         },
                         "additionalProperties": false
