@@ -8721,7 +8721,6 @@
                     "cookie_consent_value",
                     "cookie_consent_at",
                     "onboarding_dismissed_at",
-                    "created_at",
                     "marketing_consent_at"
                   ],
                   "properties": {
