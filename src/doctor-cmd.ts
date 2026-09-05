@@ -49,6 +49,7 @@ type TKeychainSpawns = {
   readonly timeouts: number;
   readonly aborted: number;
   readonly skipped_expired: number;
+  readonly skipped_floor?: number;
   readonly skipped: number;
   readonly complete_ok: number;
   readonly complete_fail: number;
@@ -263,6 +264,7 @@ const KEYCHAIN_SPAWN_COUNTERS = [
   "timeouts",
   "aborted",
   "skipped_expired",
+  "skipped_floor",
   "skipped",
   "complete_ok",
   "complete_fail",
