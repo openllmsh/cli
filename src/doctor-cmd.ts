@@ -56,6 +56,16 @@ type TKeychainSpawns = {
   readonly by_verb: Readonly<Record<string, number>>;
 };
 
+type TRefreshSpawnsLast = {
+  readonly caller?: string | null;
+  readonly error_class?: string | null;
+  readonly exit_code?: number | null;
+  readonly spawn_elapsed_ms?: number | null;
+  readonly queued_ms?: number | null;
+  readonly timeout_ms?: number | null;
+  readonly in_flight?: boolean | null;
+};
+
 type TRefreshSpawnsEntry = {
   readonly attempts: number;
   readonly ok: number;
@@ -65,6 +75,7 @@ type TRefreshSpawnsEntry = {
   readonly backoff_skips: number;
   readonly fallbacks: number;
   readonly lost: number;
+  readonly last?: TRefreshSpawnsLast | null;
 };
 
 type TDaemonHealth = {
@@ -315,16 +326,53 @@ const REFRESH_SPAWN_COUNTERS = [
   "lost",
 ] as const;
 
+const REFRESH_LAST_FIELDS = [
+  "caller",
+  "error_class",
+  "exit_code",
+  "spawn_elapsed_ms",
+  "queued_ms",
+  "timeout_ms",
+  "in_flight",
+] as const;
+
+const formatRefreshLast = (value: unknown): string | null => {
+  if (value === undefined || value === null || typeof value !== "object") {
+    return null;
+  }
+  const rec = value as Record<string, unknown>;
+  const parts: string[] = [];
+  for (const key of REFRESH_LAST_FIELDS) {
+    const raw = rec[key];
+    if (raw === undefined) continue;
+    if (raw === null) {
+      parts.push(`${key} null`);
+      continue;
+    }
+    if (typeof raw === "boolean") {
+      parts.push(`${key} ${raw ? "yes" : "no"}`);
+      continue;
+    }
+    if (typeof raw === "string" || typeof raw === "number") {
+      parts.push(`${key} ${raw}`);
+    }
+  }
+  return parts.length === 0 ? null : `last ${parts.join(" · ")}`;
+};
+
 const formatRefreshSpawnsEntry = (value: unknown): string | null => {
   if (value === undefined || value === null || typeof value !== "object") {
     return null;
   }
   const rec = value as Record<string, unknown>;
   const counts = REFRESH_SPAWN_COUNTERS.map((key) => asFiniteNumber(rec[key]));
-  if (counts.every((n) => n === null)) return null;
-  return REFRESH_SPAWN_COUNTERS.map(
+  const last = formatRefreshLast(rec.last);
+  if (counts.every((n) => n === null) && last === null) return null;
+  const parts = REFRESH_SPAWN_COUNTERS.map(
     (key, i) => `${key} ${counts[i] ?? 0}`,
-  ).join(" · ");
+  );
+  if (last !== null) parts.push(last);
+  return parts.join(" · ");
 };
 
 /** Pure `/status` → aligned doctor rows. `listenPort` is the resolved local
@@ -400,28 +448,47 @@ const formatLogTs = (iso: string): string => {
   return `${month}-${day} ${hours}:${minutes}:${seconds}`;
 };
 
+const LOG_META_PREFERRED_KEYS = [
+  "argv",
+  "verb",
+  "error_class",
+  "spawn_elapsed_ms",
+  "timeout_ms",
+  "elapsed_ms",
+] as const;
+
+const formatLogMetaValue = (value: unknown): string => {
+  const raw =
+    typeof value === "string" ||
+    typeof value === "number" ||
+    typeof value === "boolean"
+      ? String(value)
+      : JSON.stringify(value);
+  return raw.length > 48 ? `${raw.slice(0, 47)}…` : raw;
+};
+
 const formatLogMeta = (meta: unknown): string => {
   if (meta === undefined || meta === null || typeof meta !== "object") {
     return "";
   }
+  const rec = meta as Record<string, unknown>;
   const parts: string[] = [];
-  for (const [key, value] of Object.entries(meta as Record<string, unknown>)) {
-    if (value === undefined || value === null) continue;
-    const raw =
-      typeof value === "string" ||
-      typeof value === "number" ||
-      typeof value === "boolean"
-        ? String(value)
-        : JSON.stringify(value);
-    const clipped = raw.length > 48 ? `${raw.slice(0, 47)}…` : raw;
-    parts.push(`${key}=${clipped}`);
-    if (parts.length >= 6) break;
+  const seen = new Set<string>();
+  const push = (key: string, value: unknown): void => {
+    if (value === undefined || value === null || seen.has(key)) return;
+    seen.add(key);
+    parts.push(`${key}=${formatLogMetaValue(value)}`);
+  };
+  for (const key of LOG_META_PREFERRED_KEYS) push(key, rec[key]);
+  for (const [key, value] of Object.entries(rec)) {
+    if (parts.length >= 8) break;
+    push(key, value);
   }
   return parts.join(" ");
 };
 
 /** Structured JSON log line → one scannable row; anything else is left as-is. */
-const formatDoctorLogLine = (line: string): string => {
+export const formatDoctorLogLine = (line: string): string => {
   const trimmed = line.trim();
   if (trimmed.length === 0 || !trimmed.startsWith("{")) return trimmed;
   let parsed: unknown;
@@ -897,7 +964,7 @@ export const aiDiagnosis = async (
   if (!existsSync(bin) || apiKey.length === 0) return null;
 
   const daemonLogs = await collectRecentDaemonLogs();
-  const prompt = `You are diagnosing a local OpenLLM daemon ("openllmd") for a support ticket.\n\nDoctor report:\n${hideHome(redact(report))}\n\nRecent daemon logs (already redacted, newest last):\n${hideHome(redact(daemonLogs))}\n\nWrite exactly one information-dense paragraph suitable to paste into an OpenLLM support ticket. Start the paragraph with "${DIAGNOSIS_SENTINEL}" and output nothing else: no preamble, markdown headings, bullet points, or code fences. If the logs include daemon version lines and span more than one version, attribute each problem to the specific version it occurred under and keep the diagnosis segmented per version.`;
+  const prompt = `You are diagnosing a local OpenLLM daemon ("openllmd") for a support ticket.\n\nDoctor report:\n${hideHome(redact(report))}\n\nRecent daemon logs (already redacted, newest last):\n${hideHome(redact(daemonLogs))}\n\nWrite exactly one information-dense paragraph suitable to paste into an OpenLLM support ticket. Start the paragraph with "${DIAGNOSIS_SENTINEL}" and output nothing else: no preamble, markdown headings, bullet points, or code fences. If the logs include daemon version lines and span more than one version, attribute each problem to the specific version it occurred under and keep the diagnosis segmented per version. spawn_elapsed_ms is the only clock comparable to timeout_ms; elapsed_ms includes queue and reap; budget_remaining_ms_at_spawn is the child budget, not the parent's leftover.`;
   let timeout: ReturnType<typeof setTimeout> | undefined;
   let timedOut = false;
   let proc: ReturnType<typeof Bun.spawn> | null = null;
