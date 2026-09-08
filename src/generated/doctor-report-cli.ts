@@ -5,27 +5,27 @@
 import { createHash } from "node:crypto";
 
 export const DOCTOR_REPORT_CLI_CONSTANTS = {
-  schemaVersion: 1,
-  extraKey: "daemon_diagnostics_opt_in",
-  policyGenerationExtraKey: "daemon_diagnostics_policy_generation",
-  cloudReportsPath: "/api/daemon/doctor-reports",
-  cloudPreferencePath: "/api/user/daemon-diagnostics",
-  localReportPath: "/doctor/report",
-  localStatusPath: "/doctor/reporting-status",
-  localPreferencePath: "/doctor/local-preference",
-  capabilityFilename: "doctor-report.capability",
-  capabilityHeader: "x-openllm-doctor-capability",
-  localOptOutFilename: "doctor-report.local.json",
-  maxEvents: 32,
-  maxBodyBytes: 65536,
-  maxSpoolBytes: 262144,
-  pendingTtlMs: 86400000,
-  debounceMs: 30000,
-  maxBackoffMs: 3600000,
-  maxInFlight: 1,
-  leaseMs: 30000,
-  reportingPolicyTtlMs: 300000,
-  scopeHashPrefix: "openllm-doctor-scope-v1",
+  "schemaVersion": 1,
+  "extraKey": "daemon_diagnostics_opt_in",
+  "policyGenerationExtraKey": "daemon_diagnostics_policy_generation",
+  "cloudReportsPath": "/api/daemon/doctor-reports",
+  "cloudPreferencePath": "/api/user/daemon-diagnostics",
+  "localReportPath": "/doctor/report",
+  "localStatusPath": "/doctor/reporting-status",
+  "localPreferencePath": "/doctor/local-preference",
+  "capabilityFilename": "doctor-report.capability",
+  "capabilityHeader": "x-openllm-doctor-capability",
+  "localOptOutFilename": "doctor-report.local.json",
+  "maxEvents": 32,
+  "maxBodyBytes": 65536,
+  "maxSpoolBytes": 262144,
+  "pendingTtlMs": 86400000,
+  "debounceMs": 30000,
+  "maxBackoffMs": 3600000,
+  "maxInFlight": 1,
+  "leaseMs": 30000,
+  "reportingPolicyTtlMs": 300000,
+  "scopeHashPrefix": "openllm-doctor-scope-v1"
 } as const;
 
 export type TDoctorReportCliConstants = typeof DOCTOR_REPORT_CLI_CONSTANTS;
@@ -39,16 +39,10 @@ export const opaqueDoctorScope = (
     .digest("hex")
     .slice(0, 32);
 
-export const DOCTOR_OPAQUE_ID_PATTERN =
-  /^(?:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|[0-9a-f]{16,64})$/;
+export const DOCTOR_OPAQUE_ID_PATTERN = /^(?:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|[0-9a-f]{16,64})$/;
 const OPAQUE_ID = DOCTOR_OPAQUE_ID_PATTERN;
-const VERSION_STAMP =
-  /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-[0-9A-Za-z.-]{1,32})?$/;
-const UNAVAILABLE = [
-  "daemon_stopped",
-  "upgrade_required",
-  "capability_missing",
-] as const;
+const VERSION_STAMP = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-[0-9A-Za-z.-]{1,32})?$/;
+const UNAVAILABLE = ["daemon_stopped","upgrade_required","capability_missing"] as const;
 
 export type TDoctorLocalUnavailableReason = (typeof UNAVAILABLE)[number];
 

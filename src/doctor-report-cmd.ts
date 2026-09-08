@@ -169,6 +169,32 @@ const localKillSwitchOn = (): boolean => {
   return pref !== null && pref.enabled === false;
 };
 
+let fsyncImpl: typeof fsyncSync = fsyncSync;
+
+/** Test-only: inject fsync to cover durable-write failure vs unsupported dir fsync. */
+export const setDoctorLocalFsyncForTests = (
+  impl: typeof fsyncSync | null,
+): void => {
+  fsyncImpl = impl ?? fsyncSync;
+};
+
+/** Directory fsync is not portable; only treat these as unsupported, never EPERM/ENOENT. */
+const UNSUPPORTED_DIR_FSYNC = new Set(["EISDIR", "EINVAL", "ENOTSUP"]);
+
+const fsyncParentDir = (dir: string): void => {
+  let fd: number | null = null;
+  try {
+    fd = openSync(dir, "r");
+    fsyncImpl(fd);
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code !== undefined && UNSUPPORTED_DIR_FSYNC.has(code)) return;
+    throw error;
+  } finally {
+    if (fd !== null) closeSync(fd);
+  }
+};
+
 const writeLocalPreferenceFile = (record: TLocalPreference): boolean => {
   const target = localPreferencePath();
   mkdirSync(dirname(target), { recursive: true, mode: 0o700 });
@@ -183,12 +209,13 @@ const writeLocalPreferenceFile = (record: TLocalPreference): boolean => {
     });
     const fd = openSync(temp, "r");
     try {
-      fsyncSync(fd);
+      fsyncImpl(fd);
     } finally {
       closeSync(fd);
     }
     renameSync(temp, target);
     chmodSync(target, 0o600);
+    fsyncParentDir(dirname(target));
     return true;
   } catch {
     try {
@@ -430,6 +457,19 @@ const runStatus = async (): Promise<number> => {
         "last acknowledged report: none",
         "daemon version: unknown",
         unavailableMessage(result.reason),
+      ].join("\n")}\n`,
+    );
+    return 0;
+  }
+  if (result.status === 403) {
+    process.stdout.write(
+      `${[
+        `local enabled: ${file?.enabled === true ? "yes" : "no"}`,
+        "account enabled: unknown",
+        `pending account sync: ${file?.pending_account_sync === true ? "yes" : "no"}`,
+        "last acknowledged report: none",
+        "daemon version: unknown",
+        unavailableMessage("capability_missing"),
       ].join("\n")}\n`,
     );
     return 0;

@@ -144,7 +144,7 @@ export const generateArtifacts = (): {
   return {
     openapiJson: `${JSON.stringify(spec, null, 2)}\n`,
     operationsTs: operationsSource(ops),
-    doctorReportCliTs: `${renderDoctorReportCliArtifact()}\n`,
+    doctorReportCliTs: renderDoctorReportCliArtifact(),
   };
 };
 
