@@ -26,9 +26,16 @@ import * as fs from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { buildSanitizedSpec } from "../../api/handlers/swagger";
+import { renderDoctorReportCliArtifact } from "../../protocol/doctor-report-local";
 
 const PKG_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const OUT_DIR = join(PKG_ROOT, "src", "sdk", "generated");
+const DOCTOR_REPORT_CLI_OUT = join(
+  PKG_ROOT,
+  "src",
+  "generated",
+  "doctor-report-cli.ts",
+);
 
 // runtime-only: the OpenAPI 3 subset we walk.
 type TSpecOperation = {
@@ -130,22 +137,29 @@ export const API_OPERATIONS: readonly TApiOperation[] = ${JSON.stringify(ops, nu
 export const generateArtifacts = (): {
   readonly openapiJson: string;
   readonly operationsTs: string;
+  readonly doctorReportCliTs: string;
 } => {
   const spec = JSON.parse(buildSanitizedSpec()) as TSpecDoc;
   const ops = generateOperations(spec);
   return {
     openapiJson: `${JSON.stringify(spec, null, 2)}\n`,
     operationsTs: operationsSource(ops),
+    doctorReportCliTs: `${renderDoctorReportCliArtifact()}\n`,
   };
 };
 
 if (import.meta.main) {
-  const { openapiJson, operationsTs } = generateArtifacts();
+  const { openapiJson, operationsTs, doctorReportCliTs } = generateArtifacts();
   fs.mkdirSync(OUT_DIR, { recursive: true });
+  fs.mkdirSync(dirname(DOCTOR_REPORT_CLI_OUT), { recursive: true });
   fs.writeFileSync(join(OUT_DIR, "openapi.json"), openapiJson);
   fs.writeFileSync(join(OUT_DIR, "operations.ts"), operationsTs);
+  fs.writeFileSync(DOCTOR_REPORT_CLI_OUT, doctorReportCliTs);
   const count = (JSON.parse(openapiJson) as TSpecDoc).paths;
   console.log(
     `[generate-sdk] wrote openapi.json (${Object.keys(count ?? {}).length} paths) + operations.ts → ${OUT_DIR}`,
+  );
+  console.log(
+    `[generate-sdk] wrote doctor-report-cli.ts → ${DOCTOR_REPORT_CLI_OUT}`,
   );
 }

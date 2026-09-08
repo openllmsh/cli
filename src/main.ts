@@ -40,7 +40,11 @@ import {
   findDaemonBinary,
   runManagedDaemonCommand,
 } from "./daemon-delegation";
-import { runDoctor } from "./doctor-cmd";
+import {
+  DOCTOR_REPORT_USAGE,
+  isDoctorReportingVerb,
+  runDoctorReportCommand,
+} from "./doctor-report-cmd";
 import { CLI_VERSION } from "./env";
 import { runClaudeContextCli } from "./mcp/claude-context";
 import type { TMcpGroup } from "./mcp/server";
@@ -324,8 +328,20 @@ const main = async (): Promise<void> => {
       return process.exit(await runSessionsCommand(rest));
     case "uninstall":
       return process.exit(await runUninstall(rest));
-    case "doctor":
+    case "doctor": {
+      const verb = rest[0];
+      if (verb !== undefined && isDoctorReportingVerb(verb)) {
+        return process.exit(await runDoctorReportCommand(rest));
+      }
+      if (wantsHelp(rest)) {
+        process.stdout.write(
+          `${DOCTOR_REPORT_USAGE}\nLegacy leftover scan (does not upload diagnostics):\n  openllm doctor [--fix] [--no-ai] [--model <alias>] [-c]\n`,
+        );
+        return process.exit(0);
+      }
+      const { runDoctor } = await import("./doctor-cmd");
       return process.exit(await runDoctor(rest));
+    }
     case "version":
     case "-v":
     case "--version": {

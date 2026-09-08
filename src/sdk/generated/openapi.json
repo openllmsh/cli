@@ -8900,6 +8900,14 @@
                             },
                             "public_usage_index_opt_out": {
                               "type": "boolean"
+                            },
+                            "daemon_diagnostics_opt_in": {
+                              "type": "boolean"
+                            },
+                            "daemon_diagnostics_policy_generation": {
+                              "type": "string",
+                              "description": "a string matching the pattern ^(?:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|[0-9a-f]{16,64})$",
+                              "pattern": "^(?:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|[0-9a-f]{16,64})$"
                             }
                           },
                           "additionalProperties": false
@@ -10049,6 +10057,267 @@
               }
             }
           }
+        }
+      }
+    },
+    "/user/daemon-diagnostics": {
+      "patch": {
+        "tags": [
+          "user"
+        ],
+        "operationId": "user.updateDaemonDiagnostics",
+        "parameters": [],
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "daemon_diagnostics_opt_in"
+                  ],
+                  "properties": {
+                    "daemon_diagnostics_opt_in": {
+                      "type": "boolean"
+                    }
+                  },
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request did not match the expected schema",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HttpApiDecodeError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "error"
+                  ],
+                  "properties": {
+                    "error": {
+                      "type": "object",
+                      "required": [
+                        "message"
+                      ],
+                      "properties": {
+                        "message": {
+                          "type": "string"
+                        },
+                        "type": {
+                          "type": "string"
+                        },
+                        "code": {
+                          "type": "string"
+                        }
+                      },
+                      "additionalProperties": false
+                    }
+                  },
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "error"
+                  ],
+                  "properties": {
+                    "error": {
+                      "type": "object",
+                      "required": [
+                        "message"
+                      ],
+                      "properties": {
+                        "message": {
+                          "type": "string"
+                        },
+                        "type": {
+                          "type": "string"
+                        },
+                        "code": {
+                          "type": "string"
+                        }
+                      },
+                      "additionalProperties": false
+                    }
+                  },
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "error"
+                  ],
+                  "properties": {
+                    "error": {
+                      "type": "object",
+                      "required": [
+                        "message"
+                      ],
+                      "properties": {
+                        "message": {
+                          "type": "string"
+                        },
+                        "type": {
+                          "type": "string"
+                        },
+                        "code": {
+                          "type": "string"
+                        }
+                      },
+                      "additionalProperties": false
+                    }
+                  },
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "type": "object",
+                      "required": [
+                        "error"
+                      ],
+                      "properties": {
+                        "error": {
+                          "type": "object",
+                          "required": [
+                            "message"
+                          ],
+                          "properties": {
+                            "message": {
+                              "type": "string"
+                            },
+                            "type": {
+                              "type": "string"
+                            },
+                            "code": {
+                              "type": "string"
+                            }
+                          },
+                          "additionalProperties": false
+                        }
+                      },
+                      "additionalProperties": false
+                    },
+                    {
+                      "type": "object",
+                      "required": [
+                        "error"
+                      ],
+                      "properties": {
+                        "error": {
+                          "type": "object",
+                          "required": [
+                            "message"
+                          ],
+                          "properties": {
+                            "message": {
+                              "type": "string"
+                            },
+                            "type": {
+                              "type": "string"
+                            },
+                            "code": {
+                              "type": "string"
+                            }
+                          },
+                          "additionalProperties": false
+                        }
+                      },
+                      "additionalProperties": false
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "error"
+                  ],
+                  "properties": {
+                    "error": {
+                      "type": "object",
+                      "required": [
+                        "message"
+                      ],
+                      "properties": {
+                        "message": {
+                          "type": "string"
+                        },
+                        "type": {
+                          "type": "string"
+                        },
+                        "code": {
+                          "type": "string"
+                        }
+                      },
+                      "additionalProperties": false
+                    }
+                  },
+                  "additionalProperties": false
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "daemon_diagnostics_opt_in"
+                ],
+                "properties": {
+                  "daemon_diagnostics_opt_in": {
+                    "type": "boolean"
+                  }
+                },
+                "additionalProperties": false
+              }
+            }
+          },
+          "required": true
         }
       }
     },
@@ -21753,6 +22022,14 @@
                       },
                       "public_usage_index_opt_out": {
                         "type": "boolean"
+                      },
+                      "daemon_diagnostics_opt_in": {
+                        "type": "boolean"
+                      },
+                      "daemon_diagnostics_policy_generation": {
+                        "type": "string",
+                        "description": "a string matching the pattern ^(?:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|[0-9a-f]{16,64})$",
+                        "pattern": "^(?:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|[0-9a-f]{16,64})$"
                       }
                     },
                     "additionalProperties": false
@@ -23261,6 +23538,664 @@
               }
             }
           }
+        }
+      }
+    },
+    "/daemon/doctor-reports": {
+      "post": {
+        "tags": [
+          "daemonDoctorReports"
+        ],
+        "operationId": "daemonDoctorReports.submit",
+        "parameters": [],
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "report_id",
+                    "accepted_event_ids"
+                  ],
+                  "properties": {
+                    "report_id": {
+                      "type": "string",
+                      "description": "a string matching the pattern ^(?:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|[0-9a-f]{16,64})$",
+                      "pattern": "^(?:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|[0-9a-f]{16,64})$"
+                    },
+                    "accepted_event_ids": {
+                      "type": "array",
+                      "items": {
+                        "type": "string",
+                        "description": "a string matching the pattern ^(?:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|[0-9a-f]{16,64})$",
+                        "pattern": "^(?:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|[0-9a-f]{16,64})$"
+                      },
+                      "description": "an array of at most 32 item(s)",
+                      "title": "maxItems(32)",
+                      "minItems": 1,
+                      "maxItems": 32
+                    }
+                  },
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request did not match the expected schema",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HttpApiDecodeError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "error"
+                  ],
+                  "properties": {
+                    "error": {
+                      "type": "object",
+                      "required": [
+                        "message"
+                      ],
+                      "properties": {
+                        "message": {
+                          "type": "string"
+                        },
+                        "type": {
+                          "type": "string"
+                        },
+                        "code": {
+                          "type": "string"
+                        }
+                      },
+                      "additionalProperties": false
+                    }
+                  },
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "error"
+                  ],
+                  "properties": {
+                    "error": {
+                      "type": "object",
+                      "required": [
+                        "message"
+                      ],
+                      "properties": {
+                        "message": {
+                          "type": "string"
+                        },
+                        "type": {
+                          "type": "string"
+                        },
+                        "code": {
+                          "type": "string"
+                        }
+                      },
+                      "additionalProperties": false
+                    }
+                  },
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "error"
+                  ],
+                  "properties": {
+                    "error": {
+                      "type": "object",
+                      "required": [
+                        "message"
+                      ],
+                      "properties": {
+                        "message": {
+                          "type": "string"
+                        },
+                        "type": {
+                          "type": "string"
+                        },
+                        "code": {
+                          "type": "string"
+                        }
+                      },
+                      "additionalProperties": false
+                    }
+                  },
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "error"
+                  ],
+                  "properties": {
+                    "error": {
+                      "type": "object",
+                      "required": [
+                        "message"
+                      ],
+                      "properties": {
+                        "message": {
+                          "type": "string"
+                        },
+                        "type": {
+                          "type": "string"
+                        },
+                        "code": {
+                          "type": "string"
+                        }
+                      },
+                      "additionalProperties": false
+                    }
+                  },
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "error"
+                  ],
+                  "properties": {
+                    "error": {
+                      "type": "object",
+                      "required": [
+                        "message"
+                      ],
+                      "properties": {
+                        "message": {
+                          "type": "string"
+                        },
+                        "type": {
+                          "type": "string"
+                        },
+                        "code": {
+                          "type": "string"
+                        }
+                      },
+                      "additionalProperties": false
+                    }
+                  },
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "error"
+                  ],
+                  "properties": {
+                    "error": {
+                      "type": "object",
+                      "required": [
+                        "message"
+                      ],
+                      "properties": {
+                        "message": {
+                          "type": "string"
+                        },
+                        "type": {
+                          "type": "string"
+                        },
+                        "code": {
+                          "type": "string"
+                        }
+                      },
+                      "additionalProperties": false
+                    }
+                  },
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "error"
+                  ],
+                  "properties": {
+                    "error": {
+                      "type": "object",
+                      "required": [
+                        "message"
+                      ],
+                      "properties": {
+                        "message": {
+                          "type": "string"
+                        },
+                        "type": {
+                          "type": "string"
+                        },
+                        "code": {
+                          "type": "string"
+                        }
+                      },
+                      "additionalProperties": false
+                    }
+                  },
+                  "additionalProperties": false
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "schema_version",
+                  "report_id",
+                  "emitted_at_ms",
+                  "cursor_gap_count",
+                  "suppressed_event_count",
+                  "events"
+                ],
+                "properties": {
+                  "schema_version": {
+                    "type": "number",
+                    "enum": [
+                      1
+                    ]
+                  },
+                  "report_id": {
+                    "type": "string",
+                    "description": "a string matching the pattern ^(?:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|[0-9a-f]{16,64})$",
+                    "pattern": "^(?:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|[0-9a-f]{16,64})$"
+                  },
+                  "emitted_at_ms": {
+                    "type": "integer",
+                    "description": "a number less than or equal to 4102444800000",
+                    "title": "lessThanOrEqualTo(4102444800000)",
+                    "minimum": 0,
+                    "maximum": 4102444800000
+                  },
+                  "reporter_cli_version": {
+                    "type": "string",
+                    "description": "a string matching the pattern ^(0|[1-9]\\d*)\\.(0|[1-9]\\d*)\\.(0|[1-9]\\d*)(?:-[0-9A-Za-z.-]{1,32})?$",
+                    "title": "maxLength(64)",
+                    "maxLength": 64,
+                    "pattern": "^(0|[1-9]\\d*)\\.(0|[1-9]\\d*)\\.(0|[1-9]\\d*)(?:-[0-9A-Za-z.-]{1,32})?$"
+                  },
+                  "cursor_gap_count": {
+                    "type": "integer",
+                    "description": "a number less than or equal to 1000000",
+                    "title": "lessThanOrEqualTo(1000000)",
+                    "minimum": 0,
+                    "maximum": 1000000
+                  },
+                  "suppressed_event_count": {
+                    "type": "integer",
+                    "description": "a number less than or equal to 1000000",
+                    "title": "lessThanOrEqualTo(1000000)",
+                    "minimum": 0,
+                    "maximum": 1000000
+                  },
+                  "events": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "required": [
+                        "event_id",
+                        "observed_at_ms",
+                        "daemon_version",
+                        "platform",
+                        "architecture",
+                        "code",
+                        "producer",
+                        "trigger",
+                        "outcome"
+                      ],
+                      "properties": {
+                        "event_id": {
+                          "type": "string",
+                          "description": "a string matching the pattern ^(?:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|[0-9a-f]{16,64})$",
+                          "pattern": "^(?:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|[0-9a-f]{16,64})$"
+                        },
+                        "observed_at_ms": {
+                          "type": "integer",
+                          "description": "a number less than or equal to 4102444800000",
+                          "title": "lessThanOrEqualTo(4102444800000)",
+                          "minimum": 0,
+                          "maximum": 4102444800000
+                        },
+                        "daemon_version": {
+                          "type": "string",
+                          "description": "a string matching the pattern ^(0|[1-9]\\d*)\\.(0|[1-9]\\d*)\\.(0|[1-9]\\d*)(?:-[0-9A-Za-z.-]{1,32})?$",
+                          "title": "maxLength(64)",
+                          "maxLength": 64,
+                          "pattern": "^(0|[1-9]\\d*)\\.(0|[1-9]\\d*)\\.(0|[1-9]\\d*)(?:-[0-9A-Za-z.-]{1,32})?$"
+                        },
+                        "daemon_build_revision": {
+                          "type": "string",
+                          "description": "a string matching the pattern ^[0-9a-f]{7,64}$",
+                          "pattern": "^[0-9a-f]{7,64}$"
+                        },
+                        "platform": {
+                          "type": "string",
+                          "enum": [
+                            "darwin",
+                            "linux",
+                            "win32"
+                          ]
+                        },
+                        "architecture": {
+                          "type": "string",
+                          "enum": [
+                            "arm64",
+                            "x64"
+                          ]
+                        },
+                        "code": {
+                          "type": "string",
+                          "enum": [
+                            "native_auth_timeout",
+                            "refresh_failure",
+                            "unknown_status_sustained",
+                            "late_result_discarded",
+                            "login_watchdog_expiry",
+                            "login_terminal_failure",
+                            "cli_install_repeated_failure",
+                            "session_lost",
+                            "liveness_degraded",
+                            "control_channel_unexpected_disconnect",
+                            "control_channel_protocol_failure",
+                            "stream_unexpected_failure",
+                            "stream_hang_watchdog",
+                            "fatal_process"
+                          ]
+                        },
+                        "provider": {
+                          "type": "string",
+                          "enum": [
+                            "claude_code",
+                            "chatgpt",
+                            "kimi_code",
+                            "grok",
+                            "cursor"
+                          ]
+                        },
+                        "producer": {
+                          "type": "string",
+                          "enum": [
+                            "spawn",
+                            "refresh",
+                            "status",
+                            "login_flow",
+                            "cli_install",
+                            "cli_version_stamp",
+                            "auth_session_lost",
+                            "control_channel",
+                            "walker",
+                            "process"
+                          ]
+                        },
+                        "operation": {
+                          "type": "string",
+                          "enum": [
+                            "native_auth",
+                            "capture",
+                            "refresh",
+                            "probe",
+                            "login",
+                            "logout",
+                            "install",
+                            "stamp",
+                            "stream",
+                            "reconnect"
+                          ]
+                        },
+                        "trigger": {
+                          "type": "string",
+                          "enum": [
+                            "native_login",
+                            "capture",
+                            "refresh",
+                            "status_poll",
+                            "login",
+                            "logout",
+                            "install",
+                            "version_probe",
+                            "session_lost",
+                            "reconnect",
+                            "stream",
+                            "fatal",
+                            "doctor_manual",
+                            "proactive_flush"
+                          ]
+                        },
+                        "outcome": {
+                          "type": "string",
+                          "enum": [
+                            "timeout",
+                            "failure",
+                            "cancelled",
+                            "expired",
+                            "discarded",
+                            "degraded",
+                            "unknown",
+                            "disconnect",
+                            "protocol_error",
+                            "hang",
+                            "success_context"
+                          ]
+                        },
+                        "error_class": {
+                          "type": "string",
+                          "enum": [
+                            "timeout",
+                            "spawn_denied",
+                            "cli_crash",
+                            "parse_failure",
+                            "protocol_failure",
+                            "transport_dns",
+                            "transport_connect",
+                            "transport_tls",
+                            "upstream_http",
+                            "watchdog",
+                            "cancelled",
+                            "unclassified"
+                          ]
+                        },
+                        "correlation_id": {
+                          "type": "string",
+                          "description": "a string matching the pattern ^(?:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|[0-9a-f]{16,64})$",
+                          "pattern": "^(?:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|[0-9a-f]{16,64})$"
+                        },
+                        "timings": {
+                          "type": "object",
+                          "required": [],
+                          "properties": {
+                            "configured_timeout_ms": {
+                              "type": "number",
+                              "description": "a number less than or equal to 86400000",
+                              "title": "lessThanOrEqualTo(86400000)",
+                              "minimum": 0,
+                              "maximum": 86400000
+                            },
+                            "spawn_elapsed_ms": {
+                              "type": "number",
+                              "description": "a number less than or equal to 86400000",
+                              "title": "lessThanOrEqualTo(86400000)",
+                              "minimum": 0,
+                              "maximum": 86400000
+                            },
+                            "budget_remaining_ms_at_spawn": {
+                              "type": "number",
+                              "description": "a number less than or equal to 86400000",
+                              "title": "lessThanOrEqualTo(86400000)",
+                              "minimum": 0,
+                              "maximum": 86400000
+                            },
+                            "timeout_callback_lateness_ms": {
+                              "type": "number",
+                              "description": "a number less than or equal to 86400000",
+                              "title": "lessThanOrEqualTo(86400000)",
+                              "minimum": 0,
+                              "maximum": 86400000
+                            },
+                            "cleanup_ms": {
+                              "type": "number",
+                              "description": "a number less than or equal to 86400000",
+                              "title": "lessThanOrEqualTo(86400000)",
+                              "minimum": 0,
+                              "maximum": 86400000
+                            },
+                            "elapsed_ms": {
+                              "type": "number",
+                              "description": "a number less than or equal to 86400000",
+                              "title": "lessThanOrEqualTo(86400000)",
+                              "minimum": 0,
+                              "maximum": 86400000
+                            },
+                            "reconnect_episode_ms": {
+                              "type": "number",
+                              "description": "a number less than or equal to 86400000",
+                              "title": "lessThanOrEqualTo(86400000)",
+                              "minimum": 0,
+                              "maximum": 86400000
+                            },
+                            "reconnect_count": {
+                              "type": "integer",
+                              "description": "a number less than or equal to 1000000",
+                              "title": "lessThanOrEqualTo(1000000)",
+                              "minimum": 0,
+                              "maximum": 1000000
+                            },
+                            "unknown_probe_streak": {
+                              "type": "integer",
+                              "description": "a number less than or equal to 1000000",
+                              "title": "lessThanOrEqualTo(1000000)",
+                              "minimum": 0,
+                              "maximum": 1000000
+                            },
+                            "repeat_count": {
+                              "type": "integer",
+                              "description": "a number less than or equal to 1000000",
+                              "title": "lessThanOrEqualTo(1000000)",
+                              "minimum": 0,
+                              "maximum": 1000000
+                            },
+                            "root_exit_code": {
+                              "type": "integer",
+                              "description": "a number less than or equal to 255",
+                              "title": "lessThanOrEqualTo(255)",
+                              "minimum": -1,
+                              "maximum": 255
+                            },
+                            "stdout_closed": {
+                              "type": "boolean"
+                            },
+                            "stderr_closed": {
+                              "type": "boolean"
+                            },
+                            "root_exited": {
+                              "type": "boolean"
+                            }
+                          },
+                          "additionalProperties": false
+                        }
+                      },
+                      "additionalProperties": false
+                    },
+                    "description": "an array of at most 32 item(s)",
+                    "title": "maxItems(32)",
+                    "minItems": 1,
+                    "maxItems": 32
+                  },
+                  "health": {
+                    "type": "object",
+                    "required": [
+                      "connected_providers",
+                      "degraded_providers",
+                      "unknown_providers"
+                    ],
+                    "properties": {
+                      "connected_providers": {
+                        "type": "integer",
+                        "description": "a number less than or equal to 1000000",
+                        "title": "lessThanOrEqualTo(1000000)",
+                        "minimum": 0,
+                        "maximum": 1000000
+                      },
+                      "degraded_providers": {
+                        "type": "integer",
+                        "description": "a number less than or equal to 1000000",
+                        "title": "lessThanOrEqualTo(1000000)",
+                        "minimum": 0,
+                        "maximum": 1000000
+                      },
+                      "unknown_providers": {
+                        "type": "integer",
+                        "description": "a number less than or equal to 1000000",
+                        "title": "lessThanOrEqualTo(1000000)",
+                        "minimum": 0,
+                        "maximum": 1000000
+                      }
+                    },
+                    "additionalProperties": false
+                  }
+                },
+                "additionalProperties": false
+              }
+            }
+          },
+          "required": true
         }
       }
     },
@@ -26510,6 +27445,9 @@
     },
     {
       "name": "billing"
+    },
+    {
+      "name": "daemonDoctorReports"
     },
     {
       "name": "pluginsClaudeContext"

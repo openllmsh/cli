@@ -168,6 +168,18 @@ export const API_OPERATIONS: readonly TApiOperation[] = [
     "hasBody": false
   },
   {
+    "id": "daemonDoctorReports.submit",
+    "method": "post",
+    "path": "/daemon/doctor-reports",
+    "summary": "",
+    "tags": [
+      "daemonDoctorReports"
+    ],
+    "pathParams": [],
+    "queryParams": [],
+    "hasBody": true
+  },
+  {
     "id": "health.ping",
     "method": "get",
     "path": "/health",
@@ -848,6 +860,18 @@ export const API_OPERATIONS: readonly TApiOperation[] = [
     "pathParams": [],
     "queryParams": [],
     "hasBody": false
+  },
+  {
+    "id": "user.updateDaemonDiagnostics",
+    "method": "patch",
+    "path": "/user/daemon-diagnostics",
+    "summary": "",
+    "tags": [
+      "user"
+    ],
+    "pathParams": [],
+    "queryParams": [],
+    "hasBody": true
   },
   {
     "id": "user.dismissOnboarding",

@@ -122,8 +122,9 @@ export const COMMANDS = [
   },
   {
     name: "doctor",
-    args: "[--fix] [--no-ai] [--model <alias>] [-c]",
-    description: "Diagnose the local daemon and report leftover install state",
+    args: "[report|opt-out|opt-in|reporting-status|--fix] [...]",
+    description:
+      "Diagnose the local daemon, leftover install state, or reporting",
   },
   { name: "version", description: "Print the version" },
   { name: "help", description: "Show help" },
@@ -224,7 +225,19 @@ export const COMMAND_ARGS: Readonly<
   raycast: ["uninstall", "status"],
   hermes: ["install", "uninstall", "status", "--no-persist"],
   sessions: ["list", "attach", "kill"],
-  doctor: ["--fix", "--no-ai", "--model", "-c", "--copy"],
+  doctor: [
+    "report",
+    "opt-out",
+    "opt-in",
+    "reporting-status",
+    "--dry-run",
+    "--yes",
+    "--fix",
+    "--no-ai",
+    "--model",
+    "-c",
+    "--copy",
+  ],
   uninstall: ["--yes", "-y", "--keep-logins", "--remove-logins"],
 };
 
