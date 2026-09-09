@@ -70,7 +70,7 @@ Enabled by default after accepting the current analytics-cookie policy, unless o
   openllm doctor report --dry-run  preview the sanitized export; no upload
   openllm doctor opt-out           disable locally at once; then update the account
   openllm doctor opt-in --yes      re-enable from the current tail; cookie consent required
-  openllm doctor reporting-status  local, account, pending sync, last ack, daemon version
+  openllm doctor reporting-status  local/account prefs, upload eligibility, pending upload, last attempt (this process)
 `;
 
 type TUnavailableReason =
@@ -469,6 +469,11 @@ const runStatus = async (): Promise<number> => {
         `pending account sync: ${file?.pending_account_sync === true ? "yes" : "no"}`,
         "last acknowledged report: none",
         "daemon version: unknown",
+        "upload eligible: unknown",
+        "upload blocker: unknown",
+        "pending report upload: unknown",
+        "last attempt (this process): unknown",
+        "last attempt outcome (this process): unknown",
         unavailableMessage(result.reason),
       ].join("\n")}\n`,
     );
@@ -482,6 +487,11 @@ const runStatus = async (): Promise<number> => {
         `pending account sync: ${file?.pending_account_sync === true ? "yes" : "no"}`,
         "last acknowledged report: none",
         "daemon version: unknown",
+        "upload eligible: unknown",
+        "upload blocker: unknown",
+        "pending report upload: unknown",
+        "last attempt (this process): unknown",
+        "last attempt outcome (this process): unknown",
         unavailableMessage("capability_missing"),
       ].join("\n")}\n`,
     );
@@ -499,6 +509,23 @@ const runStatus = async (): Promise<number> => {
       `pending account sync: ${parsed.pending_account_sync ? "yes" : "no"}`,
       `last acknowledged report: ${parsed.last_acknowledged_report_id ?? "none"}`,
       `daemon version: ${parsed.daemon_version ?? "unknown"}`,
+      `upload eligible: ${parsed.upload_eligible === undefined ? "unknown" : parsed.upload_eligible ? "yes" : "no"}`,
+      `upload blocker: ${parsed.upload_eligible === true ? "none" : (parsed.upload_blocker ?? "unknown")}`,
+      `pending report upload: ${parsed.pending_report_upload === undefined ? "unknown" : parsed.pending_report_upload ? "yes" : "no"}`,
+      `last attempt (this process): ${
+        parsed.upload_eligible === undefined &&
+        parsed.last_attempt_at_ms === undefined
+          ? "unknown"
+          : parsed.last_attempt_at_ms === undefined
+            ? "none"
+            : String(parsed.last_attempt_at_ms)
+      }`,
+      `last attempt outcome (this process): ${
+        parsed.upload_eligible === undefined &&
+        parsed.last_attempt_outcome === undefined
+          ? "unknown"
+          : (parsed.last_attempt_outcome ?? "none")
+      }`,
     ].join("\n")}\n`,
   );
   return 0;
