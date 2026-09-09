@@ -64,11 +64,12 @@ openllm doctor reporting-status
 
 Request a sanitized diagnostic flush from the running daemon.
 Does not run AI diagnosis and does not read raw daemon logs.
+Enabled by default after accepting the current analytics-cookie policy, unless opted out.
 
   openllm doctor report            flush new observations through the daemon
   openllm doctor report --dry-run  preview the sanitized export; no upload
   openllm doctor opt-out           disable locally at once; then update the account
-  openllm doctor opt-in --yes      enable from the current tail after explicit consent
+  openllm doctor opt-in --yes      re-enable from the current tail; cookie consent required
   openllm doctor reporting-status  local, account, pending sync, last ack, daemon version
 `;
 
@@ -139,7 +140,7 @@ const parseLocalPreference = (input: unknown): TLocalPreference | null => {
   ) {
     return null;
   }
-  return {
+  const parsed: TLocalPreference = {
     enabled: rec.enabled,
     pending_account_sync: rec.pending_account_sync,
     origin_scope: asOpaqueId(
@@ -152,6 +153,14 @@ const parseLocalPreference = (input: unknown): TLocalPreference | null => {
       typeof rec.generation === "string" ? rec.generation : undefined,
     ),
   };
+  const fields = Object.entries(parsed);
+  return Object.entries(rec).every(([key, value]) =>
+    fields.some(
+      ([field, parsedValue]) => field === key && parsedValue === value,
+    ),
+  )
+    ? parsed
+    : null;
 };
 
 const readLocalPreferenceFile = (): TLocalPreference | null => {
@@ -166,7 +175,9 @@ const readLocalPreferenceFile = (): TLocalPreference | null => {
 
 const localKillSwitchOn = (): boolean => {
   const pref = readLocalPreferenceFile();
-  return pref !== null && pref.enabled === false;
+  return pref === null
+    ? existsSync(localPreferencePath())
+    : pref.enabled === false;
 };
 
 let fsyncImpl: typeof fsyncSync = fsyncSync;
@@ -404,9 +415,11 @@ const runOptOut = async (): Promise<number> => {
   return 0;
 };
 
-const OPT_IN_DISCLOSURE = `Share limited technical diagnostics to help fix local daemon problems.
+const OPT_IN_DISCLOSURE = `Re-enable limited technical diagnostics to help fix local daemon problems.
 Reports include daemon version, platform, error codes and timing.
 They do not include prompts, responses, credentials or raw log files.
+Reports are processed by PostHog and retained for 30 days after submission.
+Uploads still require acceptance of the current analytics-cookie policy.
 Re-enabling starts from the current tail and does not replay prior history.
 Pass --yes to confirm.`;
 
@@ -430,17 +443,17 @@ const runOptIn = async (args: readonly string[]): Promise<number> => {
   if (accountOk) {
     if (!writeLocalPreferenceFile({ ...record, pending_account_sync: false })) {
       process.stdout.write(
-        "Enabled on this machine; account-wide update pending.\n",
+        "Enabled on this machine; account-wide update pending. Uploads still require acceptance of the current analytics-cookie policy and a fresh account policy.\n",
       );
       return 0;
     }
     process.stdout.write(
-      "Diagnostic reporting enabled. New observations start from the current tail.\n",
+      "Diagnostic reporting preferences enabled. Uploads still require acceptance of the current analytics-cookie policy and a fresh account policy. New observations start from the current tail.\n",
     );
     return 0;
   }
   process.stdout.write(
-    "Enabled on this machine; account-wide update pending.\n",
+    "Enabled on this machine; account-wide update pending. Uploads still require acceptance of the current analytics-cookie policy and a fresh account policy.\n",
   );
   return 0;
 };
@@ -451,7 +464,7 @@ const runStatus = async (): Promise<number> => {
   if (!result.ok) {
     process.stdout.write(
       `${[
-        `local enabled: ${file?.enabled === true ? "yes" : "no"}`,
+        `local enabled: ${localKillSwitchOn() ? "no" : "yes"}`,
         "account enabled: unknown",
         `pending account sync: ${file?.pending_account_sync === true ? "yes" : "no"}`,
         "last acknowledged report: none",
@@ -464,7 +477,7 @@ const runStatus = async (): Promise<number> => {
   if (result.status === 403) {
     process.stdout.write(
       `${[
-        `local enabled: ${file?.enabled === true ? "yes" : "no"}`,
+        `local enabled: ${localKillSwitchOn() ? "no" : "yes"}`,
         "account enabled: unknown",
         `pending account sync: ${file?.pending_account_sync === true ? "yes" : "no"}`,
         "last acknowledged report: none",
