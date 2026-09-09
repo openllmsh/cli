@@ -170,8 +170,9 @@ Everything follows `packages/daemon` exactly — see
   sha256 of the DECOMPRESSED binary.
 - Change-gated on `CLI_BINARY_SOURCES`: `cli/src`, embedded `cli/setup`, the
   public-mirror `cli/install.sh` (not compiled, but released at the pinned tag),
-  `release-types.ts`, and `package.json`. The compiled binary has no
-  workspace-package dependency; an unchanged CLI keeps its lagging pin.
+  `release-types.ts`, `package.json`, and `scripts/compile.ts` (bake flags,
+  including `NODE_ENV`). The compiled binary has no workspace-package
+  dependency; an unchanged CLI keeps its lagging pin.
 - Mirror: `subtreeSplitAndPush` of `packages/cli` (manifest stamped, no
   depRefs rewrites needed) → binary publish attaches to the mirror's tag.
 - Merge gate: the `cli-pins-match` job in

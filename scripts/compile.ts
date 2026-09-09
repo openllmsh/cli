@@ -32,6 +32,38 @@ const OUT_DIR = join(PKG_ROOT, "dist");
 
 const DEFAULT_CLOUD_ORIGIN = "https://www.openllm.sh";
 
+/** Sentinel baked when compile is invoked with no `--version`. */
+export const DEV_VERSION_SENTINEL = "0.0.0-dev";
+
+/**
+ * Bun inlines `process.env.NODE_ENV` at compile time from the compile host
+ * unless `--define` overrides it. Release versions bake `"production"`; the
+ * `0.0.0-dev` sentinel keeps `"development"` for local `compile:host`.
+ */
+export const compileNodeEnv = (
+  version: string,
+): "development" | "production" =>
+  version === DEV_VERSION_SENTINEL ? "development" : "production";
+
+export const compileDefineArgs = (
+  cloudOrigin: string,
+  version: string,
+): readonly string[] => [
+  "--define",
+  `__OPENLLM_CLOUD_ORIGIN_DEFAULT__=${JSON.stringify(cloudOrigin)}`,
+  "--define",
+  `__OPENLLM_CLI_VERSION__=${JSON.stringify(version)}`,
+  "--define",
+  `process.env.NODE_ENV=${JSON.stringify(compileNodeEnv(version))}`,
+];
+
+export const COMPILE_BUN_FLAGS = [
+  "--compile",
+  "--minify",
+  "--sourcemap=none",
+  "--bytecode",
+] as const;
+
 // OpenLLM's own Vercel preview deployments — the same anchor as the daemon's
 // compile script (`packages/daemon/scripts/compile.ts`); keep in sync.
 export const OPENLLM_PREVIEW_HOST =
@@ -89,7 +121,9 @@ const versionIdx = argv.indexOf("--version");
 // sentinel, which the runtime's dev guards (self-update) key on to skip
 // production behaviour. Same model as the daemon.
 const version =
-  versionIdx >= 0 ? (argv[versionIdx + 1] ?? "0.0.0-dev") : "0.0.0-dev";
+  versionIdx >= 0
+    ? (argv[versionIdx + 1] ?? DEV_VERSION_SENTINEL)
+    : DEV_VERSION_SENTINEL;
 
 const outfileFor = (target: string): string => {
   const suffix = target.replace(/^bun-/, "");
@@ -102,13 +136,10 @@ const buildOne = async (
 ): Promise<string> => {
   const outfile = target === null ? `${OUT_DIR}/openllm` : outfileFor(target);
   const targetArgs = target === null ? [] : ["--target", target];
+  const defines = compileDefineArgs(cloudOrigin, version);
   await $`bun build ${ENTRY} \
-    --compile \
-    --minify \
-    --sourcemap=none \
-    --bytecode \
-    --define ${`__OPENLLM_CLOUD_ORIGIN_DEFAULT__=${JSON.stringify(cloudOrigin)}`} \
-    --define ${`__OPENLLM_CLI_VERSION__=${JSON.stringify(version)}`} \
+    ${COMPILE_BUN_FLAGS} \
+    ${defines} \
     ${targetArgs} \
     --outfile ${outfile}`;
   // Gzip sidecar for DISTRIBUTION — the published GitHub asset is the `.gz`.
