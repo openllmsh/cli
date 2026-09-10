@@ -126,7 +126,7 @@ export const COMMANDS = [
     description:
       "Diagnose the local daemon, leftover install state, or reporting",
   },
-  { name: "version", description: "Print the version" },
+  { name: "version", description: "Print this CLI version" },
   { name: "help", description: "Show help" },
 ] as const satisfies readonly TCommand[];
 
@@ -146,8 +146,8 @@ export const CLIENT_FLAGS: readonly TFlag[] = [
 export const FLAGS: readonly TFlag[] = [
   { name: "-h", description: "Show help" },
   { name: "--help", description: "Show help" },
-  { name: "-v", description: "Print the version" },
-  { name: "--version", description: "Print the version" },
+  { name: "-v", description: "Print this CLI version" },
+  { name: "--version", description: "Print this CLI version" },
 ] as const;
 
 /**

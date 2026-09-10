@@ -36,8 +36,9 @@ packages/cli/
 │   ├── compile.ts        # bun --compile --minify --bytecode ×4 targets + gzip sidecars
 │   └── generate-sdk.ts   # MONOREPO-ONLY: HttpApi → committed SDK artifacts
 └── src/
-    ├── main.ts           # entry: <client> | mcp | exec | api | setup | completion
-    │                      #        | sessions | status | uninstall | doctor | self-update | version
+    ├── main.ts           # compile entry: self-version (`--version`/`-v`/`version`) then lazy dispatch
+    ├── cli-version.ts    # compile-time CLI_VERSION only (self-version must not import env)
+    ├── cli-dispatch.ts   # full command tree, loaded after self-version short-circuit
     ├── clients/          # the runtime client commands
     │   ├── registry.ts   #   SSOT: which clients, session vs always-on
     │   ├── overlays.ts   #   the embedded setup/** text
@@ -85,7 +86,7 @@ packages/cli/
 | `openllm self-update` | converge to the gateway's pinned release |
 | `openllm sessions [list\|attach\|kill]` | list, attach to, or kill durable local sessions (`attach` requires an id) |
 | `openllm status` | mirror of `openllmd status` — delegates to the managed daemon binary |
-| `openllm version` | print the CLI version AND the installed daemon version (`-v`/`--version`) |
+| `openllm version` | print this CLI version only (`openllm vX.Y.Z`); `-v`/`--version` are the same. Combined daemon diagnostics stay on `status`/`doctor` |
 
 Config: `OPENLLM_CLOUD_ORIGIN` / `OPENLLM_API_KEY` env (the same contract the
 MCP mapping + hooks carry), falling back to the SHARED `~/.openllm/.env` (the

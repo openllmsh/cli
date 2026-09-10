@@ -14,20 +14,18 @@
  *
  * The version identity is baked at compile (`__OPENLLM_CLI_VERSION__`);
  * source runs carry the `0.0.0-dev` sentinel the dev guards key on.
+ * The constant itself lives in `cli-version.ts` so self-version dispatch
+ * never imports this module.
  */
 
 import * as fs from "node:fs";
 import { homedir } from "node:os";
 import { isAbsolute, join } from "node:path";
 
-// Compile-time defines (see scripts/compile.ts). Source runs fall back.
-declare const __OPENLLM_CLI_VERSION__: string | undefined;
-declare const __OPENLLM_CLOUD_ORIGIN_DEFAULT__: string | undefined;
+export { CLI_VERSION } from "./cli-version";
 
-export const CLI_VERSION: string =
-  typeof __OPENLLM_CLI_VERSION__ === "string"
-    ? __OPENLLM_CLI_VERSION__
-    : "0.0.0-dev";
+// Compile-time defines (see scripts/compile.ts). Source runs fall back.
+declare const __OPENLLM_CLOUD_ORIGIN_DEFAULT__: string | undefined;
 
 const CLOUD_ORIGIN_DEFAULT: string =
   typeof __OPENLLM_CLOUD_ORIGIN_DEFAULT__ === "string"
