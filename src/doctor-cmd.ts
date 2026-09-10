@@ -34,6 +34,7 @@ import {
   sharedFileConfig,
   userHome,
 } from "./env";
+import { DOCTOR_OPAQUE_ID_PATTERN } from "./generated/doctor-report-cli";
 
 type TLegacyRegion = {
   readonly path: string;
@@ -448,13 +449,25 @@ const formatLogTs = (iso: string): string => {
   return `${month}-${day} ${hours}:${minutes}:${seconds}`;
 };
 
+/** Identity and child clocks first so a long argv does not hide native-auth
+ *  correlation. Hard cap applies to preferred keys and extras together. */
+const LOG_META_MAX_FIELDS = 8;
 const LOG_META_PREFERRED_KEYS = [
-  "argv",
+  "producer",
+  "correlation_id",
+  "operation_id",
+  "configured_timeout_ms",
+  "spawn_elapsed_ms",
+  "timeout_callback_lateness_ms",
+  "elapsed_ms",
+  "timeout_ms",
+] as const;
+const LOG_META_FILL_KEYS = [
   "verb",
   "error_class",
-  "spawn_elapsed_ms",
-  "timeout_ms",
-  "elapsed_ms",
+  "argv",
+  "child_pid",
+  "tick_id",
 ] as const;
 
 const formatLogMetaValue = (value: unknown): string => {
@@ -467,21 +480,47 @@ const formatLogMetaValue = (value: unknown): string => {
   return raw.length > 48 ? `${raw.slice(0, 47)}…` : raw;
 };
 
+const flattenLogMeta = (
+  meta: Record<string, unknown>,
+): Record<string, unknown> => {
+  const timings = meta.timings;
+  if (
+    timings === undefined ||
+    timings === null ||
+    typeof timings !== "object"
+  ) {
+    return meta;
+  }
+  return { ...(timings as Record<string, unknown>), ...meta };
+};
+
+const isOpaqueMetaId = (value: unknown): value is string =>
+  typeof value === "string" && DOCTOR_OPAQUE_ID_PATTERN.test(value);
+
 const formatLogMeta = (meta: unknown): string => {
   if (meta === undefined || meta === null || typeof meta !== "object") {
     return "";
   }
-  const rec = meta as Record<string, unknown>;
+  const rec = flattenLogMeta(meta as Record<string, unknown>);
   const parts: string[] = [];
   const seen = new Set<string>();
   const push = (key: string, value: unknown): void => {
+    if (parts.length >= LOG_META_MAX_FIELDS) return;
     if (value === undefined || value === null || seen.has(key)) return;
+    if (key === "timings" && typeof value === "object") return;
+    if (
+      (key === "correlation_id" || key === "operation_id") &&
+      !isOpaqueMetaId(value)
+    ) {
+      return;
+    }
     seen.add(key);
     parts.push(`${key}=${formatLogMetaValue(value)}`);
   };
   for (const key of LOG_META_PREFERRED_KEYS) push(key, rec[key]);
+  for (const key of LOG_META_FILL_KEYS) push(key, rec[key]);
   for (const [key, value] of Object.entries(rec)) {
-    if (parts.length >= 8) break;
+    if (parts.length >= LOG_META_MAX_FIELDS) break;
     push(key, value);
   }
   return parts.join(" ");
@@ -921,6 +960,11 @@ const startStderrSpinner = (label: string): (() => void) => {
 
 export const DIAGNOSIS_SENTINEL = "Diagnosis:";
 
+/** Clock and auth-interpretation rules for the AI paragraph. Imported by tests
+ *  so the prompt is not duplicated. */
+export const DOCTOR_AI_GUIDANCE =
+  "Use only measured clocks present in the report or logs. spawn_elapsed_ms is the child-wait clock comparable to timeout_ms. elapsed_ms is a measured duration on that line: a named-stage message is that stage, but older producer-specific records may still mean whole-operation queue and reap — do not assume one meaning universally. timeout_callback_lateness_ms is measured callback lateness, not proof of sleep, CPU, or securityd. Local GET /status health is a 1.5-second observer, not a provider login (provider status is typically ~10s). A 4-second capture is ambiguous (keychain vs Claude status) unless a producer identifies it. Browser open/complete timestamps are unknown without an event that records them. Do not invent durations or unproven causes. If the report shows login completed, treat a slow path as eventual success rather than a permanent authentication failure. A cli-update warning that the installed OpenLLM CLI did not report a version means failure to read or parse that binary's version before comparison or download, not a vendor version cache.";
+
 /** Defense in depth: retain only a prompt-mandated diagnosis, never exposed reasoning. */
 export const extractDiagnosisParagraph = (raw: string): string | null => {
   // LAST occurrence on purpose: the failure this guards against is a provider
@@ -964,7 +1008,7 @@ export const aiDiagnosis = async (
   if (!existsSync(bin) || apiKey.length === 0) return null;
 
   const daemonLogs = await collectRecentDaemonLogs();
-  const prompt = `You are diagnosing a local OpenLLM daemon ("openllmd") for a support ticket.\n\nDoctor report:\n${hideHome(redact(report))}\n\nRecent daemon logs (already redacted, newest last):\n${hideHome(redact(daemonLogs))}\n\nWrite exactly one information-dense paragraph suitable to paste into an OpenLLM support ticket. Start the paragraph with "${DIAGNOSIS_SENTINEL}" and output nothing else: no preamble, markdown headings, bullet points, or code fences. If the logs include daemon version lines and span more than one version, attribute each problem to the specific version it occurred under and keep the diagnosis segmented per version. spawn_elapsed_ms is the only clock comparable to timeout_ms; elapsed_ms includes queue and reap; budget_remaining_ms_at_spawn is the child budget, not the parent's leftover.`;
+  const prompt = `You are diagnosing a local OpenLLM daemon ("openllmd") for a support ticket.\n\nDoctor report:\n${hideHome(redact(report))}\n\nRecent daemon logs (already redacted, newest last):\n${hideHome(redact(daemonLogs))}\n\nWrite exactly one information-dense paragraph suitable to paste into an OpenLLM support ticket. Start the paragraph with "${DIAGNOSIS_SENTINEL}" and output nothing else: no preamble, markdown headings, bullet points, or code fences. If the logs include daemon version lines and span more than one version, attribute each problem to the specific version it occurred under and keep the diagnosis segmented per version. ${DOCTOR_AI_GUIDANCE} budget_remaining_ms_at_spawn is the child budget, not the parent's leftover.`;
   let timeout: ReturnType<typeof setTimeout> | undefined;
   let timedOut = false;
   let proc: ReturnType<typeof Bun.spawn> | null = null;
