@@ -6583,7 +6583,10 @@
                                   "minimal",
                                   "low",
                                   "medium",
-                                  "high"
+                                  "high",
+                                  "xhigh",
+                                  "max",
+                                  "none"
                                 ]
                               },
                               {
