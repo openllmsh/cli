@@ -5,7 +5,7 @@
 import { createHash } from "node:crypto";
 
 export const DOCTOR_REPORT_CLI_CONSTANTS = {
-  "schemaVersion": 2,
+  "schemaVersion": 3,
   "extraKey": "daemon_diagnostics_opt_in",
   "policyGenerationExtraKey": "daemon_diagnostics_policy_generation",
   "cloudReportsPath": "/api/daemon/doctor-reports",

@@ -24239,7 +24239,7 @@
                   "schema_version": {
                     "type": "number",
                     "enum": [
-                      2
+                      3
                     ]
                   },
                   "report_id": {
@@ -24286,6 +24286,7 @@
                         "platform",
                         "architecture",
                         "severity",
+                        "scope",
                         "message"
                       ],
                       "properties": {
@@ -24331,9 +24332,17 @@
                         "severity": {
                           "type": "string",
                           "enum": [
+                            "info",
                             "warn",
                             "error"
                           ]
+                        },
+                        "scope": {
+                          "type": "string",
+                          "description": "a string at least 1 character(s) long",
+                          "title": "minLength(1)",
+                          "maxLength": 32,
+                          "minLength": 1
                         },
                         "message": {
                           "type": "string",
