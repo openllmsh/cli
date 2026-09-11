@@ -24453,6 +24453,79 @@
                             }
                           },
                           "additionalProperties": false
+                        },
+                        "provider": {
+                          "type": "string",
+                          "enum": [
+                            "claude_code",
+                            "chatgpt",
+                            "kimi_code",
+                            "grok",
+                            "cursor"
+                          ]
+                        },
+                        "operation_kind": {
+                          "type": "string",
+                          "enum": [
+                            "login",
+                            "logout",
+                            "verify",
+                            "status_probe",
+                            "status_publish"
+                          ]
+                        },
+                        "phase": {
+                          "type": "string",
+                          "enum": [
+                            "readiness_wait",
+                            "readiness",
+                            "start",
+                            "child_wait",
+                            "child",
+                            "prep_wait",
+                            "prep",
+                            "verify_wait",
+                            "verify",
+                            "terminal"
+                          ]
+                        },
+                        "outcome": {
+                          "type": "string",
+                          "enum": [
+                            "succeeded",
+                            "failed",
+                            "cancelled",
+                            "abandoned",
+                            "timeout",
+                            "unknown"
+                          ]
+                        },
+                        "observation": {
+                          "type": "string",
+                          "enum": [
+                            "connected",
+                            "signed_out",
+                            "disconnected",
+                            "unknown"
+                          ]
+                        },
+                        "reason_code": {
+                          "type": "string",
+                          "enum": [
+                            "probe_timeout",
+                            "probe_failed",
+                            "keychain_unavailable",
+                            "store_unreadable",
+                            "cli_unavailable",
+                            "credential_absent"
+                          ]
+                        },
+                        "status_seq": {
+                          "type": "integer",
+                          "description": "a number less than or equal to 1000000000",
+                          "title": "lessThanOrEqualTo(1000000000)",
+                          "minimum": 0,
+                          "maximum": 1000000000
                         }
                       },
                       "additionalProperties": false
