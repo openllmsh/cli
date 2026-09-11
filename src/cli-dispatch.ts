@@ -3,7 +3,7 @@
  * invocation is not a self-only version print.
  */
 
-import { CLI_VERSION } from "./cli-version";
+import { CLI_VERSION, printSelfVersion } from "./cli-version";
 import { runHermesCommand } from "./clients/hermes";
 import { runRaycastCommand } from "./clients/raycast";
 import { CLIENTS, isClientId, parseClientFlags } from "./clients/registry";
@@ -320,10 +320,8 @@ export const runCli = async (argv: readonly string[]): Promise<void> => {
     }
     case "version":
     case "-v":
-    case "--version": {
-      process.stdout.write(`openllm v${CLI_VERSION}\n`);
-      return process.exit(0);
-    }
+    case "--version":
+      return printSelfVersion();
     case undefined:
     case "help":
     case "-h":

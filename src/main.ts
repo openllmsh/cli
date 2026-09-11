@@ -10,14 +10,13 @@
  * Combined daemon/CLI diagnostics remain on doctor/status, not version.
  */
 
-import { CLI_VERSION } from "./cli-version";
+import { printSelfVersion } from "./cli-version";
 
 const argv = process.argv.slice(2);
 const first = argv[0];
 
 if (first === "--version" || first === "-v" || first === "version") {
-  process.stdout.write(`openllm v${CLI_VERSION}\n`);
-  process.exit(0);
+  printSelfVersion();
 }
 
 const run = async (): Promise<void> => {

@@ -11,3 +11,9 @@ export const CLI_VERSION: string =
   typeof __OPENLLM_CLI_VERSION__ === "string"
     ? __OPENLLM_CLI_VERSION__
     : "0.0.0-dev";
+
+/** Print `openllm v…` and exit 0. Safe to import from `main.ts` (no env/clients). */
+export const printSelfVersion = (): never => {
+  process.stdout.write(`openllm v${CLI_VERSION}\n`);
+  return process.exit(0);
+};
