@@ -1,6 +1,6 @@
 {
   "name": "@openllmsh/cli",
-  "version": "0.0.0-dev",
+  "version": "2.6.34",
   "private": false,
   "type": "module",
   "exports": {
@@ -22,7 +22,6 @@
     "turndown": "^7.2.4"
   },
   "devDependencies": {
-    "@openllm/schema": "workspace:*",
     "@openllmsh/protocol": "workspace:*",
     "@types/turndown": "^5.0.6"
   },
