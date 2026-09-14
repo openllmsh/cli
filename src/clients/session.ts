@@ -9,8 +9,8 @@
  */
 
 import { spawn } from "node:child_process";
-import crossSpawn from "cross-spawn";
-import cmdEscape from "cross-spawn/lib/util/escape.js";
+import { createRequire } from "node:module";
+import type { ChildProcess, SpawnOptions } from "node:child_process";
 import { executableCandidates, executablePathDirs } from "@openllmsh/protocol/executable-paths";
 import {
   chmodSync,
@@ -52,6 +52,21 @@ import {
   resolveById,
   resolvePick,
 } from "./session-picker";
+
+type TCrossSpawn = (
+  command: string,
+  args: readonly string[],
+  options: SpawnOptions,
+) => ChildProcess;
+
+type TCommandEscape = {
+  readonly command: (command: string) => string;
+  readonly argument: (argument: string, doubleEscapeMetaChars: boolean) => string;
+};
+
+const loadCommonJs = createRequire(import.meta.url);
+const crossSpawn: TCrossSpawn = loadCommonJs("cross-spawn");
+const cmdEscape: TCommandEscape = loadCommonJs("cross-spawn/lib/util/escape.js");
 
 /** `~/.openllm/run` — every ephemeral per-launch overlay lives here. */
 export const runRoot = (): string => join(openllmDir(), "run");
@@ -635,13 +650,20 @@ export const execClient = (
     const batchCommand = batch
       ? '"' + [cmdEscape.command(bin), ...args.map(arg => cmdEscape.argument(arg, true))].join(" ") + '"'
       : "";
-    const child = (batch || process.platform !== "win32" ? spawn : crossSpawn)(
-      batch ? (process.env.ComSpec ?? process.env.COMSPEC ?? "cmd.exe") : powershell ? "powershell.exe" : bin,
-      batch ? ["/d", "/s", "/c", batchCommand] : powershell ? ["-NoLogo", "-NoProfile", "-NonInteractive", "-File", bin, ...args] : [...args], {
+    const command = batch
+      ? (process.env.ComSpec ?? process.env.COMSPEC ?? "cmd.exe")
+      : powershell ? "powershell.exe" : bin;
+    const childArgs = batch
+      ? ["/d", "/s", "/c", batchCommand]
+      : powershell ? ["-NoLogo", "-NoProfile", "-NonInteractive", "-File", bin, ...args] : [...args];
+    const options: SpawnOptions = {
       ...(batch ? { windowsVerbatimArguments: true } : {}),
       stdio: "inherit",
       env: mergeSessionEnv(process.env, env, unsetEnv),
-    });
+    };
+    const child = batch || process.platform !== "win32"
+      ? spawn(command, childArgs, options)
+      : crossSpawn(command, childArgs, options);
     const forward = (signal: NodeJS.Signals) => (): void => {
       // Let the child decide how to die; our own exit follows its code.
       try {
