@@ -1,7 +1,8 @@
 /** Public CLI mirrors for daemon-owned lifecycle commands. */
 
 import { existsSync } from "node:fs";
-import { join } from "node:path";
+import { delimiter, join } from "node:path";
+import { executableName } from "@openllmsh/protocol/local-runtime";
 import { openllmDir } from "./env";
 
 export const DAEMON_LIFECYCLE_COMMANDS = ["start", "stop", "restart"] as const;
@@ -15,7 +16,7 @@ const DAEMON_VERSION_TIMEOUT_MS = 2_000;
 
 /** The installer-owned daemon location; daemon state may be elsewhere. */
 export const managedDaemonBinary = (): string =>
-  join(openllmDir(), "bin", "openllmd");
+  join(openllmDir(), "bin", executableName("openllmd"));
 
 /**
  * Resolve a daemon executable for commands that can deliberately use a developer
@@ -28,9 +29,9 @@ export const findDaemonBinary = (): string | null => {
     return override;
   const installed = managedDaemonBinary();
   if (existsSync(installed)) return installed;
-  for (const directory of (process.env.PATH ?? "").split(":")) {
+  for (const directory of (process.env.PATH ?? "").split(delimiter)) {
     if (directory.length === 0) continue;
-    const candidate = join(directory, "openllmd");
+    const candidate = join(directory, executableName("openllmd"));
     if (existsSync(candidate)) return candidate;
   }
   return null;

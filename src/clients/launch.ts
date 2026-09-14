@@ -17,7 +17,6 @@ import {
   serializeToml,
   serializeYaml,
   substitute,
-  substituteJsonValue,
   type TJsonObject,
   tomlLeaves,
 } from "./merge";
@@ -126,13 +125,47 @@ export type TLaunchPlan = {
  * Keep in sync with `GROK_BASE_URL_PLACEHOLDER` / `GROK_API_KEY_PLACEHOLDER`.
  */
 const CATALOG_BASE_URL_TOKEN = "__OPENLLM_BASE_URL__";
-const CATALOG_API_KEY_TOKEN = "__OPENLLM_API_KEY__";
 
-/** Fill the gateway-emitted catalog placeholders with this launch's values. */
-const fillCatalogTokens = (text: string, inputs: TLaunchInputs): string =>
-  text
-    .replaceAll(CATALOG_BASE_URL_TOKEN, `${inputs.apiBase}/v1`)
-    .replaceAll(CATALOG_API_KEY_TOKEN, inputs.apiKey);
+/** Transform parsed string values once; inserted data is never template source. */
+const mapStrings = (value: unknown, transform: (text: string) => unknown): unknown => {
+  if (typeof value === "string") return transform(value);
+  if (Array.isArray(value)) return value.map((item) => mapStrings(item, transform));
+  if (value !== null && typeof value === "object") {
+    return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, mapStrings(item, transform)]));
+  }
+  return value;
+};
+
+const fillCatalogTokens = (doc: unknown, inputs: TLaunchInputs): TJsonObject =>
+  mapStrings(doc, (text) => text.replace(
+    /__OPENLLM_BASE_URL__|__OPENLLM_API_KEY__/g,
+    (token) => token === CATALOG_BASE_URL_TOKEN ? `${inputs.apiBase}/v1` : inputs.apiKey,
+  )) as TJsonObject;
+
+/** Parse before substituting scalar values, so paths cannot become escapes. */
+const overlayDocument = (
+  text: string,
+  format: "json" | "toml" | "yaml",
+  inputs: TLaunchInputs,
+  values: Readonly<Record<string, unknown>> = {},
+): TJsonObject => {
+  // TOML/YAML array slots are unquoted in authored templates. Quote the slot,
+  // not its eventual value, before parsing. JSON slots are already quoted.
+  const source = format === "json" ? text : text.replace(/(?<=args = |args: )\{\{MCP_ARGS\}\}/g, '"{{MCP_ARGS}}"');
+  const doc = format === "json" ? JSON.parse(source)
+    : format === "toml" ? Bun.TOML.parse(source) : Bun.YAML.parse(source);
+  const slots: Readonly<Record<string, unknown>> = {
+    MCP_ARGS: mcpArgs(inputs.tier),
+    MCP_COMMAND: [inputs.binPath, ...mcpArgs(inputs.tier)],
+    ...values,
+  };
+  const vars = overlayVars(inputs);
+  return mapStrings(doc, (text) => {
+    const slot = /^\{\{([A-Z0-9_]+)\}\}$/.exec(text)?.[1];
+    if (slot !== undefined && Object.hasOwn(slots, slot)) return slots[slot];
+    return substitute(text, vars);
+  }) as TJsonObject;
+};
 
 /**
  * Parse the Grok catalog block into a TOML document. Best-effort: an
@@ -144,7 +177,7 @@ const parseGrokCatalog = (
   inputs: TLaunchInputs,
 ): TJsonObject => {
   try {
-    return Bun.TOML.parse(fillCatalogTokens(catalog, inputs)) as TJsonObject;
+    return fillCatalogTokens(Bun.TOML.parse(catalog), inputs);
   } catch {
     return {};
   }
@@ -180,6 +213,16 @@ const HELPER_KEY_VAR = "OPENLLM_GATEWAY_KEY";
  */
 const CLAUDE_KEY_HELPER = `#!/bin/sh\nprintf '%s' "$${HELPER_KEY_VAR}"\n`;
 
+// Windows has no executable /bin/sh contract. Inline trusted PowerShell code
+// avoids script execution-policy changes and shell expansion of the key.
+// Only the environment variable name is encoded; no credential enters argv.
+const CLAUDE_WINDOWS_KEY_HELPER =
+  "powershell.exe -NoLogo -NoProfile -NonInteractive -EncodedCommand " +
+  Buffer.from(
+    `[Console]::Out.Write([Environment]::GetEnvironmentVariable('${HELPER_KEY_VAR}'))`,
+    "utf16le",
+  ).toString("base64");
+
 /**
  * The helper's path RELATIVE to the run dir. Single source for both the
  * `execFiles` key (which is run-dir-relative) and the absolute `apiKeyHelper`
@@ -203,17 +246,17 @@ const CLAUDE_KEY_HELPER_REL = "hooks/api-key.sh";
  * OUR side is the only fix that leaves theirs intact.
  */
 const planClaude = (inputs: TLaunchInputs): TLaunchPlan => {
-  const vars = overlayVars(inputs);
   const helperPath = `${inputs.runDir}/${CLAUDE_KEY_HELPER_REL}`;
-  const settings = parseJsonLoose(
-    substitute(OVERLAYS.claude.settings, vars),
-  ) as TJsonObject;
+  const windows = process.platform === "win32";
+  const settings = overlayDocument(OVERLAYS.claude.settings, "json", inputs);
   return {
     files: {
       "settings.json": `${JSON.stringify(
         {
           ...settings,
-          apiKeyHelper: helperPath,
+          apiKeyHelper: windows
+            ? CLAUDE_WINDOWS_KEY_HELPER
+            : `'${helperPath.replaceAll("'", "'\\''")}'`,
           // Claude auto-fetches the user's claude.ai cloud MCP connectors, then
           // reports that it disabled them because another auth source takes
           // precedence. Under the gateway they could never have connected — the
@@ -233,17 +276,10 @@ const planClaude = (inputs: TLaunchInputs): TLaunchPlan => {
       ...(inputs.bare
         ? {}
         : {
-            "mcp.json": substitute(
-              substituteJsonValue(
-                OVERLAYS.claude.mcp,
-                "MCP_ARGS",
-                vars.MCP_ARGS,
-              ),
-              vars,
-            ),
+            "mcp.json": JSON.stringify(overlayDocument(OVERLAYS.claude.mcp, "json", inputs)),
           }),
     },
-    execFiles: { [CLAUDE_KEY_HELPER_REL]: CLAUDE_KEY_HELPER },
+    execFiles: windows ? {} : { [CLAUDE_KEY_HELPER_REL]: CLAUDE_KEY_HELPER },
     args: [
       "--settings",
       `${inputs.runDir}/settings.json`,
@@ -276,10 +312,7 @@ const planClaude = (inputs: TLaunchInputs): TLaunchPlan => {
  * named via `env_key`, not inlined, so it never reaches argv.
  */
 const planCodex = (inputs: TLaunchInputs): TLaunchPlan => {
-  const vars = overlayVars(inputs);
-  const overrides = Bun.TOML.parse(
-    substitute(OVERLAYS.codex.overrides, vars),
-  ) as TJsonObject;
+  const overrides = overlayDocument(OVERLAYS.codex.overrides, "toml", inputs);
   const files: Record<string, string> = {};
   if (inputs.catalog !== undefined) files["models.json"] = inputs.catalog;
   else delete overrides.model_catalog_json; // no catalog → don't point at a missing file
@@ -300,10 +333,7 @@ const planCodex = (inputs: TLaunchInputs): TLaunchPlan => {
  * real files in the run dir.
  */
 const planGrok = (inputs: TLaunchInputs): TLaunchPlan => {
-  const vars = overlayVars(inputs);
-  const overlay = Bun.TOML.parse(
-    substitute(OVERLAYS.grok.config, vars),
-  ) as TJsonObject;
+  const overlay = overlayDocument(OVERLAYS.grok.config, "toml", inputs);
   // The catalog is its own TOML document of one [model."<id>"] table per
   // activated model. Parse + deep-merge it (it must NOT be concatenated — both
   // documents define `[model."ultra"]`, which is a duplicate-key error) so the
@@ -312,9 +342,7 @@ const planGrok = (inputs: TLaunchInputs): TLaunchPlan => {
     inputs.catalog === undefined
       ? {}
       : parseGrokCatalog(inputs.catalog, inputs);
-  const mcp = Bun.TOML.parse(
-    substitute(OVERLAYS.grok.mcp, vars),
-  ) as TJsonObject;
+  const mcp = overlayDocument(OVERLAYS.grok.mcp, "toml", inputs);
   const user =
     inputs.userConfig === undefined
       ? {}
@@ -334,7 +362,7 @@ const planGrok = (inputs: TLaunchInputs): TLaunchPlan => {
   return {
     files: {
       "config.toml": serializeToml(merged),
-      "hooks/openllm.json": substitute(OVERLAYS.grok.hooks, vars),
+      "hooks/openllm.json": JSON.stringify(overlayDocument(OVERLAYS.grok.hooks, "json", inputs)),
       "rules/openllm.md": OVERLAYS.grok.guidance,
     },
     args: [],
@@ -353,9 +381,7 @@ const planGrok = (inputs: TLaunchInputs): TLaunchPlan => {
  * `~/.hermes`. Sticky profile writes live on `openllm hermes install`.
  */
 const planHermes = (inputs: TLaunchInputs): TLaunchPlan => {
-  const vars = overlayVars(inputs);
-  const overlayText = substitute(OVERLAYS.hermes.config, vars);
-  const overlay = parseYaml(overlayText) ?? {};
+  const overlay = overlayDocument(OVERLAYS.hermes.config, "yaml", inputs);
   const user =
     inputs.userConfig === undefined ? {} : (parseYaml(inputs.userConfig) ?? {});
   const merged = deepMerge(user, overlay) as TJsonObject;
@@ -386,31 +412,9 @@ const planHermes = (inputs: TLaunchInputs): TLaunchPlan => {
  * the run dir. An unparseable user config degrades to our overlay alone.
  */
 const planOpenCode = (inputs: TLaunchInputs): TLaunchPlan => {
-  const vars = overlayVars(inputs);
-  // The catalog carries USER-configured model IDs/names, which may contain
-  // `{{…}}`-like sequences. It must be injected ONLY AFTER every template
-  // substitution pass has run, so `substitute` (which throws on an unknown
-  // `{{…}}`) never scans it. The models slot is parked behind a non-placeholder
-  // sentinel across the substitution passes, then filled last.
-  const MODELS_SLOT = '"__OPENLLM_MODELS_SLOT__"';
-  const substituted = substitute(
-    // opencode's MCP `command` bundles the binary + args in one array; the
-    // quoted `"{{MCP_COMMAND}}"` becomes that array, tier-gated.
-    substituteJsonValue(
-      OVERLAYS.opencode.config,
-      "MCP_COMMAND",
-      mcpCommandJson(inputs.binPath, inputs.tier),
-    ).replaceAll('"{{MODELS}}"', MODELS_SLOT),
-    vars,
-  );
-  // Callback form: a string replacement interprets `$&`/`$``/`$'`/`$n` in the
-  // catalog; a function return is inserted verbatim.
-  const overlayText = substituted.replaceAll(MODELS_SLOT, () =>
-    inputs.catalog === undefined
-      ? "{}"
-      : fillCatalogTokens(inputs.catalog, inputs),
-  );
-  const overlay = JSON.parse(overlayText) as TJsonObject;
+  const models = inputs.catalog === undefined ? {}
+    : fillCatalogTokens(JSON.parse(inputs.catalog), inputs);
+  const overlay = overlayDocument(OVERLAYS.opencode.config, "json", inputs, { MODELS: models });
   const user =
     inputs.userConfig === undefined
       ? {}

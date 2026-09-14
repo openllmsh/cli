@@ -114,40 +114,72 @@ else
   [ "$ACTUAL" = "$PUBLISHED" ] \
     || die "checksum mismatch (expected $PUBLISHED, got $ACTUAL) — refusing to install"
   chmod 0755 "$BIN"
-  mv -f "$BIN" "$DEST"
   # Preserve a valid Developer ID / notarized signature; only ad-hoc when invalid.
   if [ "$OS" = "darwin" ]; then
-    xattr -d com.apple.quarantine "$DEST" >/dev/null 2>&1 || true
-    if ! codesign --verify "$DEST" >/dev/null 2>&1; then
-      codesign --force --sign - "$DEST" >/dev/null 2>&1 || true
-      printf '%s %s\n' "$PUBLISHED" "$(sha256_of "$DEST")" > "$STAMP" 2>/dev/null || true
+    xattr -d com.apple.quarantine "$BIN" >/dev/null 2>&1 || true
+    if ! codesign --verify --strict "$BIN" >/dev/null 2>&1; then
+      codesign --force --sign - "$BIN" >/dev/null 2>&1 \
+        || die "could not sign openllm — refusing to install"
+      codesign --verify --strict "$BIN" >/dev/null 2>&1 \
+        || die "signature verification failed for openllm — refusing to install"
+      printf '%s %s\n' "$PUBLISHED" "$(sha256_of "$BIN")" > "$STAMP" 2>/dev/null || true
     fi
   fi
+  mv -f "$BIN" "$DEST"
   echo "  openllm installed → $DEST"
 fi
 
 # Record the gateway origin (and a key, when supplied) in the SHARED config file
-# the daemon also boots from. Never clobber an existing key with nothing.
-# Always refresh OPENLLM_CLOUD_ORIGIN so origin changes are propagated.
-EXISTING_KEY=""
-EXISTING_DEVICE_ID=""
-if [ -f "$ENV_FILE" ]; then
-  EXISTING_KEY="$(sed -n 's/^OPENLLM_API_KEY=//p' "$ENV_FILE" | head -1)"
-  EXISTING_DEVICE_ID="$(sed -n 's/^OPENLLM_DEVICE_ID=//p' "$ENV_FILE" | head -1)"
-fi
-API_KEY="${OPENLLM_API_KEY:-$EXISTING_KEY}"
-# umask in a SUBSHELL: this write is now unconditional, so a bare `umask 077`
-# would leak owner-only mode into everything after it — including the rc file
-# `$DEST setup` appends to.
+# the daemon also boots from. Match its exclusive .lock + atomic rename protocol,
+# and read only AFTER acquiring the lock. Preserve every unrelated setting and
+# the latest device/key a concurrent daemon may have persisted during download.
+# This installer owns the origin, and the key only when explicitly supplied.
 (
+  lock="$ENV_FILE.lock"
+  tmp="$ENV_FILE.tmp.$$"
+  deadline=$((SECONDS + 5))
+  acquired=0
+  while [ "$SECONDS" -lt "$deadline" ]; do
+    if (set -C; : > "$lock") 2>/dev/null; then acquired=1; break; fi
+    sleep 0.01
+  done
+  [ "$acquired" = 1 ] || die "could not acquire config lock: $lock"
+  trap 'rm -f "$tmp" "$lock"' EXIT
+  # The subshell keeps the private creation mode out of later shell setup.
   umask 077
-  {
-    echo "OPENLLM_CLOUD_ORIGIN=$ORIGIN"
-    [ -n "$API_KEY" ] && echo "OPENLLM_API_KEY=$API_KEY"
-    [ -n "$EXISTING_DEVICE_ID" ] && echo "OPENLLM_DEVICE_ID=$EXISTING_DEVICE_ID"
-  } > "$ENV_FILE"
+  : > "$tmp"
+  wrote_origin=0
+  wrote_key=0
+  if [ -f "$ENV_FILE" ]; then
+    while IFS= read -r line || [ -n "$line" ]; do
+      case "${line%%=*}" in
+        OPENLLM_CLOUD_ORIGIN)
+          if [ "$wrote_origin" = 0 ]; then
+            printf 'OPENLLM_CLOUD_ORIGIN=%s\n' "$ORIGIN" >> "$tmp"
+            wrote_origin=1
+          fi
+          ;;
+        OPENLLM_API_KEY)
+          if [ -n "${OPENLLM_API_KEY:-}" ]; then
+            if [ "$wrote_key" = 0 ]; then
+              printf 'OPENLLM_API_KEY=%s\n' "$OPENLLM_API_KEY" >> "$tmp"
+              wrote_key=1
+            fi
+          else
+            printf '%s\n' "$line" >> "$tmp"
+          fi
+          ;;
+        *) printf '%s\n' "$line" >> "$tmp" ;;
+      esac
+    done < "$ENV_FILE"
+  fi
+  if [ "$wrote_origin" = 0 ]; then printf 'OPENLLM_CLOUD_ORIGIN=%s\n' "$ORIGIN" >> "$tmp"; fi
+  if [ -n "${OPENLLM_API_KEY:-}" ] && [ "$wrote_key" = 0 ]; then
+    printf 'OPENLLM_API_KEY=%s\n' "$OPENLLM_API_KEY" >> "$tmp"
+  fi
+  chmod 0600 "$tmp"
+  mv -f "$tmp" "$ENV_FILE" || die "could not write config file: $ENV_FILE"
 )
-chmod 0600 "$ENV_FILE"
 echo "  gateway config written → $ENV_FILE"
 
 # PATH symlinks (openllm + ollm), the marked rc block, and completion for both

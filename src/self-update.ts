@@ -28,12 +28,12 @@ const FETCH_TIMEOUT_MS = 30_000;
  *  returns null too — matching `hostTarget()` in `scripts/verify.ts` and the
  *  daemon's `currentTarget()` — letting the caller fail with a clear message
  *  instead of 404ing on a bogus target. */
-const targetSuffix = (): string | null => {
-  const os = process.platform === "darwin" ? "darwin" : "linux";
+export const targetSuffix = (platform: string = process.platform, architecture: string = process.arch): string | null => {
+  const os = platform;
   const arch =
-    process.arch === "x64"
+    architecture === "x64"
       ? "x64-baseline"
-      : process.arch === "arm64"
+      : architecture === "arm64"
         ? "arm64"
         : null;
   if (arch === null) return null;

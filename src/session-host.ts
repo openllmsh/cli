@@ -12,6 +12,7 @@ import type { TDaemonCli } from "./clients/registry";
 import { DAEMON_CLIS } from "./clients/registry";
 import { findDaemonBinary as findManagedDaemonBinary } from "./daemon-delegation";
 import { daemonStateDir } from "./env";
+import { processStartIdentity } from "@openllmsh/protocol/local-runtime";
 
 export type TSessionHostMeta = {
   readonly id: string;
@@ -86,17 +87,7 @@ export const isSessionHostMeta = (
 };
 
 const processStartTime = (pid: number): string | null => {
-  try {
-    const output = Bun.spawnSync(["ps", "-o", "lstart=", "-p", String(pid)], {
-      stdout: "pipe",
-      stderr: "ignore",
-    });
-    if (output.exitCode !== 0) return null;
-    const value = new TextDecoder().decode(output.stdout).trim();
-    return value.length > 0 ? value : null;
-  } catch {
-    return null;
-  }
+  return processStartIdentity(pid, daemonStateDir()) ?? null;
 };
 
 /** PID liveness only — used for legacy meta that predates processStartTime. */

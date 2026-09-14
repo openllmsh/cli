@@ -9,6 +9,9 @@
  */
 
 import { spawn } from "node:child_process";
+import crossSpawn from "cross-spawn";
+import cmdEscape from "cross-spawn/lib/util/escape.js";
+import { executableCandidates, executablePathDirs } from "@openllmsh/protocol/executable-paths";
 import {
   chmodSync,
   existsSync,
@@ -60,15 +63,15 @@ const expandHome = (p: string): string =>
 export const findClientBinary = (client: TClient): string | null => {
   for (const candidate of client.binPaths) {
     const abs = expandHome(candidate);
-    if (existsSync(abs)) return abs;
+    for (const path of executableCandidates(abs)) if (existsSync(path)) return path;
   }
   // Fall back to PATH resolution — `spawn` would do this anyway, but resolving
   // here lets us print the install hint instead of an ENOENT stack.
-  const dirs = (process.env.PATH ?? "").split(":");
+  const dirs = executablePathDirs();
   for (const dir of dirs) {
     if (dir.length === 0) continue;
     const abs = join(dir, client.bin);
-    if (existsSync(abs)) return abs;
+    for (const path of executableCandidates(abs)) if (existsSync(path)) return path;
   }
   return null;
 };
@@ -623,7 +626,19 @@ export const execClient = (
   unsetEnv: readonly string[] = [],
 ): Promise<number> =>
   new Promise((resolve) => {
-    const child = spawn(bin, args, {
+    // cross-spawn quotes cmd/bat launchers without interpolating caller args.
+    // PowerShell files retain the host's execution policy (no bypass).
+    const powershell = process.platform === "win32" && /\.ps1$/i.test(bin);
+    // Global npm shims also re-parse %*. cross-spawn only double-escapes
+    // node_modules/.bin shims, so explicitly cover global cmd/bat launchers.
+    const batch = process.platform === "win32" && /\.(cmd|bat)$/i.test(bin);
+    const batchCommand = batch
+      ? '"' + [cmdEscape.command(bin), ...args.map(arg => cmdEscape.argument(arg, true))].join(" ") + '"'
+      : "";
+    const child = (batch || process.platform !== "win32" ? spawn : crossSpawn)(
+      batch ? (process.env.ComSpec ?? process.env.COMSPEC ?? "cmd.exe") : powershell ? "powershell.exe" : bin,
+      batch ? ["/d", "/s", "/c", batchCommand] : powershell ? ["-NoLogo", "-NoProfile", "-NonInteractive", "-File", bin, ...args] : [...args], {
+      ...(batch ? { windowsVerbatimArguments: true } : {}),
       stdio: "inherit",
       env: mergeSessionEnv(process.env, env, unsetEnv),
     });

@@ -17,8 +17,8 @@
  *   bun run packages/cli/scripts/compile.ts --host     # current host only
  *   bun run packages/cli/scripts/compile.ts --version 1.2.3
  */
-import { readFileSync, writeFileSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { gzipSync } from "node:zlib";
 import { $ } from "bun";
@@ -111,6 +111,7 @@ const TARGETS = [
   "bun-darwin-x64-baseline",
   "bun-linux-x64-baseline",
   "bun-linux-arm64",
+  "bun-windows-x64-baseline",
 ] as const;
 
 const argv = process.argv.slice(2);
@@ -127,26 +128,49 @@ const version =
 
 const outfileFor = (target: string): string => {
   const suffix = target.replace(/^bun-/, "");
-  return `${OUT_DIR}/openllm-${suffix}`;
+  return `${OUT_DIR}/openllm-${suffix}${target.includes("windows") ? ".exe" : ""}`;
 };
 
 const buildOne = async (
   target: string | null,
   cloudOrigin: string,
 ): Promise<string> => {
-  const outfile = target === null ? `${OUT_DIR}/openllm` : outfileFor(target);
+  // Bun appends .exe on Windows; gzip must read that actual emitted path.
+  const outfile = target === null
+    ? `${OUT_DIR}/openllm${process.platform === "win32" ? ".exe" : ""}`
+    : outfileFor(target);
   const targetArgs = target === null ? [] : ["--target", target];
   const defines = compileDefineArgs(cloudOrigin, version);
-  await $`bun build ${ENTRY} \
-    ${COMPILE_BUN_FLAGS} \
-    ${defines} \
-    ${targetArgs} \
-    --outfile ${outfile}`;
-  // Gzip sidecar for DISTRIBUTION — the published GitHub asset is the `.gz`.
-  // The release pins the sha256 of the DECOMPRESSED binary; install +
-  // self-update decompress before verifying, so the integrity gate is
-  // independent of gzip's non-determinism.
-  writeFileSync(`${outfile}.gz`, gzipSync(readFileSync(outfile), { level: 9 }));
+  // Bun 1.3.14 Windows bytecode crashed at startup on the baseline test host,
+  // so a Windows host/target build drops `--bytecode`. Every other platform
+  // keeps the source-hiding flag. (Same guard the release Windows build needs
+  // when `--host` is used inside the Windows guest.)
+  const windowsBuild =
+    target?.includes("windows") ||
+    (target === null && process.platform === "win32");
+  const bunFlags = windowsBuild
+    ? COMPILE_BUN_FLAGS.filter((flag) => flag !== "--bytecode")
+    : COMPILE_BUN_FLAGS;
+  // Bun's standalone compiler uses process-local intermediate names. Separate
+  // both cwd and outfile directories so concurrent targets cannot collide.
+  const scratch = mkdtempSync(join(OUT_DIR, ".compile-"));
+  const staged = join(scratch, basename(outfile));
+  try {
+    await $`bun build ${ENTRY} \
+      ${bunFlags} \
+      ${defines} \
+      ${targetArgs} \
+      --outfile ${staged}`.cwd(scratch);
+    // Gzip sidecar for DISTRIBUTION — the published GitHub asset is the `.gz`.
+    // The release pins the sha256 of the DECOMPRESSED binary; install +
+    // self-update decompress before verifying, so the integrity gate is
+    // independent of gzip's non-determinism.
+    writeFileSync(`${staged}.gz`, gzipSync(readFileSync(staged), { level: 9 }));
+    renameSync(staged, outfile);
+    renameSync(`${staged}.gz`, `${outfile}.gz`);
+  } finally {
+    rmSync(scratch, { recursive: true, force: true });
+  }
   return outfile;
 };
 
@@ -158,14 +182,17 @@ const main = async (): Promise<void> => {
     console.log(`built host binary → ${out}`);
     return;
   }
-  // All four targets in parallel — independent cross-compiles, no shared state.
+  // Every parallel compiler has private intermediates. Wait for all cleanup
+  // before reporting an error so a failed build leaves no active writers.
   const t0 = Date.now();
-  await Promise.all(
+  const builds = await Promise.allSettled(
     TARGETS.map(async (target) => {
       const out = await buildOne(target, cloudOrigin);
       console.log(`built ${target} → ${out}`);
     }),
   );
+  const failed = builds.find((build) => build.status === "rejected");
+  if (failed?.status === "rejected") throw failed.reason;
   console.log(`compiled ${TARGETS.length} targets in ${Date.now() - t0}ms`);
 };
 

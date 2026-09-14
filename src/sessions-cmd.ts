@@ -5,7 +5,7 @@
  * `ctl.sock`), so these commands remain usable while the daemon is stopped.
  */
 
-import { attachBrokerSession } from "./clients/attach";
+import { attachBrokerSession, brokerAttachUrl } from "./clients/attach";
 import type { TDaemonCli } from "./clients/registry";
 import { resolveById } from "./clients/session-picker";
 import {
@@ -147,12 +147,10 @@ const attach = async (
   }
   if (
     !opts.pipe &&
-    (!process.stdin.isTTY ||
-      !process.stdout.isTTY ||
-      process.platform === "win32")
+    (!process.stdin.isTTY || !process.stdout.isTTY)
   ) {
     process.stderr.write(
-      "[openllm] attaching requires an interactive non-Windows terminal\n",
+      "[openllm] attaching requires an interactive terminal\n",
     );
     return 1;
   }
@@ -248,7 +246,7 @@ export const killSessionHost = async (
     let ws: WebSocket;
     try {
       ws = new WebSocket(
-        socketPath.startsWith("/") ? `ws+unix://${socketPath}` : socketPath,
+        brokerAttachUrl(socketPath),
       );
     } catch {
       settle(false);

@@ -621,8 +621,19 @@ const redact = (text: string): string => {
   out = out.replace(/xai-[A-Za-z0-9._-]+/g, "***");
   out = out.replace(/AIza[A-Za-z0-9._-]+/g, "***");
   out = out.replace(/eyJ[A-Za-z0-9._-]+/g, "***");
-  out = out.replace(/\bBearer\s+[^\s]+/gi, "Bearer ***");
-  out = out.replace(/[?&](?:token|key|api_key|sig)=[^&\s]+/gi, (match) => {
+  // Seeds and private-plane credentials need not carry a vendor prefix. Match
+  // their field names (including camelCase) rather than all hex strings,
+  // preserving diagnostic hashes and fields such as tokenCount.
+  // Consume quoted values as a unit (including escaped characters and spaces).
+  out = out.replace(
+    /(\b(?:[a-z0-9_-]*(?:seed|password|passwd|secret|token|api[_-]?key|private[_-]?key|credential)|private_plane_key(?:_[a-z0-9]+)?)["']?\s*[:=]\s*)("(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^\s,;&}\]]+)/gi,
+    (_match, prefix: string, value: string) =>
+      `${prefix}${value.startsWith('"') ? '"***"' : value.startsWith("'") ? "'***'" : "***"}`,
+  );
+  out = out.replace(/-----BEGIN (?:[A-Z]+ )?PRIVATE KEY-----[\s\S]*?-----END (?:[A-Z]+ )?PRIVATE KEY-----/g, "***");
+  out = out.replace(/(https?:\/\/)[^\s/@:]+:[^\s/@]+@/gi, "$1***@");
+  out = out.replace(/\b(Bearer|Basic)\s+[^\s"',;}]+/gi, "$1 ***");
+  out = out.replace(/[?&](?:token|key|api_key|access_token|refresh_token|sig)=[^&\s"']+/gi, (match) => {
     const eq = match.indexOf("=");
     return `${match.slice(0, eq + 1)}***`;
   });

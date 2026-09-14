@@ -6,7 +6,10 @@
  * and daemon versions can roll independently.
  */
 
+import { isAbsolute } from "node:path";
 import type { TDaemonCli } from "./registry";
+import { daemonStateDir } from "../env";
+import { localSessionEndpoint } from "@openllmsh/protocol/local-runtime";
 
 export type TBrokerOpen = {
   readonly session_id: string;
@@ -170,6 +173,7 @@ export type TBrokerAttachTarget = string;
  * transport test uses this exact spelling).
  */
 export const brokerAttachUrl = (target: TBrokerAttachTarget): string => {
+  if (process.platform === "win32" && isAbsolute(target)) return localSessionEndpoint(target, daemonStateDir());
   if (target.startsWith("ws+unix://")) return target;
   if (target.startsWith("/")) return `ws+unix://${target}`;
   if (target.startsWith("ws://") || target.startsWith("wss://"))
@@ -452,6 +456,9 @@ export const attachBrokerSession = async (args: {
       }
       if (envelope.t === "exit") {
         exitCode = envelope.code;
+        // The daemon's RTC bridge consumes this pipe. Preserve the broker's
+        // exit status before EOF so remote clients can distinguish failures.
+        if (pipe) io.stdout.write(`${String.fromCharCode(PIPE_CTRL)}${JSON.stringify(envelope)}\n`);
         return;
       }
       if (envelope.t === "reset") {
