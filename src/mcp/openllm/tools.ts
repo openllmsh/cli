@@ -372,7 +372,7 @@ export const handleOpenllmTool = async (
         ? res.body
         : JSON.stringify(res.body, null, 2);
     if (!res.ok) return textResult(`HTTP ${res.status}: ${text}`, true);
-    if (op.path === "/v1/images/generations")
+    if (op.path === "/v1/images/generations" || op.path === "/v1/images/edits")
       return imageResult(res.body, config);
     return textResult(text);
   } catch (err) {

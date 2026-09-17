@@ -934,6 +934,18 @@ export const API_OPERATIONS: readonly TApiOperation[] = [
     "hasBody": true
   },
   {
+    "id": "v1Images.imagesEdits",
+    "method": "post",
+    "path": "/v1/images/edits",
+    "summary": "",
+    "tags": [
+      "v1Images"
+    ],
+    "pathParams": [],
+    "queryParams": [],
+    "hasBody": true
+  },
+  {
     "id": "v1Images.imagesGenerations",
     "method": "post",
     "path": "/v1/images/generations",

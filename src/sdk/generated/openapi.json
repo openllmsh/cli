@@ -80,7 +80,9 @@
                                 "transcription",
                                 "speech",
                                 "image_generation",
+                                "image_editing",
                                 "video_generation",
+                                "realtime",
                                 "vision",
                                 "tools",
                                 "json_mode",
@@ -88,6 +90,37 @@
                                 "reasoning"
                               ]
                             }
+                          },
+                          "audio_support": {
+                            "type": "object",
+                            "required": [],
+                            "properties": {
+                              "input_formats": {
+                                "type": "array",
+                                "items": {
+                                  "type": "string"
+                                }
+                              },
+                              "output_formats": {
+                                "type": "array",
+                                "items": {
+                                  "type": "string"
+                                }
+                              },
+                              "voices": {
+                                "type": "array",
+                                "items": {
+                                  "type": "string"
+                                }
+                              },
+                              "realtime_operations": {
+                                "type": "array",
+                                "items": {
+                                  "type": "string"
+                                }
+                              }
+                            },
+                            "additionalProperties": false
                           },
                           "dimension_presets": {
                             "type": "array",
@@ -7235,6 +7268,255 @@
                   },
                   "user": {
                     "type": "string"
+                  }
+                },
+                "additionalProperties": false
+              }
+            }
+          },
+          "required": true
+        }
+      }
+    },
+    "/v1/images/edits": {
+      "post": {
+        "tags": [
+          "v1Images"
+        ],
+        "operationId": "v1Images.imagesEdits",
+        "parameters": [],
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "created",
+                    "data"
+                  ],
+                  "properties": {
+                    "created": {
+                      "type": "number"
+                    },
+                    "data": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "required": [],
+                        "properties": {
+                          "url": {
+                            "type": "string"
+                          },
+                          "b64_json": {
+                            "type": "string"
+                          },
+                          "revised_prompt": {
+                            "type": "string"
+                          }
+                        },
+                        "additionalProperties": false
+                      }
+                    }
+                  },
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request did not match the expected schema",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/HttpApiDecodeError"
+                    },
+                    {
+                      "type": "object",
+                      "required": [
+                        "error"
+                      ],
+                      "properties": {
+                        "error": {
+                          "type": "object",
+                          "required": [
+                            "message"
+                          ],
+                          "properties": {
+                            "message": {
+                              "type": "string"
+                            },
+                            "type": {
+                              "type": "string"
+                            },
+                            "code": {
+                              "type": "string"
+                            }
+                          },
+                          "additionalProperties": false
+                        }
+                      },
+                      "additionalProperties": false
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "error"
+                  ],
+                  "properties": {
+                    "error": {
+                      "type": "object",
+                      "required": [
+                        "message"
+                      ],
+                      "properties": {
+                        "message": {
+                          "type": "string"
+                        },
+                        "type": {
+                          "type": "string"
+                        },
+                        "code": {
+                          "type": "string"
+                        }
+                      },
+                      "additionalProperties": false
+                    }
+                  },
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "error"
+                  ],
+                  "properties": {
+                    "error": {
+                      "type": "object",
+                      "required": [
+                        "message"
+                      ],
+                      "properties": {
+                        "message": {
+                          "type": "string"
+                        },
+                        "type": {
+                          "type": "string"
+                        },
+                        "code": {
+                          "type": "string"
+                        }
+                      },
+                      "additionalProperties": false
+                    }
+                  },
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "error"
+                  ],
+                  "properties": {
+                    "error": {
+                      "type": "object",
+                      "required": [
+                        "message"
+                      ],
+                      "properties": {
+                        "message": {
+                          "type": "string"
+                        },
+                        "type": {
+                          "type": "string"
+                        },
+                        "code": {
+                          "type": "string"
+                        }
+                      },
+                      "additionalProperties": false
+                    }
+                  },
+                  "additionalProperties": false
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "model",
+                  "prompt",
+                  "image"
+                ],
+                "properties": {
+                  "model": {
+                    "type": "string"
+                  },
+                  "prompt": {
+                    "type": "string"
+                  },
+                  "image": {
+                    "type": "object",
+                    "required": [
+                      "url"
+                    ],
+                    "properties": {
+                      "url": {
+                        "type": "string"
+                      }
+                    },
+                    "additionalProperties": false
+                  },
+                  "n": {
+                    "type": "integer",
+                    "description": "a positive number",
+                    "title": "positive",
+                    "exclusiveMinimum": 0
+                  },
+                  "size": {
+                    "type": "string"
+                  },
+                  "quality": {
+                    "type": "string"
+                  },
+                  "response_format": {
+                    "type": "string",
+                    "enum": [
+                      "url",
+                      "b64_json"
+                    ]
                   }
                 },
                 "additionalProperties": false
@@ -21827,7 +22109,9 @@
                                 "transcription",
                                 "speech",
                                 "image_generation",
+                                "image_editing",
                                 "video_generation",
+                                "realtime",
                                 "vision",
                                 "tools",
                                 "json_mode",
@@ -21955,6 +22239,37 @@
                             "items": {
                               "type": "number"
                             }
+                          },
+                          "audio_support": {
+                            "type": "object",
+                            "required": [],
+                            "properties": {
+                              "input_formats": {
+                                "type": "array",
+                                "items": {
+                                  "type": "string"
+                                }
+                              },
+                              "output_formats": {
+                                "type": "array",
+                                "items": {
+                                  "type": "string"
+                                }
+                              },
+                              "voices": {
+                                "type": "array",
+                                "items": {
+                                  "type": "string"
+                                }
+                              },
+                              "realtime_operations": {
+                                "type": "array",
+                                "items": {
+                                  "type": "string"
+                                }
+                              }
+                            },
+                            "additionalProperties": false
                           },
                           "default_tiers": {
                             "type": "array",
