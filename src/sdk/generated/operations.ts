@@ -284,6 +284,18 @@ export const API_OPERATIONS: readonly TApiOperation[] = [
     "hasBody": true
   },
   {
+    "id": "marketingConsent.marketingConsent",
+    "method": "post",
+    "path": "/marketing-consent",
+    "summary": "",
+    "tags": [
+      "marketingConsent"
+    ],
+    "pathParams": [],
+    "queryParams": [],
+    "hasBody": true
+  },
+  {
     "id": "media.list",
     "method": "get",
     "path": "/media",
