@@ -253,6 +253,7 @@ const isImageGenerationBody = (
 const imageResult = async (
   body: unknown,
   config: { readonly baseUrl: string },
+  label: string,
 ): Promise<TToolResult> => {
   if (!isImageGenerationBody(body)) {
     return textResult(JSON.stringify(body, null, 2));
@@ -287,7 +288,7 @@ const imageResult = async (
   }
 
   const notes = [
-    "Image generated.",
+    label,
     ...urls,
     ...revisedPrompts.map((prompt) => `Revised prompt: ${prompt}`),
   ];
@@ -372,8 +373,12 @@ export const handleOpenllmTool = async (
         ? res.body
         : JSON.stringify(res.body, null, 2);
     if (!res.ok) return textResult(`HTTP ${res.status}: ${text}`, true);
-    if (op.path === "/v1/images/generations" || op.path === "/v1/images/edits")
-      return imageResult(res.body, config);
+    if (op.path === "/v1/images/generations") {
+      return imageResult(res.body, config, "Image generated.");
+    }
+    if (op.path === "/v1/images/edits") {
+      return imageResult(res.body, config, "Image edited.");
+    }
     return textResult(text);
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
