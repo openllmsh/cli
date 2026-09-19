@@ -114,9 +114,45 @@ const toolDef = (op: TApiOperation): TToolDef => ({
  *  exposes inference + account ops for in-chat delegation. */
 export const openllmToolDefsAll = API_OPERATIONS.map(toolDef);
 
-/** The MCP-exposed surface — trimmed to reduce agent context. The
- *  `openllm mcp` server lists THIS. */
-export const openllmToolDefs = API_OPERATIONS.filter(isMcpExposed).map(toolDef);
+/** Browser-safe identification/limit shared with the CLI-only local adapter. */
+export const TRANSCRIPTION_TOOL_NAME = "api_v1Audio_transcriptions";
+export const MAX_TRANSCRIPTION_BYTES = 25 * 1024 * 1024;
+
+/** MCP-listed subset, with local input contracts where the CLI owns the IO. */
+export const openllmToolDefs = API_OPERATIONS.filter(isMcpExposed).map(
+  (op): TToolDef => {
+    const def = toolDef(op);
+    if (def.name !== TRANSCRIPTION_TOOL_NAME) return def;
+    return {
+      ...def,
+      description: `${def.description} Transcribe a local audio file by path; never send audio bytes or base64. Relative paths resolve from the MCP server working directory. Input and converted audio are limited to 25 MiB. WAV, MP3 and WebM pass through (provider codec restrictions still apply); Ogg (including Opus voice notes) and FLAC require system ffmpeg on PATH and are converted to mono 16 kHz PCM WAV.`,
+      inputSchema: {
+        type: "object",
+        properties: {
+          path: {
+            type: "string",
+            minLength: 1,
+            description:
+              "Local audio file path (absolute or relative to the MCP server working directory).",
+          },
+          model: {
+            type: "string",
+            minLength: 1,
+            description:
+              "Optional model alias; omit to use the HTTP handler default (OpenAI whisper-1).",
+          },
+          language: {
+            type: "string",
+            minLength: 1,
+            description: "Optional language code, for example en.",
+          },
+        },
+        required: ["path"],
+        additionalProperties: false,
+      },
+    };
+  },
+);
 
 /** Names in the MCP-exposed subset. The `openllm mcp` server gates CallTool
  *  on THIS — not `isOpenllmTool` — so a client cannot invoke a hidden

@@ -152,6 +152,27 @@ to cut agent context. Execution still recognizes every operation, so a trimmed
 tool is never uncallable. Mutating operations carry explicit consent copy in
 their tool descriptions.
 
+**Transcription is the local-file exception to the generic MCP input shape.**
+`api_v1Audio_transcriptions` lists `{ path, model?, language? }` in MCP only;
+`openllmToolDefsAll` retains the HTTP `body` for browser chat. The CLI server
+routes this one name, inside its group/listed-tool guard, to
+`src/mcp/openllm/transcribe-audio.ts`. That module alone imports filesystem and
+subprocess APIs; never import it from the browser-shared `tools.ts`.
+Relative paths resolve from the MCP server working directory. Regular-file
+checks and bounded reads enforce a 25 MiB input ceiling. WAV/MP3/WebM pass
+through by signature (provider codec restrictions still apply); Ogg/Opus,
+including `.ogg` voice notes, and FLAC require **system ffmpeg on PATH** and
+convert to mono 16 kHz signed PCM16 WAV. Other formats must be converted first.
+No codec is downloaded or bundled. Conversion is no-shell, forced-demuxer,
+pipe-only input, time/diagnostic/output bounded, and uses a private seekable
+WAV file so its headers contain final sizes; cleanup runs on all outcomes.
+Converted audio is capped at 25 MiB too, and overflow is an error, not truncation.
+The adapter constructs the data URL internally, redacts echoed audio, and reuses
+`handleOpenllmTool` / `callOperation` for auth and transport. An absent model
+stays absent (the cloud handler defaults to OpenAI `whisper-1`); supplied
+model/language pass unchanged. HTTP data-URL/multipart contracts and the daemon's
+existing transcription and subscription redirect behavior are unchanged.
+
 Because the artifacts are committed, `packages/cli` has **zero runtime
 workspace deps** — the public `cli` mirror builds standalone
 (`bun install && bun run compile`). The drift test

@@ -34,7 +34,9 @@ import {
   handleOpenllmTool,
   isMcpListedTool,
   openllmToolDefs,
+  TRANSCRIPTION_TOOL_NAME,
 } from "./openllm/tools";
+import { transcribeAudio } from "./openllm/transcribe-audio";
 import {
   handleSupermemoryTool,
   supermemoryToolDefs,
@@ -105,6 +107,8 @@ export const runMcpServer = async (
       return handleSupermemoryTool(name, a, supermemoryConfig);
     }
     if (groups.includes("openllm") && isMcpListedTool(name)) {
+      if (name === TRANSCRIPTION_TOOL_NAME)
+        return transcribeAudio(a, gatewayConfig);
       return handleOpenllmTool(name, a, gatewayConfig);
     }
     return {

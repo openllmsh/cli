@@ -8733,7 +8733,8 @@
                     "type": "string"
                   },
                   "file": {
-                    "type": "string"
+                    "type": "string",
+                    "description": "HTTP JSON audio data URL: start with \"data:audio/wav;base64,\" and append actual base64-encoded file bytes. HTTP also accepts multipart/form-data uploads. Local paths are not HTTP payloads: use the CLI MCP transcription tool with {\"path\":\"./voice-note.ogg\"} to read a local file without emitting base64. Ogg/Opus conversion in the CLI requires system ffmpeg on PATH."
                   },
                   "language": {
                     "type": "string"
