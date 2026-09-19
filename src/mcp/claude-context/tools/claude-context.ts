@@ -16,6 +16,7 @@ import { execSync } from "node:child_process";
 import * as crypto from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
+import type { TToolResult } from "../../types";
 import {
   chunkFile,
   chunksExists,
@@ -759,12 +760,11 @@ export async function handleClaudeContextTool(
   name: string,
   args: Record<string, unknown>,
   config: GatewayConfig,
-): Promise<{
-  content: Array<{ type: string; text: string }>;
-  isError?: boolean;
-}> {
-  const textRes = (t: string) => ({ content: [{ type: "text", text: t }] });
-  const errRes = (t: string) => ({
+): Promise<TToolResult> {
+  const textRes = (t: string): TToolResult => ({
+    content: [{ type: "text", text: t }],
+  });
+  const errRes = (t: string): TToolResult => ({
     content: [{ type: "text", text: t }],
     isError: true,
   });

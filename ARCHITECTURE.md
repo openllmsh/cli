@@ -135,12 +135,14 @@ logic lives in `clients/session-picker.ts` (pure, unit-tested);
 `scripts/generate-sdk.ts` runs ONLY in the monorepo: it derives the OpenAPI
 doc via the exact same path as the served `/api/swagger`
 (`buildSanitizedSpec` in `packages/api/handlers/swagger.ts` — shared
-sanitize, so the SDK can never drift from the published spec), then emits two
+sanitize, so the SDK can never drift from the published spec), then emits
 COMMITTED artifacts into `src/sdk/generated/`:
 
 - `openapi.json` — the sanitized spec (also served by `openllm api --spec`).
 - `operations.ts` — a dependency-free typed table: one row per spec operation
   (method, path, params, body-presence). Deterministically sorted.
+- `subscription-providers.ts` — the protocol-owned subscription provider slugs
+  used by MCP discovery, generated without adding a runtime workspace dependency.
 
 `src/mcp/openllm/tools.ts` derives one tool def per row and exports two
 surfaces: `openllmToolDefsAll` (**every** operation — the browser chat and the
@@ -151,6 +153,22 @@ account/config/vault writes plus the raw `/plugins/*` HTTP mirrors (the curated
 to cut agent context. Execution still recognizes every operation, so a trimmed
 tool is never uncallable. Mutating operations carry explicit consent copy in
 their tool descriptions.
+
+**MCP uses the v2 server SDK** (`@modelcontextprotocol/server`):
+`McpServer.registerTool` registers only the tier/group-filtered tool set, with
+`fromJsonSchema` validating the existing tool contracts. `serveStdio` negotiates
+legacy and current protocol connections from the same server factory. Unlisted
+tools cannot be called; logs stay on stderr.
+
+**Model discovery is subscription-first in MCP only.** `api_v1Models_list`
+guidance prefers a suitable direct subscription model over metered API models,
+with API alternatives for unsupported/unavailable subscriptions or explicit user
+choice. Its result stable-partitions direct subscription catalog cards ahead of
+other entries without dropping IDs or metadata. Provider slugs are generated from
+protocol's `SubscriptionProviderSlug` into `sdk/generated/subscription-providers.ts`.
+Aliases remain configurable fallback chains, not subscription guarantees. The
+catalog expresses configured availability, not live daemon reachability or quota.
+HTTP catalog order, browser compact inventory, and request routing are unchanged.
 
 **Transcription is the local-file exception to the generic MCP input shape.**
 `api_v1Audio_transcriptions` lists `{ path, model?, language? }` in MCP only;

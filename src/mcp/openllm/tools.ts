@@ -14,7 +14,9 @@
 import { callOperation } from "../../sdk/client";
 import type { TApiOperation } from "../../sdk/generated/operations";
 import { API_OPERATIONS } from "../../sdk/generated/operations";
+import { SUBSCRIPTION_PROVIDER_SLUGS } from "../../sdk/generated/subscription-providers";
 import type { TToolResult, TToolResultContent } from "../types";
+import { MODELS_TOOL_NAME } from "./model-priority";
 
 /** MCP tool names must match `[a-zA-Z0-9_-]+` — sanitize the operation id.
  *  Exported: the browser chat's tool bridge maps operations back to tool
@@ -122,6 +124,12 @@ export const MAX_TRANSCRIPTION_BYTES = 25 * 1024 * 1024;
 export const openllmToolDefs = API_OPERATIONS.filter(isMcpExposed).map(
   (op): TToolDef => {
     const def = toolDef(op);
+    if (def.name === MODELS_TOOL_NAME) {
+      return {
+        ...def,
+        description: `${def.description} Discover models before choosing an inference model. Subscription providers: ${SUBSCRIPTION_PROVIDER_SLUGS.join(", ")}. Their direct provider/model IDs are listed first; choose a subscription-suitable model supporting the task before a metered API model. Use API alternatives only if no suitable subscription model is available, the subscription cannot serve the request, or the user explicitly requests an API model. Use exact returned IDs and check capabilities, audio formats, and limits. Aliases are configurable fallback chains and may invoke metered APIs; they are not subscription guarantees. This is configured availability, not live readiness or remaining quota.`,
+      };
+    }
     if (def.name !== TRANSCRIPTION_TOOL_NAME) return def;
     return {
       ...def,

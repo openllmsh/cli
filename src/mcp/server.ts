@@ -1,25 +1,11 @@
 /**
- * The ONE MCP server (`openllm mcp`) — composes every tool group over a
- * single stdio transport, registered in `~/.claude.json` as the single
- * `mcpServers.openllm` entry:
- *
- *   - openllm         — the native gateway API (the MCP-exposed subset of
- *                       the generated OpenAPI spec — inference + read-only
- *                       ops; account/config writes + raw plugin mirrors are
- *                       trimmed to cut context. See `openllm/tools.ts`.)
- *   - openllm-context — semantic code + docs search (gateway dispatch)
- *   - openllm-memory  — persistent memory / recall (gateway dispatch)
- *
- * `--only <group>` narrows the surface for debugging; the install script
- * always registers the full server.
+ * The ONE MCP server (`openllm mcp`) — composes native API, context, and
+ * memory tools over stdio. `--only <group>` narrows the surface for debugging;
+ * the free-tier gate applies before registration, not just to tools/list.
  */
 
-import { Server } from "@modelcontextprotocol/sdk/server/index.js";
-import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import {
-  CallToolRequestSchema,
-  ListToolsRequestSchema,
-} from "@modelcontextprotocol/sdk/types.js";
+import { fromJsonSchema, McpServer } from "@modelcontextprotocol/server";
+import { serveStdio } from "@modelcontextprotocol/server/stdio";
 import { fetchTier } from "../clients/gateway";
 import type { TMcpGroup } from "../commands";
 import { mcpGroupsForTier } from "../commands";
@@ -31,6 +17,10 @@ import {
   isClaudeContextGroupTool,
 } from "./claude-context";
 import {
+  MODELS_TOOL_NAME,
+  prioritizeSubscriptionModels,
+} from "./openllm/model-priority";
+import {
   handleOpenllmTool,
   isMcpListedTool,
   openllmToolDefs,
@@ -41,25 +31,87 @@ import {
   handleSupermemoryTool,
   supermemoryToolDefs,
 } from "./supermemory/tools";
+import type { TToolResult } from "./types";
 
 export type { TMcpGroup } from "../commands";
-// The group list is owned by `commands.ts` (the dependency-free command
-// surface) so completion can consume it without this module's SDK graph.
 export { MCP_ONLY_GROUPS as MCP_GROUPS } from "../commands";
 
 const isSupermemoryTool = (name: string): boolean =>
-  supermemoryToolDefs.some((t) => t.name === name);
+  supermemoryToolDefs.some((tool) => tool.name === name);
+
+/** One registration path for both negotiated stdio eras and local tests. */
+export const createMcpServer = ({
+  requested,
+  tier,
+  config,
+}: {
+  requested: readonly TMcpGroup[];
+  tier: Parameters<typeof mcpGroupsForTier>[1];
+  config: { baseUrl: string; apiKey: string };
+}): McpServer => {
+  const groups = mcpGroupsForTier(requested, tier);
+  const supermemoryConfig = {
+    name: "openllm",
+    version: CLI_VERSION,
+    gatewayUrl: config.baseUrl,
+    gatewayApiKey: config.apiKey,
+  };
+  const tools = [
+    ...(groups.includes("openllm") ? openllmToolDefs : []),
+    ...(groups.includes("openllm-context") ? claudeContextGroupToolDefs : []),
+    ...(groups.includes("openllm-memory") ? supermemoryToolDefs : []),
+  ];
+  const server = new McpServer(
+    { name: "openllm", version: CLI_VERSION },
+    { capabilities: { tools: {} } },
+  );
+  for (const tool of tools) {
+    const name = tool.name;
+    const inputSchema: Record<string, unknown> = tool.inputSchema;
+    server.registerTool(
+      name,
+      {
+        description: tool.description,
+        inputSchema: fromJsonSchema<Record<string, unknown>>(inputSchema),
+      },
+      async (args): Promise<TToolResult> => {
+        if (
+          groups.includes("openllm-context") &&
+          isClaudeContextGroupTool(name)
+        ) {
+          return handleClaudeContextGroupTool(name, args, config);
+        }
+        if (groups.includes("openllm-memory") && isSupermemoryTool(name)) {
+          return handleSupermemoryTool(name, args, supermemoryConfig);
+        }
+        if (groups.includes("openllm") && isMcpListedTool(name)) {
+          if (name === TRANSCRIPTION_TOOL_NAME)
+            return transcribeAudio(args, config);
+          const result = await handleOpenllmTool(name, args, config);
+          return name === MODELS_TOOL_NAME
+            ? prioritizeSubscriptionModels(result)
+            : result;
+        }
+        return {
+          content: [{ type: "text", text: `Unknown tool: ${name}` }],
+          isError: true,
+        };
+      },
+    );
+  }
+  return server;
+};
 
 export const runMcpServer = async (
   requested: readonly TMcpGroup[],
 ): Promise<void> => {
   // stdout is reserved for MCP JSON-RPC; push all logs to stderr.
-  console.log = (...a: unknown[]) =>
-    process.stderr.write(`[LOG] ${a.join(" ")}\n`);
-  console.warn = (...a: unknown[]) =>
-    process.stderr.write(`[WARN] ${a.join(" ")}\n`);
-  console.error = (...a: unknown[]) =>
-    process.stderr.write(`[ERR] ${a.join(" ")}\n`);
+  console.log = (...args: unknown[]) =>
+    process.stderr.write(`[LOG] ${args.join(" ")}\n`);
+  console.warn = (...args: unknown[]) =>
+    process.stderr.write(`[WARN] ${args.join(" ")}\n`);
+  console.error = (...args: unknown[]) =>
+    process.stderr.write(`[ERR] ${args.join(" ")}\n`);
 
   const credential = requireCliApiKey("machine");
   if (!credential.ok) {
@@ -68,58 +120,15 @@ export const runMcpServer = async (
     return;
   }
   const cfg = credential.config;
-  const gatewayConfig = { baseUrl: cfg.gatewayUrl, apiKey: cfg.apiKey };
-  // Authoritative free-tier gate: drop code search even when a client overlay
-  // (or a persisted Hermes profile) launched us as bare `openllm mcp`.
+  const config = { baseUrl: cfg.gatewayUrl, apiKey: cfg.apiKey };
   const tier = await fetchTier({
     base: cfg.gatewayUrl,
     apiKey: cfg.apiKey,
     cloudOrigin: cfg.gatewayUrl,
     local: false,
   });
-  const groups = mcpGroupsForTier(requested, tier);
-  const supermemoryConfig = {
-    name: "openllm",
-    version: CLI_VERSION,
-    gatewayUrl: cfg.gatewayUrl,
-    gatewayApiKey: cfg.apiKey,
-  };
-
-  const tools = [
-    ...(groups.includes("openllm") ? openllmToolDefs : []),
-    ...(groups.includes("openllm-context") ? claudeContextGroupToolDefs : []),
-    ...(groups.includes("openllm-memory") ? supermemoryToolDefs : []),
-  ];
-
-  const server = new Server(
-    { name: "openllm", version: CLI_VERSION },
-    { capabilities: { tools: {} } },
-  );
-
-  server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools }));
-  server.setRequestHandler(CallToolRequestSchema, async (req) => {
-    const { name, arguments: args = {} } = req.params;
-    const a = args as Record<string, unknown>;
-    if (groups.includes("openllm-context") && isClaudeContextGroupTool(name)) {
-      return handleClaudeContextGroupTool(name, a, gatewayConfig);
-    }
-    if (groups.includes("openllm-memory") && isSupermemoryTool(name)) {
-      return handleSupermemoryTool(name, a, supermemoryConfig);
-    }
-    if (groups.includes("openllm") && isMcpListedTool(name)) {
-      if (name === TRANSCRIPTION_TOOL_NAME)
-        return transcribeAudio(a, gatewayConfig);
-      return handleOpenllmTool(name, a, gatewayConfig);
-    }
-    return {
-      content: [{ type: "text" as const, text: `Unknown tool: ${name}` }],
-      isError: true,
-    };
-  });
-
-  const transport = new StdioServerTransport();
-  await server.connect(transport);
+  serveStdio(() => createMcpServer({ requested, tier, config }));
   console.log(
-    `[MCP] openllm v${CLI_VERSION} listening on stdio (groups: ${groups.join(", ")})`,
+    `[MCP] openllm v${CLI_VERSION} listening on stdio (groups: ${mcpGroupsForTier(requested, tier).join(", ")})`,
   );
 };

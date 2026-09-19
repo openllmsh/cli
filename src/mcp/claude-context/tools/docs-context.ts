@@ -19,6 +19,7 @@
 import * as crypto from "node:crypto";
 import * as cheerio from "cheerio";
 import TurndownService from "turndown";
+import type { TToolResult } from "../../types";
 import {
   chunkFile,
   chunksExists,
@@ -962,12 +963,11 @@ export async function handleDocsContextTool(
   name: string,
   args: Record<string, unknown>,
   config: GatewayConfig,
-): Promise<{
-  content: Array<{ type: string; text: string }>;
-  isError?: boolean;
-}> {
-  const textRes = (t: string) => ({ content: [{ type: "text", text: t }] });
-  const errRes = (t: string) => ({
+): Promise<TToolResult> {
+  const textRes = (t: string): TToolResult => ({
+    content: [{ type: "text", text: t }],
+  });
+  const errRes = (t: string): TToolResult => ({
     content: [{ type: "text", text: t }],
     isError: true,
   });
