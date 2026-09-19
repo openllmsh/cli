@@ -172,11 +172,17 @@ billing claim) and is omitted on aliases. The catalog expresses configured
 availability, not live daemon reachability or quota.
 
 **Media inference may omit `model`.** Image generation/edit, transcription,
-speech, and video create select a compatible subscription candidate first,
-then a compatible configured API-key model. Explicit models override.
-Caller voice/format/size options are preserved; voiceless pronunciation is
-not treated as compatible with an arbitrary voice.
-HTTP catalog order, browser compact inventory, and request routing are unchanged.
+speech, and video create use the catalog's media default class and ranks
+(subscription hops first, then a compatible API-key tail). The gateway may
+advance the chain only after a failed, unaccepted attempt; explicit models
+stay explicit. Caller voice/format/size options are preserved; voiceless
+pronunciation is not treated as compatible with an arbitrary voice.
+Successful responses report the actual hop via `x-openllm-resolved-model`
+and `x-openllm-chain` — never infer the served model from the request if
+those headers are absent. Browser chat tunnels omitted media and video
+create/follow-up to the selected device; CLI MCP tools use the HTTP SDK
+(daemon or cloud origin from `OPENLLM_GATEWAY`). Compact inventory keeps
+`provider` / `provider_type` when the catalog sends them.
 
 **Transcription is the local-file exception to the generic MCP input shape.**
 `api_v1Audio_transcriptions` lists `{ path, model?, language? }` in MCP only;
@@ -195,8 +201,8 @@ WAV file so its headers contain final sizes; cleanup runs on all outcomes.
 Converted audio is capped at 25 MiB too, and overflow is an error, not truncation.
 The adapter constructs the data URL internally, redacts echoed audio, and reuses
 `handleOpenllmTool` / `callOperation` for auth and transport. An absent model
-stays absent so the gateway can select subscription-first then a compatible
-API-key model; supplied
+stays absent so the gateway can apply the catalog media default chain
+(same omit-`model` contract as the other media tools); supplied
 model/language pass unchanged. HTTP data-URL/multipart contracts and the daemon's
 existing transcription and subscription redirect behavior are unchanged.
 

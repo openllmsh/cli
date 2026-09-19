@@ -30,6 +30,10 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { buildSanitizedSpec } from "../../api/handlers/swagger";
 import { renderDoctorReportCliArtifact } from "../../protocol/doctor-report-local";
+import {
+  OPENLLM_CHAIN_HEADER,
+  OPENLLM_RESOLVED_MODEL_HEADER,
+} from "../../protocol/inference-headers";
 import { SubscriptionProviderSlug } from "../../protocol/subscription-provider";
 
 const PKG_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -151,11 +155,19 @@ export type TGeneratedSubscriptionProviderSlug =
   (typeof SUBSCRIPTION_PROVIDER_SLUGS)[number];
 `;
 
+const inferenceHeadersSource = (): string => `/**
+ * Generated from protocol inference-headers.ts — do not edit.
+ */
+export const OPENLLM_RESOLVED_MODEL_HEADER = ${JSON.stringify(OPENLLM_RESOLVED_MODEL_HEADER)};
+export const OPENLLM_CHAIN_HEADER = ${JSON.stringify(OPENLLM_CHAIN_HEADER)};
+`;
+
 export const generateArtifacts = (): {
   readonly openapiJson: string;
   readonly operationsTs: string;
   readonly doctorReportCliTs: string;
   readonly subscriptionProvidersTs: string;
+  readonly inferenceHeadersTs: string;
 } => {
   const spec = JSON.parse(buildSanitizedSpec()) as TSpecDoc;
   const ops = generateOperations(spec);
@@ -166,6 +178,7 @@ export const generateArtifacts = (): {
     subscriptionProvidersTs: subscriptionProvidersSource(
       SubscriptionProviderSlug.literals,
     ),
+    inferenceHeadersTs: inferenceHeadersSource(),
   };
 };
 
@@ -175,6 +188,7 @@ if (import.meta.main) {
     operationsTs,
     doctorReportCliTs,
     subscriptionProvidersTs,
+    inferenceHeadersTs,
   } = generateArtifacts();
   fs.mkdirSync(OUT_DIR, { recursive: true });
   fs.mkdirSync(dirname(DOCTOR_REPORT_CLI_OUT), { recursive: true });
@@ -184,6 +198,7 @@ if (import.meta.main) {
     join(OUT_DIR, "subscription-providers.ts"),
     subscriptionProvidersTs,
   );
+  fs.writeFileSync(join(OUT_DIR, "inference-headers.ts"), inferenceHeadersTs);
   fs.writeFileSync(DOCTOR_REPORT_CLI_OUT, doctorReportCliTs);
   const count = (JSON.parse(openapiJson) as TSpecDoc).paths;
   console.log(

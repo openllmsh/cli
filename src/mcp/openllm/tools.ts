@@ -12,6 +12,10 @@
  */
 
 import { callOperation } from "../../sdk/client";
+import {
+  OPENLLM_CHAIN_HEADER,
+  OPENLLM_RESOLVED_MODEL_HEADER,
+} from "../../sdk/generated/inference-headers";
 import type { TApiOperation } from "../../sdk/generated/operations";
 import { API_OPERATIONS } from "../../sdk/generated/operations";
 import { SUBSCRIPTION_PROVIDER_SLUGS } from "../../sdk/generated/subscription-providers";
@@ -37,7 +41,7 @@ const MEDIA_OPTIONAL_MODEL_TOOLS: ReadonlySet<string> = new Set([
 ]);
 
 const MEDIA_OPTIONAL_MODEL_GUIDANCE =
-  " Model is optional: omitting it selects a compatible subscription model first, then a compatible configured API-key model. An explicit model overrides selection. Do not drop or replace voice, format, size, or other caller options to force a match.";
+  " Model is optional: omitting it uses the catalog-ranked media default chain (subscription candidates first, then a compatible API-key tail) and may fall through at runtime after a failed, unaccepted attempt. An explicit model is used as requested. Do not drop or replace voice, format, size, or other caller options to force a match.";
 
 const descriptionFor = (op: TApiOperation): string => {
   const base =
@@ -142,7 +146,7 @@ export const openllmToolDefs = API_OPERATIONS.filter(isMcpExposed).map(
     if (def.name === MODELS_TOOL_NAME) {
       return {
         ...def,
-        description: `${def.description} Subscription providers: ${SUBSCRIPTION_PROVIDER_SLUGS.join(", ")}. Direct subscription provider/model IDs are listed first. Use exact returned IDs and check capabilities, audio formats, limits, and provider_type. Media inference may omit model (subscription-first, then a compatible API-key model). Aliases are configurable fallback chains and may invoke API-key providers; they are not subscription guarantees. This is configured availability, not live readiness or remaining quota.`,
+        description: `${def.description} Subscription providers: ${SUBSCRIPTION_PROVIDER_SLUGS.join(", ")}. Direct subscription provider/model IDs are listed first. Use exact returned IDs and check capabilities, audio formats, limits, and provider_type. Media inference may omit model (catalog-ranked chain; runtime fallback after a failed unaccepted attempt). Aliases are configurable fallback chains and may invoke API-key providers; they are not subscription guarantees. This is configured availability, not live readiness or remaining quota.`,
       };
     }
     if (def.name !== TRANSCRIPTION_TOOL_NAME) return def;
@@ -162,7 +166,7 @@ export const openllmToolDefs = API_OPERATIONS.filter(isMcpExposed).map(
             type: "string",
             minLength: 1,
             description:
-              "Optional model; omit to select a compatible subscription model first, then a compatible API-key model.",
+              "Optional model; omit to use the catalog-ranked media default chain (subscription first, then a compatible API-key tail).",
           },
           language: {
             type: "string",
@@ -309,10 +313,28 @@ const isImageGenerationBody = (
   "data" in body &&
   Array.isArray(body.data);
 
+const attributionFromHeaders = (headers: Headers): string => {
+  const resolved = headers.get(OPENLLM_RESOLVED_MODEL_HEADER)?.trim() ?? "";
+  if (resolved === "") return "";
+  const chain = (headers.get(OPENLLM_CHAIN_HEADER) ?? "")
+    .split(",")
+    .map((hop) => hop.trim())
+    .filter((hop) => hop !== "");
+  return chain.length > 1
+    ? `Served by ${resolved} (chain: ${chain.join(" → ")}).`
+    : `Served by ${resolved}.`;
+};
+
+const withAttribution = (text: string, headers: Headers): string => {
+  const attribution = attributionFromHeaders(headers);
+  return attribution === "" ? text : `${text} ${attribution}`;
+};
+
 const imageResult = async (
   body: unknown,
   config: { readonly baseUrl: string },
   label: string,
+  headers: Headers,
 ): Promise<TToolResult> => {
   if (!isImageGenerationBody(body)) {
     return textResult(JSON.stringify(body, null, 2));
@@ -347,7 +369,7 @@ const imageResult = async (
   }
 
   const notes = [
-    label,
+    withAttribution(label, headers),
     ...urls,
     ...revisedPrompts.map((prompt) => `Revised prompt: ${prompt}`),
   ];
@@ -390,7 +412,11 @@ const mediaRedirectResult = async (
     return textResult(`HTTP ${res.status}: missing media url header`, true);
   }
   const durableUrl = new URL(mediaUrl, config.baseUrl).toString();
-  if (kind === "video") return textResult(`Video generated — ${durableUrl}`);
+  if (kind === "video") {
+    return textResult(
+      withAttribution(`Video generated — ${durableUrl}`, res.headers),
+    );
+  }
 
   const media = await fetchDurableMedia(durableUrl, config.baseUrl, true);
   if (!media.ok) {
@@ -401,7 +427,10 @@ const mediaRedirectResult = async (
   }
   return {
     content: [
-      { type: "text", text: `Audio generated — ${durableUrl}` },
+      {
+        type: "text",
+        text: withAttribution(`Audio generated — ${durableUrl}`, res.headers),
+      },
       {
         type: "audio",
         data: base64FromBytes(await media.arrayBuffer()),
@@ -433,10 +462,13 @@ export const handleOpenllmTool = async (
         : JSON.stringify(res.body, null, 2);
     if (!res.ok) return textResult(`HTTP ${res.status}: ${text}`, true);
     if (op.path === "/v1/images/generations") {
-      return imageResult(res.body, config, "Image generated.");
+      return imageResult(res.body, config, "Image generated.", res.headers);
     }
     if (op.path === "/v1/images/edits") {
-      return imageResult(res.body, config, "Image edited.");
+      return imageResult(res.body, config, "Image edited.", res.headers);
+    }
+    if (op.path === "/v1/audio/transcriptions" || op.path === "/v1/videos") {
+      return textResult(withAttribution(text, res.headers));
     }
     return textResult(text);
   } catch (err) {

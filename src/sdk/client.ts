@@ -17,6 +17,7 @@ export type TSdkResponse = {
   readonly ok: boolean;
   readonly status: number;
   readonly body: unknown;
+  readonly headers: Headers;
 };
 
 /** Substitute `{param}` path segments and collect query params. */
@@ -78,5 +79,5 @@ export const callOperation = async (
   const body = ct.includes("application/json")
     ? await res.json().catch(() => null)
     : await res.text();
-  return { ok: res.ok, status: res.status, body };
+  return { ok: res.ok, status: res.status, body, headers: res.headers };
 };

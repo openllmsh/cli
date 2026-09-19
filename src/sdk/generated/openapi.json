@@ -22522,12 +22522,20 @@
                               "enum": [
                                 "ultra",
                                 "plus",
-                                "lite"
+                                "lite",
+                                "media"
                               ]
                             }
                           },
                           "tier_rank": {
                             "type": "number"
+                          },
+                          "provider_type": {
+                            "type": "string",
+                            "enum": [
+                              "subscription",
+                              "api_key"
+                            ]
                           }
                         },
                         "additionalProperties": false
