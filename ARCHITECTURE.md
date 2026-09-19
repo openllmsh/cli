@@ -161,13 +161,21 @@ legacy and current protocol connections from the same server factory. Unlisted
 tools cannot be called; logs stay on stderr.
 
 **Model discovery is subscription-first in MCP only.** `api_v1Models_list`
-guidance prefers a suitable direct subscription model over metered API models,
-with API alternatives for unsupported/unavailable subscriptions or explicit user
-choice. Its result stable-partitions direct subscription catalog cards ahead of
-other entries without dropping IDs or metadata. Provider slugs are generated from
-protocol's `SubscriptionProviderSlug` into `sdk/generated/subscription-providers.ts`.
-Aliases remain configurable fallback chains, not subscription guarantees. The
-catalog expresses configured availability, not live daemon reachability or quota.
+lists direct subscription catalog cards first. Compact `provider/model` IDs
+classify as subscription only when `provider` is absent; explicit
+`provider_type` / provider / alias metadata wins over an ID that merely looks
+namespaced. Provider slugs are generated from protocol's
+`SubscriptionProviderSlug` into `sdk/generated/subscription-providers.ts`.
+Aliases remain configurable fallback chains, not subscription guarantees.
+`provider_type` on HTTP cards is `subscription` or `api_key` (not a metered
+billing claim) and is omitted on aliases. The catalog expresses configured
+availability, not live daemon reachability or quota.
+
+**Media inference may omit `model`.** Image generation/edit, transcription,
+speech, and video create select a compatible subscription candidate first,
+then a compatible configured API-key model. Explicit models override.
+Caller voice/format/size options are preserved; voiceless pronunciation is
+not treated as compatible with an arbitrary voice.
 HTTP catalog order, browser compact inventory, and request routing are unchanged.
 
 **Transcription is the local-file exception to the generic MCP input shape.**
@@ -187,7 +195,8 @@ WAV file so its headers contain final sizes; cleanup runs on all outcomes.
 Converted audio is capped at 25 MiB too, and overflow is an error, not truncation.
 The adapter constructs the data URL internally, redacts echoed audio, and reuses
 `handleOpenllmTool` / `callOperation` for auth and transport. An absent model
-stays absent (the cloud handler defaults to OpenAI `whisper-1`); supplied
+stays absent so the gateway can select subscription-first then a compatible
+API-key model; supplied
 model/language pass unchanged. HTTP data-URL/multipart contracts and the daemon's
 existing transcription and subscription redirect behavior are unchanged.
 

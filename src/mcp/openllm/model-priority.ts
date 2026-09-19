@@ -13,16 +13,32 @@ const SUBSCRIPTION_SLUGS: ReadonlySet<string> = new Set(
   SUBSCRIPTION_PROVIDER_SLUGS,
 );
 
+const compactSubscriptionId = (id: string): boolean => {
+  const slash = id.indexOf("/");
+  if (slash <= 0 || slash === id.length - 1) return false;
+  return SUBSCRIPTION_SLUGS.has(id.slice(0, slash));
+};
+
+const isDirectSubscriptionId = (rec: Record<string, unknown>): boolean =>
+  typeof rec.provider === "string" &&
+  rec.provider !== "fallback-chain" &&
+  SUBSCRIPTION_SLUGS.has(rec.provider) &&
+  typeof rec.id === "string" &&
+  rec.id.startsWith(`${rec.provider}/`) &&
+  rec.id.length > rec.provider.length + 1;
+
 const isSubscriptionCatalogEntry = (entry: unknown): boolean => {
   if (typeof entry !== "object" || entry === null) return false;
   const rec = entry as Record<string, unknown>;
-  return (
-    typeof rec.provider === "string" &&
-    SUBSCRIPTION_SLUGS.has(rec.provider) &&
-    typeof rec.id === "string" &&
-    rec.id.startsWith(`${rec.provider}/`) &&
-    rec.id.length > rec.provider.length + 1
-  );
+  if (rec.provider_type === "api_key") return false;
+  if (rec.provider === "fallback-chain") return false;
+  if (rec.provider_type === "subscription") {
+    return isDirectSubscriptionId(rec);
+  }
+  if (Object.hasOwn(rec, "provider")) {
+    return isDirectSubscriptionId(rec);
+  }
+  return typeof rec.id === "string" && compactSubscriptionId(rec.id);
 };
 
 const reorderModelsListText = (text: string): string | null => {
@@ -54,8 +70,9 @@ const reorderModelsListText = (text: string): string | null => {
  * Stable-partition success `/v1/models` JSON text blocks so subscription
  * catalog entries come first. Malformed JSON, non-list envelopes, error
  * results, and non-text blocks are returned unchanged. Extra envelope
- * fields are preserved. Classification requires a subscription provider and
- * its namespaced catalog ID — aliases and upstream model names never match.
+ * fields are preserved. Classification uses provider_type when present, else
+ * provider + namespaced ID, else a compact provider/model ID only when
+ * provider is absent. Aliases and conflicting metadata never match.
  */
 export const prioritizeSubscriptionModels = (
   result: TToolResult,

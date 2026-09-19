@@ -28,6 +28,17 @@ const MUTATING = new Set(["post", "put", "patch", "delete"]);
 const MEDIA_FETCH_TIMEOUT_MS = 30_000;
 const REQUEST_TIMEOUT_MS = 120_000;
 
+const MEDIA_OPTIONAL_MODEL_TOOLS: ReadonlySet<string> = new Set([
+  "api_v1Images_imagesGenerations",
+  "api_v1Images_imagesEdits",
+  "api_v1Audio_transcriptions",
+  "api_v1Audio_speech",
+  "api_v1Videos_videosCreate",
+]);
+
+const MEDIA_OPTIONAL_MODEL_GUIDANCE =
+  " Model is optional: omitting it selects a compatible subscription model first, then a compatible configured API-key model. An explicit model overrides selection. Do not drop or replace voice, format, size, or other caller options to force a match.";
+
 const descriptionFor = (op: TApiOperation): string => {
   const base =
     op.summary.length > 0
@@ -37,7 +48,11 @@ const descriptionFor = (op: TApiOperation): string => {
   const consent = MUTATING.has(op.method)
     ? " MUTATING operation — call only when the user explicitly asked for this change; confirm first when destructive."
     : "";
-  return `${base}${wire}${consent}`;
+  const name = toolNameFor(op);
+  const media = MEDIA_OPTIONAL_MODEL_TOOLS.has(name)
+    ? MEDIA_OPTIONAL_MODEL_GUIDANCE
+    : "";
+  return `${base}${wire}${consent}${media}`;
 };
 
 const inputSchemaFor = (op: TApiOperation): Record<string, unknown> => {
@@ -127,7 +142,7 @@ export const openllmToolDefs = API_OPERATIONS.filter(isMcpExposed).map(
     if (def.name === MODELS_TOOL_NAME) {
       return {
         ...def,
-        description: `${def.description} Discover models before choosing an inference model. Subscription providers: ${SUBSCRIPTION_PROVIDER_SLUGS.join(", ")}. Their direct provider/model IDs are listed first; choose a subscription-suitable model supporting the task before a metered API model. Use API alternatives only if no suitable subscription model is available, the subscription cannot serve the request, or the user explicitly requests an API model. Use exact returned IDs and check capabilities, audio formats, and limits. Aliases are configurable fallback chains and may invoke metered APIs; they are not subscription guarantees. This is configured availability, not live readiness or remaining quota.`,
+        description: `${def.description} Subscription providers: ${SUBSCRIPTION_PROVIDER_SLUGS.join(", ")}. Direct subscription provider/model IDs are listed first. Use exact returned IDs and check capabilities, audio formats, limits, and provider_type. Media inference may omit model (subscription-first, then a compatible API-key model). Aliases are configurable fallback chains and may invoke API-key providers; they are not subscription guarantees. This is configured availability, not live readiness or remaining quota.`,
       };
     }
     if (def.name !== TRANSCRIPTION_TOOL_NAME) return def;
@@ -147,7 +162,7 @@ export const openllmToolDefs = API_OPERATIONS.filter(isMcpExposed).map(
             type: "string",
             minLength: 1,
             description:
-              "Optional model alias; omit to use the HTTP handler default (OpenAI whisper-1).",
+              "Optional model; omit to select a compatible subscription model first, then a compatible API-key model.",
           },
           language: {
             type: "string",

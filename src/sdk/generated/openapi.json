@@ -134,6 +134,13 @@
                           "max_output_tokens": {
                             "type": "number"
                           },
+                          "provider_type": {
+                            "type": "string",
+                            "enum": [
+                              "subscription",
+                              "api_key"
+                            ]
+                          },
                           "context_window": {
                             "type": "number"
                           },
@@ -7222,13 +7229,9 @@
               "schema": {
                 "type": "object",
                 "required": [
-                  "model",
                   "prompt"
                 ],
                 "properties": {
-                  "model": {
-                    "type": "string"
-                  },
                   "prompt": {
                     "type": "string"
                   },
@@ -7267,6 +7270,9 @@
                     ]
                   },
                   "user": {
+                    "type": "string"
+                  },
+                  "model": {
                     "type": "string"
                   }
                 },
@@ -7476,14 +7482,10 @@
               "schema": {
                 "type": "object",
                 "required": [
-                  "model",
                   "prompt",
                   "image"
                 ],
                 "properties": {
-                  "model": {
-                    "type": "string"
-                  },
                   "prompt": {
                     "type": "string"
                   },
@@ -7517,6 +7519,9 @@
                       "url",
                       "b64_json"
                     ]
+                  },
+                  "model": {
+                    "type": "string"
                   }
                 },
                 "additionalProperties": false
@@ -7793,13 +7798,9 @@
               "schema": {
                 "type": "object",
                 "required": [
-                  "model",
                   "prompt"
                 ],
                 "properties": {
-                  "model": {
-                    "type": "string"
-                  },
                   "prompt": {
                     "type": "string"
                   },
@@ -7823,6 +7824,9 @@
                     "items": {
                       "type": "string"
                     }
+                  },
+                  "model": {
+                    "type": "string"
                   }
                 },
                 "additionalProperties": false
@@ -8725,7 +8729,6 @@
               "schema": {
                 "type": "object",
                 "required": [
-                  "model",
                   "file"
                 ],
                 "properties": {
@@ -8935,14 +8938,10 @@
               "schema": {
                 "type": "object",
                 "required": [
-                  "model",
                   "input",
                   "voice"
                 ],
                 "properties": {
-                  "model": {
-                    "type": "string"
-                  },
                   "input": {
                     "type": "string"
                   },
@@ -8964,6 +8963,9 @@
                     "type": "number"
                   },
                   "instructions": {
+                    "type": "string"
+                  },
+                  "model": {
                     "type": "string"
                   }
                 },
