@@ -122,31 +122,6 @@
                             },
                             "additionalProperties": false
                           },
-                          "video_support": {
-                            "type": "object",
-                            "required": [
-                              "input_modes"
-                            ],
-                            "properties": {
-                              "input_modes": {
-                                "type": "array",
-                                "items": {
-                                  "type": "string",
-                                  "enum": [
-                                    "text",
-                                    "starting_image",
-                                    "subject_images",
-                                    "voices",
-                                    "starting_image+subject_images",
-                                    "starting_image+voices",
-                                    "subject_images+voices",
-                                    "starting_image+subject_images+voices"
-                                  ]
-                                }
-                              }
-                            },
-                            "additionalProperties": false
-                          },
                           "dimension_presets": {
                             "type": "array",
                             "items": {
@@ -7666,10 +7641,12 @@
                       "additionalProperties": false
                     },
                     "seconds": {
-                      "type": "string"
+                      "type": "string",
+                      "description": "Requested duration in seconds as a numeric string. Values are not clamped; the provider validates durations accepted by the selected model."
                     },
                     "size": {
-                      "type": "string"
+                      "type": "string",
+                      "description": "Requested output dimensions as WIDTHxHEIGHT (for example 1280x720 or 720x1280). Adapters preserve aspect ratio and resolution intent; the provider validates model-specific sizes."
                     },
                     "error": {
                       "anyOf": [
@@ -7888,14 +7865,16 @@
                     "type": "string"
                   },
                   "seconds": {
-                    "type": "string"
+                    "type": "string",
+                    "description": "Requested duration in seconds as a numeric string. Values are not clamped; the provider validates durations accepted by the selected model."
                   },
                   "size": {
-                    "type": "string"
+                    "type": "string",
+                    "description": "Requested output dimensions as WIDTHxHEIGHT (for example 1280x720 or 720x1280). Adapters preserve aspect ratio and resolution intent; the provider validates model-specific sizes."
                   },
                   "input_image": {
                     "type": "string",
-                    "description": "Starting-frame image URL or data URL. Not a subject reference.",
+                    "description": "Starting-frame image as an HTTPS URL or base64 image data URL (for example data:image/png;base64,...). Not subject guidance. MIME is detected from PNG, JPEG, GIF, or WebP bytes; the provider validates its accepted formats.",
                     "title": "minLength(1)",
                     "minLength": 1
                   },
@@ -7907,7 +7886,7 @@
                       "title": "minLength(1)",
                       "minLength": 1
                     },
-                    "description": "Subject-reference image URLs or data URLs. Requires exact model support."
+                    "description": "Ordered subject-reference images as HTTPS URLs or base64 image data URLs. References guide identity/appearance, not the first frame. Every input is preserved; the provider validates format and count limits."
                   },
                   "reference_voices": {
                     "type": "array",
@@ -7917,7 +7896,7 @@
                       "title": "minLength(1)",
                       "minLength": 1
                     },
-                    "description": "Provider voice IDs for reference guidance. Requires exact model support."
+                    "description": "Provider voice IDs for reference guidance."
                   },
                   "model": {
                     "type": "string"
@@ -8034,10 +8013,12 @@
                       "additionalProperties": false
                     },
                     "seconds": {
-                      "type": "string"
+                      "type": "string",
+                      "description": "Requested duration in seconds as a numeric string. Values are not clamped; the provider validates durations accepted by the selected model."
                     },
                     "size": {
-                      "type": "string"
+                      "type": "string",
+                      "description": "Requested output dimensions as WIDTHxHEIGHT (for example 1280x720 or 720x1280). Adapters preserve aspect ratio and resolution intent; the provider validates model-specific sizes."
                     },
                     "error": {
                       "anyOf": [
@@ -22647,31 +22628,6 @@
                                 "type": "array",
                                 "items": {
                                   "type": "string"
-                                }
-                              }
-                            },
-                            "additionalProperties": false
-                          },
-                          "video_support": {
-                            "type": "object",
-                            "required": [
-                              "input_modes"
-                            ],
-                            "properties": {
-                              "input_modes": {
-                                "type": "array",
-                                "items": {
-                                  "type": "string",
-                                  "enum": [
-                                    "text",
-                                    "starting_image",
-                                    "subject_images",
-                                    "voices",
-                                    "starting_image+subject_images",
-                                    "starting_image+voices",
-                                    "subject_images+voices",
-                                    "starting_image+subject_images+voices"
-                                  ]
                                 }
                               }
                             },

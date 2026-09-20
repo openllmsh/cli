@@ -16,11 +16,56 @@ import {
   OPENLLM_CHAIN_HEADER,
   OPENLLM_RESOLVED_MODEL_HEADER,
 } from "../../sdk/generated/inference-headers";
+import generatedSpec from "../../sdk/generated/openapi.json";
 import type { TApiOperation } from "../../sdk/generated/operations";
 import { API_OPERATIONS } from "../../sdk/generated/operations";
 import { SUBSCRIPTION_PROVIDER_SLUGS } from "../../sdk/generated/subscription-providers";
 import type { TToolResult, TToolResultContent } from "../types";
 import { MODELS_TOOL_NAME } from "./model-priority";
+
+const schemaObject = (value: unknown): Record<string, unknown> | undefined =>
+  value !== null && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : undefined;
+
+/** Resolve only local generated references; media body schemas have no recursive branches. */
+const resolveGeneratedSchema = (
+  value: unknown,
+  seen: ReadonlySet<string> = new Set(),
+): unknown => {
+  if (Array.isArray(value))
+    return value.map((item) => resolveGeneratedSchema(item, seen));
+  const object = schemaObject(value);
+  if (object === undefined) return value;
+  if (
+    typeof object.$ref === "string" &&
+    object.$ref.startsWith("#/") &&
+    !seen.has(object.$ref)
+  ) {
+    let target: unknown = generatedSpec;
+    for (const segment of object.$ref.slice(2).split("/"))
+      target =
+        schemaObject(target)?.[segment.replace(/~1/g, "/").replace(/~0/g, "~")];
+    if (target !== undefined)
+      return resolveGeneratedSchema(target, new Set([...seen, object.$ref]));
+  }
+  return Object.fromEntries(
+    Object.entries(object).map(([key, child]) => [
+      key,
+      resolveGeneratedSchema(child, seen),
+    ]),
+  );
+};
+
+const generatedBodySchema = (
+  op: TApiOperation,
+): Record<string, unknown> | undefined => {
+  const paths = schemaObject(generatedSpec.paths);
+  const operation = schemaObject(schemaObject(paths?.[op.path])?.[op.method]);
+  const content = schemaObject(schemaObject(operation?.requestBody)?.content);
+  const schema = schemaObject(content?.["application/json"])?.schema;
+  return schemaObject(resolveGeneratedSchema(schema));
+};
 
 /** MCP tool names must match `[a-zA-Z0-9_-]+` — sanitize the operation id.
  *  Exported: the browser chat's tool bridge maps operations back to tool
@@ -74,7 +119,9 @@ const inputSchemaFor = (op: TApiOperation): Record<string, unknown> => {
     if (q.required) required.push(q.name);
   }
   if (op.hasBody) {
-    properties.body = {
+    properties.body = (MEDIA_OPTIONAL_MODEL_TOOLS.has(toolNameFor(op))
+      ? generatedBodySchema(op)
+      : undefined) ?? {
       type: "object",
       description:
         "JSON request body — see the operation's schema in the OpenAPI spec (`openllm api --spec`).",
@@ -83,6 +130,9 @@ const inputSchemaFor = (op: TApiOperation): Record<string, unknown> => {
   return {
     type: "object",
     properties,
+    ...(MEDIA_OPTIONAL_MODEL_TOOLS.has(toolNameFor(op))
+      ? { additionalProperties: false }
+      : {}),
     ...(required.length > 0 ? { required } : {}),
   };
 };
@@ -448,6 +498,14 @@ export const handleOpenllmTool = async (
   const op = byToolName.get(name);
   if (op === undefined) {
     return textResult(`Unknown tool: ${name}`, true);
+  }
+  if (op.path === "/v1/videos" && op.method === "post") {
+    const properties = schemaObject(inputSchemaFor(op).properties) ?? {};
+    if (Object.keys(args).some((key) => !Object.hasOwn(properties, key)))
+      return textResult(
+        "Invalid video tool envelope. Put canonical fields inside body; use input_image for a starting frame or reference_images for subject guidance, not input_reference.",
+        true,
+      );
   }
   try {
     const mediaRedirectKind = mediaRedirectKindFor(op);
