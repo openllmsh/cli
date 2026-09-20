@@ -86,7 +86,7 @@ const MEDIA_OPTIONAL_MODEL_TOOLS: ReadonlySet<string> = new Set([
 ]);
 
 const MEDIA_OPTIONAL_MODEL_GUIDANCE =
-  " Model is optional: omitting it uses the catalog-ranked media default chain (subscription candidates first, then a compatible API-key tail) and may fall through at runtime after a failed, unaccepted attempt. An explicit model is used as requested. Do not drop or replace voice, format, size, or other caller options to force a match.";
+  " Model is optional: omitting it uses the catalog-ranked media default chain (subscription candidates first, then a compatible API-key tail) and may fall through at runtime after a failed, unaccepted attempt. An explicit model is used as requested. Send only needed optional keys; omit model for automatic selection, never send an empty-string placeholder. Do not add dummy empty strings or empty reference arrays. Do not drop or replace voice, format, size, or other caller options to force a match.";
 
 const descriptionFor = (op: TApiOperation): string => {
   const base =

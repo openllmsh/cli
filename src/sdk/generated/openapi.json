@@ -7288,7 +7288,8 @@
                     "type": "string"
                   },
                   "model": {
-                    "type": "string"
+                    "type": "string",
+                    "description": "Optional model ID. Omit for automatic default-chain selection; never send an empty-string placeholder. Preserve an explicitly selected nonempty ID exactly."
                   }
                 },
                 "additionalProperties": false
@@ -7536,7 +7537,8 @@
                     ]
                   },
                   "model": {
-                    "type": "string"
+                    "type": "string",
+                    "description": "Optional model ID. Omit for automatic default-chain selection; never send an empty-string placeholder. Preserve an explicitly selected nonempty ID exactly."
                   }
                 },
                 "additionalProperties": false
@@ -7886,7 +7888,7 @@
                       "title": "minLength(1)",
                       "minLength": 1
                     },
-                    "description": "Ordered subject-reference images as HTTPS URLs or base64 image data URLs. References guide identity/appearance, not the first frame. Every input is preserved; the provider validates format and count limits."
+                    "description": "Optional ordered subject-reference images as HTTPS URLs or base64 image data URLs. Omit when unused; do not send a dummy empty array. References guide identity/appearance, not the first frame. Every input is preserved; the provider validates format and count limits."
                   },
                   "reference_voices": {
                     "type": "array",
@@ -7896,13 +7898,15 @@
                       "title": "minLength(1)",
                       "minLength": 1
                     },
-                    "description": "Provider voice IDs for reference guidance."
+                    "description": "Optional provider voice IDs for reference guidance. Omit when unused; do not send a dummy empty array."
                   },
                   "model": {
-                    "type": "string"
+                    "type": "string",
+                    "description": "Optional model ID. Omit for automatic default-chain selection; never send an empty-string placeholder. Preserve an explicitly selected nonempty ID exactly."
                   }
                 },
-                "additionalProperties": false
+                "additionalProperties": false,
+                "description": "Video creation input. Only prompt is required. Send only needed optional keys; omit unused model and reference arrays rather than filling dummy empty strings or arrays."
               }
             }
           },
@@ -8851,7 +8855,8 @@
                 ],
                 "properties": {
                   "model": {
-                    "type": "string"
+                    "type": "string",
+                    "description": "Optional model ID. Omit for automatic default-chain selection; never send an empty-string placeholder. Preserve an explicitly selected nonempty ID exactly."
                   },
                   "file": {
                     "type": "string",
@@ -9084,7 +9089,8 @@
                     "type": "string"
                   },
                   "model": {
-                    "type": "string"
+                    "type": "string",
+                    "description": "Optional model ID. Omit for automatic default-chain selection; never send an empty-string placeholder. Preserve an explicitly selected nonempty ID exactly."
                   }
                 },
                 "additionalProperties": false
