@@ -122,6 +122,31 @@
                             },
                             "additionalProperties": false
                           },
+                          "video_support": {
+                            "type": "object",
+                            "required": [
+                              "input_modes"
+                            ],
+                            "properties": {
+                              "input_modes": {
+                                "type": "array",
+                                "items": {
+                                  "type": "string",
+                                  "enum": [
+                                    "text",
+                                    "starting_image",
+                                    "subject_images",
+                                    "voices",
+                                    "starting_image+subject_images",
+                                    "starting_image+voices",
+                                    "subject_images+voices",
+                                    "starting_image+subject_images+voices"
+                                  ]
+                                }
+                              }
+                            },
+                            "additionalProperties": false
+                          },
                           "dimension_presets": {
                             "type": "array",
                             "items": {
@@ -7597,6 +7622,49 @@
                     "progress": {
                       "type": "number"
                     },
+                    "input_receipt": {
+                      "type": "object",
+                      "required": [
+                        "mode",
+                        "starting_images",
+                        "subject_images",
+                        "voices"
+                      ],
+                      "properties": {
+                        "mode": {
+                          "type": "string",
+                          "enum": [
+                            "text",
+                            "starting_image",
+                            "subject_images",
+                            "voices",
+                            "starting_image+subject_images",
+                            "starting_image+voices",
+                            "subject_images+voices",
+                            "starting_image+subject_images+voices"
+                          ]
+                        },
+                        "starting_images": {
+                          "type": "integer",
+                          "description": "a non-negative number",
+                          "title": "nonNegative",
+                          "minimum": 0
+                        },
+                        "subject_images": {
+                          "type": "integer",
+                          "description": "a non-negative number",
+                          "title": "nonNegative",
+                          "minimum": 0
+                        },
+                        "voices": {
+                          "type": "integer",
+                          "description": "a non-negative number",
+                          "title": "nonNegative",
+                          "minimum": 0
+                        }
+                      },
+                      "additionalProperties": false
+                    },
                     "seconds": {
                       "type": "string"
                     },
@@ -7826,19 +7894,30 @@
                     "type": "string"
                   },
                   "input_image": {
-                    "type": "string"
+                    "type": "string",
+                    "description": "Starting-frame image URL or data URL. Not a subject reference.",
+                    "title": "minLength(1)",
+                    "minLength": 1
                   },
                   "reference_images": {
                     "type": "array",
                     "items": {
-                      "type": "string"
-                    }
+                      "type": "string",
+                      "description": "a string at least 1 character(s) long",
+                      "title": "minLength(1)",
+                      "minLength": 1
+                    },
+                    "description": "Subject-reference image URLs or data URLs. Requires exact model support."
                   },
                   "reference_voices": {
                     "type": "array",
                     "items": {
-                      "type": "string"
-                    }
+                      "type": "string",
+                      "description": "a string at least 1 character(s) long",
+                      "title": "minLength(1)",
+                      "minLength": 1
+                    },
+                    "description": "Provider voice IDs for reference guidance. Requires exact model support."
                   },
                   "model": {
                     "type": "string"
@@ -7910,6 +7989,49 @@
                     },
                     "progress": {
                       "type": "number"
+                    },
+                    "input_receipt": {
+                      "type": "object",
+                      "required": [
+                        "mode",
+                        "starting_images",
+                        "subject_images",
+                        "voices"
+                      ],
+                      "properties": {
+                        "mode": {
+                          "type": "string",
+                          "enum": [
+                            "text",
+                            "starting_image",
+                            "subject_images",
+                            "voices",
+                            "starting_image+subject_images",
+                            "starting_image+voices",
+                            "subject_images+voices",
+                            "starting_image+subject_images+voices"
+                          ]
+                        },
+                        "starting_images": {
+                          "type": "integer",
+                          "description": "a non-negative number",
+                          "title": "nonNegative",
+                          "minimum": 0
+                        },
+                        "subject_images": {
+                          "type": "integer",
+                          "description": "a non-negative number",
+                          "title": "nonNegative",
+                          "minimum": 0
+                        },
+                        "voices": {
+                          "type": "integer",
+                          "description": "a non-negative number",
+                          "title": "nonNegative",
+                          "minimum": 0
+                        }
+                      },
+                      "additionalProperties": false
                     },
                     "seconds": {
                       "type": "string"
@@ -22525,6 +22647,31 @@
                                 "type": "array",
                                 "items": {
                                   "type": "string"
+                                }
+                              }
+                            },
+                            "additionalProperties": false
+                          },
+                          "video_support": {
+                            "type": "object",
+                            "required": [
+                              "input_modes"
+                            ],
+                            "properties": {
+                              "input_modes": {
+                                "type": "array",
+                                "items": {
+                                  "type": "string",
+                                  "enum": [
+                                    "text",
+                                    "starting_image",
+                                    "subject_images",
+                                    "voices",
+                                    "starting_image+subject_images",
+                                    "starting_image+voices",
+                                    "subject_images+voices",
+                                    "starting_image+subject_images+voices"
+                                  ]
                                 }
                               }
                             },
