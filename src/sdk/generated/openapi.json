@@ -141,6 +141,21 @@
                               "api_key"
                             ]
                           },
+                          "default_tiers": {
+                            "type": "array",
+                            "items": {
+                              "type": "string",
+                              "enum": [
+                                "ultra",
+                                "plus",
+                                "lite",
+                                "media"
+                              ]
+                            }
+                          },
+                          "tier_rank": {
+                            "type": "number"
+                          },
                           "context_window": {
                             "type": "number"
                           },
