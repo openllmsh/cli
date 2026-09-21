@@ -23715,6 +23715,9 @@
                               "upstreamAcceptsResponseFormat": {
                                 "type": "boolean"
                               },
+                              "upstreamAcceptsStream": {
+                                "type": "boolean"
+                              },
                               "supportsStyle": {
                                 "type": "boolean"
                               },
