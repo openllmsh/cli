@@ -589,6 +589,14 @@
                                   }
                                 ]
                               },
+                              "annotations": {
+                                "$id": "/schemas/unknown",
+                                "title": "unknown"
+                              },
+                              "audio": {
+                                "$id": "/schemas/unknown",
+                                "title": "unknown"
+                              },
                               "reasoning_content": {
                                 "anyOf": [
                                   {
@@ -777,6 +785,18 @@
                           "type": "null"
                         }
                       ]
+                    },
+                    "service_tier": {
+                      "$id": "/schemas/unknown",
+                      "title": "unknown"
+                    },
+                    "metadata": {
+                      "$id": "/schemas/unknown",
+                      "title": "unknown"
+                    },
+                    "moderation": {
+                      "$id": "/schemas/unknown",
+                      "title": "unknown"
                     }
                   },
                   "additionalProperties": false
@@ -1750,6 +1770,14 @@
                                 }
                               ]
                             },
+                            "annotations": {
+                              "$id": "/schemas/unknown",
+                              "title": "unknown"
+                            },
+                            "audio": {
+                              "$id": "/schemas/unknown",
+                              "title": "unknown"
+                            },
                             "reasoning_content": {
                               "anyOf": [
                                 {
@@ -2290,6 +2318,10 @@
                     "properties": {
                       "include_usage": {
                         "type": "boolean"
+                      },
+                      "include_obfuscation": {
+                        "$id": "/schemas/unknown",
+                        "title": "unknown"
                       }
                     },
                     "additionalProperties": false
@@ -2365,6 +2397,42 @@
                         "additionalProperties": false
                       }
                     ]
+                  },
+                  "service_tier": {
+                    "$id": "/schemas/unknown",
+                    "title": "unknown"
+                  },
+                  "store": {
+                    "$id": "/schemas/unknown",
+                    "title": "unknown"
+                  },
+                  "verbosity": {
+                    "$id": "/schemas/unknown",
+                    "title": "unknown"
+                  },
+                  "safety_identifier": {
+                    "$id": "/schemas/unknown",
+                    "title": "unknown"
+                  },
+                  "prompt_cache_retention": {
+                    "$id": "/schemas/unknown",
+                    "title": "unknown"
+                  },
+                  "web_search_options": {
+                    "$id": "/schemas/unknown",
+                    "title": "unknown"
+                  },
+                  "modalities": {
+                    "$id": "/schemas/unknown",
+                    "title": "unknown"
+                  },
+                  "audio": {
+                    "$id": "/schemas/unknown",
+                    "title": "unknown"
+                  },
+                  "prediction": {
+                    "$id": "/schemas/unknown",
+                    "title": "unknown"
                   },
                   "reasoning_effort": {
                     "type": "string",
@@ -3410,6 +3478,47 @@
                                             }
                                           },
                                           "additionalProperties": false
+                                        },
+                                        {
+                                          "type": "object",
+                                          "required": [
+                                            "type",
+                                            "tool_name"
+                                          ],
+                                          "properties": {
+                                            "type": {
+                                              "type": "string",
+                                              "enum": [
+                                                "tool_reference"
+                                              ]
+                                            },
+                                            "tool_name": {
+                                              "type": "string"
+                                            },
+                                            "cache_control": {
+                                              "anyOf": [
+                                                {
+                                                  "type": "object",
+                                                  "required": [
+                                                    "type"
+                                                  ],
+                                                  "properties": {
+                                                    "type": {
+                                                      "type": "string",
+                                                      "enum": [
+                                                        "ephemeral"
+                                                      ]
+                                                    }
+                                                  },
+                                                  "additionalProperties": false
+                                                },
+                                                {
+                                                  "type": "null"
+                                                }
+                                              ]
+                                            }
+                                          },
+                                          "additionalProperties": false
                                         }
                                       ]
                                     }
@@ -3585,6 +3694,417 @@
                             "type": "object",
                             "required": [
                               "type",
+                              "tool_use_id",
+                              "content"
+                            ],
+                            "properties": {
+                              "type": {
+                                "type": "string",
+                                "enum": [
+                                  "web_fetch_tool_result"
+                                ]
+                              },
+                              "tool_use_id": {
+                                "type": "string"
+                              },
+                              "content": {
+                                "$id": "/schemas/unknown",
+                                "title": "unknown"
+                              },
+                              "cache_control": {
+                                "anyOf": [
+                                  {
+                                    "type": "object",
+                                    "required": [
+                                      "type"
+                                    ],
+                                    "properties": {
+                                      "type": {
+                                        "type": "string",
+                                        "enum": [
+                                          "ephemeral"
+                                        ]
+                                      }
+                                    },
+                                    "additionalProperties": false
+                                  },
+                                  {
+                                    "type": "null"
+                                  }
+                                ]
+                              }
+                            },
+                            "additionalProperties": false
+                          },
+                          {
+                            "type": "object",
+                            "required": [
+                              "type",
+                              "tool_use_id",
+                              "content"
+                            ],
+                            "properties": {
+                              "type": {
+                                "type": "string",
+                                "enum": [
+                                  "code_execution_tool_result"
+                                ]
+                              },
+                              "tool_use_id": {
+                                "type": "string"
+                              },
+                              "content": {
+                                "$id": "/schemas/unknown",
+                                "title": "unknown"
+                              },
+                              "cache_control": {
+                                "anyOf": [
+                                  {
+                                    "type": "object",
+                                    "required": [
+                                      "type"
+                                    ],
+                                    "properties": {
+                                      "type": {
+                                        "type": "string",
+                                        "enum": [
+                                          "ephemeral"
+                                        ]
+                                      }
+                                    },
+                                    "additionalProperties": false
+                                  },
+                                  {
+                                    "type": "null"
+                                  }
+                                ]
+                              }
+                            },
+                            "additionalProperties": false
+                          },
+                          {
+                            "type": "object",
+                            "required": [
+                              "type",
+                              "tool_use_id",
+                              "content"
+                            ],
+                            "properties": {
+                              "type": {
+                                "type": "string",
+                                "enum": [
+                                  "bash_code_execution_tool_result"
+                                ]
+                              },
+                              "tool_use_id": {
+                                "type": "string"
+                              },
+                              "content": {
+                                "$id": "/schemas/unknown",
+                                "title": "unknown"
+                              },
+                              "cache_control": {
+                                "anyOf": [
+                                  {
+                                    "type": "object",
+                                    "required": [
+                                      "type"
+                                    ],
+                                    "properties": {
+                                      "type": {
+                                        "type": "string",
+                                        "enum": [
+                                          "ephemeral"
+                                        ]
+                                      }
+                                    },
+                                    "additionalProperties": false
+                                  },
+                                  {
+                                    "type": "null"
+                                  }
+                                ]
+                              }
+                            },
+                            "additionalProperties": false
+                          },
+                          {
+                            "type": "object",
+                            "required": [
+                              "type",
+                              "tool_use_id",
+                              "content"
+                            ],
+                            "properties": {
+                              "type": {
+                                "type": "string",
+                                "enum": [
+                                  "text_editor_code_execution_tool_result"
+                                ]
+                              },
+                              "tool_use_id": {
+                                "type": "string"
+                              },
+                              "content": {
+                                "$id": "/schemas/unknown",
+                                "title": "unknown"
+                              },
+                              "cache_control": {
+                                "anyOf": [
+                                  {
+                                    "type": "object",
+                                    "required": [
+                                      "type"
+                                    ],
+                                    "properties": {
+                                      "type": {
+                                        "type": "string",
+                                        "enum": [
+                                          "ephemeral"
+                                        ]
+                                      }
+                                    },
+                                    "additionalProperties": false
+                                  },
+                                  {
+                                    "type": "null"
+                                  }
+                                ]
+                              }
+                            },
+                            "additionalProperties": false
+                          },
+                          {
+                            "type": "object",
+                            "required": [
+                              "type",
+                              "tool_use_id",
+                              "content"
+                            ],
+                            "properties": {
+                              "type": {
+                                "type": "string",
+                                "enum": [
+                                  "tool_search_tool_result"
+                                ]
+                              },
+                              "tool_use_id": {
+                                "type": "string"
+                              },
+                              "content": {
+                                "$id": "/schemas/unknown",
+                                "title": "unknown"
+                              },
+                              "cache_control": {
+                                "anyOf": [
+                                  {
+                                    "type": "object",
+                                    "required": [
+                                      "type"
+                                    ],
+                                    "properties": {
+                                      "type": {
+                                        "type": "string",
+                                        "enum": [
+                                          "ephemeral"
+                                        ]
+                                      }
+                                    },
+                                    "additionalProperties": false
+                                  },
+                                  {
+                                    "type": "null"
+                                  }
+                                ]
+                              }
+                            },
+                            "additionalProperties": false
+                          },
+                          {
+                            "type": "object",
+                            "required": [
+                              "type",
+                              "id",
+                              "name",
+                              "input"
+                            ],
+                            "properties": {
+                              "type": {
+                                "type": "string",
+                                "enum": [
+                                  "mcp_tool_use"
+                                ]
+                              },
+                              "id": {
+                                "type": "string"
+                              },
+                              "name": {
+                                "type": "string"
+                              },
+                              "server_name": {
+                                "type": "string"
+                              },
+                              "input": {
+                                "$id": "/schemas/unknown",
+                                "title": "unknown"
+                              },
+                              "cache_control": {
+                                "anyOf": [
+                                  {
+                                    "type": "object",
+                                    "required": [
+                                      "type"
+                                    ],
+                                    "properties": {
+                                      "type": {
+                                        "type": "string",
+                                        "enum": [
+                                          "ephemeral"
+                                        ]
+                                      }
+                                    },
+                                    "additionalProperties": false
+                                  },
+                                  {
+                                    "type": "null"
+                                  }
+                                ]
+                              }
+                            },
+                            "additionalProperties": false
+                          },
+                          {
+                            "type": "object",
+                            "required": [
+                              "type",
+                              "tool_use_id",
+                              "content"
+                            ],
+                            "properties": {
+                              "type": {
+                                "type": "string",
+                                "enum": [
+                                  "mcp_tool_result"
+                                ]
+                              },
+                              "tool_use_id": {
+                                "type": "string"
+                              },
+                              "content": {
+                                "$id": "/schemas/unknown",
+                                "title": "unknown"
+                              },
+                              "cache_control": {
+                                "anyOf": [
+                                  {
+                                    "type": "object",
+                                    "required": [
+                                      "type"
+                                    ],
+                                    "properties": {
+                                      "type": {
+                                        "type": "string",
+                                        "enum": [
+                                          "ephemeral"
+                                        ]
+                                      }
+                                    },
+                                    "additionalProperties": false
+                                  },
+                                  {
+                                    "type": "null"
+                                  }
+                                ]
+                              }
+                            },
+                            "additionalProperties": false
+                          },
+                          {
+                            "type": "object",
+                            "required": [
+                              "type",
+                              "tool_name"
+                            ],
+                            "properties": {
+                              "type": {
+                                "type": "string",
+                                "enum": [
+                                  "tool_reference"
+                                ]
+                              },
+                              "tool_name": {
+                                "type": "string"
+                              },
+                              "cache_control": {
+                                "anyOf": [
+                                  {
+                                    "type": "object",
+                                    "required": [
+                                      "type"
+                                    ],
+                                    "properties": {
+                                      "type": {
+                                        "type": "string",
+                                        "enum": [
+                                          "ephemeral"
+                                        ]
+                                      }
+                                    },
+                                    "additionalProperties": false
+                                  },
+                                  {
+                                    "type": "null"
+                                  }
+                                ]
+                              }
+                            },
+                            "additionalProperties": false
+                          },
+                          {
+                            "type": "object",
+                            "required": [
+                              "type"
+                            ],
+                            "properties": {
+                              "type": {
+                                "type": "string",
+                                "enum": [
+                                  "browser_state"
+                                ]
+                              },
+                              "content": {
+                                "$id": "/schemas/unknown",
+                                "title": "unknown"
+                              },
+                              "cache_control": {
+                                "anyOf": [
+                                  {
+                                    "type": "object",
+                                    "required": [
+                                      "type"
+                                    ],
+                                    "properties": {
+                                      "type": {
+                                        "type": "string",
+                                        "enum": [
+                                          "ephemeral"
+                                        ]
+                                      }
+                                    },
+                                    "additionalProperties": false
+                                  },
+                                  {
+                                    "type": "null"
+                                  }
+                                ]
+                              }
+                            },
+                            "additionalProperties": false
+                          },
+                          {
+                            "type": "object",
+                            "required": [
+                              "type",
                               "data"
                             ],
                             "properties": {
@@ -3613,7 +4133,8 @@
                             "stop_sequence",
                             "tool_use",
                             "pause_turn",
-                            "refusal"
+                            "refusal",
+                            "model_context_window_exceeded"
                           ]
                         },
                         {
@@ -4872,6 +5393,47 @@
                                                     }
                                                   },
                                                   "additionalProperties": false
+                                                },
+                                                {
+                                                  "type": "object",
+                                                  "required": [
+                                                    "type",
+                                                    "tool_name"
+                                                  ],
+                                                  "properties": {
+                                                    "type": {
+                                                      "type": "string",
+                                                      "enum": [
+                                                        "tool_reference"
+                                                      ]
+                                                    },
+                                                    "tool_name": {
+                                                      "type": "string"
+                                                    },
+                                                    "cache_control": {
+                                                      "anyOf": [
+                                                        {
+                                                          "type": "object",
+                                                          "required": [
+                                                            "type"
+                                                          ],
+                                                          "properties": {
+                                                            "type": {
+                                                              "type": "string",
+                                                              "enum": [
+                                                                "ephemeral"
+                                                              ]
+                                                            }
+                                                          },
+                                                          "additionalProperties": false
+                                                        },
+                                                        {
+                                                          "type": "null"
+                                                        }
+                                                      ]
+                                                    }
+                                                  },
+                                                  "additionalProperties": false
                                                 }
                                               ]
                                             }
@@ -5013,6 +5575,417 @@
                                       },
                                       "tool_use_id": {
                                         "type": "string"
+                                      },
+                                      "content": {
+                                        "$id": "/schemas/unknown",
+                                        "title": "unknown"
+                                      },
+                                      "cache_control": {
+                                        "anyOf": [
+                                          {
+                                            "type": "object",
+                                            "required": [
+                                              "type"
+                                            ],
+                                            "properties": {
+                                              "type": {
+                                                "type": "string",
+                                                "enum": [
+                                                  "ephemeral"
+                                                ]
+                                              }
+                                            },
+                                            "additionalProperties": false
+                                          },
+                                          {
+                                            "type": "null"
+                                          }
+                                        ]
+                                      }
+                                    },
+                                    "additionalProperties": false
+                                  },
+                                  {
+                                    "type": "object",
+                                    "required": [
+                                      "type",
+                                      "tool_use_id",
+                                      "content"
+                                    ],
+                                    "properties": {
+                                      "type": {
+                                        "type": "string",
+                                        "enum": [
+                                          "web_fetch_tool_result"
+                                        ]
+                                      },
+                                      "tool_use_id": {
+                                        "type": "string"
+                                      },
+                                      "content": {
+                                        "$id": "/schemas/unknown",
+                                        "title": "unknown"
+                                      },
+                                      "cache_control": {
+                                        "anyOf": [
+                                          {
+                                            "type": "object",
+                                            "required": [
+                                              "type"
+                                            ],
+                                            "properties": {
+                                              "type": {
+                                                "type": "string",
+                                                "enum": [
+                                                  "ephemeral"
+                                                ]
+                                              }
+                                            },
+                                            "additionalProperties": false
+                                          },
+                                          {
+                                            "type": "null"
+                                          }
+                                        ]
+                                      }
+                                    },
+                                    "additionalProperties": false
+                                  },
+                                  {
+                                    "type": "object",
+                                    "required": [
+                                      "type",
+                                      "tool_use_id",
+                                      "content"
+                                    ],
+                                    "properties": {
+                                      "type": {
+                                        "type": "string",
+                                        "enum": [
+                                          "code_execution_tool_result"
+                                        ]
+                                      },
+                                      "tool_use_id": {
+                                        "type": "string"
+                                      },
+                                      "content": {
+                                        "$id": "/schemas/unknown",
+                                        "title": "unknown"
+                                      },
+                                      "cache_control": {
+                                        "anyOf": [
+                                          {
+                                            "type": "object",
+                                            "required": [
+                                              "type"
+                                            ],
+                                            "properties": {
+                                              "type": {
+                                                "type": "string",
+                                                "enum": [
+                                                  "ephemeral"
+                                                ]
+                                              }
+                                            },
+                                            "additionalProperties": false
+                                          },
+                                          {
+                                            "type": "null"
+                                          }
+                                        ]
+                                      }
+                                    },
+                                    "additionalProperties": false
+                                  },
+                                  {
+                                    "type": "object",
+                                    "required": [
+                                      "type",
+                                      "tool_use_id",
+                                      "content"
+                                    ],
+                                    "properties": {
+                                      "type": {
+                                        "type": "string",
+                                        "enum": [
+                                          "bash_code_execution_tool_result"
+                                        ]
+                                      },
+                                      "tool_use_id": {
+                                        "type": "string"
+                                      },
+                                      "content": {
+                                        "$id": "/schemas/unknown",
+                                        "title": "unknown"
+                                      },
+                                      "cache_control": {
+                                        "anyOf": [
+                                          {
+                                            "type": "object",
+                                            "required": [
+                                              "type"
+                                            ],
+                                            "properties": {
+                                              "type": {
+                                                "type": "string",
+                                                "enum": [
+                                                  "ephemeral"
+                                                ]
+                                              }
+                                            },
+                                            "additionalProperties": false
+                                          },
+                                          {
+                                            "type": "null"
+                                          }
+                                        ]
+                                      }
+                                    },
+                                    "additionalProperties": false
+                                  },
+                                  {
+                                    "type": "object",
+                                    "required": [
+                                      "type",
+                                      "tool_use_id",
+                                      "content"
+                                    ],
+                                    "properties": {
+                                      "type": {
+                                        "type": "string",
+                                        "enum": [
+                                          "text_editor_code_execution_tool_result"
+                                        ]
+                                      },
+                                      "tool_use_id": {
+                                        "type": "string"
+                                      },
+                                      "content": {
+                                        "$id": "/schemas/unknown",
+                                        "title": "unknown"
+                                      },
+                                      "cache_control": {
+                                        "anyOf": [
+                                          {
+                                            "type": "object",
+                                            "required": [
+                                              "type"
+                                            ],
+                                            "properties": {
+                                              "type": {
+                                                "type": "string",
+                                                "enum": [
+                                                  "ephemeral"
+                                                ]
+                                              }
+                                            },
+                                            "additionalProperties": false
+                                          },
+                                          {
+                                            "type": "null"
+                                          }
+                                        ]
+                                      }
+                                    },
+                                    "additionalProperties": false
+                                  },
+                                  {
+                                    "type": "object",
+                                    "required": [
+                                      "type",
+                                      "tool_use_id",
+                                      "content"
+                                    ],
+                                    "properties": {
+                                      "type": {
+                                        "type": "string",
+                                        "enum": [
+                                          "tool_search_tool_result"
+                                        ]
+                                      },
+                                      "tool_use_id": {
+                                        "type": "string"
+                                      },
+                                      "content": {
+                                        "$id": "/schemas/unknown",
+                                        "title": "unknown"
+                                      },
+                                      "cache_control": {
+                                        "anyOf": [
+                                          {
+                                            "type": "object",
+                                            "required": [
+                                              "type"
+                                            ],
+                                            "properties": {
+                                              "type": {
+                                                "type": "string",
+                                                "enum": [
+                                                  "ephemeral"
+                                                ]
+                                              }
+                                            },
+                                            "additionalProperties": false
+                                          },
+                                          {
+                                            "type": "null"
+                                          }
+                                        ]
+                                      }
+                                    },
+                                    "additionalProperties": false
+                                  },
+                                  {
+                                    "type": "object",
+                                    "required": [
+                                      "type",
+                                      "id",
+                                      "name",
+                                      "input"
+                                    ],
+                                    "properties": {
+                                      "type": {
+                                        "type": "string",
+                                        "enum": [
+                                          "mcp_tool_use"
+                                        ]
+                                      },
+                                      "id": {
+                                        "type": "string"
+                                      },
+                                      "name": {
+                                        "type": "string"
+                                      },
+                                      "server_name": {
+                                        "type": "string"
+                                      },
+                                      "input": {
+                                        "$id": "/schemas/unknown",
+                                        "title": "unknown"
+                                      },
+                                      "cache_control": {
+                                        "anyOf": [
+                                          {
+                                            "type": "object",
+                                            "required": [
+                                              "type"
+                                            ],
+                                            "properties": {
+                                              "type": {
+                                                "type": "string",
+                                                "enum": [
+                                                  "ephemeral"
+                                                ]
+                                              }
+                                            },
+                                            "additionalProperties": false
+                                          },
+                                          {
+                                            "type": "null"
+                                          }
+                                        ]
+                                      }
+                                    },
+                                    "additionalProperties": false
+                                  },
+                                  {
+                                    "type": "object",
+                                    "required": [
+                                      "type",
+                                      "tool_use_id",
+                                      "content"
+                                    ],
+                                    "properties": {
+                                      "type": {
+                                        "type": "string",
+                                        "enum": [
+                                          "mcp_tool_result"
+                                        ]
+                                      },
+                                      "tool_use_id": {
+                                        "type": "string"
+                                      },
+                                      "content": {
+                                        "$id": "/schemas/unknown",
+                                        "title": "unknown"
+                                      },
+                                      "cache_control": {
+                                        "anyOf": [
+                                          {
+                                            "type": "object",
+                                            "required": [
+                                              "type"
+                                            ],
+                                            "properties": {
+                                              "type": {
+                                                "type": "string",
+                                                "enum": [
+                                                  "ephemeral"
+                                                ]
+                                              }
+                                            },
+                                            "additionalProperties": false
+                                          },
+                                          {
+                                            "type": "null"
+                                          }
+                                        ]
+                                      }
+                                    },
+                                    "additionalProperties": false
+                                  },
+                                  {
+                                    "type": "object",
+                                    "required": [
+                                      "type",
+                                      "tool_name"
+                                    ],
+                                    "properties": {
+                                      "type": {
+                                        "type": "string",
+                                        "enum": [
+                                          "tool_reference"
+                                        ]
+                                      },
+                                      "tool_name": {
+                                        "type": "string"
+                                      },
+                                      "cache_control": {
+                                        "anyOf": [
+                                          {
+                                            "type": "object",
+                                            "required": [
+                                              "type"
+                                            ],
+                                            "properties": {
+                                              "type": {
+                                                "type": "string",
+                                                "enum": [
+                                                  "ephemeral"
+                                                ]
+                                              }
+                                            },
+                                            "additionalProperties": false
+                                          },
+                                          {
+                                            "type": "null"
+                                          }
+                                        ]
+                                      }
+                                    },
+                                    "additionalProperties": false
+                                  },
+                                  {
+                                    "type": "object",
+                                    "required": [
+                                      "type"
+                                    ],
+                                    "properties": {
+                                      "type": {
+                                        "type": "string",
+                                        "enum": [
+                                          "browser_state"
+                                        ]
                                       },
                                       "content": {
                                         "$id": "/schemas/unknown",
@@ -5207,6 +6180,9 @@
                             "enum": [
                               "auto"
                             ]
+                          },
+                          "disable_parallel_tool_use": {
+                            "type": "boolean"
                           }
                         },
                         "additionalProperties": false
@@ -5222,6 +6198,9 @@
                             "enum": [
                               "any"
                             ]
+                          },
+                          "disable_parallel_tool_use": {
+                            "type": "boolean"
                           }
                         },
                         "additionalProperties": false
@@ -5241,6 +6220,9 @@
                           },
                           "name": {
                             "type": "string"
+                          },
+                          "disable_parallel_tool_use": {
+                            "type": "boolean"
                           }
                         },
                         "additionalProperties": false
@@ -5303,6 +6285,21 @@
                             "type": "string",
                             "enum": [
                               "adaptive"
+                            ]
+                          }
+                        },
+                        "additionalProperties": false
+                      },
+                      {
+                        "type": "object",
+                        "required": [
+                          "type"
+                        ],
+                        "properties": {
+                          "type": {
+                            "type": "string",
+                            "enum": [
+                              "disabled"
                             ]
                           }
                         },
@@ -7087,6 +8084,65 @@
                         },
                         "additionalProperties": false
                       }
+                    },
+                    "usage": {
+                      "type": "object",
+                      "required": [
+                        "input_tokens",
+                        "output_tokens",
+                        "total_tokens"
+                      ],
+                      "properties": {
+                        "input_tokens": {
+                          "type": "number"
+                        },
+                        "output_tokens": {
+                          "type": "number"
+                        },
+                        "total_tokens": {
+                          "type": "number"
+                        },
+                        "input_tokens_details": {
+                          "type": "object",
+                          "required": [],
+                          "properties": {},
+                          "additionalProperties": {
+                            "$id": "/schemas/unknown",
+                            "title": "unknown"
+                          }
+                        },
+                        "output_tokens_details": {
+                          "type": "object",
+                          "required": [],
+                          "properties": {},
+                          "additionalProperties": {
+                            "$id": "/schemas/unknown",
+                            "title": "unknown"
+                          }
+                        }
+                      },
+                      "additionalProperties": false
+                    },
+                    "background": {
+                      "type": "string",
+                      "enum": [
+                        "transparent",
+                        "opaque"
+                      ]
+                    },
+                    "output_format": {
+                      "type": "string",
+                      "enum": [
+                        "png",
+                        "jpeg",
+                        "webp"
+                      ]
+                    },
+                    "size": {
+                      "type": "string"
+                    },
+                    "quality": {
+                      "type": "string"
                     }
                   },
                   "additionalProperties": false
@@ -7287,6 +8343,36 @@
                   "user": {
                     "type": "string"
                   },
+                  "output_format": {
+                    "type": "string",
+                    "enum": [
+                      "png",
+                      "jpeg",
+                      "webp"
+                    ]
+                  },
+                  "output_compression": {
+                    "type": "integer",
+                    "description": "an integer",
+                    "title": "int"
+                  },
+                  "moderation": {
+                    "type": "string",
+                    "enum": [
+                      "low",
+                      "auto"
+                    ]
+                  },
+                  "stream": {
+                    "type": "boolean"
+                  },
+                  "partial_images": {
+                    "type": "integer",
+                    "description": "a number less than or equal to 3",
+                    "title": "lessThanOrEqualTo(3)",
+                    "minimum": 0,
+                    "maximum": 3
+                  },
                   "model": {
                     "type": "string",
                     "description": "Optional model ID. Omit for automatic default-chain selection; never send an empty-string placeholder. Preserve an explicitly selected nonempty ID exactly."
@@ -7341,6 +8427,65 @@
                         },
                         "additionalProperties": false
                       }
+                    },
+                    "usage": {
+                      "type": "object",
+                      "required": [
+                        "input_tokens",
+                        "output_tokens",
+                        "total_tokens"
+                      ],
+                      "properties": {
+                        "input_tokens": {
+                          "type": "number"
+                        },
+                        "output_tokens": {
+                          "type": "number"
+                        },
+                        "total_tokens": {
+                          "type": "number"
+                        },
+                        "input_tokens_details": {
+                          "type": "object",
+                          "required": [],
+                          "properties": {},
+                          "additionalProperties": {
+                            "$id": "/schemas/unknown",
+                            "title": "unknown"
+                          }
+                        },
+                        "output_tokens_details": {
+                          "type": "object",
+                          "required": [],
+                          "properties": {},
+                          "additionalProperties": {
+                            "$id": "/schemas/unknown",
+                            "title": "unknown"
+                          }
+                        }
+                      },
+                      "additionalProperties": false
+                    },
+                    "background": {
+                      "type": "string",
+                      "enum": [
+                        "transparent",
+                        "opaque"
+                      ]
+                    },
+                    "output_format": {
+                      "type": "string",
+                      "enum": [
+                        "png",
+                        "jpeg",
+                        "webp"
+                      ]
+                    },
+                    "size": {
+                      "type": "string"
+                    },
+                    "quality": {
+                      "type": "string"
                     }
                   },
                   "additionalProperties": false
@@ -9069,7 +10214,23 @@
                     "type": "string"
                   },
                   "voice": {
-                    "type": "string"
+                    "anyOf": [
+                      {
+                        "type": "string"
+                      },
+                      {
+                        "type": "object",
+                        "required": [
+                          "id"
+                        ],
+                        "properties": {
+                          "id": {
+                            "type": "string"
+                          }
+                        },
+                        "additionalProperties": false
+                      }
+                    ]
                   },
                   "response_format": {
                     "type": "string",
@@ -9087,6 +10248,13 @@
                   },
                   "instructions": {
                     "type": "string"
+                  },
+                  "stream_format": {
+                    "type": "string",
+                    "enum": [
+                      "sse",
+                      "audio"
+                    ]
                   },
                   "model": {
                     "type": "string",
@@ -22520,6 +23688,167 @@
                                   "only-1",
                                   "clamp-0-1",
                                   "drop"
+                                ]
+                              },
+                              "thinkingModes": {
+                                "type": "array",
+                                "items": {
+                                  "type": "string",
+                                  "enum": [
+                                    "enabled",
+                                    "adaptive",
+                                    "disabled"
+                                  ]
+                                }
+                              },
+                              "reasoningContexts": {
+                                "type": "array",
+                                "items": {
+                                  "type": "string",
+                                  "enum": [
+                                    "auto",
+                                    "current_turn",
+                                    "all_turns"
+                                  ]
+                                }
+                              },
+                              "upstreamAcceptsResponseFormat": {
+                                "type": "boolean"
+                              },
+                              "supportsStyle": {
+                                "type": "boolean"
+                              },
+                              "supportsGptImageOutputOptions": {
+                                "type": "boolean"
+                              },
+                              "alwaysReturnsBase64": {
+                                "type": "boolean"
+                              },
+                              "nativeProgressiveImages": {
+                                "type": "boolean"
+                              },
+                              "maxNativePartialImages": {
+                                "type": "number"
+                              },
+                              "nativeWire": {
+                                "type": "string",
+                                "enum": [
+                                  "generateContent",
+                                  "predict"
+                                ]
+                              },
+                              "videoResolutions": {
+                                "type": "array",
+                                "items": {
+                                  "type": "string"
+                                }
+                              },
+                              "mediaVideoDurationsSeconds": {
+                                "type": "array",
+                                "items": {
+                                  "type": "number"
+                                }
+                              },
+                              "mediaVideoDurationRange": {
+                                "type": "object",
+                                "required": [
+                                  "min",
+                                  "max"
+                                ],
+                                "properties": {
+                                  "min": {
+                                    "type": "number"
+                                  },
+                                  "max": {
+                                    "type": "number"
+                                  }
+                                },
+                                "additionalProperties": false
+                              },
+                              "mediaVideoDurationWithReferences": {
+                                "type": "number"
+                              },
+                              "mediaVideoAspectRatios": {
+                                "type": "array",
+                                "items": {
+                                  "type": "string"
+                                }
+                              },
+                              "mediaVideoMaxReferenceImages": {
+                                "type": "number"
+                              },
+                              "mediaVideoMaxReferenceVoices": {
+                                "type": "number"
+                              },
+                              "mediaVideoReferenceType": {
+                                "type": "string"
+                              },
+                              "mediaVideoStartingImageExclusiveWithReferences": {
+                                "type": "boolean"
+                              },
+                              "mediaImageAspectRatios": {
+                                "type": "array",
+                                "items": {
+                                  "type": "string"
+                                }
+                              },
+                              "mediaImageResolutions": {
+                                "type": "array",
+                                "items": {
+                                  "type": "string"
+                                }
+                              },
+                              "mediaImageResolutionTiers": {
+                                "type": "array",
+                                "items": {
+                                  "type": "object",
+                                  "required": [
+                                    "resolution",
+                                    "longEdge"
+                                  ],
+                                  "properties": {
+                                    "resolution": {
+                                      "type": "string"
+                                    },
+                                    "longEdge": {
+                                      "type": "number"
+                                    }
+                                  },
+                                  "additionalProperties": false
+                                }
+                              },
+                              "mediaImageDefaultResolution": {
+                                "type": "string"
+                              },
+                              "mediaImageSizeAspectRatios": {
+                                "type": "object",
+                                "required": [],
+                                "properties": {},
+                                "additionalProperties": {
+                                  "type": "string"
+                                }
+                              },
+                              "mediaImageCountRange": {
+                                "type": "object",
+                                "required": [
+                                  "min",
+                                  "max"
+                                ],
+                                "properties": {
+                                  "min": {
+                                    "type": "number"
+                                  },
+                                  "max": {
+                                    "type": "number"
+                                  }
+                                },
+                                "additionalProperties": false
+                              },
+                              "tokenizer": {
+                                "type": "string",
+                                "enum": [
+                                  "claude",
+                                  "o200k"
                                 ]
                               }
                             },

@@ -363,6 +363,161 @@ const isImageGenerationBody = (
   "data" in body &&
   Array.isArray(body.data);
 
+/**
+ * Aggregation of a canonical `/v1/images/generations` SSE body.
+ *
+ * A caller asking to stream is HONOURED end to end: the request is forwarded
+ * unchanged and the HTTP surface really streams. This tool has no SSE reader,
+ * so it collapses the event stream into the final result rather than
+ * rewriting the caller's request to `stream: false` — which silently handed
+ * an agent something other than what it asked for.
+ *
+ * Mirrors `packages/wire/lib/canonical/image-sse.ts` in behaviour, but is
+ * reimplemented here because the CLI ships as a self-contained binary with no
+ * workspace dependencies. Two deliberate differences from
+ * `aggregateImageSse`: EVERY completion is kept (`n > 1` yields one completed
+ * event per image, and dropping all but the last would lose images the user
+ * paid for), and a terminal `error` frame is surfaced rather than swallowed.
+ */
+type TImageSseAggregate =
+  | {
+      readonly kind: "body";
+      readonly body: {
+        readonly created: number;
+        readonly data: ReadonlyArray<TImageGenerationItem>;
+      };
+    }
+  | { readonly kind: "error"; readonly message: string };
+
+type TSseFrame = {
+  readonly event: string | null;
+  readonly data: string;
+};
+
+/**
+ * Split an SSE body into frames.
+ *
+ * Follows the event-stream framing rules the gateway emits against: lines end
+ * with LF, CRLF or CR; a blank line dispatches the frame; a line starting
+ * with `:` is a COMMENT and carries no data (the gateway uses comments for
+ * keepalives and for the "partials unavailable" note, precisely so no client
+ * can mistake them for progress); repeated `data:` lines within one frame are
+ * joined with a newline.
+ */
+const parseSseFrames = (raw: string): ReadonlyArray<TSseFrame> => {
+  const frames: TSseFrame[] = [];
+  let event: string | null = null;
+  let data: string[] = [];
+  const flush = (): void => {
+    if (data.length > 0) frames.push({ event, data: data.join("\n") });
+    event = null;
+    data = [];
+  };
+  for (const line of raw.split(/\r\n|\r|\n/)) {
+    if (line === "") {
+      flush();
+      continue;
+    }
+    if (line.startsWith(":")) continue;
+    const colon = line.indexOf(":");
+    const field = colon === -1 ? line : line.slice(0, colon);
+    const rawValue = colon === -1 ? "" : line.slice(colon + 1);
+    const value = rawValue.startsWith(" ") ? rawValue.slice(1) : rawValue;
+    if (field === "event") event = value;
+    else if (field === "data") data.push(value);
+  }
+  // A stream cut off mid-frame never dispatched its last frame; the spec
+  // discards it, and so do we — a truncated frame is not a result.
+  return frames;
+};
+
+const sseFrameError = (
+  event: string | null,
+  parsed: unknown,
+): string | null => {
+  const error =
+    typeof parsed === "object" && parsed !== null && "error" in parsed
+      ? (parsed as { readonly error: unknown }).error
+      : null;
+  const message =
+    typeof error === "object" &&
+    error !== null &&
+    "message" in error &&
+    typeof (error as { readonly message: unknown }).message === "string"
+      ? (error as { readonly message: string }).message
+      : null;
+  if (message !== null) return message;
+  return event === "error" ? "The image stream reported an error." : null;
+};
+
+const aggregateImageSseText = (raw: string): TImageSseAggregate => {
+  const data: TImageGenerationItem[] = [];
+  let created: number | null = null;
+  let errorMessage: string | null = null;
+
+  for (const frame of parseSseFrames(raw)) {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(frame.data);
+    } catch {
+      // An unparseable frame is not a result. Skipping it keeps a provider's
+      // unknown extension from failing a generation that otherwise succeeded.
+      continue;
+    }
+    const failure = sseFrameError(frame.event, parsed);
+    if (failure !== null) {
+      errorMessage = failure;
+      continue;
+    }
+    if (typeof parsed !== "object" || parsed === null) continue;
+    const event = parsed as {
+      readonly type?: unknown;
+      readonly b64_json?: unknown;
+      readonly url?: unknown;
+      readonly created_at?: unknown;
+    };
+    // Partials are successive PREVIEWS of one image, not fragments of it, so
+    // they are discarded rather than concatenated.
+    if (event.type !== "image_generation.completed") continue;
+    if (created === null && typeof event.created_at === "number")
+      created = event.created_at;
+    data.push({
+      ...(typeof event.b64_json === "string"
+        ? { b64_json: event.b64_json }
+        : {}),
+      ...(typeof event.url === "string" ? { url: event.url } : {}),
+    });
+  }
+
+  if (errorMessage !== null) {
+    // Terminal, but never silent about what DID land: a per-image persistence
+    // failure can follow completions, and those urls stay useful.
+    const urls = data
+      .map((item) => (typeof item.url === "string" ? item.url : null))
+      .filter((url): url is string => url !== null);
+    return {
+      kind: "error",
+      message:
+        urls.length === 0
+          ? errorMessage
+          : `${errorMessage} Images that were saved: ${urls.join(" ")}`,
+    };
+  }
+  if (data.length === 0) {
+    return {
+      kind: "error",
+      message:
+        "The image stream ended without a completed image. Nothing was generated.",
+    };
+  }
+  return { kind: "body", body: { created: created ?? 0, data } };
+};
+
+const isEventStream = (headers: Headers): boolean =>
+  (headers.get("content-type") ?? "")
+    .toLowerCase()
+    .includes("text/event-stream");
+
 const attributionFromHeaders = (headers: Headers): string => {
   const resolved = headers.get(OPENLLM_RESOLVED_MODEL_HEADER)?.trim() ?? "";
   if (resolved === "") return "";
@@ -519,11 +674,23 @@ export const handleOpenllmTool = async (
         ? res.body
         : JSON.stringify(res.body, null, 2);
     if (!res.ok) return textResult(`HTTP ${res.status}: ${text}`, true);
-    if (op.path === "/v1/images/generations") {
-      return imageResult(res.body, config, "Image generated.", res.headers);
-    }
-    if (op.path === "/v1/images/edits") {
-      return imageResult(res.body, config, "Image edited.", res.headers);
+    if (
+      op.path === "/v1/images/generations" ||
+      op.path === "/v1/images/edits"
+    ) {
+      const label =
+        op.path === "/v1/images/edits" ? "Image edited." : "Image generated.";
+      // The RESPONSE decides how it is read — the declared content type, not
+      // a guess at the body's shape. An ordinary JSON answer takes the
+      // unchanged path below; only a real event stream is aggregated.
+      if (!isEventStream(res.headers)) {
+        return imageResult(res.body, config, label, res.headers);
+      }
+      const aggregated = aggregateImageSseText(text);
+      if (aggregated.kind === "error") {
+        return textResult(aggregated.message, true);
+      }
+      return imageResult(aggregated.body, config, label, res.headers);
     }
     if (op.path === "/v1/audio/transcriptions" || op.path === "/v1/videos") {
       return textResult(withAttribution(text, res.headers));
