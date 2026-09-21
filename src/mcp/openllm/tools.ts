@@ -77,6 +77,8 @@ const MUTATING = new Set(["post", "put", "patch", "delete"]);
 const MEDIA_FETCH_TIMEOUT_MS = 30_000;
 const REQUEST_TIMEOUT_MS = 120_000;
 
+/** The media tools whose `model` is OPTIONAL — the one table. Consumers ask
+ *  through {@link isMediaOptionalModelTool} rather than re-listing it. */
 const MEDIA_OPTIONAL_MODEL_TOOLS: ReadonlySet<string> = new Set([
   "api_v1Images_imagesGenerations",
   "api_v1Images_imagesEdits",
@@ -85,8 +87,20 @@ const MEDIA_OPTIONAL_MODEL_TOOLS: ReadonlySet<string> = new Set([
   "api_v1Videos_videosCreate",
 ]);
 
+/** Also read by the browser chat, which marks exactly these `strict: false` —
+ *  Responses normalizes an omitted `strict` toward strict, which would promote
+ *  their optional fields to required. */
+export const isMediaOptionalModelTool = (name: string): boolean =>
+  MEDIA_OPTIONAL_MODEL_TOOLS.has(name);
+
+/** Answers the loop this fixes: an agent filled every optional field, then on
+ *  a rejection kept the body and swapped the model. So — smallest request,
+ *  omit `model` rather than invent one (`"auto"` is named because agents reach
+ *  for it, and it resolves as a literal id), and on a rejection change the FIELD
+ *  (only what the agent added; a user's own constraint is reported, not
+ *  silently overridden). */
 const MEDIA_OPTIONAL_MODEL_GUIDANCE =
-  " Model is optional: omitting it uses the catalog-ranked media default chain (subscription candidates first, then a compatible API-key tail) and may fall through at runtime after a failed, unaccepted attempt. An explicit model is used as requested. Send only needed optional keys; omit model for automatic selection, never send an empty-string placeholder. Do not add dummy empty strings or empty reference arrays. Do not drop or replace voice, format, size, or other caller options to force a match.";
+  ' Send the smallest request that expresses the user\'s intent — the optional fields are not a checklist, so send an optional key only when the user asked for that specific thing. Model is optional. Omit model entirely for automatic selection: omitting it is the default-selection mechanism (it uses the catalog-ranked media default chain — subscription candidates first, then a compatible API-key tail — and may fall through at runtime after a failed, unaccepted attempt), so never send a placeholder in its place — `model: "auto"` and `model: ""` are both invalid ways to request automatic selection, and `"auto"` in particular is taken as a literal model id. An explicit model is used as requested. If a field is rejected, fix that field and do not retry the same rejected fields under a different model: drop the unsupported options you added on your own, keep every constraint the user gave (voice, format, size, quality and the like), and if one of THOSE is what the provider refuses, report the conflict and the supported alternatives instead of silently changing or dropping it.';
 
 const descriptionFor = (op: TApiOperation): string => {
   const base =
@@ -290,9 +304,33 @@ const resolveRawOperationUrl = (
   return url.toString();
 };
 
+/** Which model served — or refused — this request, from the headers the
+ *  gateway attaches on BOTH outcomes. Empty when nothing was resolved. */
+const attributionFromHeaders = (headers: Headers): string => {
+  const resolved = headers.get(OPENLLM_RESOLVED_MODEL_HEADER)?.trim() ?? "";
+  if (resolved === "") return "";
+  const chain = (headers.get(OPENLLM_CHAIN_HEADER) ?? "")
+    .split(",")
+    .map((hop) => hop.trim())
+    .filter((hop) => hop !== "");
+  return chain.length > 1
+    ? `Served by ${resolved} (chain: ${chain.join(" → ")}).`
+    : `Served by ${resolved}.`;
+};
+
+const withAttribution = (text: string, headers: Headers): string => {
+  const attribution = attributionFromHeaders(headers);
+  return attribution === "" ? text : `${text} ${attribution}`;
+};
+
+/** Status line and provider body (message, `param`, `code`) verbatim;
+ *  attribution is APPENDED, and absent when no model was ever selected. */
 const responseErrorResult = async (res: Response): Promise<TToolResult> => {
   const text = await res.text().catch(() => "");
-  return textResult(`HTTP ${res.status}: ${text}`, true);
+  return textResult(
+    withAttribution(`HTTP ${res.status}: ${text}`, res.headers),
+    true,
+  );
 };
 
 const sleep = async (ms: number): Promise<void> =>
@@ -518,23 +556,6 @@ const isEventStream = (headers: Headers): boolean =>
     .toLowerCase()
     .includes("text/event-stream");
 
-const attributionFromHeaders = (headers: Headers): string => {
-  const resolved = headers.get(OPENLLM_RESOLVED_MODEL_HEADER)?.trim() ?? "";
-  if (resolved === "") return "";
-  const chain = (headers.get(OPENLLM_CHAIN_HEADER) ?? "")
-    .split(",")
-    .map((hop) => hop.trim())
-    .filter((hop) => hop !== "");
-  return chain.length > 1
-    ? `Served by ${resolved} (chain: ${chain.join(" → ")}).`
-    : `Served by ${resolved}.`;
-};
-
-const withAttribution = (text: string, headers: Headers): string => {
-  const attribution = attributionFromHeaders(headers);
-  return attribution === "" ? text : `${text} ${attribution}`;
-};
-
 const imageResult = async (
   body: unknown,
   config: { readonly baseUrl: string },
@@ -614,7 +635,13 @@ const mediaRedirectResult = async (
   await res.body?.cancel();
   const mediaUrl = res.headers.get("x-openllm-media-url");
   if (mediaUrl === null || mediaUrl.length === 0) {
-    return textResult(`HTTP ${res.status}: missing media url header`, true);
+    return textResult(
+      withAttribution(
+        `HTTP ${res.status}: missing media url header`,
+        res.headers,
+      ),
+      true,
+    );
   }
   const durableUrl = new URL(mediaUrl, config.baseUrl).toString();
   if (kind === "video") {
@@ -627,7 +654,10 @@ const mediaRedirectResult = async (
   if (!media.ok) {
     await media.body?.cancel().catch(() => {});
     return textResult(
-      `Audio generated — ${durableUrl} (still finalizing; open the url shortly)`,
+      withAttribution(
+        `Audio generated — ${durableUrl} (still finalizing; open the url shortly)`,
+        res.headers,
+      ),
     );
   }
   return {
@@ -673,7 +703,12 @@ export const handleOpenllmTool = async (
       typeof res.body === "string"
         ? res.body
         : JSON.stringify(res.body, null, 2);
-    if (!res.ok) return textResult(`HTTP ${res.status}: ${text}`, true);
+    // Name the model that refused, so a retry fixes the FIELD, not the model.
+    if (!res.ok)
+      return textResult(
+        withAttribution(`HTTP ${res.status}: ${text}`, res.headers),
+        true,
+      );
     if (
       op.path === "/v1/images/generations" ||
       op.path === "/v1/images/edits"
@@ -688,7 +723,12 @@ export const handleOpenllmTool = async (
       }
       const aggregated = aggregateImageSseText(text);
       if (aggregated.kind === "error") {
-        return textResult(aggregated.message, true);
+        // An HTTP 200 carrying a terminal `error` frame was still served by
+        // some model; don't let it be the one failure shape that hides it.
+        return textResult(
+          withAttribution(aggregated.message, res.headers),
+          true,
+        );
       }
       return imageResult(aggregated.body, config, label, res.headers);
     }
