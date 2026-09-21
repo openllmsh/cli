@@ -10435,6 +10435,9 @@
                                 },
                                 "quota_email": {
                                   "type": "boolean"
+                                },
+                                "daemon_idle_email": {
+                                  "type": "boolean"
                                 }
                               },
                               "additionalProperties": false
@@ -24385,6 +24388,9 @@
                             "type": "boolean"
                           },
                           "quota_email": {
+                            "type": "boolean"
+                          },
+                          "daemon_idle_email": {
                             "type": "boolean"
                           }
                         },
