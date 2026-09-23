@@ -22,9 +22,16 @@ export type TCommand = {
 export const EXEC_GROUPS = ["ctx", "memory"] as const;
 export type TExecGroup = (typeof EXEC_GROUPS)[number];
 
+export const CONTEXT_HOOK_VERBS = [
+  "session-start",
+  "reindex-on-edit",
+  "grep-nudge",
+  "index-worker",
+] as const;
+
 /** Per-group verbs (drives dispatch, help, and completion). */
 export const EXEC_VERBS: Record<TExecGroup, readonly string[]> = {
-  ctx: ["index", "search", "status", "index-docs"],
+  ctx: ["index", "search", "status", "index-docs", ...CONTEXT_HOOK_VERBS],
   memory: ["recall", "extract", "extract-worker"],
 };
 

@@ -17,6 +17,7 @@ import {
   normalizeMcpGroup,
 } from "./commands";
 import { runCompletionCommand } from "./completion";
+import { runContextCommand } from "./context-hooks/command";
 import type { TDaemonLifecycleCommand } from "./daemon-delegation";
 import { runManagedDaemonCommand } from "./daemon-delegation";
 import {
@@ -24,7 +25,6 @@ import {
   isDoctorReportingVerb,
   runDoctorReportCommand,
 } from "./doctor-report-cmd";
-import { runClaudeContextCli } from "./mcp/claude-context";
 import type { TMcpGroup } from "./mcp/server";
 import { MCP_GROUPS, runMcpServer } from "./mcp/server";
 import { runSelfUpdate } from "./self-update";
@@ -65,6 +65,7 @@ ${EXEC_GROUPS.map((g) => `  openllm exec ${g} <${EXEC_VERBS[g].join("|")}>`).joi
   ctx search     --path <dir> --query <q> [--limit N]
   ctx status     --path <dir>                  indexing progress/state
   ctx index-docs --url <url> [--force]         index a docs site
+  ctx session-start|reindex-on-edit|grep-nudge  client hook event on stdin
   memory recall                              recall from a hook event on stdin
   memory extract                             start background memory extraction
 `;
@@ -228,7 +229,7 @@ export const runCli = async (argv: readonly string[]): Promise<void> => {
       if (!(EXEC_VERBS.ctx as readonly string[]).includes(verb)) {
         return usage(EXEC_USAGE, 2);
       }
-      await runClaudeContextCli(rest);
+      await runContextCommand(rest);
       break;
     }
     case "exec": {
@@ -248,7 +249,7 @@ export const runCli = async (argv: readonly string[]): Promise<void> => {
       }
       switch (group) {
         case "ctx":
-          await runClaudeContextCli(rest.slice(1));
+          await runContextCommand(rest.slice(1));
           break;
         case "memory": {
           const { runMemoryHookCommand } = await import(

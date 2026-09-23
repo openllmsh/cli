@@ -28,7 +28,7 @@ packages/cli/
 ├── install.sh            # the CLI-only installer (mirrored to the repo root)
 ├── setup/                # STATIC client overlays, embedded as text
 │   ├── claude/ codex/ grok/ opencode/ raycast/
-│   └── hooks/            # session hooks, materialized into the run dir
+│   └── hooks/            # statusline.sh, materialized into the run dir
 ├── manifest.ts           # COMMITTED release pin (repo/tag/per-target sha256)
 ├── release-types.ts      # CLI_TARGETS (SSOT of buildable targets) + TCliRelease
 ├── index.ts              # barrel: manifest + release-types only (gateway reads the pin)
@@ -59,6 +59,8 @@ packages/cli/
     ├── completion.ts     # bash/zsh/fish completion (daemon-parity)
     ├── setup-cmd.ts      # PATH symlink + completion install
     ├── env.ts            # config resolution (env → shared ~/.openllm/.env → baked origin)
+    ├── hook-helpers.ts   # bounded stdin, detached self-exec, nonblocking SQLite locks
+    ├── context-hooks/    # compiled index lifecycle and advisory search nudge
     ├── memory-hooks/     # compiled recall + detached extraction, private health/retry state
     ├── self-update.ts    # converge to /api/cli/version (checksum-gated atomic swap)
     ├── sdk/
@@ -80,7 +82,8 @@ packages/cli/
 | `openllm uninstall [--yes]` | remove the CLI (reverses always-on wiring first) |
 | `openllm doctor [--fix]` | report/clean leftovers from the old install model |
 | `openllm mcp [--only <group>]` | the unified MCP server over stdio (groups: `openllm`, `openllm-context`, `openllm-memory`; default all — `--only` is debug) |
-| `openllm exec ctx <index\|search\|status\|index-docs> …` | claude-context hook verbs — what the `openllm` bundle's hooks shell out to (`ctx` kept as a hidden alias for older bundles) |
+| `openllm exec ctx <index\|search\|status\|index-docs> …` | manual context commands (`ctx` kept as a hidden compatibility alias) |
+| `openllm exec ctx <session-start\|reindex-on-edit\|grep-nudge>` | Context hook events on stdin; `index-worker` is the internal detached command |
 | `openllm exec memory <recall\|extract>` | Memory hook events on stdin: foreground recall or detached extraction; `extract-worker` is the internal child command |
 | `openllm setup` | PATH symlink + shell completion — run automatically by the curl installer; shown as a copyable follow-up on the dashboard card for sandboxed one-click installs |
 | `openllm completion <bash\|zsh\|fish\|install>` | shell completion (derived from `commands.ts`, the single command-surface source) |
@@ -94,6 +97,39 @@ Config: `OPENLLM_CLOUD_ORIGIN` / `OPENLLM_API_KEY` env (the same contract the
 MCP mapping + hooks carry), falling back to the SHARED `~/.openllm/.env` (the
 same file the daemon boots from — one pairing covers every tool), falling back
 to the compile-time cloud-origin bake.
+
+### Automatic context hooks
+
+Claude and Grok invoke `"$OPENLLM_BIN" exec ctx session-start|reindex-on-edit|grep-nudge`
+directly. These hooks are compiled; no jq, Python, Node, or Bun installation is
+needed. Git remains required for repository identity. The unrelated
+`setup/hooks/statusline.sh` stays embedded and materialized, alongside the
+launcher-generated API-key helper.
+
+Index hooks prefer `CLAUDE_PROJECT_DIR`, then the event cwd, then the process
+cwd; the search nudge preserves event-cwd-first precedence. Canonical Git roots
+must have an origin. Foreground hooks do not resolve credentials: they schedule
+a detached self-invocation using the same executable (or the source entry when
+running from source), sending only root/trigger over stdin. The worker reuses
+`runClaudeContextCli(["index", "--path", root])`, including authentication,
+incremental sync, and retry cooldown. `auto-index.log` owns detached output;
+the foreground session message reports scheduling, never successful indexing.
+
+`CLAUDE_CONTEXT_AUTO_INDEX`, `CLAUDE_CONTEXT_REINDEX_ON_EDIT`,
+`CLAUDE_CONTEXT_REINDEX_INTERVAL` (120 seconds), `CLAUDE_CONTEXT_GREP_NUDGE`, and
+`CLAUDE_CONTEXT_STATE_DIR` retain their existing behavior. State defaults to
+`~/.claude/plugin-state/claude-context`. Each root's worker holds an embedded
+SQLite exclusive lock for the whole sync. The edit timestamp is checked and
+updated only under that lock; SessionStart shares the lock but neither consumes
+nor obeys the edit throttle. OS locks release on worker death, and distinct
+`.lock.sqlite` files never collide with old shell `.lock` directories. Edits
+remain silent; failures are fail-open with content-free foreground diagnostics.
+
+Claude snake_case and Grok camelCase search events share the advisory-only
+PreToolUse nudge. Atomic session markers suppress duplicate concurrent nudges;
+old markers are pruned with the previous seven-day `find -mtime +7` semantics.
+No permission decision is emitted. Hook stdin is bounded by the same small
+helper used by memory hooks, and neither credentials nor event JSON enter argv.
 
 ### Automatic memory hooks
 

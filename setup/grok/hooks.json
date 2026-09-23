@@ -5,7 +5,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "{{HOOKS_DIR}}/ctx-session-start.sh",
+            "command": "\"$OPENLLM_BIN\" exec ctx session-start",
             "timeout": 30
           }
         ]
@@ -17,7 +17,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "{{HOOKS_DIR}}/ctx-grep-nudge.sh",
+            "command": "\"$OPENLLM_BIN\" exec ctx grep-nudge",
             "timeout": 5
           }
         ]
@@ -29,7 +29,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "{{HOOKS_DIR}}/ctx-reindex-on-edit.sh",
+            "command": "\"$OPENLLM_BIN\" exec ctx reindex-on-edit",
             "timeout": 10
           }
         ]

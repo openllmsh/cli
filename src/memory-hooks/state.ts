@@ -1,11 +1,8 @@
-import { Database } from "bun:sqlite";
 import { createHash, randomUUID } from "node:crypto";
 import {
   appendFileSync,
   chmodSync,
-  closeSync,
   mkdirSync,
-  openSync,
   readFileSync,
   renameSync,
   statSync,
@@ -14,6 +11,7 @@ import {
 } from "node:fs";
 import { join } from "node:path";
 import { userHome } from "../env";
+import { tryHookLock } from "../hook-helpers";
 import type { THookDiagnostic } from "./transport";
 import { recordOf } from "./transport";
 
@@ -84,27 +82,6 @@ const writeState = (path: string, value: unknown): void => {
   }
 };
 
-/** SQLite is embedded in the compiled CLI. Its OS locks serialize workers and
- * release on process death, unlike lock directories that strand crashed runs.
- * No rows/content are stored here; BEGIN EXCLUSIVE is only a nonblocking lock.
- */
-const tryLock = (path: string): (() => void) | null => {
-  let database: Database | undefined;
-  try {
-    closeSync(openSync(path, "a", 0o600));
-    chmodSync(path, 0o600);
-    database = new Database(path);
-    database.exec("PRAGMA busy_timeout=0; BEGIN EXCLUSIVE");
-    const held = database;
-    return (): void => {
-      held.close();
-    };
-  } catch {
-    database?.close();
-    return null;
-  }
-};
-
 const healthOf = (value: unknown): TComponentHealth | undefined => {
   const data = recordOf(value);
   if (!data) return undefined;
@@ -149,7 +126,7 @@ export class MemoryHookState {
     const dir = join(this.root, "sessions");
     privateDirectory(dir);
     const path = join(dir, `${hash(`${sessionId}\0${transcript}`)}.json`);
-    const release = tryLock(`${path}.lock.sqlite`);
+    const release = tryHookLock(`${path}.lock.sqlite`);
     if (!release) return null;
     const data = readState(path);
     return {
@@ -248,7 +225,7 @@ export class MemoryHookState {
   private updateHealth(update: (state: THealthState) => void): void {
     let release: (() => void) | null = null;
     try {
-      release = tryLock(join(this.root, "health.lock.sqlite"));
+      release = tryHookLock(join(this.root, "health.lock.sqlite"));
       if (!release) return;
       const path = join(this.root, "health.json");
       const raw = readState(path);
