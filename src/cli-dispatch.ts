@@ -65,6 +65,8 @@ ${EXEC_GROUPS.map((g) => `  openllm exec ${g} <${EXEC_VERBS[g].join("|")}>`).joi
   ctx search     --path <dir> --query <q> [--limit N]
   ctx status     --path <dir>                  indexing progress/state
   ctx index-docs --url <url> [--force]         index a docs site
+  memory recall                              recall from a hook event on stdin
+  memory extract                             start background memory extraction
 `;
 
 const API_USAGE = `usage: openllm api --spec
@@ -244,11 +246,16 @@ export const runCli = async (argv: readonly string[]): Promise<void> => {
       if (!(EXEC_VERBS[group] as readonly string[]).includes(verb)) {
         return usage(EXEC_USAGE, 2);
       }
-      // One group today; a switch keeps the next group's dispatch obvious.
       switch (group) {
         case "ctx":
           await runClaudeContextCli(rest.slice(1));
           break;
+        case "memory": {
+          const { runMemoryHookCommand } = await import(
+            "./memory-hooks/command"
+          );
+          return process.exit(await runMemoryHookCommand(rest.slice(1)));
+        }
       }
       break;
     }

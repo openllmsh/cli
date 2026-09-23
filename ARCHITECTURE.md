@@ -59,6 +59,7 @@ packages/cli/
     ├── completion.ts     # bash/zsh/fish completion (daemon-parity)
     ├── setup-cmd.ts      # PATH symlink + completion install
     ├── env.ts            # config resolution (env → shared ~/.openllm/.env → baked origin)
+    ├── memory-hooks/     # compiled recall + detached extraction, private health/retry state
     ├── self-update.ts    # converge to /api/cli/version (checksum-gated atomic swap)
     ├── sdk/
     │   ├── generated/    # COMMITTED: openapi.json + operations.ts (69 ops)
@@ -80,6 +81,7 @@ packages/cli/
 | `openllm doctor [--fix]` | report/clean leftovers from the old install model |
 | `openllm mcp [--only <group>]` | the unified MCP server over stdio (groups: `openllm`, `openllm-context`, `openllm-memory`; default all — `--only` is debug) |
 | `openllm exec ctx <index\|search\|status\|index-docs> …` | claude-context hook verbs — what the `openllm` bundle's hooks shell out to (`ctx` kept as a hidden alias for older bundles) |
+| `openllm exec memory <recall\|extract>` | Memory hook events on stdin: foreground recall or detached extraction; `extract-worker` is the internal child command |
 | `openllm setup` | PATH symlink + shell completion — run automatically by the curl installer; shown as a copyable follow-up on the dashboard card for sandboxed one-click installs |
 | `openllm completion <bash\|zsh\|fish\|install>` | shell completion (derived from `commands.ts`, the single command-surface source) |
 | `openllm api --spec` | print the embedded OpenAPI spec |
@@ -92,6 +94,37 @@ Config: `OPENLLM_CLOUD_ORIGIN` / `OPENLLM_API_KEY` env (the same contract the
 MCP mapping + hooks carry), falling back to the SHARED `~/.openllm/.env` (the
 same file the daemon boots from — one pairing covers every tool), falling back
 to the compile-time cloud-origin bake.
+
+### Automatic memory hooks
+
+Claude and Grok's runtime overlays attach `UserPromptSubmit` recall and `Stop`
+extraction by invoking `"$OPENLLM_BIN" exec memory recall|extract` directly.
+The launcher supplies `OPENLLM_BIN`; quoting it preserves paths with spaces or
+shell metacharacters. There are no memory `.sh` forwarding files and **no
+external Python, Node, or Bun runtime is required**. The implementation is
+compiled into this binary and reuses `cliConfig`, `MemoryClient`, and the SDK
+HTTP client. The command accepts the hook event on stdin; the detached worker
+re-executes the same binary, never an ephemeral run-directory script, and never
+puts conversation text or credentials in argv.
+
+The launcher supplies its validated key/cloud origin snapshot and
+`OPENLLM_INFERENCE_ORIGIN` from its existing gateway selection. Extraction uses
+that inference origin (and the configured `SUPERMEMORY_AUTO_MODEL`, default
+`lite`); memory reads/writes always use the cloud. Standalone invocation falls
+back to the configured cloud origin. `OPENLLM_DAEMON_ENV_FILE` remains the
+canonical configuration override; the memory command accepts the historical
+`OPENLLM_ENV_FILE` only when the canonical override is absent.
+
+Private, account/key-and-origin-scoped state under
+`~/.claude/plugin-state/supermemory` (or `SUPERMEMORY_AUTO_LOG_DIR`) tracks
+successful input separately from failed attempts. Session locks serialize
+concurrent Stops; failed extraction or partial writes can retry unchanged input
+after a bounded cooldown. Valid empty extraction is a healthy no-op. Logs hold
+content-free diagnostics, not transcripts, keys, or raw error bodies. Repeated
+failure produces a rate-limited advisory in the foreground recall hook rather
+than blocking work or silently failing indefinitely. `SUPERMEMORY_AUTO_SAVE=0`
+and `SUPERMEMORY_AUTO_RECALL=0` remain independent opt-outs. No historical
+transcript backfill runs automatically.
 
 ### Brokered session launches
 

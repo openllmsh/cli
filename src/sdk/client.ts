@@ -8,6 +8,12 @@
 
 import type { TApiOperation } from "./generated/operations";
 
+/** Optional transport controls for latency-sensitive embedded consumers. */
+export type THttpClientOptions = {
+  readonly fetch?: (input: string, init?: RequestInit) => Promise<Response>;
+  readonly timeoutMs?: number;
+};
+
 export type TSdkConfig = {
   readonly baseUrl: string;
   readonly apiKey: string;
@@ -61,6 +67,7 @@ export const callOperation = async (
   config: TSdkConfig,
   op: TApiOperation,
   args: Record<string, unknown>,
+  options: THttpClientOptions = {},
 ): Promise<TSdkResponse> => {
   const url = resolveUrl(config, op, args);
   const init: RequestInit = {
@@ -72,9 +79,9 @@ export const callOperation = async (
     ...(op.hasBody && args.body !== undefined
       ? { body: JSON.stringify(args.body) }
       : {}),
-    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+    signal: AbortSignal.timeout(options.timeoutMs ?? REQUEST_TIMEOUT_MS),
   };
-  const res = await fetch(url, init);
+  const res = await (options.fetch ?? fetch)(url, init);
   const ct = res.headers.get("content-type") ?? "";
   const body = ct.includes("application/json")
     ? await res.json().catch(() => null)

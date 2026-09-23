@@ -108,6 +108,7 @@ Every command accepts `-h` / `--help`.
 | `openllm uninstall [--yes] [--keep-logins\|--remove-logins]` | Remove the full product: daemon + CLI |
 | `openllm mcp [--only <group>]` | MCP over stdio: `openllm`, `openllm-context`, `openllm-memory`; tier restrictions still apply |
 | `openllm exec ctx <index\|search\|status\|index-docs> …` | Code/docs-search hook commands |
+| `openllm exec memory <recall\|extract>` | Automatic memory hooks (event JSON on stdin; extraction runs in a detached worker) |
 | `openllm setup` | PATH symlink and shell completion (idempotent) |
 | `openllm completion <bash\|zsh\|fish\|install>` | Print or install shell completion |
 | `openllm api --spec` | Print the embedded OpenAPI spec |
@@ -117,6 +118,23 @@ Config resolution: process environment → shared `~/.openllm/.env` → baked ga
 origin. The key variables are `OPENLLM_CLOUD_ORIGIN` and `OPENLLM_API_KEY`.
 `OPENLLM_GATEWAY=local|cloud` controls client routing; otherwise the CLI prefers
 local routing when the daemon is available.
+
+### Proactive memory
+
+Claude Code and Grok Build sessions automatically recall relevant memories before
+prompts and extract confirmed, durable preferences and decisions after a turn.
+Both hooks run inside the compiled OpenLLM CLI; **Python, Node, and Bun do not
+need to be installed**. Memory storage uses the cloud gateway, while extraction
+uses the session's selected inference gateway and the `lite` alias by default
+(`SUPERMEMORY_AUTO_MODEL` overrides it).
+
+Set `SUPERMEMORY_AUTO_SAVE=0` or `SUPERMEMORY_AUTO_RECALL=0` to disable either
+behavior. Repeated failures produce a rate-limited warning without blocking your
+work. Private, content-free health logs live under
+`~/.claude/plugin-state/supermemory/scopes/` (override the parent with
+`SUPERMEMORY_AUTO_LOG_DIR`). Failed attempts remain retryable; no historical
+conversation backfill runs automatically. New hook code takes effect in a fresh
+session after updating the CLI.
 
 ### MCP model discovery
 

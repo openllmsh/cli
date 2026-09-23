@@ -36,8 +36,8 @@ const CLOUD_ORIGIN_DEFAULT: string =
  * The user's home directory, `$HOME` first.
  *
  * `os.homedir()` on macOS resolves via `getpwuid`, IGNORING `$HOME` — which
- * would make the CLI disagree with its own shell hooks (`openllm-env.sh` reads
- * `$HOME/.openllm/.env`) and with a child launched under an explicitly set HOME
+ * would make the CLI disagree with its shell launchers and with a child
+ * launched under an explicitly set HOME
  * (the daemon's isolated-CLI path does exactly that). Honour `$HOME` when
  * present so every OpenLLM component resolves the same tree.
  */

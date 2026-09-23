@@ -6,6 +6,7 @@
  * API key.
  */
 
+import type { THttpClientOptions } from "../../sdk/client";
 import type { PluginConfig } from "./config";
 
 // ── Domain types ──────────────────────────────────────────────────────────
@@ -52,7 +53,10 @@ export class MemoryClient {
   private baseUrl: string;
   private apiKey: string;
 
-  constructor(config: PluginConfig) {
+  constructor(
+    config: PluginConfig,
+    private readonly options: THttpClientOptions = {},
+  ) {
     this.baseUrl = config.gatewayUrl.replace(/\/$/, "");
     this.apiKey = config.gatewayApiKey;
   }
@@ -68,11 +72,11 @@ export class MemoryClient {
     if (body !== undefined) headers["Content-Type"] = "application/json";
 
     // Bounded so a wedged gateway can't hang a save/recall tool call forever.
-    const res = await fetch(`${this.baseUrl}${path}`, {
+    const res = await (this.options.fetch ?? fetch)(`${this.baseUrl}${path}`, {
       method,
       headers,
       body: body !== undefined ? JSON.stringify(body) : undefined,
-      signal: AbortSignal.timeout(60_000),
+      signal: AbortSignal.timeout(this.options.timeoutMs ?? 60_000),
     });
     if (!res.ok) {
       const text = await res.text().catch(() => "");
@@ -117,6 +121,18 @@ export class MemoryClient {
     return Array.isArray(res?.projects) ? res.projects : [];
   }
 
+  /** Automatic extraction retries must never fuzzy-delete a replacement. */
+  async forgetExact(
+    content: string,
+    opts: SaveOptions = {},
+  ): Promise<{ deleted: number }> {
+    if (!content.trim()) throw new Error("content is required");
+    return this.request("POST", "/api/plugins/supermemory/forget", {
+      content,
+      ...(opts.project ? { project: opts.project } : {}),
+    });
+  }
+
   /**
    * Forget by exact-content hash first, then semantic fallback. Server scopes
    * every delete to the caller's own chunks (team chunks stay put).
@@ -125,17 +141,8 @@ export class MemoryClient {
     content: string,
     opts: SaveOptions = {},
   ): Promise<{ success: boolean; message: string }> {
-    if (!content.trim()) throw new Error("content is required");
-
-    // Exact-content match first (server hashes (project, content) → same id).
-    const exact = await this.request<{ deleted: number }>(
-      "POST",
-      "/api/plugins/supermemory/forget",
-      {
-        content,
-        ...(opts.project ? { project: opts.project } : {}),
-      },
-    );
+    // Exact-content match first (server hashes saver email + content).
+    const exact = await this.forgetExact(content, opts);
     if (exact.deleted > 0) {
       return { success: true, message: "Forgot memory (exact match)" };
     }

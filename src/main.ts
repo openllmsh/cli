@@ -20,6 +20,11 @@ if (first === "--version" || first === "-v" || first === "version") {
 }
 
 const run = async (): Promise<void> => {
+  // Per-prompt hooks should not initialize the vendor clients or MCP server.
+  if (first === "exec" && argv[1] === "memory") {
+    const { runMemoryHookCommand } = await import("./memory-hooks/command");
+    process.exit(await runMemoryHookCommand(argv.slice(2)));
+  }
   const { runCli } = await import("./cli-dispatch");
   await runCli(argv);
 };

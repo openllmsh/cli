@@ -48,7 +48,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "{{HOOKS_DIR}}/mem-recall-on-prompt.sh",
+            "command": "\"$OPENLLM_BIN\" exec memory recall",
             "timeout": 10
           }
         ]
@@ -59,7 +59,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "{{HOOKS_DIR}}/mem-extract-on-stop.sh",
+            "command": "\"$OPENLLM_BIN\" exec memory extract",
             "timeout": 5
           }
         ]

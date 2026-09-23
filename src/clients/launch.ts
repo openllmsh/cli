@@ -67,6 +67,8 @@ export type TLaunchInputs = {
   readonly client: TClient;
   /** Gateway base origin (local daemon or cloud), no trailing slash. */
   readonly apiBase: string;
+  /** Cloud origin for hook memory CRUD; distinct from daemon inference. */
+  readonly cloudOrigin?: string;
   readonly apiKey: string;
   /** Absolute path to this binary — what MCP entries invoke. */
   readonly binPath: string;
@@ -187,6 +189,17 @@ const CLAUDE_KEY_HELPER = `#!/bin/sh\nprintf '%s' "$${HELPER_KEY_VAR}"\n`;
  */
 const CLAUDE_KEY_HELPER_REL = "hooks/api-key.sh";
 
+/** Hooks use the validated launch snapshot, never a second account's file key. */
+const memoryHookEnv = (
+  inputs: TLaunchInputs,
+): Readonly<Record<string, string>> => ({
+  OPENLLM_INFERENCE_ORIGIN: inputs.apiBase,
+  OPENLLM_API_KEY: inputs.apiKey,
+  ...(inputs.cloudOrigin === undefined
+    ? {}
+    : { OPENLLM_CLOUD_ORIGIN: inputs.cloudOrigin }),
+});
+
 /**
  * Claude Code — `--settings` layers additional settings over the user's own and
  * `--mcp-config` adds MCP servers, so NOTHING needs merging and nothing needs a
@@ -250,6 +263,7 @@ const planClaude = (inputs: TLaunchInputs): TLaunchPlan => {
       ...(inputs.bare ? [] : ["--mcp-config", `${inputs.runDir}/mcp.json`]),
     ],
     env: {
+      ...memoryHookEnv(inputs),
       ANTHROPIC_BASE_URL: inputs.apiBase,
       [HELPER_KEY_VAR]: inputs.apiKey,
       ANTHROPIC_DEFAULT_OPUS_MODEL: "ultra",
@@ -339,6 +353,7 @@ const planGrok = (inputs: TLaunchInputs): TLaunchPlan => {
     },
     args: [],
     env: {
+      ...memoryHookEnv(inputs),
       GROK_HOME: inputs.runDir,
       OPENLLM_BIN: inputs.binPath,
       CLAUDE_CONTEXT_STATE_DIR: inputs.stateDir,

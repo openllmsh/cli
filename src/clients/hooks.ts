@@ -10,9 +10,9 @@
  * settings, so nothing lands in the user's config tree and a stale hook can't
  * outlive the launch that created it.
  *
- * They shell out to `openllm exec ctx …` (hooks can't speak MCP stdio) and
- * resolve the gateway origin + key from the shared `~/.openllm/.env` via
- * `openllm-env.sh` — so no secret is written into any hook or settings file.
+ * These remaining scripts implement indexing/status-line behavior. Memory
+ * hooks invoke `openllm exec memory …` directly from the client overlays —
+ * their configuration, HTTP and extraction live entirely in the compiled CLI.
  */
 
 import ctxGrepNudge from "../../setup/hooks/ctx-grep-nudge.sh" with {
@@ -24,23 +24,13 @@ import ctxReindexOnEdit from "../../setup/hooks/ctx-reindex-on-edit.sh" with {
 import ctxSessionStart from "../../setup/hooks/ctx-session-start.sh" with {
   type: "text",
 };
-import memExtractOnStop from "../../setup/hooks/mem-extract-on-stop.sh" with {
-  type: "text",
-};
-import memRecallOnPrompt from "../../setup/hooks/mem-recall-on-prompt.sh" with {
-  type: "text",
-};
-import openllmEnv from "../../setup/hooks/openllm-env.sh" with { type: "text" };
 import statusline from "../../setup/hooks/statusline.sh" with { type: "text" };
 
 /** filename → script body. Materialized 0o700 into `<runDir>/hooks/`. */
 export const HOOK_SCRIPTS: Readonly<Record<string, string>> = {
-  "openllm-env.sh": openllmEnv,
   "ctx-session-start.sh": ctxSessionStart,
   "ctx-grep-nudge.sh": ctxGrepNudge,
   "ctx-reindex-on-edit.sh": ctxReindexOnEdit,
-  "mem-recall-on-prompt.sh": memRecallOnPrompt,
-  "mem-extract-on-stop.sh": memExtractOnStop,
   // Not a hook in the event sense — a `statusLine` command — but it shares the
   // same lifecycle: embedded as text, materialized 0700 into the run dir, and
   // referenced from the run-local settings.

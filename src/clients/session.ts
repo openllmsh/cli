@@ -523,6 +523,7 @@ export const runSessionClient = async (
     const plan = buildLaunchPlan({
       client,
       apiBase: gateway.base,
+      cloudOrigin: gateway.cloudOrigin,
       apiKey: gateway.apiKey,
       // `OPENLLM_BIN` bakes this into wrapped-client MCP `command` entries. Run
       // from a compiled binary, `process.execPath` IS `openllm` — correct. Run
