@@ -4,7 +4,7 @@
 // `bun run --cwd packages/cli generate:sdk` and commit the diff; the drift
 // test (tests/cli/sdk-drift.test.ts) fails when this file is stale.
 
-export const SUBSCRIPTION_PROVIDER_SLUGS = ["claude_code","chatgpt","kimi_code","grok","cursor"] as const;
+export const SUBSCRIPTION_PROVIDER_SLUGS = ["claude_code","chatgpt","kimi_code","grok","cursor","muse"] as const;
 
 export type TGeneratedSubscriptionProviderSlug =
   (typeof SUBSCRIPTION_PROVIDER_SLUGS)[number];

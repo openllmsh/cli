@@ -26499,7 +26499,8 @@
                             "chatgpt",
                             "kimi_code",
                             "grok",
-                            "cursor"
+                            "cursor",
+                            "muse"
                           ]
                         },
                         "operation_kind": {
