@@ -13210,6 +13210,9 @@
                                 "type": "null"
                               }
                             ]
+                          },
+                          "is_new": {
+                            "type": "boolean"
                           }
                         },
                         "additionalProperties": false
@@ -13251,6 +13254,9 @@
                                 "type": "null"
                               }
                             ]
+                          },
+                          "is_new": {
+                            "type": "boolean"
                           }
                         },
                         "additionalProperties": false
@@ -13300,6 +13306,9 @@
                                 "type": "null"
                               }
                             ]
+                          },
+                          "is_new": {
+                            "type": "boolean"
                           },
                           "history": {
                             "type": "array",
