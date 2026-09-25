@@ -10438,6 +10438,9 @@
                                 },
                                 "daemon_idle_email": {
                                   "type": "boolean"
+                                },
+                                "lifecycle_email": {
+                                  "type": "boolean"
                                 }
                               },
                               "additionalProperties": false
@@ -24403,6 +24406,9 @@
                             "type": "boolean"
                           },
                           "daemon_idle_email": {
+                            "type": "boolean"
+                          },
+                          "lifecycle_email": {
                             "type": "boolean"
                           }
                         },
