@@ -13038,6 +13038,7 @@
                     "period_end",
                     "windows",
                     "caption",
+                    "value_methodology_version",
                     "model_popularity",
                     "provider_popularity",
                     "value_by_tier"
@@ -13169,6 +13170,9 @@
                       "enum": [
                         "Trends measured across OpenLLM gateway activity"
                       ]
+                    },
+                    "value_methodology_version": {
+                      "type": "string"
                     },
                     "model_popularity": {
                       "type": "array",
