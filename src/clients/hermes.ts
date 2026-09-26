@@ -300,6 +300,38 @@ const profileBackupPath = (profileName: string): string => {
 };
 
 /**
+ * FSS-19: a preserved profile must not keep a copy of the API key. Strip the
+ * `OPENLLM_API_KEY=` lines `install` wrote (any other keys in a cloned .env
+ * are the user's own and stay). If the strip cannot be verified, drop the
+ * .env outright; the last resort is a loud warning, never a silent retain.
+ */
+const redactProfileBackupKey = (backupDir: string): void => {
+  const envPath = join(backupDir, ".env");
+  try {
+    if (!existsSync(envPath)) return;
+    const kept = readFileSync(envPath, "utf-8")
+      .split("\n")
+      .filter((line) => !/^\s*(export\s+)?OPENLLM_API_KEY\s*=/.test(line));
+    if (kept.every((line) => line.trim() === "")) {
+      rmSync(envPath, { force: true });
+      return;
+    }
+    const body = kept.join("\n").replace(/\n*$/, "\n");
+    writeFileSync(envPath, body, { mode: 0o600 });
+  } catch {
+    try {
+      rmSync(envPath, { force: true });
+      if (!existsSync(envPath)) return;
+    } catch {
+      // fall through to the warning
+    }
+    process.stderr.write(
+      `Could not remove OPENLLM_API_KEY from the preserved profile — delete ${envPath} by hand.\n`,
+    );
+  }
+};
+
+/**
  * The profile `install` created is the STICKY one — it holds every Hermes
  * session, memory, state.db and SOUL edit since then. Uninstall must not
  * delete it: move it to a timestamped backup and tell the user where.
@@ -332,6 +364,7 @@ export const uninstallHermes = (): number => {
         return 1;
       }
     }
+    redactProfileBackupKey(backup);
   }
   setActiveProfile(ledger.previousProfile);
   rmSync(hermesLedgerPath(), { force: true });
