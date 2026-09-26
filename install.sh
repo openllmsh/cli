@@ -29,6 +29,45 @@ ENV_FILE="$OPENLLM_DIR/.env"
 has_command() { command -v "$1" >/dev/null 2>&1; }
 die() { echo "Error: $*" >&2; exit 1; }
 
+# --- arguments ---------------------------------------------------------------
+# Private-prerelease path (NR2-3): `--from-file <path>` supplies a LOCAL CLI
+# binary verified against the operator-provided `--sha256 <hex>` digest of
+# THAT file (e.g. `sha256sum openllm-linux-x64-baseline`). When given, NOTHING
+# is downloaded — no manifest, no .sha256, no binary fetch. All other
+# arguments are rejected so a typo can never silently change an install.
+FROM_FILE=""
+FROM_SHA=""
+usage() {
+  cat <<'USAGE'
+Usage: install.sh [options]
+  --from-file <path>   install the openllm CLI binary from a local file
+  --sha256 <hex>       sha256 digest of the --from-file file (required with it)
+  -h, --help           show this text
+USAGE
+}
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --from-file)
+      FROM_FILE="${2:-}"
+      [ -n "$FROM_FILE" ] || die "--from-file needs a path"
+      shift 2
+      ;;
+    --from-file=*) FROM_FILE="${1#*=}"; shift ;;
+    --sha256)
+      FROM_SHA="${2:-}"
+      [ -n "$FROM_SHA" ] || die "--sha256 needs a hex digest"
+      shift 2
+      ;;
+    --sha256=*) FROM_SHA="${1#*=}"; shift ;;
+    -h|--help) usage; exit 0 ;;
+    *) die "unknown argument: $1 (supported: --from-file, --sha256)" ;;
+  esac
+done
+if [ -n "$FROM_FILE" ] || [ -n "$FROM_SHA" ]; then
+  [ -n "$FROM_FILE" ] && [ -n "$FROM_SHA" ] \
+    || die "--from-file and --sha256 must be given together"
+fi
+
 # Replacement policy: the version advertised by /api/install is the release of
 # record — an advertised PRERELEASE is installable, and a prerelease install may
 # move to a newer stable (or newer prerelease). The only refusal left is a
@@ -107,20 +146,31 @@ semver_cmp() {
   echo 0
 }
 
+# Extract the first dotted semver from --version output; empty on no match.
+version_of_output() {
+  local output="$1"
+  if [[ "$output" =~ (^|[^[:alnum:].+_-])v?([0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?([+][0-9A-Za-z.-]+)?)([^[:alnum:].+-]|$) ]]; then
+    printf '%s' "${BASH_REMATCH[2]}"
+    return 0
+  fi
+  return 1
+}
+
 # The one remaining replacement refusal: an installed build NEWER than the
-# advertised CLI release. Fail closed with the manual remedy printed (DR-1).
+# reference version (the advertised CLI release, or the supplied file's own
+# reported version for --from-file). Fail closed with the manual remedy
+# printed (DR-1).
 assert_no_downgrade() {
-  local binary="$1" output installed
+  local binary="$1" ref_version="$2" output installed
+  [ -n "$ref_version" ] || return 0
   [ -x "$binary" ] || return 0
   probe_version "$binary"
   output="$PROBE_OUTPUT"
-  if [[ "$output" =~ (^|[^[:alnum:].+_-])v?([0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?([+][0-9A-Za-z.-]+)?)([^[:alnum:].+-]|$) ]]; then
-    installed="${BASH_REMATCH[2]}"
-  else
+  if ! installed="$(version_of_output "$output")"; then
     die "could not parse installed CLI version at $binary; refusing to overwrite it"
   fi
-  [ "$(semver_cmp "$installed" "$CLI_VERSION")" != "1" ] || die "installed $binary is $installed, newer than the advertised release $CLI_VERSION — refusing to downgrade.
-  To force the advertised version, remove $binary and re-run this installer."
+  [ "$(semver_cmp "$installed" "$ref_version")" != "1" ] || die "installed $binary is $installed, newer than the install target $ref_version — refusing to downgrade.
+  To force this version, remove $binary and re-run this installer."
 }
 
 sha256_of() {
@@ -141,7 +191,9 @@ case "$(uname -m)" in
 esac
 TARGET="${OS}-${ARCH}"
 
-has_command curl || die "curl is required"
+if [ -z "$FROM_FILE" ]; then
+  has_command curl || die "curl is required"
+fi
 if ! has_command shasum && ! has_command sha256sum; then
   die "shasum or sha256sum is required to verify the download"
 fi
@@ -171,43 +223,59 @@ if [ "$INSECURE_DEV_ORIGIN" = 1 ]; then
 else
   CURL_SCHEME=(--proto "=https" --proto-redir "=https")
 fi
-# --proto/--proto-redir need a curl new enough to know the options (≈7.21):
-# an older system curl fails the FIRST fetch with an opaque option error, so
-# detect support once and fail with the upgrade remedy up front.
-curl "${CURL_SCHEME[@]}" -V >/dev/null 2>&1 \
-  || die "this curl does not support --proto/--proto-redir — upgrade to curl 7.21.0 or newer and re-run"
 
-# /api/install validates the committed release pins server-side and fails
-# closed, so a mis-pinned or half-published release is refused before any
-# download. No query parameters.
-echo "Resolving the current OpenLLM CLI release..."
-MANIFEST="$(curl "${CURL_SCHEME[@]}" -fsSL "$ORIGIN/api/install" 2>/dev/null)" \
-  || die "could not reach $ORIGIN/api/install — check OPENLLM_CLOUD_ORIGIN and your network"
+CLI_VERSION=""
+if [ -z "$FROM_FILE" ]; then
+  # --proto/--proto-redir need a curl new enough to know the options (≈7.21):
+  # an older system curl fails the FIRST fetch with an opaque option error, so
+  # detect support once and fail with the upgrade remedy up front.
+  curl "${CURL_SCHEME[@]}" -V >/dev/null 2>&1 \
+    || die "this curl does not support --proto/--proto-redir — upgrade to curl 7.21.0 or newer and re-run"
 
-json_field() {
-  printf '%s' "$MANIFEST" \
-    | tr -d '\n' \
-    | sed -n "s/.*\"$1\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p"
-}
-CLI_VERSION="$(json_field cli_version)"
-[ -n "$CLI_VERSION" ] || die "no CLI release is published yet"
-# Whatever /api/install advertises is the release of record — a PRERELEASE is
-# installable too (TCB-1/DR-1), and a prerelease install may move to a newer
-# stable. The only refusal is an actual DOWNGRADE of a managed binary — check
-# both the current and legacy CLI names.
-assert_no_downgrade "$DEST"
-assert_no_downgrade "$BIN_DIR/openllmc"
+  # /api/install validates the committed release pins server-side and fails
+  # closed, so a mis-pinned or half-published release is refused before any
+  # download. No query parameters.
+  echo "Resolving the current OpenLLM CLI release..."
+  MANIFEST="$(curl "${CURL_SCHEME[@]}" -fsSL "$ORIGIN/api/install" 2>/dev/null)" \
+    || die "could not reach $ORIGIN/api/install — check OPENLLM_CLOUD_ORIGIN and your network"
+
+  json_field() {
+    printf '%s' "$MANIFEST" \
+      | tr -d '\n' \
+      | sed -n "s/.*\"$1\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p"
+  }
+  CLI_VERSION="$(json_field cli_version)"
+  [ -n "$CLI_VERSION" ] || die "no CLI release is published yet"
+  # Whatever /api/install advertises is the release of record — a PRERELEASE is
+  # installable too (TCB-1/DR-1), and a prerelease install may move to a newer
+  # stable. The only refusal is an actual DOWNGRADE of a managed binary — check
+  # both the current and legacy CLI names.
+  assert_no_downgrade "$DEST" "$CLI_VERSION"
+  assert_no_downgrade "$BIN_DIR/openllmc" "$CLI_VERSION"
+fi
 
 mkdir -p "$BIN_DIR"
 
 URL="$ORIGIN/api/cli/binary/$TARGET"
 STAMP="$BIN_DIR/.openllm.sha256.stamp"
 
-PUBLISHED="$(curl "${CURL_SCHEME[@]}" -fsSL "$URL.sha256" 2>/dev/null | cut -d' ' -f1 || true)"
-case "$PUBLISHED" in
-  [0-9a-f]*) [ ${#PUBLISHED} -eq 64 ] || die "malformed published checksum" ;;
-  *) die "no published binary for $TARGET yet" ;;
-esac
+if [ -n "$FROM_FILE" ]; then
+  # Private-prerelease path: the OPERATOR supplies both the bytes and the
+  # digest — no network fetch of either. The checksum covers the file as
+  # handed to us (a gzipped asset is decompressed after verification,
+  # exactly like the download path).
+  PUBLISHED="$(printf '%s' "$FROM_SHA" | tr '[:upper:]' '[:lower:]')"
+  [[ "$PUBLISHED" =~ ^[0-9a-f]{64}$ ]] \
+    || die "malformed --sha256 digest (expected 64 hex chars)"
+  [ -f "$FROM_FILE" ] && [ -r "$FROM_FILE" ] \
+    || die "--from-file path is not a readable regular file: $FROM_FILE"
+else
+  PUBLISHED="$(curl "${CURL_SCHEME[@]}" -fsSL "$URL.sha256" 2>/dev/null | cut -d' ' -f1 || true)"
+  case "$PUBLISHED" in
+    [0-9a-f]*) [ ${#PUBLISHED} -eq 64 ] || die "malformed published checksum" ;;
+    *) die "no published binary for $TARGET yet" ;;
+  esac
+fi
 
 # Skip the download when what's installed already matches (see the daemon
 # installer for the macOS codesign/stamp rationale).
@@ -227,7 +295,11 @@ fi
 if [ "$SKIP" = "1" ]; then
   echo "  openllm is already up to date"
 else
-  echo "Downloading openllm $CLI_VERSION ($TARGET)..."
+  if [ -n "$FROM_FILE" ]; then
+    echo "Installing openllm from $FROM_FILE..."
+  else
+    echo "Downloading openllm $CLI_VERSION ($TARGET)..."
+  fi
   DL="$BIN_DIR/.openllm.download.$$"
   BIN="$BIN_DIR/.openllm.bin.$$"
   # Download+verify+swap in a SUBSHELL: its EXIT trap (temp-file cleanup) stays
@@ -235,7 +307,15 @@ else
   # trap if this script is ever embedded in a wrapper.
   (
     trap 'rm -f "$DL" "$BIN"' EXIT
-    if [ -t 2 ]; then
+    if [ -n "$FROM_FILE" ]; then
+      cp "$FROM_FILE" "$DL" || die "could not stage local binary: $FROM_FILE"
+      # The operator's digest covers the FILE as supplied — verify BEFORE any
+      # decompression so the gate is on exactly the bytes they checksummed.
+      ACTUAL="$(sha256_of "$DL")"
+      [ -n "$ACTUAL" ] || die "could not hash $FROM_FILE"
+      [ "$ACTUAL" = "$PUBLISHED" ] \
+        || die "checksum mismatch (expected $PUBLISHED, got $ACTUAL) — refusing to install"
+    elif [ -t 2 ]; then
       curl "${CURL_SCHEME[@]}" -fL --progress-bar "$URL" -o "$DL" || die "download failed: $URL"
     else
       curl "${CURL_SCHEME[@]}" -fsSL "$URL" -o "$DL" || die "download failed: $URL"
@@ -246,10 +326,12 @@ else
     else
       mv "$DL" "$BIN"
     fi
-    ACTUAL="$(sha256_of "$BIN")"
-    [ -n "$ACTUAL" ] || die "could not hash the download"
-    [ "$ACTUAL" = "$PUBLISHED" ] \
-      || die "checksum mismatch (expected $PUBLISHED, got $ACTUAL) — refusing to install"
+    if [ -z "$FROM_FILE" ]; then
+      ACTUAL="$(sha256_of "$BIN")"
+      [ -n "$ACTUAL" ] || die "could not hash the download"
+      [ "$ACTUAL" = "$PUBLISHED" ] \
+        || die "checksum mismatch (expected $PUBLISHED, got $ACTUAL) — refusing to install"
+    fi
     chmod 0755 "$BIN"
     # Preserve a valid Developer ID / notarized signature; only ad-hoc when invalid.
     if [ "$OS" = "darwin" ]; then
@@ -262,8 +344,17 @@ else
         printf '%s %s\n' "$PUBLISHED" "$(sha256_of "$BIN")" > "$STAMP" 2>/dev/null || true
       fi
     fi
-    # The installed executable may have changed while the download was in flight.
-    assert_no_downgrade "$DEST"
+    # The installed executable may have changed while the download was in
+    # flight. For a local file there is no advertised release: the staged
+    # binary's own reported version is the reference (the probe doubles as a
+    # sanity check that the supplied file is really an openllm binary).
+    CHECK_VERSION="$CLI_VERSION"
+    if [ -n "$FROM_FILE" ]; then
+      probe_version "$BIN"
+      CHECK_VERSION="$(version_of_output "$PROBE_OUTPUT")" \
+        || die "could not parse a version from $FROM_FILE — refusing to install"
+    fi
+    assert_no_downgrade "$DEST" "$CHECK_VERSION"
     mv -f "$BIN" "$DEST"
   ) || exit 1
   echo "  openllm installed → $DEST"
@@ -292,31 +383,42 @@ fi
 #
 # A held lock is STALE only when its marked owner names a dead pid, or a
 # live pid whose current start identity differs. A dir with no, unreadable
-# or unmarked owner is HELD — the one exception is a dir older than the
-# stale window that still has no complete owner (a holder killed between
-# `mkdir` and publish), which may be reclaimed.
+# or unmarked owner is HELD — but only inside a short "unproven" bound
+# (OPENLLM_ENV_LOCK_ORPHAN_SECS, default 30 s): past it an ownerless dir
+# (a holder killed between `mkdir` and publish) is reclaimed. The same
+# bound caps a marked owner whose start is `-` (never provable) and the
+# legacy `.env.lock` FILE — an unprovable identity must not wedge the lock
+# for the full stale window.
 #
-# Reclaim is an atomic `mv .lock.d .lock.stale.<pid>.<nonce>` — exactly one
-# contender wins the rename. The winner re-reads the owner INSIDE the
-# quarantine: if it turns out to be live after all it is moved back, but
-# only when `.lock.d` still does not exist (no-replace); otherwise it stays
-# quarantined. Acquisition is retried either way. Quarantine dirs older
-# than the stale window are swept when their contents are only `owner.tmp.*`
-# publish residue (or empty — the crash-between-mkdir-and-publish shape) or
-# a complete marked owner record.
+# Reclaim is MARK-FIRST. A contender that judges the dir stale drops a
+# `steal.<pid>.<nonce>` marker INSIDE it (noclobber create), re-judges the
+# SAME generation (inode match + the pre-mark mtime for the age term,
+# since the marker create already bumped it), and only then `mv`s it to
+# `.lock.stale.<pid>.<nonce>.<seq>`. The marker bridges the gap between the
+# re-check and the move: a paused publisher that commits its owner record
+# while a steal is in flight sees the marker (or the dir gone) and fails
+# its own publish rather than holding a quarantined dir — two holders can
+# never result. A steal that loses the rename (another contender moved
+# first) or fails its re-check just drops its marker. Quarantine dirs are
+# never moved back; a committed steal is final because publishers
+# self-detect it. Old quarantine dirs are swept when their contents are
+# only `owner.tmp.*`/`steal.*` residue (or empty) or a complete marked
+# owner record.
 #
 # Release is `mv .lock.d .lock.rel.<pid>.<nonce>` first, then the record's
 # nonce is verified before deleting — a holder whose lock was stolen or
 # replaced finds a successor's record and puts it back instead of deleting.
 #
 # The pre-dir `.env.lock` FILE is still honoured for one release: HELD
-# while its recorded pid is alive or its content is unparseable. A dead-pid
-# record is reclaimed ONLY by atomic rename to a unique quarantine name —
-# the live path is never unlinked directly — then re-read there: a record
-# that turns out to be live is put back with a no-replace link, never over
-# a successor lock file.
+# only inside the bounded orphan window — while a recorded pid is alive or
+# its content is unparseable — and reclaimed past it even on a live pid.
+# A dead-pid record is reclaimed ONLY by atomic rename to a unique
+# quarantine name — the live path is never unlinked directly — then
+# re-read there: a record that turns out to be live AND young is put back
+# with a no-replace link, never over a successor lock file.
 ENV_LOCK_STALE_SECS="${OPENLLM_ENV_LOCK_STALE_SECS:-600}"
 ENV_LOCK_WAIT_SECS="${OPENLLM_ENV_LOCK_WAIT_SECS:-10}"
+ENV_LOCK_ORPHAN_SECS="${OPENLLM_ENV_LOCK_ORPHAN_SECS:-30}"
 # Same knob rule as the daemon: decimal digits AND > 0 — "0" or junk falls
 # back to the defaults, never a zero-length window. Leading zeros are
 # DECIMAL on the daemon side (Number("08") is 8) but invalid octal to
