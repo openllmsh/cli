@@ -27,10 +27,9 @@ import {
   readlinkSync,
   symlinkSync,
   unlinkSync,
-  writeFileSync,
 } from "node:fs";
 import { basename, dirname, isAbsolute, join } from "node:path";
-import { installCompletion } from "./completion";
+import { installCompletion, writeFileAtomic } from "./completion";
 import { canonicalPath, isIsolatedStateRoot, userHome } from "./env";
 
 const binDir = (): string => join(userHome(), ".openllm", "bin");
@@ -186,10 +185,54 @@ const rcBlock = (fish: boolean): string => {
   return lines.join("\n");
 };
 
+type RcRegion =
+  | { readonly begin: number; readonly end: number }
+  | "absent"
+  | "unbalanced";
+
+const countMarker = (content: string, marker: string): number => {
+  let count = 0;
+  let at = content.indexOf(marker);
+  while (at >= 0) {
+    count += 1;
+    at = content.indexOf(marker, at + marker.length);
+  }
+  return count;
+};
+
+/**
+ * Locate the ONE managed block. Anything other than exactly one BEGIN before
+ * exactly one END is "unbalanced" — a hand edit or a truncated earlier write.
+ * An unbalanced file is refused rather than repaired: an orphan BEGIN plus a
+ * later END would make removal delete every user line between them (FS-8).
+ */
+const locateRcRegion = (content: string): RcRegion => {
+  if (
+    countMarker(content, RC_BEGIN) !== 1 ||
+    countMarker(content, RC_END) !== 1
+  )
+    return countMarker(content, RC_BEGIN) === 0 &&
+      countMarker(content, RC_END) === 0
+      ? "absent"
+      : "unbalanced";
+  const begin = content.indexOf(RC_BEGIN);
+  const end = content.indexOf(RC_END);
+  if (end <= begin) return "unbalanced";
+  return { begin, end: end + RC_END.length };
+};
+
+const refuseUnbalanced = (rc: string): void => {
+  process.stderr.write(
+    `${rc} has an unbalanced openllm block — refusing to touch it.\n` +
+      `Remove the stray "${RC_BEGIN}" or "${RC_END}" marker by hand, then re-run.\n`,
+  );
+};
+
 /**
  * Write (or refresh) the owned rc block. Idempotent: an existing block is
- * replaced in place; otherwise the block is appended. Returns the rc path,
- * or null when the shell is unsupported or the rc is not writable.
+ * replaced in place; otherwise the block is appended. A file whose markers
+ * are unbalanced is refused. Returns the rc path, or null when the shell is
+ * unsupported or the rc is not writable.
  */
 export const installRcBlock = (): string | null => {
   const target = rcFileForShell();
@@ -203,18 +246,19 @@ export const installRcBlock = (): string | null => {
     } catch {
       // rc doesn't exist yet — created below
     }
-    const begin = content.indexOf(RC_BEGIN);
-    const end = content.indexOf(RC_END);
+    const region = locateRcRegion(content);
+    if (region === "unbalanced") {
+      refuseUnbalanced(rc);
+      return null;
+    }
     let next: string;
-    if (begin >= 0 && end > begin) {
-      next =
-        content.slice(0, begin) + block + content.slice(end + RC_END.length);
+    if (region !== "absent") {
+      next = content.slice(0, region.begin) + block + content.slice(region.end);
     } else {
       next = `${content.replace(/\n*$/, "\n")}\n${block}\n`;
     }
     if (next !== content) {
-      mkdirSync(join(rc, ".."), { recursive: true });
-      writeFileSync(rc, next);
+      writeFileAtomic(rc, next, { backup: true });
     }
     return rc;
   } catch {
@@ -222,19 +266,28 @@ export const installRcBlock = (): string | null => {
   }
 };
 
-/** Remove the owned rc block (uninstall path). Best-effort; silent. */
+/** Remove the owned rc block (uninstall path). Best-effort. */
 export const removeRcBlock = (): void => {
   const target = rcFileForShell();
   if (target === null) return;
   try {
     const content = readFileSync(target.rc, "utf-8");
-    const begin = content.indexOf(RC_BEGIN);
-    const end = content.indexOf(RC_END);
-    if (begin < 0 || end <= begin) return;
-    const next = (
-      content.slice(0, begin) + content.slice(end + RC_END.length)
-    ).replace(/\n{3,}/g, "\n\n");
-    writeFileSync(target.rc, next);
+    const region = locateRcRegion(content);
+    if (region === "absent") return;
+    if (region === "unbalanced") {
+      refuseUnbalanced(target.rc);
+      return;
+    }
+    // Only the block's own bytes are removed: the region text plus the
+    // newline that terminated its END line. When nothing but whitespace is
+    // left after it, trailing newlines fold back to one so an install +
+    // remove cycle returns the original bytes.
+    const left = content.slice(0, region.begin);
+    let right = content.slice(region.end);
+    if (right.startsWith("\n")) right = right.slice(1);
+    const next =
+      right.trim().length === 0 ? left.replace(/\n*$/, "\n") : left + right;
+    if (next !== content) writeFileAtomic(target.rc, next, { backup: true });
   } catch {
     // best-effort
   }

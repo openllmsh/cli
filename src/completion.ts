@@ -12,12 +12,20 @@
  */
 import {
   appendFileSync,
+  closeSync,
+  copyFileSync,
+  fsyncSync,
+  lstatSync,
   mkdirSync,
+  openSync,
   readFileSync,
+  readlinkSync,
+  renameSync,
   rmSync,
+  unlinkSync,
   writeFileSync,
 } from "node:fs";
-import { basename, dirname, join } from "node:path";
+import { basename, dirname, isAbsolute, join } from "node:path";
 import type { TCompletionShell } from "./commands";
 import {
   CLIENT_FLAGS,
@@ -194,6 +202,109 @@ const isShell = (v: string): v is TCompletionShell =>
 /** The marker every rc line we add carries, so removal is exact. */
 const RC_MARKER = "# openllm-completion";
 
+/** Suffix of the backup written before an rc file is replaced. */
+export const RC_BACKUP_SUFFIX = ".openllm.bak";
+
+/**
+ * Resolve a chain of symlinks to the file the bytes must land on. A plain
+ * `writeFileSync(path)` follows a symlink and writes the TARGET, so an
+ * atomic write must do the same — renaming over `path` itself would replace
+ * the user's link with a regular file. Bounded: a link loop returns the last
+ * hop rather than spinning.
+ */
+const resolveWriteTarget = (path: string): string => {
+  let current = path;
+  for (let hop = 0; hop < 10; hop += 1) {
+    let stat: ReturnType<typeof lstatSync>;
+    try {
+      stat = lstatSync(current);
+    } catch {
+      return current; // does not exist yet — it becomes the target
+    }
+    if (!stat.isSymbolicLink()) return current;
+    let raw: string;
+    try {
+      raw = readlinkSync(current);
+    } catch {
+      return current;
+    }
+    current = isAbsolute(raw) ? raw : join(dirname(current), raw);
+  }
+  return current;
+};
+
+/**
+ * Write `content` to `path` without ever leaving a partial file behind: the
+ * bytes go to a fsynced temp file in the same directory, then a rename moves
+ * it over the target atomically. A truncating `writeFileSync` can leave an
+ * empty or half-written rc after ENOSPC or a mid-write crash; this cannot.
+ *
+ * Symlinks are resolved first so the link stays a link. When `backup` is
+ * set and the target exists, the old bytes are first copied to
+ * `target + backup` so a bad replace is recoverable. An existing file's
+ * permission bits carry over to the replacement. Throws on fs errors.
+ */
+export const writeFileAtomic = (
+  path: string,
+  content: string,
+  opts?: { backup?: boolean },
+): void => {
+  const target = resolveWriteTarget(path);
+  mkdirSync(dirname(target), { recursive: true });
+  let mode: number | undefined;
+  try {
+    const stat = lstatSync(target);
+    if (stat.isFile()) {
+      mode = stat.mode & 0o777;
+      if (opts?.backup === true) {
+        copyFileSync(target, `${target}${RC_BACKUP_SUFFIX}`);
+      }
+    }
+  } catch {
+    // no existing file — first write, nothing to back up
+  }
+  const tmp = join(
+    dirname(target),
+    `.${basename(target)}.openllm-${process.pid}-${crypto.randomUUID()}.tmp`,
+  );
+  try {
+    const fd = openSync(tmp, "w", mode);
+    try {
+      writeFileSync(fd, content);
+      fsyncSync(fd);
+    } finally {
+      closeSync(fd);
+    }
+    renameSync(tmp, target);
+  } catch (error) {
+    try {
+      unlinkSync(tmp);
+    } catch {
+      // renamed or never created
+    }
+    throw error;
+  }
+};
+
+/**
+ * Drop the lines that carry `marker`. For each dropped line, one directly
+ * preceding empty line is dropped too — that is the separator our own append
+ * wrote (`\n<line>\n`), so an uninstall restores the original bytes exactly.
+ * Nothing else is rewritten: blank-line runs elsewhere in the file are the
+ * user's and stay untouched.
+ */
+export const removeMarkedLines = (text: string, marker: string): string => {
+  const kept: string[] = [];
+  for (const line of text.split("\n")) {
+    if (line.includes(marker)) {
+      if (kept[kept.length - 1] === "") kept.pop();
+      continue;
+    }
+    kept.push(line);
+  }
+  return kept.join("\n");
+};
+
 const fishCompletionPath = (): string =>
   join(userHome(), ".config", "fish", "completions", "openllm.fish");
 
@@ -231,8 +342,7 @@ export const installCompletion = (): string | null => {
   try {
     if (shell === "fish") {
       const file = fishCompletionPath();
-      mkdirSync(dirname(file), { recursive: true });
-      writeFileSync(file, fishScript());
+      writeFileAtomic(file, fishScript(), { backup: true });
       return file;
     }
     const rc = join(userHome(), shell === "zsh" ? ".zshrc" : ".bashrc");
@@ -264,12 +374,8 @@ export const removeCompletion = (): void => {
     try {
       const existing = readFileSync(rc, "utf-8");
       if (!existing.includes(RC_MARKER)) continue;
-      const next = existing
-        .split("\n")
-        .filter((line) => !line.includes(RC_MARKER))
-        .join("\n")
-        .replace(/\n{3,}/g, "\n\n");
-      writeFileSync(rc, next);
+      const next = removeMarkedLines(existing, RC_MARKER);
+      writeFileAtomic(rc, next, { backup: true });
     } catch {
       // missing / unwritable rc — nothing to do
     }
