@@ -20,6 +20,7 @@ import {
   evaluateUpdatePolicy,
   mayReplaceProductVersion,
 } from "@openllmsh/protocol/update-policy";
+import { processStartIdentity } from "../../tunnel/session/local-runtime";
 import { acquireUpdateLock, updateLockDirFor } from "../../tunnel/update-lock";
 import { CLI_RELEASE } from "../manifest";
 import { CLI_TARGETS } from "../release-types";
@@ -32,6 +33,11 @@ const FETCH_TIMEOUT_MS = 30_000;
 // failures are transient — they earn backoff, never a rejection (TD-4).
 const DOWNLOAD_STALL_MS = 60_000;
 const DOWNLOAD_TOTAL_MS = 15 * 60_000;
+// Bound on `reader.cancel()` itself: a wedged stream can leave the cancel
+// promise unsettled forever, which would hang the updater despite the stall
+// bound. The fetch's AbortController is fired first so the socket dies even
+// when cancel never resolves.
+const DOWNLOAD_CANCEL_MS = 5_000;
 /**
  * Hard cap on a downloaded artifact (compressed AND decompressed), mirroring
  * the daemon's self-updater — refuse a hostile/corrupt endpoint before it
@@ -158,10 +164,43 @@ export class ArtifactFetchError extends Error {
   }
 }
 
-/** Per-download bounds: stall = no bytes for this long; total = hard cap. */
+/**
+ * Per-download bounds: stall = no bytes for this long; total = hard cap.
+ * `cancelMs` bounds the stream's own `cancel()` promise — a wedged
+ * implementation that never settles must not hang the updater past the
+ * stall/total verdict that fired.
+ */
 export type TCliDownloadBounds = {
   readonly stallMs?: number;
   readonly totalMs?: number;
+  readonly cancelMs?: number;
+};
+
+/**
+ * Await a stream teardown promise with its own bound (round-3 rework): a
+ * wedged reader can leave `cancel()` unsettled forever, which would hang the
+ * updater past the verdict that fired. After the bound we stop waiting —
+ * `abort` (the fetch's AbortController) has already killed the socket, so no
+ * updater state stays in flight.
+ */
+const teardownBounded = async (
+  pending: Promise<unknown> | undefined,
+  cancelMs: number,
+): Promise<void> => {
+  if (pending === undefined) return;
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  try {
+    await Promise.race([
+      pending.catch(() => {
+        // best-effort abort
+      }),
+      new Promise<"timeout">((resolve) => {
+        timer = setTimeout(() => resolve("timeout"), cancelMs);
+      }),
+    ]);
+  } finally {
+    if (timer !== null) clearTimeout(timer);
+  }
 };
 
 /**
@@ -178,17 +217,16 @@ export const readBodyCapped = async (
   maxBytes: number,
   label: string,
   bounds?: TCliDownloadBounds,
+  abort?: () => void,
 ): Promise<Buffer> => {
   // Hash whatever arrives so an oversize rejection is keyed to the exact
   // bytes that failed (a corrected re-publish yields a different prefix).
   const keyHash = createHash("sha256");
+  const cancelMs = bounds?.cancelMs ?? DOWNLOAD_CANCEL_MS;
   const declared = Number(res.headers.get("content-length") ?? "");
   if (Number.isFinite(declared) && declared > maxBytes) {
-    try {
-      await res.body?.cancel();
-    } catch {
-      // best-effort abort
-    }
+    abort?.();
+    await teardownBounded(res.body?.cancel(), cancelMs);
     throw new ArtifactFetchError(`${label} exceeds the ${maxBytes}-byte cap`);
   }
   if (res.body === null) return Buffer.alloc(0);
@@ -206,33 +244,24 @@ export const readBodyCapped = async (
     try {
       const read = await Promise.race([reader.read(), stalled]);
       if (read === "stalled") {
-        try {
-          await reader.cancel();
-        } catch {
-          // best-effort abort
-        }
+        abort?.();
+        await teardownBounded(reader.cancel(), cancelMs);
         throw new Error(`${label} stalled — no bytes for ${stallMs}ms`);
       }
       if (read.done) break;
       total += read.value.byteLength;
       keyHash.update(read.value);
       if (total > maxBytes) {
-        try {
-          await reader.cancel();
-        } catch {
-          // best-effort abort
-        }
+        abort?.();
+        await teardownBounded(reader.cancel(), cancelMs);
         throw new ArtifactFetchError(
           `${label} exceeds the ${maxBytes}-byte cap`,
           keyHash.digest("hex"),
         );
       }
       if (Date.now() > deadline) {
-        try {
-          await reader.cancel();
-        } catch {
-          // best-effort abort
-        }
+        abort?.();
+        await teardownBounded(reader.cancel(), cancelMs);
         throw new Error(`${label} exceeded its ${totalMs}ms total budget`);
       }
       chunks.push(read.value);
@@ -434,8 +463,16 @@ const rejectedMemoryKey = (version: string, digest: string): string =>
 // sync code paths. MIRROR of the daemon copy in
 // `packages/daemon/src/state-file.ts` — KEEP THE TWO IN SYNC.
 //
-// The critical section is milliseconds, so a holder whose lock dir predates
-// the reclaim bound is treated as wedged and stolen.
+// Steal policy (round-3 rework): a PROVEN-LIVE owner — live pid AND matching
+// recorded start identity — is NEVER stolen, however old the dir. A paused
+// holder keeps its lock; the alternative was forced steals that corrupted
+// read-modify-write cycles (lost boot history, rejects, device state). Only a
+// provably-gone owner (dead pid, or a reused pid whose live start identity no
+// longer matches the record) is stolen outright. An owner that can neither be
+// convicted nor proven live (no recorded start, inconclusive probe, or no
+// readable record at all) is UNPROVEN: still held, but reclaimed once the dir
+// has shown no complete owner for STATE_LOCK_RECLAIM_MS — a crash between
+// mkdir and publish can then never wedge every writer forever.
 const STATE_LOCK_DIR_NAME = "state.json.lock.d";
 const STATE_LOCK_OWNER_KIND = "openllm-state-lock/v1";
 const STATE_LOCK_OWNER_FILE = "owner.json";
@@ -446,6 +483,13 @@ const STATE_LOCK_RECLAIM_MS = 10 * 60_000;
 type TStateLockOwner = {
   readonly kind: string;
   readonly pid: number;
+  /**
+   * The owner's process-start identity (`processStartIdentity`). "" means the
+   * owner could not self-probe — liveness alone must not promote such a
+   * record to proven-live: a REUSED pid would otherwise inherit the dead
+   * owner's lock forever.
+   */
+  readonly start: string;
   readonly nonce: string;
 };
 
@@ -486,7 +530,12 @@ const readStateLockOwner = (dir: string): TStateLockOwner | null => {
       typeof parsed.nonce !== "string"
     )
       return null;
-    return { kind: parsed.kind, pid: parsed.pid, nonce: parsed.nonce };
+    return {
+      kind: parsed.kind,
+      pid: parsed.pid,
+      start: typeof parsed.start === "string" ? parsed.start : "",
+      nonce: parsed.nonce,
+    };
   } catch {
     return null;
   }
@@ -498,6 +547,51 @@ const stateLockAgeMs = (dir: string): number => {
   } catch {
     return 0;
   }
+};
+
+/**
+ * This process's start identity, cached — it cannot change. "" when the
+ * self-probe is unavailable: our record then stays UNPROVEN for readers
+ * (reclaimable by age) rather than unverifiable-forever.
+ */
+let ownStateLockStart: string | null = null;
+const myStateLockStart = (): string => {
+  if (ownStateLockStart !== null) return ownStateLockStart;
+  let start: string;
+  try {
+    start = processStartIdentity(process.pid) ?? "";
+  } catch {
+    start = "";
+  }
+  ownStateLockStart = start;
+  return start;
+};
+
+type TStateLockVerdict = "stale" | "proven-live" | "unproven";
+
+/**
+ * Three-way verdict for a recorded owner — mirrors `classifyOwner` in
+ * `packages/tunnel/update-lock.ts`:
+ *   - `proven-live` — the pid is alive AND its live start identity matches
+ *     the record. Never stolen, whatever the dir's age.
+ *   - `stale` — the pid is confirmed dead, or alive but a DIFFERENT process
+ *     (PID reuse: the live identity no longer matches the recorded start).
+ *   - `unproven` — live but unverifiable (empty recorded start, or an
+ *     inconclusive probe). Held; stealable only past the reclaim bound.
+ */
+const classifyStateLockOwner = (owner: TStateLockOwner): TStateLockVerdict => {
+  let start: string | null | undefined;
+  try {
+    start = processStartIdentity(owner.pid);
+  } catch {
+    start = undefined;
+  }
+  if (start === null) return "stale"; // confirmed dead
+  if (typeof start === "string" && start.length > 0) {
+    if (owner.start === "") return "unproven"; // live pid, nothing to compare
+    return start === owner.start ? "proven-live" : "stale"; // PID reuse
+  }
+  return stateLockPidAlive(owner.pid) ? "unproven" : "stale";
 };
 
 const stealStateLock = (
@@ -576,10 +670,15 @@ export const acquireCliStateLock = (opts?: {
   const ours: TStateLockOwner = {
     kind: STATE_LOCK_OWNER_KIND,
     pid: process.pid,
+    start: myStateLockStart(),
     nonce: randomBytes(16).toString("hex"),
   };
   const lockDir = cliStateLockDir();
   const deadline = Date.now() + waitMs;
+  // Per-call verdict cache: a contested acquire polls every few ms, and one
+  // `ps` identity probe per pass would dominate the wait. An owner record is
+  // immutable per nonce, so one classify per record is enough.
+  const verdicts = new Map<string, TStateLockVerdict>();
   let swept = false;
   for (;;) {
     try {
@@ -591,9 +690,13 @@ export const acquireCliStateLock = (opts?: {
           JSON.stringify(ours),
         );
       } catch {
-        // best-effort — an unpublished owner is provable by pid liveness
+        // best-effort — an unpublished owner is unproven, still reclaimable
       }
       ourStateLockNonces.add(ours.nonce);
+      // Sweep stale quarantine dirs + dead-pid temps on EVERY clean acquire —
+      // otherwise they are only reaped on a contested acquire and residue
+      // grows without bound (round-3).
+      sweepStateLockResidue();
       return () => {
         ourStateLockNonces.delete(ours.nonce);
         const quarantine = `${lockDir}.rel-${ours.nonce}`;
@@ -607,7 +710,7 @@ export const acquireCliStateLock = (opts?: {
           try {
             fs.rmSync(quarantine, { recursive: true, force: true });
           } catch {
-            // best-effort — residue is reclaimed by age
+            // best-effort — residue is reclaimed by the sweeps
           }
         } else {
           try {
@@ -616,6 +719,7 @@ export const acquireCliStateLock = (opts?: {
             // best-effort
           }
         }
+        sweepStateLockResidue();
       };
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code !== "EEXIST") {
@@ -630,10 +734,29 @@ export const acquireCliStateLock = (opts?: {
     if (owner !== null && ourStateLockNonces.has(owner.nonce)) {
       return null;
     }
+    let verdict: TStateLockVerdict;
+    if (owner === null) {
+      verdict = "unproven";
+    } else {
+      const cached = verdicts.get(owner.nonce);
+      if (cached !== undefined) {
+        verdict = cached;
+      } else {
+        verdict = classifyStateLockOwner(owner);
+        verdicts.set(owner.nonce, verdict);
+      }
+    }
+    // NEVER steal a live verified owner — a paused holder keeps its lock
+    // however long the pause. Steal only a provably-gone owner, or a dir that
+    // has shown no complete provable owner past the reclaim bound.
     const wedged = stateLockAgeMs(lockDir) >= STATE_LOCK_RECLAIM_MS;
-    const steal =
-      owner === null ? wedged : wedged || !stateLockPidAlive(owner.pid);
-    if (steal && stealStateLock(lockDir, owner)) continue;
+    if (
+      (verdict === "stale" || (verdict === "unproven" && wedged)) &&
+      stealStateLock(lockDir, owner)
+    ) {
+      verdicts.clear(); // the dir changed hands — old verdicts no longer apply
+      continue;
+    }
     if (Date.now() >= deadline) return null;
     stateLockSleep(STATE_LOCK_POLL_MS);
   }
@@ -948,15 +1071,14 @@ export type TCliSwapOutcome =
   | "changed"
   | "busy";
 
-/** Probe the INSTALLED binary's `--version` (UP-4 in-lock re-check). */
-const probeInstalledCliVersion = (
+/** Probe the INSTALLED binary's `--version` verdict (UP-4 in-lock re-check). */
+const probeInstalledCliVerdict = (
   path: string,
   spawn: typeof Bun.spawnSync = Bun.spawnSync,
-): string | null => {
-  const verdict = probeCliVerdict(path, "--version", spawn);
-  if (verdict.kind !== "ok") return null;
-  return verdict.out.match(/openllmc? v(\S+)/)?.[1] ?? null;
-};
+): TCliProbeVerdict => probeCliVerdict(path, "--version", spawn);
+
+const parseCliVersionOut = (out: string): string | null =>
+  out.match(/openllmc? v(\S+)/)?.[1] ?? null;
 
 /**
  * The serialized swap region for a verified staged binary: acquire the shared
@@ -981,13 +1103,37 @@ export const commitCliSwap = async (args: {
     path: string,
     flag: "--version" | "--self-test",
   ) => TCliProbeVerdict;
-  /** Test seam: installed-version probe for the UP-4 re-check. */
+  /**
+   * Test seam: installed-version probe for the UP-4 re-check. A null return
+   * means the probe could not judge the installed file — treated as
+   * inconclusive (`busy`), never as "unchanged".
+   */
   readonly probeInstalled?: (path: string) => string | null;
+  /**
+   * Test seam: verdict-shaped installed probe — expresses the difference
+   * between an inconclusive probe (`busy`) and a provably broken installed
+   * binary (proceed: overwriting it heals, never clobbers a working update).
+   */
+  readonly probeInstalledVerdict?: (path: string) => TCliProbeVerdict;
   /** The version `self` reported when this update began — defaults to
    *  `CLI_VERSION` (this process IS that binary). */
   readonly expectedInstalled?: string;
   readonly lockWaitMs?: number;
+  /**
+   * Test seam: observe/override the durability steps (FSS-18). The required
+   * order is fsync file → probe → backup → rename → fsync dir.
+   */
+  readonly hooks?: {
+    readonly fsyncFile?: (path: string) => void;
+    readonly fsyncDir?: (dir: string) => void;
+    readonly onWarn?: (message: string) => void;
+  };
 }): Promise<TCliSwapOutcome> => {
+  const fsyncFile = args.hooks?.fsyncFile ?? fsyncFileSync;
+  const fsyncDir = args.hooks?.fsyncDir ?? fsyncFileSync;
+  const onWarn =
+    args.hooks?.onWarn ??
+    ((message: string) => process.stderr.write(`[self-update] ${message}\n`));
   const release = await acquireUpdateLock(updateLockDirFor(args.self), {
     waitMs: args.lockWaitMs ?? UPDATE_LOCK_WAIT_MS,
   });
@@ -996,9 +1142,25 @@ export const commitCliSwap = async (args: {
     // UP-4: inside the lock, re-check what `self` reports NOW. A converger or
     // manual run that landed `latest` while we downloaded wins — return
     // converged; a file changed to anything else is owned by someone else.
-    const installed = (args.probeInstalled ?? probeInstalledCliVersion)(
-      args.self,
-    );
+    // An INCONCLUSIVE probe (timeout/transient spawn failure) cannot prove
+    // what is installed — return busy rather than overwrite on unproven
+    // evidence (round-3). Only a `failed` verdict (the installed binary
+    // provably cannot run) falls through to the swap: overwriting heals it.
+    let installed: string | null;
+    if (args.probeInstalledVerdict !== undefined) {
+      const verdict = args.probeInstalledVerdict(args.self);
+      if (verdict.kind === "inconclusive") return "busy";
+      installed =
+        verdict.kind === "ok" ? parseCliVersionOut(verdict.out) : null;
+    } else if (args.probeInstalled !== undefined) {
+      installed = args.probeInstalled(args.self);
+      if (installed === null) return "busy";
+    } else {
+      const verdict = probeInstalledCliVerdict(args.self);
+      if (verdict.kind === "inconclusive") return "busy";
+      installed =
+        verdict.kind === "ok" ? parseCliVersionOut(verdict.out) : null;
+    }
     if (installed === args.latest) return "converged";
     if (
       installed !== null &&
@@ -1008,7 +1170,7 @@ export const commitCliSwap = async (args: {
     }
     // FSS-18: fsync the staged bytes before the rename lands on `self`.
     try {
-      fsyncFileSync(args.staged);
+      fsyncFile(args.staged);
     } catch {
       return "stage-failed";
     }
@@ -1029,8 +1191,18 @@ export const commitCliSwap = async (args: {
       return "backup-failed";
     }
     fs.renameSync(args.staged, args.self);
-    // FSS-18: fsync the directory so the rename's dirent survives a crash.
-    fsyncDirBestEffort(dirname(args.self));
+    // FSS-18: fsync the directory so the rename's dirent survives a crash —
+    // the LAST filesystem step, after which nothing mutates the install dir.
+    // A refusal does not un-swap the binary, but it must not be silent.
+    try {
+      fsyncDir(dirname(args.self));
+    } catch (err) {
+      onWarn(
+        `post-swap directory fsync failed — openllm v${args.latest} is installed but not proven crash-durable: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+    }
     recordCliUpdateAttempt(args.latest, args.digest);
     return "updated";
   } finally {
@@ -1063,10 +1235,22 @@ export const applyManualCliUpdate = async (args: {
     flag: "--version" | "--self-test",
   ) => TCliProbeVerdict;
   readonly probeInstalled?: (path: string) => string | null;
+  readonly probeInstalledVerdict?: (path: string) => TCliProbeVerdict;
   /** The version `self` reported when this update began — defaults to
    *  `CLI_VERSION` (this process IS that binary). */
   readonly expectedInstalled?: string;
   readonly lockWaitMs?: number;
+  /**
+   * Test seam: observe/override the durability + prepare steps (FSS-18). The
+   * required order is stage → prepare (chmod+harden) → fsync file → probe →
+   * backup → rename → fsync dir.
+   */
+  readonly hooks?: {
+    readonly fsyncFile?: (path: string) => void;
+    readonly fsyncDir?: (dir: string) => void;
+    readonly prepare?: (path: string) => void;
+    readonly onWarn?: (message: string) => void;
+  };
 }): Promise<TManualUpdateResult> => {
   const { gatewayUrl, latest, target } = args;
   const connectMs = args.download?.connectMs ?? FETCH_TIMEOUT_MS;
@@ -1075,10 +1259,15 @@ export const applyManualCliUpdate = async (args: {
   // rejection key, so it must be known before the ~40 MB binary download is
   // spent on an artifact already proven bad. HTTP/transport failures here are
   // transient (TD-4): record the try, back off, never reject.
+  // The AbortController bounds the connect AND survives into the body read:
+  // `readBodyCapped` fires it when a stall/total verdict must kill the socket
+  // even if the stream's own cancel never settles.
+  const shaCtrl = new AbortController();
+  const shaConnectTimer = setTimeout(() => shaCtrl.abort(), connectMs);
   let shaRes: Response;
   try {
     shaRes = await fetch(`${gatewayUrl}/api/cli/binary/${target}.sha256`, {
-      signal: AbortSignal.timeout(connectMs),
+      signal: shaCtrl.signal,
     });
   } catch (err) {
     recordCliUpdateAttempt(latest);
@@ -1088,6 +1277,8 @@ export const applyManualCliUpdate = async (args: {
         err instanceof Error ? err.message : String(err)
       } — will retry later\n`,
     };
+  } finally {
+    clearTimeout(shaConnectTimer);
   }
   if (!shaRes.ok) {
     recordCliUpdateAttempt(latest);
@@ -1104,6 +1295,7 @@ export const applyManualCliUpdate = async (args: {
         DIGEST_MAX_BYTES,
         "checksum download",
         args.download,
+        () => shaCtrl.abort(),
       )
     )
       .toString("utf-8")
@@ -1147,11 +1339,13 @@ export const applyManualCliUpdate = async (args: {
   }
 
   let binRes: Response;
+  const binCtrl = new AbortController();
+  const binConnectTimer = setTimeout(() => binCtrl.abort(), connectMs);
   try {
     binRes = await fetch(`${gatewayUrl}/api/cli/binary/${target}`, {
       // connect/first-byte bound only — the body stream has its own
       // stall + total bounds (NR2-2) so a slow link can still finish.
-      signal: AbortSignal.timeout(connectMs),
+      signal: binCtrl.signal,
     });
   } catch (err) {
     recordCliUpdateAttempt(latest, expected);
@@ -1161,6 +1355,8 @@ export const applyManualCliUpdate = async (args: {
         err instanceof Error ? err.message : String(err)
       } — will retry later\n`,
     };
+  } finally {
+    clearTimeout(binConnectTimer);
   }
   if (!binRes.ok) {
     recordCliUpdateAttempt(latest, expected);
@@ -1176,6 +1372,7 @@ export const applyManualCliUpdate = async (args: {
       MAX_BINARY_BYTES,
       "binary download",
       args.download,
+      () => binCtrl.abort(),
     );
   } catch (err) {
     if (err instanceof ArtifactFetchError) {
@@ -1225,12 +1422,17 @@ export const applyManualCliUpdate = async (args: {
     dirname(self),
     `.openllm.next-${process.pid}-${randomBytes(6).toString("hex")}`,
   );
+  const fsyncFile = args.hooks?.fsyncFile ?? fsyncFileSync;
+  const prepare =
+    args.hooks?.prepare ?? ((path: string) => prepareUpdatedCliBinary(path));
   try {
     try {
       fs.writeFileSync(staging, bytes, { mode: 0o755 });
-      // FSS-18: fsync the staged bytes before the rename lands on `self`.
-      fsyncFileSync(staging);
-      prepareUpdatedCliBinary(staging);
+      // FSS-18 ordering: chmod+harden BEFORE the fsync — the fsync must make
+      // the file's FINAL state durable (hardening after it would leave the
+      // xattr changes outside the durability point).
+      prepare(staging);
+      fsyncFile(staging);
     } catch (err) {
       // FSS-16/FSS-17: a failed staging write must not leave the ~90 MB temp.
       recordCliUpdateAttempt(latest, expected);
@@ -1253,7 +1455,25 @@ export const applyManualCliUpdate = async (args: {
       ...(args.probeInstalled !== undefined
         ? { probeInstalled: args.probeInstalled }
         : {}),
+      ...(args.probeInstalledVerdict !== undefined
+        ? { probeInstalledVerdict: args.probeInstalledVerdict }
+        : {}),
       ...(args.lockWaitMs !== undefined ? { lockWaitMs: args.lockWaitMs } : {}),
+      ...(args.hooks !== undefined
+        ? {
+            hooks: {
+              ...(args.hooks.fsyncFile !== undefined
+                ? { fsyncFile: args.hooks.fsyncFile }
+                : {}),
+              ...(args.hooks.fsyncDir !== undefined
+                ? { fsyncDir: args.hooks.fsyncDir }
+                : {}),
+              ...(args.hooks.onWarn !== undefined
+                ? { onWarn: args.hooks.onWarn }
+                : {}),
+            },
+          }
+        : {}),
     });
     if (swap === "busy") {
       return {
