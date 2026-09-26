@@ -1,6 +1,6 @@
 {
   "name": "@openllmsh/cli",
-  "version": "0.0.0-dev",
+  "version": "2.8.0-beta.1",
   "private": false,
   "type": "module",
   "exports": {
@@ -23,8 +23,6 @@
     "cross-spawn": "7.0.6"
   },
   "devDependencies": {
-    "@openllm/schema": "workspace:*",
-    "@openllmsh/protocol": "workspace:*",
     "@types/turndown": "^5.0.6"
   },
   "license": "BUSL-1.1"
