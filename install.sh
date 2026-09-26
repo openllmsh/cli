@@ -713,8 +713,18 @@ env_lock_release() {
   return 0
 }
 # <<< openllm-env-lock/v1 <<<
+# The env write runs in a subshell so the lock traps and private umask stay
+# scoped — and every fallible step is guarded explicitly (`|| die`): a
+# half-written tmp must never reach the rename, and a write failure must
+# never let the installer announce success on a config it did not write.
 (
   tmp="$ENV_FILE.tmp.$$"
+  # An existing-but-unreadable env file would silently drop every preserved
+  # key — fail loudly instead of merging against an empty read. Checked BEFORE
+  # the lock: a die here must not strand a lock dir the EXIT trap isn't
+  # installed yet to release.
+  [ ! -f "$ENV_FILE" ] || [ -r "$ENV_FILE" ] \
+    || die "cannot read existing config file: $ENV_FILE"
   env_lock_acquire "$ENV_FILE" \
     || die "could not acquire config lock: $ENV_FILE.lock.d (remove it manually if no installer or daemon is running)"
   # Any exit while the lock is held — die, a set -e failure, Ctrl-C, SIGTERM —
@@ -724,8 +734,8 @@ env_lock_release() {
   trap 'exit 130' INT
   trap 'exit 143' TERM
   # The subshell keeps the private creation mode out of later shell setup.
-  umask 077
-  : > "$tmp"
+  umask 077 || die "could not tighten the umask"
+  : > "$tmp" || die "could not create temp config file: $tmp"
   wrote_origin=0
   wrote_key=0
   if [ -f "$ENV_FILE" ]; then
@@ -733,29 +743,31 @@ env_lock_release() {
       case "${line%%=*}" in
         OPENLLM_CLOUD_ORIGIN)
           if [ "$wrote_origin" = 0 ]; then
-            printf 'OPENLLM_CLOUD_ORIGIN=%s\n' "$ORIGIN" >> "$tmp"
+            printf 'OPENLLM_CLOUD_ORIGIN=%s\n' "$ORIGIN" >> "$tmp" || die "write failed: $tmp"
             wrote_origin=1
           fi
           ;;
         OPENLLM_API_KEY)
           if [ -n "${OPENLLM_API_KEY:-}" ]; then
             if [ "$wrote_key" = 0 ]; then
-              printf 'OPENLLM_API_KEY=%s\n' "$OPENLLM_API_KEY" >> "$tmp"
+              printf 'OPENLLM_API_KEY=%s\n' "$OPENLLM_API_KEY" >> "$tmp" || die "write failed: $tmp"
               wrote_key=1
             fi
           else
-            printf '%s\n' "$line" >> "$tmp"
+            printf '%s\n' "$line" >> "$tmp" || die "write failed: $tmp"
           fi
           ;;
-        *) printf '%s\n' "$line" >> "$tmp" ;;
+        *) printf '%s\n' "$line" >> "$tmp" || die "write failed: $tmp" ;;
       esac
-    done < "$ENV_FILE"
+    done < "$ENV_FILE" || die "could not read config file: $ENV_FILE"
   fi
-  if [ "$wrote_origin" = 0 ]; then printf 'OPENLLM_CLOUD_ORIGIN=%s\n' "$ORIGIN" >> "$tmp"; fi
+  if [ "$wrote_origin" = 0 ]; then
+    printf 'OPENLLM_CLOUD_ORIGIN=%s\n' "$ORIGIN" >> "$tmp" || die "write failed: $tmp"
+  fi
   if [ -n "${OPENLLM_API_KEY:-}" ] && [ "$wrote_key" = 0 ]; then
-    printf 'OPENLLM_API_KEY=%s\n' "$OPENLLM_API_KEY" >> "$tmp"
+    printf 'OPENLLM_API_KEY=%s\n' "$OPENLLM_API_KEY" >> "$tmp" || die "write failed: $tmp"
   fi
-  chmod 0600 "$tmp"
+  chmod 0600 "$tmp" || die "could not chmod temp config file: $tmp"
   mv -f "$tmp" "$ENV_FILE" || die "could not write config file: $ENV_FILE"
 )
 echo "  gateway config written → $ENV_FILE"
