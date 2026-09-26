@@ -12,7 +12,7 @@
  * overlay state all live on the gateway.
  */
 
-import { execSync } from "node:child_process";
+import { execFileSync } from "node:child_process";
 import * as crypto from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
@@ -104,12 +104,26 @@ export interface GitIdentity {
   isDirty: boolean;
 }
 
+// `git ls-files` output scales with the repo — the 1 MB default maxBuffer
+// truncates a large repo to a silent zero-file index, so we carry 64 MB.
+// The timeout stops a wedged git (a stalled filesystem, a lock wait) from
+// pinning the hook-fired CLI open. Override with
+// CLAUDE_CONTEXT_GIT_TIMEOUT_MS (ms).
+const GIT_MAX_BUFFER_BYTES = 64 * 1024 * 1024;
+const gitTimeoutMs = (): number => {
+  const raw = Number(process.env.CLAUDE_CONTEXT_GIT_TIMEOUT_MS);
+  return Number.isFinite(raw) && raw > 0 ? raw : 30_000;
+};
+
 function gitCmd(repo: string, args: string[]): string | null {
   try {
-    return execSync(`git ${args.map((a) => JSON.stringify(a)).join(" ")}`, {
+    return execFileSync("git", args, {
       cwd: repo,
       encoding: "utf-8",
       stdio: ["ignore", "pipe", "ignore"],
+      maxBuffer: GIT_MAX_BUFFER_BYTES,
+      timeout: gitTimeoutMs(),
+      windowsHide: true,
     }).trim();
   } catch {
     return null;
@@ -182,7 +196,7 @@ export function resolveGitIdentity(absPath: string): GitIdentity | null {
  * contents, which is exactly what we want: the parent owns only its own files,
  * and each submodule is indexed independently under its own codebaseId.
  */
-function listTrackedFiles(absPath: string): string[] {
+export function listTrackedFiles(absPath: string): string[] {
   const out = gitCmd(absPath, ["ls-files", "-co", "--exclude-standard"]);
   if (!out) return [];
   return out
