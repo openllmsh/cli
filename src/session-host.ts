@@ -22,6 +22,9 @@ import type {
   TProcessStartIdentityReader,
 } from "../../tunnel/session/local-runtime";
 import {
+  bootScopedStartIdentityMs,
+  isBootScopedStartIdentity,
+  legacyProcessStartIdentity,
   processIdentityStatus,
   processStartIdentity,
   SESSION_HOST_STARTUP_GRACE_MS,
@@ -275,6 +278,9 @@ export const startIdentityMs = (identity: string): number | null => {
     const ms = (BigInt(identity) - 11_644_473_600_000_000_000n) / 10_000n;
     return Number(ms);
   }
+  // A post-RT-1 Linux identity is boot-scoped; translate it through btime.
+  if (isBootScopedStartIdentity(identity))
+    return bootScopedStartIdentityMs(identity);
   const match =
     /([A-Z][a-z]{2})\s+(\d{1,2})\s+(\d{2}):(\d{2}):(\d{2})\s+(\d{4})/.exec(
       identity,
@@ -314,7 +320,10 @@ const legacyPidIsSessionHost = (
   if (meta.startedAtMs === null) return null;
   let identity: string | null | undefined;
   try {
-    identity = (readIdentity ?? processStartIdentity)(meta.pid);
+    // The comparison below parses a wall-clock timestamp, so the default
+    // probe must be the LEGACY-format reader — a boot-scoped identity would
+    // fail to parse and leave every legacy meta undecidable (RT-1).
+    identity = (readIdentity ?? legacyProcessStartIdentity)(meta.pid);
   } catch {
     return null;
   }
@@ -749,6 +758,14 @@ export const discoverSessionHosts = (
 export const discoverLiveSessionHosts = (): readonly TLiveSessionHost[] =>
   discoverSessionHosts().hosts;
 
+/**
+ * How long the CLI waits for a freshly spawned host's socket before falling
+ * back (SH-4). A ConPTY first-compile can take ~12 s on Windows, so the
+ * fallback path uses this longer bound — never the old 2 s, which fired
+ * mid-compile and orphaned the vendor process.
+ */
+export const SESSION_HOST_SOCKET_WAIT_MS = 15_000;
+
 /** Wait for the detached host to publish its private local control endpoint. */
 export const waitForSessionHostSocket = async (
   id: string,
@@ -833,5 +850,46 @@ export const spawnSessionHost = (args: {
     return proc;
   } catch {
     return null;
+  }
+};
+
+/**
+ * Kill a spawned-but-unusable host and its WHOLE tree (SH-4). On Windows the
+ * spawned leader is a `cmd.exe` wrapper (or the ConPTY host) whose children
+ * would survive a bare `proc.kill()` — `taskkill /T /F` takes the entire
+ * tree. POSIX uses the direct kill; the detached child is its own process
+ * group leader, so a group signal is tried first and a bare-pid kill is the
+ * fallback.
+ */
+export const killSpawnedSessionHost = (proc: {
+  readonly pid?: number;
+  kill: () => unknown;
+}): void => {
+  const pid = typeof proc.pid === "number" && proc.pid > 0 ? proc.pid : null;
+  if (process.platform === "win32" && pid !== null) {
+    try {
+      spawnSync("taskkill", ["/pid", String(pid), "/t", "/f"], {
+        stdio: "ignore",
+        timeout: 5_000,
+        windowsHide: true,
+      });
+      return;
+    } catch {
+      // fall through to the direct kill
+    }
+  }
+  if (process.platform !== "win32" && pid !== null) {
+    try {
+      process.kill(-pid, "SIGTERM");
+      return;
+    } catch {
+      // No such group (setsid never ran, or the leader is already gone) —
+      // fall through to the direct pid.
+    }
+  }
+  try {
+    proc.kill();
+  } catch {
+    // already gone
   }
 };
