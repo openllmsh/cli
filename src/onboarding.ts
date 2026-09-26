@@ -3,16 +3,20 @@ import {
   chmodSync,
   closeSync,
   fsyncSync,
+  linkSync,
   lstatSync,
   mkdirSync,
   openSync,
+  readdirSync,
   readFileSync,
   readSync,
   renameSync,
+  rmdirSync,
+  statSync,
   unlinkSync,
   writeFileSync,
 } from "node:fs";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import type { TCliConfig } from "./env";
 import { cliConfig, sharedEnvFile } from "./env";
 import type {
@@ -130,110 +134,662 @@ const defaultTerminal: TCredentialGateTerminal = {
   },
 };
 
-const ENV_UPDATE_LOCK_ATTEMPTS = 500;
-const ENV_UPDATE_LOCK_RETRY_MS = 10;
-const ENV_UPDATE_LOCK_STALE_MS = 30_000;
+/**
+ * Shared env-file lock protocol `openllm-env-lock/v1` — the SAME protocol as
+ * `packages/daemon/src/env.ts` (and the block duplicated verbatim in both
+ * `install.sh` scripts). The lock is the DIRECTORY `<envfile>.lock.d` claimed
+ * by atomic `mkdir`; the owner publishes
+ * `kind=openllm-env-lock/v1 pid=<pid> start=<identity> nonce=<hex>` no-replace
+ * inside it; stale reclaim is marker-first (`steal.<pid>.<nonce>` inside the
+ * dir, then re-judge the same generation, then quarantine by rename); the
+ * publish is vetoed by an in-flight steal; release renames to `.rel.` and
+ * verifies the nonce before deleting. An ownerless or unprovable lock is
+ * HELD only inside the orphan bound (default 30 s) and a legacy `.env.lock`
+ * FILE inside the same bound. Keep every rule byte-compatible with the
+ * daemon side — the parity tests pin both.
+ */
+const ENV_LOCK_MARKER = "kind=openllm-env-lock/v1";
 
-/** Block briefly between lock attempts without spawning a shell process. */
-const waitForEnvUpdateLock = (): void => {
-  Atomics.wait(
-    new Int32Array(new SharedArrayBuffer(4)),
-    0,
-    0,
-    ENV_UPDATE_LOCK_RETRY_MS,
+const envLockStaleMs = (): number => {
+  const raw = process.env.OPENLLM_ENV_LOCK_STALE_SECS;
+  if (raw !== undefined && /^[0-9]+$/.test(raw) && Number(raw) > 0)
+    return Number(raw) * 1000;
+  return 600_000;
+};
+
+const envLockOrphanMs = (): number => {
+  const raw = process.env.OPENLLM_ENV_LOCK_ORPHAN_SECS;
+  if (raw !== undefined && /^[0-9]+$/.test(raw) && Number(raw) > 0)
+    return Number(raw) * 1000;
+  return 30_000;
+};
+
+// Installer patience, not the daemon's request-path bound: onboarding is an
+// interactive one-shot write outside any event loop, so a held lock is
+// waited out like the installers do.
+const envLockWaitMs = (): number => {
+  const raw = process.env.OPENLLM_ENV_LOCK_WAIT_SECS;
+  if (raw !== undefined && /^[0-9]+$/.test(raw) && Number(raw) > 0)
+    return Number(raw) * 1000;
+  return 10_000;
+};
+
+const lockWait = (): void => {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10);
+};
+
+type TEnvLockOwner =
+  | {
+      readonly state: "marked";
+      readonly pid: number;
+      readonly start: string;
+      readonly nonce: string;
+    }
+  | { readonly state: "unmarked"; readonly pid: number | null };
+
+/** Identical field rules to the daemon's `envLockReadOwner`. */
+const envLockReadOwner = (dir: string): TEnvLockOwner => {
+  let text = "";
+  try {
+    text = readFileSync(join(dir, "owner"), "utf-8").trim();
+  } catch {
+    text = "";
+  }
+  const marked = text.match(
+    /^kind=openllm-env-lock\/v1 pid=([0-9]+) start=(.+) nonce=([0-9a-fA-F]+)$/,
   );
+  if (marked !== null) {
+    return {
+      state: "marked",
+      pid: Number(marked[1]),
+      start: marked[2],
+      nonce: marked[3],
+    };
+  }
+  const pidField =
+    text.match(/(?:^|\s)pid=([0-9]+)(?:\s|$)/)?.[1] ??
+    text.match(/^([0-9]+)(?:\s|$)/)?.[1];
+  const pid = pidField === undefined ? Number.NaN : Number(pidField);
+  return {
+    state: "unmarked",
+    pid: Number.isInteger(pid) && pid > 0 ? pid : null,
+  };
+};
+
+/** Is `pid` a live process? EPERM means it exists but is owned by another user. */
+const envLockOwnerAlive = (pid: number): boolean => {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === "EPERM";
+  }
 };
 
 /**
- * Serialize read-modify-rename updates with the daemon-compatible file lock.
- * A killed writer leaves a stale regular file that is recovered after 30 seconds.
+ * `ps -o lstart=` under the fixed locale/timezone the daemon uses, whitespace
+ * collapsed to single spaces. Tri-state: identity string, null for a
+ * confirmed-dead pid, undefined when unknown (ps missing/failed on a live
+ * pid). The CLI package cannot reach the tunnel's processStartIdentity, so
+ * this mirrors its POSIX path exactly.
+ */
+const envLockStartIdentityProbe = (pid: number): string | null | undefined => {
+  if (!Number.isSafeInteger(pid) || pid <= 0) return undefined;
+  const result = spawnSync("ps", ["-o", "lstart=", "-p", String(pid)], {
+    encoding: "utf8",
+    timeout: 1500,
+    windowsHide: true,
+    env: { ...process.env, LC_ALL: "C", LANG: "C", TZ: "UTC" },
+  });
+  if (!result.error && result.status === 0) {
+    const value = result.stdout.trim().split(/\s+/).join(" ");
+    return value.length > 0 ? value : undefined;
+  }
+  try {
+    process.kill(pid, 0);
+    return undefined;
+  } catch (error) {
+    const code = (error as { readonly code?: unknown }).code;
+    return code === "ESRCH" ? null : undefined;
+  }
+};
+
+const IDENTITY_PROBE_TTL_MS = 250;
+const identityCache = new Map<
+  number,
+  { readonly value: string | null | undefined; readonly at: number }
+>();
+let selfIdentity: string | null | undefined;
+let selfIdentityRead = false;
+
+const envLockStartIdentity = (pid: number): string | null | undefined => {
+  if (pid === process.pid) {
+    if (!selfIdentityRead) {
+      selfIdentity = envLockStartIdentityProbe(pid);
+      selfIdentityRead = true;
+    }
+    return selfIdentity;
+  }
+  const now = Date.now();
+  const hit = identityCache.get(pid);
+  if (hit !== undefined && now - hit.at < IDENTITY_PROBE_TTL_MS)
+    return hit.value;
+  const value = envLockStartIdentityProbe(pid);
+  if (identityCache.size > 128) identityCache.clear();
+  identityCache.set(pid, { value, at: now });
+  return value;
+};
+
+/**
+ * The shared staleness predicate — identical rules to the daemon side.
+ * `asOfMtimeMs` substitutes a pre-captured dir mtime for the age terms: the
+ * steal path passes the PRE-MARK stat because our own `steal.*` marker
+ * create already bumped the dir's mtime.
+ */
+const envLockDirIsStale = (dir: string, asOfMtimeMs?: number): boolean => {
+  const owner = envLockReadOwner(dir);
+  let ageMs = Number.NaN;
+  if (asOfMtimeMs !== undefined) {
+    ageMs = Date.now() - asOfMtimeMs;
+  } else {
+    try {
+      ageMs = Date.now() - lstatSync(dir).mtimeMs;
+    } catch {
+      // unreadable — stay held
+    }
+  }
+  if (owner.state === "marked") {
+    if (!envLockOwnerAlive(owner.pid)) return true;
+    if (owner.start === "-")
+      return Number.isFinite(ageMs) && ageMs >= envLockOrphanMs();
+    const current = envLockStartIdentity(owner.pid);
+    return current !== null && current !== undefined && current !== owner.start;
+  }
+  if (!(ageMs >= envLockOrphanMs())) return false;
+  if (owner.pid !== null && envLockOwnerAlive(owner.pid)) return false;
+  return true;
+};
+
+let envLockQuarantineSeq = 0;
+
+/** Marker-first stale reclaim — identical to the daemon's `envLockSteal`. */
+const envLockSteal = (lockDir: string, stem: string, nonce: string): void => {
+  let beforeIno = Number.NaN;
+  let beforeMtimeMs = Number.NaN;
+  try {
+    const stat = lstatSync(lockDir);
+    beforeIno = stat.ino;
+    beforeMtimeMs = stat.mtimeMs;
+  } catch {
+    return;
+  }
+  const marker = join(lockDir, `steal.${process.pid}.${nonce}`);
+  try {
+    const fd = openSync(marker, "wx", 0o600);
+    closeSync(fd);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOTDIR") {
+      try {
+        if (statSync(lockDir).isFile()) {
+          envLockQuarantineSeq += 1;
+          renameSync(
+            lockDir,
+            `${stem}.stale.${process.pid}.${nonce}.${envLockQuarantineSeq}`,
+          );
+        }
+      } catch {
+        // raced — leave it
+      }
+    }
+    return;
+  }
+  let stale = false;
+  try {
+    stale =
+      lstatSync(lockDir).ino === beforeIno &&
+      envLockDirIsStale(lockDir, beforeMtimeMs);
+  } catch {
+    stale = false;
+  }
+  if (stale) {
+    try {
+      envLockQuarantineSeq += 1;
+      renameSync(
+        lockDir,
+        `${stem}.stale.${process.pid}.${nonce}.${envLockQuarantineSeq}`,
+      );
+      return;
+    } catch {
+      // lost the rename or the dir vanished — unmark below
+    }
+  }
+  try {
+    unlinkSync(marker);
+  } catch {
+    // already gone, or moved with the dir
+  }
+};
+
+/** Bounded quarantine sweep — identical allowlist to the daemon's. */
+const envLockSweepQuarantine = (parentDir: string, baseName: string): void => {
+  let entries: string[] = [];
+  try {
+    entries = readdirSync(parentDir);
+  } catch {
+    return;
+  }
+  const staleMs = envLockStaleMs();
+  for (const entry of entries) {
+    if (
+      !entry.startsWith(`${baseName}.lock.stale.`) &&
+      !entry.startsWith(`${baseName}.lock.rel.`)
+    )
+      continue;
+    const path = join(parentDir, entry);
+    let isDir = false;
+    let mtimeMs = 0;
+    try {
+      const stat = lstatSync(path);
+      isDir = stat.isDirectory();
+      mtimeMs = stat.mtimeMs;
+    } catch {
+      continue;
+    }
+    if (!isDir || Date.now() - mtimeMs < staleMs) continue;
+    let clean = true;
+    let hasOwner = false;
+    try {
+      for (const child of readdirSync(path)) {
+        if (child === "owner") hasOwner = true;
+        else if (!child.startsWith("owner.tmp.") && !child.startsWith("steal."))
+          clean = false;
+      }
+    } catch {
+      clean = false;
+    }
+    if (!clean) continue;
+    if (hasOwner && envLockReadOwner(path).state !== "marked") continue;
+    for (const child of readdirSync(path)) {
+      try {
+        unlinkSync(join(path, child));
+      } catch {
+        // best effort
+      }
+    }
+    try {
+      rmdirSync(path);
+    } catch {
+      // best effort
+    }
+  }
+};
+
+/**
+ * Adjudicate a legacy `.env.lock` file already renamed into quarantine —
+ * identical verdicts to the daemon's: a live pid is restored no-replace only
+ * inside the orphan window; everything else is deleted. Returns true while
+ * the legacy path still blocks acquisition.
+ */
+const envLockLegacyResolveQuarantine = (
+  quarantinePath: string,
+  legacyPath: string,
+): boolean => {
+  let movedText = "";
+  try {
+    movedText = readFileSync(quarantinePath, "utf-8");
+  } catch {
+    movedText = "";
+  }
+  const movedPid = Number(movedText.trim().split(/\s+/)[0]);
+  let withinWindow = false;
+  if (
+    Number.isInteger(movedPid) &&
+    movedPid > 0 &&
+    envLockOwnerAlive(movedPid)
+  ) {
+    withinWindow = true;
+    try {
+      withinWindow =
+        Date.now() - lstatSync(quarantinePath).mtimeMs < envLockOrphanMs();
+    } catch {
+      // keep the conservative default
+    }
+  }
+  if (withinWindow) {
+    try {
+      linkSync(quarantinePath, legacyPath);
+      try {
+        unlinkSync(quarantinePath);
+      } catch {
+        // best effort
+      }
+    } catch {
+      let restored = false;
+      let fd = -1;
+      try {
+        fd = openSync(legacyPath, "wx");
+        writeFileSync(fd, movedText);
+        closeSync(fd);
+        fd = -1;
+        restored = true;
+      } catch {
+        if (fd >= 0) {
+          try {
+            closeSync(fd);
+          } catch {
+            // best effort
+          }
+          try {
+            unlinkSync(legacyPath);
+          } catch {
+            // best effort
+          }
+        }
+      }
+      if (restored) {
+        try {
+          unlinkSync(quarantinePath);
+        } catch {
+          // best effort
+        }
+      } else {
+        try {
+          lstatSync(legacyPath);
+          try {
+            unlinkSync(quarantinePath);
+          } catch {
+            // best effort
+          }
+        } catch {
+          // Path free but restore failed — keep it quarantined for a retry.
+        }
+      }
+    }
+    return true;
+  }
+  try {
+    unlinkSync(quarantinePath);
+  } catch {
+    // best effort
+  }
+  return false;
+};
+
+/**
+ * Legacy `.env.lock` FILE handling — identical to the daemon's: a live or
+ * unparseable record holds only inside the orphan window, and reclaim always
+ * renames to a unique quarantine name first (never an unlink on the live
+ * path). Returns true while the legacy file still blocks acquisition.
+ */
+const envLockLegacyHeld = (legacyPath: string, nonce: string): boolean => {
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    let text: string;
+    try {
+      text = readFileSync(legacyPath, "utf-8");
+    } catch (error) {
+      return (error as NodeJS.ErrnoException).code !== "ENOENT";
+    }
+    const pid = Number(text.trim().split(/\s+/)[0]);
+    const pidProvenDead =
+      Number.isInteger(pid) && pid > 0 && !envLockOwnerAlive(pid);
+    if (!pidProvenDead) {
+      let ageMs = Number.NaN;
+      try {
+        ageMs = Date.now() - lstatSync(legacyPath).mtimeMs;
+      } catch {
+        // exists but its age is unknown — stay held
+      }
+      if (!(ageMs >= envLockOrphanMs())) return true;
+    }
+    const quarantine = `${legacyPath}.stale.${process.pid}.${nonce}.${attempt}`;
+    try {
+      renameSync(legacyPath, quarantine);
+    } catch {
+      continue;
+    }
+    if (envLockLegacyResolveQuarantine(quarantine, legacyPath)) return true;
+  }
+  return true;
+};
+
+/**
+ * Publish OUR owner record no-replace, then check the steal veto: a
+ * `steal.*` marker inside the dir — or the dir itself gone — means a
+ * contender committed to reclaiming it while our record was in flight, so we
+ * drop only OUR record and report failure. Identical to the daemon's.
+ */
+const envLockPublishOwner = (lockDir: string, nonce: string): boolean => {
+  const start = envLockStartIdentity(process.pid) ?? "-";
+  const record = `${ENV_LOCK_MARKER} pid=${process.pid} start=${start} nonce=${nonce}\n`;
+  const tmp = join(lockDir, `owner.tmp.${process.pid}`);
+  const ownerPath = join(lockDir, "owner");
+  writeFileSync(tmp, record, "utf-8");
+  let published = false;
+  try {
+    linkSync(tmp, ownerPath);
+    published = true;
+  } catch {
+    let fd = -1;
+    try {
+      fd = openSync(ownerPath, "wx");
+      writeFileSync(fd, record);
+      closeSync(fd);
+      fd = -1;
+      published = true;
+    } catch {
+      if (fd >= 0) {
+        try {
+          closeSync(fd);
+        } catch {
+          // best effort
+        }
+        try {
+          unlinkSync(ownerPath);
+        } catch {
+          // best effort
+        }
+      }
+    }
+  }
+  try {
+    unlinkSync(tmp);
+  } catch {
+    // best effort — swept later either way
+  }
+  if (!published) return false;
+  let stolen = true;
+  try {
+    stolen = readdirSync(lockDir).some((child) => child.startsWith("steal."));
+  } catch {
+    // dir vanished — stolen outright
+  }
+  if (stolen) {
+    const ours = envLockReadOwner(lockDir);
+    if (ours.state === "marked" && ours.nonce === nonce) {
+      try {
+        unlinkSync(ownerPath);
+      } catch {
+        // best effort
+      }
+    }
+    try {
+      rmdirSync(lockDir);
+    } catch {
+      // best effort — the dir is being (or was) quarantined regardless
+    }
+    return false;
+  }
+  const now = envLockReadOwner(lockDir);
+  return now.state === "marked" && now.nonce === nonce;
+};
+
+/**
+ * Acquire the shared lock, run `operation`, release — identical flow to the
+ * daemon's `withEnvFileLock`, including the guaranteed first attempt.
+ */
+const withEnvFileLock = (
+  targetPath: string,
+  operation: () => boolean,
+  waitMs?: number,
+): boolean => {
+  const stem = `${targetPath}.lock`;
+  const lockDir = `${stem}.d`;
+  const parentDir = dirname(targetPath);
+  const baseName = basename(targetPath);
+  const nonce = crypto.randomUUID().replace(/-/g, "");
+  const deadline = Date.now() + (waitMs ?? envLockWaitMs());
+  let sweeps = 0;
+  let attempts = 0;
+  let acquired = false;
+  envLockSweepQuarantine(parentDir, baseName);
+  while (attempts === 0 || Date.now() < deadline) {
+    attempts += 1;
+    if (envLockLegacyHeld(stem, nonce)) {
+      lockWait();
+      continue;
+    }
+    try {
+      mkdirSync(lockDir);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") return false;
+      sweeps += 1;
+      if (sweeps % 25 === 0) envLockSweepQuarantine(parentDir, baseName);
+      try {
+        if (envLockDirIsStale(lockDir)) {
+          envLockSteal(lockDir, stem, nonce);
+        }
+      } catch {
+        // Another writer may have released/replaced it; retry normally.
+      }
+      lockWait();
+      continue;
+    }
+    let published: boolean;
+    try {
+      published = envLockPublishOwner(lockDir, nonce);
+    } catch {
+      try {
+        unlinkSync(join(lockDir, `owner.tmp.${process.pid}`));
+      } catch {
+        // best effort
+      }
+      try {
+        rmdirSync(lockDir);
+      } catch {
+        // best effort
+      }
+      return false;
+    }
+    if (!published) {
+      lockWait();
+      continue;
+    }
+    acquired = true;
+    break;
+  }
+  if (!acquired) return false;
+  try {
+    return operation();
+  } finally {
+    const released = `${stem}.rel.${process.pid}.${nonce}`;
+    try {
+      renameSync(lockDir, released);
+      const owner = envLockReadOwner(released);
+      if (owner.state === "marked" && owner.nonce === nonce) {
+        for (const child of readdirSync(released)) {
+          try {
+            unlinkSync(join(released, child));
+          } catch {
+            // best effort
+          }
+        }
+        try {
+          rmdirSync(released);
+        } catch {
+          // best effort
+        }
+      } else {
+        try {
+          lstatSync(lockDir);
+        } catch {
+          try {
+            renameSync(released, lockDir);
+          } catch {
+            // leave it quarantined
+          }
+        }
+      }
+    } catch {
+      // The lock dir vanished under us (stolen/quarantined) — nothing held.
+    }
+  }
+};
+
+/**
+ * Serialize read-modify-rename updates with the daemon-compatible directory
+ * lock (`<envfile>.lock.d`), the same protocol the installers and daemon
+ * share.
  */
 const updateEnvFile = (key: string): boolean => {
   const target = sharedEnvFile();
-  const lock = `${target}.lock`;
-  let locked = false;
   try {
     if (/[\r\n\0]/.test(key)) return false;
     mkdirSync(dirname(target), { recursive: true, mode: 0o700 });
-    for (let attempts = 0; attempts < ENV_UPDATE_LOCK_ATTEMPTS; attempts += 1) {
-      try {
-        const fd = openSync(lock, "wx", 0o600);
-        closeSync(fd);
-        locked = true;
-        break;
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== "EEXIST") return false;
-        try {
-          const held = lstatSync(lock);
-          if (
-            held.isFile() &&
-            Date.now() - held.mtimeMs > ENV_UPDATE_LOCK_STALE_MS
-          )
-            unlinkSync(lock);
-        } catch {
-          // Another writer may have released or replaced the lock.
-        }
-        waitForEnvUpdateLock();
-      }
-    }
-    if (!locked) return false;
-
-    let lines: string[] = [];
-    try {
-      const stat = lstatSync(target);
-      if (!stat.isFile() || stat.isSymbolicLink()) return false;
-      lines = readFileSync(target, "utf8").split("\n");
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "ENOENT") return false;
-    }
-    let replaced = false;
-    const next = lines.flatMap((line): string[] => {
-      const match = /^\s*OPENLLM_API_KEY\s*=/.test(line);
-      if (!match) return [line];
-      if (replaced) return [];
-      replaced = true;
-      return [`OPENLLM_API_KEY=${key}`];
-    });
-    while (next.length > 0 && next[next.length - 1]?.trim() === "") next.pop();
-    if (!replaced) next.push(`OPENLLM_API_KEY=${key}`);
-    const temp = join(
-      dirname(target),
-      `.${process.pid}.${crypto.randomUUID()}.tmp`,
-    );
-    try {
-      writeFileSync(temp, `${next.join("\n")}\n`, { mode: 0o600, flag: "wx" });
-      const fd = openSync(temp, "r");
-      try {
-        fsyncSync(fd);
-      } finally {
-        closeSync(fd);
-      }
+    return withEnvFileLock(target, () => {
+      let lines: string[] = [];
       try {
         const stat = lstatSync(target);
         if (!stat.isFile() || stat.isSymbolicLink()) return false;
+        lines = readFileSync(target, "utf8").split("\n");
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code !== "ENOENT") return false;
       }
-      renameSync(temp, target);
-      chmodSync(target, 0o600);
-      return true;
-    } finally {
+      let replaced = false;
+      const next = lines.flatMap((line): string[] => {
+        const match = /^\s*OPENLLM_API_KEY\s*=/.test(line);
+        if (!match) return [line];
+        if (replaced) return [];
+        replaced = true;
+        return [`OPENLLM_API_KEY=${key}`];
+      });
+      while (next.length > 0 && next[next.length - 1]?.trim() === "")
+        next.pop();
+      if (!replaced) next.push(`OPENLLM_API_KEY=${key}`);
+      const temp = join(
+        dirname(target),
+        `.${process.pid}.${crypto.randomUUID()}.tmp`,
+      );
       try {
-        unlinkSync(temp);
-      } catch {
-        // renamed or never created
+        writeFileSync(temp, `${next.join("\n")}\n`, {
+          mode: 0o600,
+          flag: "wx",
+        });
+        const fd = openSync(temp, "r");
+        try {
+          fsyncSync(fd);
+        } finally {
+          closeSync(fd);
+        }
+        try {
+          const stat = lstatSync(target);
+          if (!stat.isFile() || stat.isSymbolicLink()) return false;
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== "ENOENT") return false;
+        }
+        renameSync(temp, target);
+        chmodSync(target, 0o600);
+        return true;
+      } finally {
+        try {
+          unlinkSync(temp);
+        } catch {
+          // renamed or never created
+        }
       }
-    }
+    });
   } catch {
     return false;
-  } finally {
-    if (locked) {
-      try {
-        unlinkSync(lock);
-      } catch {
-        // Stale-lock recovery prevents a permanent wedge.
-      }
-    }
   }
 };
 

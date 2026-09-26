@@ -328,6 +328,9 @@ ENV_LOCK_STALE_SECS=$((10#$ENV_LOCK_STALE_SECS))
 [[ "$ENV_LOCK_WAIT_SECS" =~ ^[0-9]+$ ]] || ENV_LOCK_WAIT_SECS=0
 ENV_LOCK_WAIT_SECS=$((10#$ENV_LOCK_WAIT_SECS))
 [ "$ENV_LOCK_WAIT_SECS" -gt 0 ] || ENV_LOCK_WAIT_SECS=10
+[[ "$ENV_LOCK_ORPHAN_SECS" =~ ^[0-9]+$ ]] || ENV_LOCK_ORPHAN_SECS=0
+ENV_LOCK_ORPHAN_SECS=$((10#$ENV_LOCK_ORPHAN_SECS))
+[ "$ENV_LOCK_ORPHAN_SECS" -gt 0 ] || ENV_LOCK_ORPHAN_SECS=30
 ENV_LOCK_DIR=""
 ENV_LOCK_NONCE=""
 ENV_LOCK_QSEQ=0
@@ -407,8 +410,9 @@ env_lock_read_owner() {
 }
 
 env_lock_dir_age_secs() {
-  local mtime now
-  mtime="$(stat -c %Y "$1" 2>/dev/null || stat -f %m "$1" 2>/dev/null || true)"
+  local mtime="${2:-}" now
+  [[ "$mtime" =~ ^[0-9]+$ ]] || \
+    mtime="$(stat -c %Y "$1" 2>/dev/null || stat -f %m "$1" 2>/dev/null || true)"
   now="$(date +%s 2>/dev/null || true)"
   if [[ "$mtime" =~ ^[0-9]+$ && "$now" =~ ^[0-9]+$ ]]; then
     printf '%s\n' $((10#$now - 10#$mtime))
@@ -417,19 +421,29 @@ env_lock_dir_age_secs() {
   fi
 }
 
+# Inode of a path (no deref — `stat` only dereferences under -L on both
+# GNU and BSD, matching the daemon's lstatSync). The steal re-check uses
+# it to prove the dir it marked is the SAME generation the staleness
+# verdict was computed against.
+env_lock_path_ino() {
+  stat -c %i "$1" 2>/dev/null || stat -f %i "$1" 2>/dev/null || true
+}
+
 # The ONE staleness predicate — identical rules on the daemon side.
-# $1 = the lock dir (or a quarantined dir).
+# $1 = the lock dir (or a quarantined dir); $2 = optional PRE-CAPTURED dir
+# mtime used for the age terms (the steal re-check — our own `steal.*`
+# marker create already bumped the dir's mtime).
 env_lock_is_stale_dir() {
-  local dir="$1" current age
+  local dir="$1" as_of="${2:-}" current age
   env_lock_read_owner "$dir"
+  age="$(env_lock_dir_age_secs "$dir" "$as_of")"
   if [ "$ENV_LOCK_OWNER_STATE" = "marked" ]; then
     env_lock_pid_alive "$ENV_LOCK_OWNER_PID" || return 0
     if [ "$ENV_LOCK_OWNER_START" = "-" ]; then
       # The start identity can never be proven ("-"): the lock is held only
       # inside the same bounded window an ownerless dir gets — past it a
       # live-but-unidentifiable pid no longer wedges the lock.
-      age="$(env_lock_dir_age_secs "$dir")"
-      { [ "$age" -ge 0 ] && [ "$age" -ge "$ENV_LOCK_STALE_SECS" ]; }
+      { [ "$age" -ge 0 ] && [ "$age" -ge "$ENV_LOCK_ORPHAN_SECS" ]; }
       return
     fi
     current="$(env_lock_start_identity "$ENV_LOCK_OWNER_PID")"
@@ -438,34 +452,57 @@ env_lock_is_stale_dir() {
     [ -n "$current" ] && [ "$current" != "$ENV_LOCK_OWNER_START" ]
     return
   fi
-  # Unmarked: HELD unless old AND still unclaimed — and never while a
-  # parseable pid inside it is still alive.
-  age="$(env_lock_dir_age_secs "$dir")"
-  { [ "$age" -ge 0 ] && [ "$age" -ge "$ENV_LOCK_STALE_SECS" ]; } || return 1
+  # Unmarked: HELD unless past the short unproven bound AND still without
+  # a complete owner — and never while a parseable pid in it is still
+  # alive.
+  { [ "$age" -ge 0 ] && [ "$age" -ge "$ENV_LOCK_ORPHAN_SECS" ]; } || return 1
   if [[ "$ENV_LOCK_OWNER_PID" =~ ^[0-9]+$ ]] && env_lock_pid_alive "$ENV_LOCK_OWNER_PID"; then
     return 1
   fi
   return 0
 }
 
-# Reclaim = `mv .lock.d .lock.stale.<pid>.<nonce>` — atomic; exactly one
-# contender wins the rename. A re-read owner that turns out to be live is
-# restored, but never over an existing `.lock.d` (no-replace).
-env_lock_quarantine() {
-  local lockdir="$1" stem="$2" q
-  q="$stem.stale.$$.$ENV_LOCK_NONCE"
-  mv "$lockdir" "$q" 2>/dev/null || return 0
-  env_lock_is_stale_dir "$q" && return 0
-  if [ ! -e "$lockdir" ] && [ ! -L "$lockdir" ]; then
-    mv "$q" "$lockdir" 2>/dev/null || true
+# Reclaim an apparently-stale lock dir — MARK-FIRST. Drop a
+# `steal.<pid>.<nonce>` marker INSIDE the dir (noclobber create), re-judge
+# the SAME generation (inode match + the pre-mark mtime for the age term),
+# then `mv` it aside atomically — exactly one contender wins the rename.
+# The marker bridges check->move: a publisher that commits its owner record
+# while the steal is in flight sees the marker and fails its own publish,
+# so a committed steal can never leave two holders. A committed quarantine
+# is never moved back; the sweep removes it once it ages out.
+env_lock_steal() {
+  local lockdir="$1" stem="$2" marker q ino_before ino_after mtime
+  ino_before="$(env_lock_path_ino "$lockdir")"
+  mtime="$(stat -c %Y "$lockdir" 2>/dev/null || stat -f %m "$lockdir" 2>/dev/null || true)"
+  [ -n "$ino_before" ] || return 0  # vanished — the outer acquire retries
+  marker="$lockdir/steal.$$.$ENV_LOCK_NONCE"
+  if ! (set -C; : > "$marker") 2>/dev/null; then
+    # A plain FILE at the lock path can never gain an owner record — park
+    # it like a stale dir. Anything else (dir vanished) retries at the top.
+    if [ -f "$lockdir" ]; then
+      ENV_LOCK_QSEQ=$((ENV_LOCK_QSEQ + 1))
+      mv "$lockdir" "$stem.stale.$$.$ENV_LOCK_NONCE.$ENV_LOCK_QSEQ" \
+        2>/dev/null || true
+    fi
+    return 0
   fi
+  ino_after="$(env_lock_path_ino "$lockdir")"
+  if [ -n "$ino_after" ] && [ "$ino_after" = "$ino_before" ] \
+    && env_lock_is_stale_dir "$lockdir" "$mtime"; then
+    ENV_LOCK_QSEQ=$((ENV_LOCK_QSEQ + 1))
+    q="$stem.stale.$$.$ENV_LOCK_NONCE.$ENV_LOCK_QSEQ"
+    if mv "$lockdir" "$q" 2>/dev/null; then
+      return 0  # committed — the marker (and dir) are parked with it
+    fi
+  fi
+  rm -f "$marker" 2>/dev/null || true
   return 0
 }
 
 # Delete old quarantine/release dirs whose contents are only `owner.tmp.*`
-# publish residue (or EMPTY — a holder killed between mkdir and publish,
-# then quarantined) or a complete marked owner record. Anything foreign is
-# kept.
+# publish residue or `steal.*` markers left by a steal committed
+# mid-publish (or EMPTY — a holder killed between mkdir and publish, then
+# quarantined) or a complete marked owner record. Anything foreign is kept.
 env_lock_sweep() {
   local stem="$1" entry child age ok has_owner
   for entry in "$stem".stale.* "$stem".rel.*; do
@@ -478,7 +515,7 @@ env_lock_sweep() {
       [ -e "$child" ] || continue
       case "${child##*/}" in
         owner) has_owner=1 ;;
-        owner.tmp.*) ;;
+        owner.tmp.*|steal.*) ;;
         *) ok=0 ;;
       esac
     done
@@ -509,7 +546,7 @@ env_lock_legacy_resolve() {
   read -r moved rest < "$q" 2>/dev/null || moved=""
   if [[ "$moved" =~ ^[0-9]+$ ]] && env_lock_pid_alive "$moved"; then
     age="$(env_lock_dir_age_secs "$q")"
-    if [ "$age" -lt 0 ] || [ "$age" -lt "$ENV_LOCK_STALE_SECS" ]; then
+    if [ "$age" -lt 0 ] || [ "$age" -lt "$ENV_LOCK_ORPHAN_SECS" ]; then
       if ln "$q" "$legacy" 2>/dev/null; then
         rm -f "$q" 2>/dev/null || true
       elif (set -C; cat "$q" > "$legacy") 2>/dev/null; then
@@ -544,10 +581,10 @@ env_lock_legacy_held() {
     else
       # A live pid — or a record that cannot be parsed at all — can never
       # prove the owner's start identity, so the lock is held ONLY inside
-      # the bounded reclaim window (an unreadable age stays held); past it
+      # the bounded orphan window (an unreadable age stays held); past it
       # we reclaim below like any stale dir.
       age="$(env_lock_dir_age_secs "$legacy")"
-      if [ "$age" -lt 0 ] || [ "$age" -lt "$ENV_LOCK_STALE_SECS" ]; then
+      if [ "$age" -lt 0 ] || [ "$age" -lt "$ENV_LOCK_ORPHAN_SECS" ]; then
         return 0
       fi
     fi
@@ -573,7 +610,7 @@ env_lock_legacy_held() {
 # lock is held); 1 = did not acquire, the caller retries from the top;
 # 2 = the tmp write itself failed, the caller drops its own dir.
 env_lock_publish_owner() {
-  local lockdir="$1" start
+  local lockdir="$1" start stolen marker
   start="$(env_lock_start_identity "$$")"
   [ -n "$start" ] || start="-"
   printf 'kind=openllm-env-lock/v1 pid=%s start=%s nonce=%s\n' \
@@ -582,6 +619,25 @@ env_lock_publish_owner() {
   if ln "$lockdir/owner.tmp.$$" "$lockdir/owner" 2>/dev/null \
     || (set -C; cat "$lockdir/owner.tmp.$$" > "$lockdir/owner") 2>/dev/null; then
     rm -f "$lockdir/owner.tmp.$$" 2>/dev/null
+    # Steal veto — checked AFTER our record lands: a contender that
+    # committed to reclaiming this dir while we published left a `steal.*`
+    # marker inside (or the dir itself is gone, moved wholesale). Our hold
+    # is already lost, so drop OUR record — only when it is still ours —
+    # and report failure; the caller retries acquisition from the top.
+    stolen=1
+    for marker in "$lockdir"/steal.*; do
+      if [ -e "$marker" ]; then stolen=0; break; fi
+    done
+    [ -d "$lockdir" ] || stolen=0
+    if [ "$stolen" = 0 ]; then
+      env_lock_read_owner "$lockdir"
+      if [ "$ENV_LOCK_OWNER_STATE" = "marked" ] \
+        && [ "$ENV_LOCK_OWNER_NONCE" = "$ENV_LOCK_NONCE" ]; then
+        rm -f "$lockdir/owner" 2>/dev/null
+      fi
+      rmdir "$lockdir" 2>/dev/null || true
+      return 1
+    fi
     env_lock_read_owner "$lockdir"
     [ "$ENV_LOCK_OWNER_STATE" = "marked" ] \
       && [ "$ENV_LOCK_OWNER_NONCE" = "$ENV_LOCK_NONCE" ]
@@ -626,7 +682,7 @@ env_lock_acquire() {
       attempts=$((attempts + 1))
       [ $((attempts % 25)) -eq 0 ] && env_lock_sweep "$stem"
       if env_lock_is_stale_dir "$lockdir"; then
-        env_lock_quarantine "$lockdir" "$stem"
+        env_lock_steal "$lockdir" "$stem"
       fi
     fi
     sleep 0.01 2>/dev/null || sleep 1
