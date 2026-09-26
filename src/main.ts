@@ -10,7 +10,6 @@
  * Combined daemon/CLI diagnostics remain on doctor/status, not version.
  */
 
-import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { printSelfVersion } from "./cli-version";
@@ -35,15 +34,18 @@ if (first === "--version" || first === "-v" || first === "version") {
  *     groups + verbs, MCP `--only` groups, auto-update actions,
  *     per-command completion args) resolves through its real parsing path.
  *  3. Runtime config initialization resolves with NO real state touched:
- *     `HOME` and the state-dir/env-file overrides are redirected to a fresh
- *     temp dir while `openllmDir`/`sharedEnvFile`/`cliBinPath`/`cliConfig`/
- *     `cliUpdateRoute` execute — path resolution and `.env` fallback both
- *     run without reading or writing the user's actual state.
+ *     `HOME` and the state-dir/env-file overrides are redirected to a
+ *     never-created synthetic path while `openllmDir`/`sharedEnvFile`/
+ *     `cliBinPath`/`cliConfig`/`cliUpdateRoute` execute — path resolution and
+ *     `.env` fallback both run without reading or writing the user's actual
+ *     state.
  *
- *  Side-effect free: no network, no state writes, no daemon spawn; the only
- *  filesystem touch is a throwaway dir under `os.tmpdir()` removed before
- *  exit. Prints the same `openllm v…` line the probes parse, then exits 0 —
- *  any failure exits non-zero so the updater refuses to swap the build in.
+ *  Side-effect free AND tmpdir-free (FSS-05): the probe home is a string the
+ *  resolvers only compute with — it is never created, so a missing,
+ *  unwritable, or full TMPDIR can no longer make a healthy release fail its
+ *  own health check. Prints the same `openllm v…` line the probes parse,
+ *  then exits 0 — any failure exits non-zero so the updater refuses to swap
+ *  the build in.
  */
 const runSelfTest = async (): Promise<void> => {
   try {
@@ -99,13 +101,18 @@ const runSelfTest = async (): Promise<void> => {
       }
     }
 
-    // 3 — config-path + .env resolution under a THROWAWAY home: real state
-    // can never be read (HOME + overrides repointed) or written (resolution
-    // is pure; only an .env READ happens, against the temp tree).
+    // 3 — config-path + .env resolution under a SYNTHETIC home that is never
+    // created on disk (FSS-05): real state can never be read (HOME +
+    // overrides repointed) or written (resolution is pure; the only read is
+    // the tolerated-ENOENT `.env` parse). A broken TMPDIR therefore cannot
+    // make a healthy release fail its own health probe — before this, the
+    // mkdtemp alone was a valid-release rejection path.
     const savedHome = process.env.HOME;
     const savedStateDir = process.env.OPENLLM_DAEMON_STATE_DIR;
     const savedEnvFile = process.env.OPENLLM_DAEMON_ENV_FILE;
-    const fakeHome = mkdtempSync(join(tmpdir(), "openllm-selftest-"));
+    // Never created — `os.tmpdir()` here only supplies a plausible-looking
+    // prefix string; no filesystem call touches it.
+    const fakeHome = join(tmpdir(), `openllm-selftest-${process.pid}`);
     try {
       process.env.HOME = fakeHome;
       delete process.env.OPENLLM_DAEMON_STATE_DIR;
@@ -141,11 +148,6 @@ const runSelfTest = async (): Promise<void> => {
       if (savedEnvFile === undefined)
         delete process.env.OPENLLM_DAEMON_ENV_FILE;
       else process.env.OPENLLM_DAEMON_ENV_FILE = savedEnvFile;
-      try {
-        rmSync(fakeHome, { recursive: true, force: true });
-      } catch {
-        // best-effort temp cleanup — failure must not fail the probe
-      }
     }
   } catch (err) {
     process.stderr.write(
