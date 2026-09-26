@@ -255,7 +255,11 @@ export const installRcBlock = (): string | null => {
     if (region !== "absent") {
       next = content.slice(0, region.begin) + block + content.slice(region.end);
     } else {
-      next = `${content.replace(/\n*$/, "\n")}\n${block}\n`;
+      // The append adds bytes only: the line terminator the last line
+      // lacks, one blank separator line, then the block. Trailing blank
+      // lines the user wrote stay as they are.
+      const sep = content === "" ? "" : content.endsWith("\n") ? "\n" : "\n\n";
+      next = `${content}${sep}${block}\n`;
     }
     if (next !== content) {
       writeFileAtomic(rc, next, { backup: true });
@@ -279,14 +283,18 @@ export const removeRcBlock = (): void => {
       return;
     }
     // Only the block's own bytes are removed: the region text plus the
-    // newline that terminated its END line. When nothing but whitespace is
-    // left after it, trailing newlines fold back to one so an install +
-    // remove cycle returns the original bytes.
+    // newline that terminated its END line. When the block ended the file,
+    // the append also added one blank separator line before BEGIN — drop
+    // exactly that one newline so an install + remove cycle returns the
+    // original bytes. The user's own blank-line runs are never folded.
     const left = content.slice(0, region.begin);
     let right = content.slice(region.end);
     if (right.startsWith("\n")) right = right.slice(1);
-    const next =
-      right.trim().length === 0 ? left.replace(/\n*$/, "\n") : left + right;
+    const head =
+      right.trim().length === 0 && left.endsWith("\n\n")
+        ? left.slice(0, -1)
+        : left;
+    const next = head + right;
     if (next !== content) writeFileAtomic(target.rc, next, { backup: true });
   } catch {
     // best-effort

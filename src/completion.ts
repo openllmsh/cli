@@ -209,8 +209,9 @@ export const RC_BACKUP_SUFFIX = ".openllm.bak";
  * Resolve a chain of symlinks to the file the bytes must land on. A plain
  * `writeFileSync(path)` follows a symlink and writes the TARGET, so an
  * atomic write must do the same — renaming over `path` itself would replace
- * the user's link with a regular file. Bounded: a link loop returns the last
- * hop rather than spinning.
+ * the user's link with a regular file. Bounded: a link loop or a chain that
+ * stays a symlink after 10 hops throws, so the rename can never land on an
+ * unresolved link.
  */
 const resolveWriteTarget = (path: string): string => {
   let current = path;
@@ -230,7 +231,16 @@ const resolveWriteTarget = (path: string): string => {
     }
     current = isAbsolute(raw) ? raw : join(dirname(current), raw);
   }
-  return current;
+  // The chain did not resolve inside 10 hops. A plain file or a vanished
+  // path is still a safe target. A link that is STILL a symlink is a loop
+  // or a deeper chain: renaming over it would replace the user's link with
+  // a regular file, so the write fails closed instead.
+  try {
+    if (!lstatSync(current).isSymbolicLink()) return current;
+  } catch {
+    return current;
+  }
+  throw new Error(`${path}: symlink loop or chain longer than 10 hops`);
 };
 
 /**
