@@ -164,6 +164,12 @@ const run = async (): Promise<void> => {
     await runSelfTest();
     return;
   }
+  // The SDK transport attaches the daemon's local caller token only once the
+  // CLI process installs it (the same module is bundled into the web app,
+  // which must never load `env.ts`). Every command, hook and MCP server runs
+  // through here.
+  const { installDaemonCallerAuth } = await import("./sdk/daemon-auth");
+  installDaemonCallerAuth();
   // Per-prompt hooks should not initialize the vendor clients or MCP server.
   if (first === "exec" && argv[1] === "memory") {
     const { runMemoryHookCommand } = await import("./memory-hooks/command");

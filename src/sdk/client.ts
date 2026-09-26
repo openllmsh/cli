@@ -6,12 +6,27 @@
  * self-contained.
  */
 
-import {
-  daemonTokenPorts,
-  LOCAL_CALLER_TOKEN_HEADER,
-  localCallerToken,
-} from "../env";
 import type { TApiOperation } from "./generated/operations";
+
+/**
+ * The daemon's per-boot local caller credential, injected by the CLI process
+ * (`sdk/daemon-auth.ts`, installed from `main.ts`). This module is also
+ * bundled into the WEB app through the shared MCP tool definitions, so it must
+ * not import the Node-only `../env` itself: a static import put `node:fs` into
+ * the browser bundle and broke the Next.js build. Unset (the browser), no
+ * target counts as the daemon and no token is ever attached.
+ */
+export type TDaemonCallerAuth = {
+  readonly ports: () => ReadonlySet<number>;
+  readonly header: string;
+  readonly token: () => string | null;
+};
+
+let daemonCallerAuth: TDaemonCallerAuth | null = null;
+
+export const setDaemonCallerAuth = (auth: TDaemonCallerAuth | null): void => {
+  daemonCallerAuth = auth;
+};
 
 /** Optional transport controls for latency-sensitive embedded consumers. */
 export type THttpClientOptions = {
@@ -31,8 +46,9 @@ const isLoopbackUrl = (url: URL): boolean =>
  * `env.daemonTokenPorts`).
  */
 const isDaemonUrl = (url: URL): boolean =>
+  daemonCallerAuth !== null &&
   isLoopbackUrl(url) &&
-  daemonTokenPorts().has(url.port === "" ? 80 : Number(url.port));
+  daemonCallerAuth.ports().has(url.port === "" ? 80 : Number(url.port));
 
 /**
  * The canonical cloud move — the only cross-origin redirect the `sk-llm`
@@ -74,10 +90,10 @@ export const localAwareFetch = async (
   let target = new URL(String(input));
   for (let hop = 0; ; hop++) {
     const headers = new Headers(init.headers);
-    if (isDaemonUrl(target)) {
-      const token = localCallerToken();
+    if (daemonCallerAuth !== null && isDaemonUrl(target)) {
+      const token = daemonCallerAuth.token();
       if (token !== null) {
-        headers.set(LOCAL_CALLER_TOKEN_HEADER, token);
+        headers.set(daemonCallerAuth.header, token);
         headers.delete("authorization");
       }
     }
