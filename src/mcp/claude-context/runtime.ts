@@ -43,6 +43,12 @@ const FAILED_RETRY_COOLDOWN_MS = ((): number => {
   return Number.isFinite(raw) && raw >= 0 ? raw : 60 * 60 * 1000; // 1h default
 })();
 
+// Every gateway call gets a deadline: a wedged upstream must never pin a
+// hook-fired CLI open. The signal path gets a shorter budget — the process
+// is exiting anyway, so the "mark failed" notification is best-effort.
+const GATEWAY_REQUEST_TIMEOUT_MS = 30_000;
+const SIGNAL_NOTIFY_TIMEOUT_MS = 5_000;
+
 // ── Gateway credentials ───────────────────────────────────────────────────────
 
 // Resolution is owned by `src/env.ts` (`cliConfig`): process env
@@ -129,6 +135,7 @@ async function runCli(argv: string[]): Promise<void> {
         {
           method: "DELETE",
           headers: { Authorization: `Bearer ${config.apiKey}` },
+          signal: AbortSignal.timeout(GATEWAY_REQUEST_TIMEOUT_MS),
         },
       ).catch(() => {});
     } else {
@@ -194,6 +201,7 @@ async function runCli(argv: string[]): Promise<void> {
           Authorization: `Bearer ${config.apiKey}`,
           "Content-Type": "application/json",
         },
+        signal: AbortSignal.timeout(GATEWAY_REQUEST_TIMEOUT_MS),
         body: JSON.stringify({
           sourceId: base.sourceId,
           ref: "latest",
@@ -242,6 +250,7 @@ async function runCli(argv: string[]): Promise<void> {
           {
             method: "DELETE",
             headers: { Authorization: `Bearer ${config.apiKey}` },
+            signal: AbortSignal.timeout(GATEWAY_REQUEST_TIMEOUT_MS),
           },
         ).catch(() => {});
       } else {
@@ -279,23 +288,30 @@ async function runCli(argv: string[]): Promise<void> {
 
       // Signal handlers: flip the job to "failed" on clean termination so the
       // next run isn't blocked waiting for the gateway's staleness reaper.
+      // The notification is bounded by SIGNAL_NOTIFY_TIMEOUT_MS and a second
+      // signal exits at once — a wedged gateway must not keep this process
+      // (and the repo lock the hook holds) alive.
       const collection = collectionName(identity.codebaseId);
       let interrupted = false;
-      const markFailed = (reason: string): void => {
-        if (interrupted) return;
+      const onSignal = (sig: NodeJS.Signals): void => {
+        const code = sig === "SIGINT" ? 130 : 143;
+        if (interrupted) process.exit(code);
         interrupted = true;
-        gatewayPost(config, "/api/plugins/claude-context/jobs", {
-          codebaseId: identity.codebaseId,
-          branch: identity.branch,
-          collection,
-          status: "failed",
-          error: reason,
-        })
+        gatewayPost(
+          config,
+          "/api/plugins/claude-context/jobs",
+          {
+            codebaseId: identity.codebaseId,
+            branch: identity.branch,
+            collection,
+            status: "failed",
+            error: `interrupted by ${sig}`,
+          },
+          SIGNAL_NOTIFY_TIMEOUT_MS,
+        )
           .catch(() => {})
-          .finally(() => process.exit(130));
+          .finally(() => process.exit(code));
       };
-      const onSignal = (sig: NodeJS.Signals): void =>
-        markFailed(`interrupted by ${sig}`);
       process.on("SIGTERM", onSignal);
       process.on("SIGINT", onSignal);
 
@@ -453,6 +469,7 @@ async function gatewayGet(
 ): Promise<Response> {
   return fetch(`${config.baseUrl}${path}`, {
     headers: { Authorization: `Bearer ${config.apiKey}` },
+    signal: AbortSignal.timeout(GATEWAY_REQUEST_TIMEOUT_MS),
   });
 }
 
@@ -460,6 +477,7 @@ async function gatewayPost(
   config: { baseUrl: string; apiKey: string },
   path: string,
   body: unknown,
+  timeoutMs = GATEWAY_REQUEST_TIMEOUT_MS,
 ): Promise<Response> {
   return fetch(`${config.baseUrl}${path}`, {
     method: "POST",
@@ -468,6 +486,7 @@ async function gatewayPost(
       "Content-Type": "application/json",
     },
     body: JSON.stringify(body),
+    signal: AbortSignal.timeout(timeoutMs),
   });
 }
 
