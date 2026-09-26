@@ -74,14 +74,16 @@ const MAX_FETCH_REDIRECTS = 4;
  * same-origin, loopback, or canonical-cloud target; every other redirect is
  * returned to the caller verbatim.
  *
- * On a DAEMON target (loopback + the configured daemon port) the per-boot
- * local caller token is attached (`x-openllm-local-token`) — the
- * loopback-only credential the daemon swaps for the paired key before any
- * upstream call. When a token is available it REPLACES the caller's bearer
- * on the daemon hop, so the real `sk-llm` never touches a socket that could
- * be rebound by a third-party process. Other loopback ports get neither the
- * token nor a stripped bearer — a mock or third-party local server keeps the
- * caller's own credential.
+ * On a DAEMON target (loopback + the configured daemon port) the caller's
+ * own credential headers are ALWAYS stripped — `authorization` and
+ * `x-api-key` never ride a loopback daemon hop, so a process squatting on
+ * the port is never handed the `sk-llm`. Only the per-boot local caller
+ * token is presented (`x-openllm-local-token`), the loopback-only
+ * credential the daemon swaps for the paired key before any upstream call.
+ * When no token is readable the hop goes unauthenticated and the daemon's
+ * 401 is the honest answer. Other loopback ports get neither the token nor
+ * a stripped bearer — a mock or third-party local server keeps the caller's
+ * own credential.
  */
 export const localAwareFetch = async (
   input: string | URL,
@@ -91,10 +93,11 @@ export const localAwareFetch = async (
   for (let hop = 0; ; hop++) {
     const headers = new Headers(init.headers);
     if (daemonCallerAuth !== null && isDaemonUrl(target)) {
+      headers.delete("authorization");
+      headers.delete("x-api-key");
       const token = daemonCallerAuth.token();
       if (token !== null) {
         headers.set(daemonCallerAuth.header, token);
-        headers.delete("authorization");
       }
     }
     const res = await fetch(target, {
