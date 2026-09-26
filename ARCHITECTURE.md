@@ -295,7 +295,7 @@ Everything follows `packages/daemon` exactly — see
 - Change-gated on `CLI_BINARY_SOURCES`: `cli/src`, embedded `cli/setup`, the
   public-mirror `cli/install.sh` (not compiled, but released at the pinned tag),
   `release-types.ts`, `package.json`, `scripts/compile.ts` (bake flags,
-  including `NODE_ENV`), and `packages/pty-native/session` (the inlined local
+  including `NODE_ENV`), and `packages/tunnel/session` (the inlined local
   session runtime and Windows C source). The generated SDK remains committed
   in the CLI tree; an unchanged CLI keeps its lagging pin.
 - Mirror: `subtreeSplitAndPush` of `packages/cli` (manifest stamped, no

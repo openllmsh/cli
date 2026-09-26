@@ -20,16 +20,16 @@ import { extname, isAbsolute, join } from "node:path";
 import type {
   TProcessIdentity,
   TProcessStartIdentityReader,
-} from "../../pty-native/session/local-runtime";
+} from "../../tunnel/session/local-runtime";
 import {
   processIdentityStatus,
   processStartIdentity,
   SESSION_HOST_STARTUP_GRACE_MS,
-} from "../../pty-native/session/local-runtime";
+} from "../../tunnel/session/local-runtime";
 import {
   verifyWindowsSessionDirectory,
   verifyWindowsSessionFile,
-} from "../../pty-native/session/windows-session-pipe";
+} from "../../tunnel/session/windows-session-pipe";
 import type { TDaemonCli } from "./clients/registry";
 import { DAEMON_CLIS } from "./clients/registry";
 import { findDaemonBinary as findManagedDaemonBinary } from "./daemon-delegation";

@@ -2,7 +2,7 @@
 
 import { existsSync } from "node:fs";
 import { delimiter, join } from "node:path";
-import { executableName } from "../../pty-native/session/local-runtime";
+import { executableName } from "../../tunnel/session/local-runtime";
 import {
   CLI_VERSION,
   isIsolatedStateRoot,

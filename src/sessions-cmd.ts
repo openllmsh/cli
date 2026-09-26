@@ -5,7 +5,7 @@
  * `ctl.sock`), so these commands remain usable while the daemon is stopped.
  */
 
-import type { TProcessStartIdentityReader } from "../../pty-native/session/local-runtime";
+import type { TProcessStartIdentityReader } from "../../tunnel/session/local-runtime";
 import { attachBrokerSession, brokerAttachUrl } from "./clients/attach";
 import type { TDaemonCli } from "./clients/registry";
 import { resolveById } from "./clients/session-picker";

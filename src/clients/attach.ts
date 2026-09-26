@@ -9,19 +9,19 @@
 import { readFileSync } from "node:fs";
 import { basename, dirname, isAbsolute, join } from "node:path";
 import {
-  localSessionEndpoint,
-  sessionHostSupported,
-} from "../../../pty-native/session/local-runtime";
-import {
   encodeSessionPipeFrame,
   SESSION_PIPE_DRAIN_ACK,
   SessionPipeFrameDecoder,
 } from "@openllmsh/protocol/session-pipe";
 import {
+  localSessionEndpoint,
+  sessionHostSupported,
+} from "../../../tunnel/session/local-runtime";
+import {
   openVerifiedWindowsSessionPipe,
   verifyWindowsSessionDirectory,
   verifyWindowsSessionFile,
-} from "../../../pty-native/session/windows-session-pipe";
+} from "../../../tunnel/session/windows-session-pipe";
 import type { TDaemonCli } from "./registry";
 
 export type TBrokerOpen = {

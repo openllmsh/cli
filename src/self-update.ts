@@ -15,15 +15,12 @@ import { createHash } from "node:crypto";
 import * as fs from "node:fs";
 import { dirname, join } from "node:path";
 import { gunzipSync } from "node:zlib";
-import {
-  acquireUpdateLock,
-  updateLockDirFor,
-} from "@openllmsh/protocol/update-lock";
 import type { TUpdateRouteConfig } from "@openllmsh/protocol/update-policy";
 import {
   evaluateUpdatePolicy,
   mayReplaceProductVersion,
 } from "@openllmsh/protocol/update-policy";
+import { acquireUpdateLock, updateLockDirFor } from "../../tunnel/update-lock";
 import { CLI_RELEASE } from "../manifest";
 import { CLI_TARGETS } from "../release-types";
 import { CLI_VERSION, cliConfig, cliUpdateRoute, daemonStateDir } from "./env";

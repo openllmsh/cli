@@ -35,13 +35,13 @@ import {
 } from "@openllmsh/protocol/executable-paths";
 import crossSpawnModule from "cross-spawn";
 import cmdEscapeModule from "cross-spawn/lib/util/escape.js";
-import type { TProcessStartIdentityReader } from "../../../pty-native/session/local-runtime";
+import type { TProcessStartIdentityReader } from "../../../tunnel/session/local-runtime";
 import {
   processIdentityStatus,
   processStartCommand,
   processStartIdentity,
   sessionHostSupported,
-} from "../../../pty-native/session/local-runtime";
+} from "../../../tunnel/session/local-runtime";
 import { findCompatibleDaemonBinary } from "../daemon-delegation";
 import { openllmDir, userHome } from "../env";
 import { requireCliApiKey } from "../onboarding";
