@@ -200,28 +200,36 @@ const LOCAL_CALLER_TOKEN_FILE = "local-caller-token";
  * the user's `sk-llm`. The daemon swaps it for the paired key before any
  * upstream call, so a captured token is useless off this machine.
  *
- * Resolution order: {@link LOCAL_CALLER_TOKEN_ENV} (inherited by launched
- * children), then the `0600` file under the daemon state root. A caller
- * carrying `OPENLLM_DAEMON_DEV=1` prefers the dev-isolated file. Null when no
- * daemon has minted one — callers keep the `sk-llm` bearer, which the daemon
- * also accepts.
+ * Resolution order: the `0600` file under the daemon state root FIRST, then
+ * {@link LOCAL_CALLER_TOKEN_ENV} (inherited by launched children) as the
+ * fallback. The file wins because the daemon rewrites it at every boot: a
+ * child still holding the previous boot's env token (an MCP server or hook
+ * launched before a daemon restart or auto-update) reads the CURRENT token
+ * on every call instead of 401ing until relaunch. A caller carrying
+ * `OPENLLM_DAEMON_DEV=1` prefers the dev-isolated file. Null when no daemon
+ * has minted one — daemon-bound callers then present no credential rather
+ * than the `sk-llm` bearer (which is never forwarded to loopback).
  */
 export const localCallerToken = (): string | null => {
-  const fromEnv = process.env[LOCAL_CALLER_TOKEN_ENV]?.trim();
-  if (fromEnv !== undefined && /^[0-9a-f]{64}$/.test(fromEnv)) return fromEnv;
-  const dir = daemonStateDir();
   const names =
     process.env.OPENLLM_DAEMON_DEV === "1"
       ? [`${LOCAL_CALLER_TOKEN_FILE}.dev`, LOCAL_CALLER_TOKEN_FILE]
       : [LOCAL_CALLER_TOKEN_FILE, `${LOCAL_CALLER_TOKEN_FILE}.dev`];
-  for (const name of names) {
-    try {
-      const token = fs.readFileSync(join(dir, name), "utf-8").trim();
-      if (/^[0-9a-f]{64}$/.test(token)) return token;
-    } catch {
-      // absent/unreadable — try the next candidate
+  try {
+    const dir = daemonStateDir();
+    for (const name of names) {
+      try {
+        const token = fs.readFileSync(join(dir, name), "utf-8").trim();
+        if (/^[0-9a-f]{64}$/.test(token)) return token;
+      } catch {
+        // absent/unreadable — try the next candidate
+      }
     }
+  } catch {
+    // state dir unresolvable — the inherited env token is still usable
   }
+  const fromEnv = process.env[LOCAL_CALLER_TOKEN_ENV]?.trim();
+  if (fromEnv !== undefined && /^[0-9a-f]{64}$/.test(fromEnv)) return fromEnv;
   return null;
 };
 
