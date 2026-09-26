@@ -15,9 +15,31 @@ export const CLI_TARGETS = [
   "darwin-x64-baseline",
   "linux-x64-baseline",
   "linux-arm64",
+  "win32-x64",
 ] as const;
 
 export type TCliTarget = (typeof CLI_TARGETS)[number];
+
+/**
+ * The targets this release actually builds, hashes, and publishes — the ONE
+ * switch every release/compile/hash/publish/manifest path iterates.
+ * `CLI_TARGETS` stays the buildable superset so the Windows code still
+ * typechecks, but Windows is off for 2.8.0-beta.1: add "win32-x64" back here
+ * (or iterate CLI_TARGETS) to re-enable it.
+ */
+export const CLI_RELEASE_TARGETS = CLI_TARGETS.filter(
+  (target): target is Exclude<TCliTarget, "win32-x64"> =>
+    target !== "win32-x64",
+);
+
+/** Bun compiler spelling for each release target. */
+export const CLI_COMPILE_TARGET: Readonly<Record<TCliTarget, string>> = {
+  "darwin-arm64": "bun-darwin-arm64",
+  "darwin-x64-baseline": "bun-darwin-x64-baseline",
+  "linux-x64-baseline": "bun-linux-x64-baseline",
+  "linux-arm64": "bun-linux-arm64",
+  "win32-x64": "bun-windows-x64-baseline",
+};
 
 export type TCliRelease = {
   /** GitHub `owner/repo` the binaries are released to. */

@@ -35,6 +35,12 @@ export type TSessionPick =
   | { readonly kind: "new" }
   | { readonly kind: "invalid" };
 
+/** A failed attach may fall through only after the selected host is gone. */
+export const shouldStartFreshAfterAttachFailure = (args: {
+  readonly explicitAttach: boolean;
+  readonly hostStillAlive: boolean;
+}): boolean => !args.explicitAttach && !args.hostStillAlive;
+
 /**
  * Sessions for THIS client, most-relevant first: same working directory before
  * anything else, then newest. Attaching adopts the session's cwd, not the
@@ -76,6 +82,22 @@ export const resolveById = <T extends { readonly id: string }>(
   const matches = rows.filter((row) => row.id.startsWith(supplied));
   if (matches.length === 1) return matches[0] as T;
   return matches.length === 0 ? "missing" : "ambiguous";
+};
+
+/** Explicit selectors fail closed; they never become an implicit new launch. */
+export const resolveExplicitSession = <T extends { readonly id: string }>(
+  rows: readonly T[],
+  supplied: string,
+):
+  | { readonly kind: "attach"; readonly session: T }
+  | {
+      readonly kind: "refused";
+      readonly reason: "missing" | "ambiguous";
+    } => {
+  const resolved = resolveById(rows, supplied);
+  return resolved === "missing" || resolved === "ambiguous"
+    ? { kind: "refused", reason: resolved }
+    : { kind: "attach", session: resolved };
 };
 
 /**

@@ -105,25 +105,66 @@ const writeLedger = (ledger: TRaycastLedger): void => {
   writeFileSync(path, `${JSON.stringify(ledger, null, 2)}\n`, { mode: 0o600 });
 };
 
-/** Read Raycast's plist domain as JSON with `defaults export | plutil`. */
-const readDefaultsArray = (key: string): string[] => {
+/**
+ * The result of reading one UserDefaults array.
+ *
+ * `ok:false` is a READ FAILURE — the existing values could not be obtained,
+ * so the caller must refuse to write rather than overwrite the user's list
+ * with a partial one. `[]` means the key is genuinely absent.
+ */
+export type TDefaultsArrayRead =
+  | { readonly ok: true; readonly values: readonly string[] }
+  | { readonly ok: false };
+
+/**
+ * True when plutil failed because the key is absent — an empty list, not an
+ * error. The stdin plist is known-valid at this point (it came from a
+ * successful `defaults export`), so the extract failure is the missing key.
+ */
+const isMissingKeyError = (error: unknown): boolean => {
+  const stderr = (error as { stderr?: unknown })?.stderr;
+  const text = Buffer.isBuffer(stderr)
+    ? stderr.toString("utf-8")
+    : String(stderr ?? "");
+  return /could not extract value|no value at that key path|does not exist/i.test(
+    text,
+  );
+};
+
+/**
+ * Read ONE key of Raycast's plist domain: `defaults export` pipes the whole
+ * domain to `plutil -extract <key> json`. Extracting a single key keeps a
+ * `<date>`/`<data>` value in an unrelated key from failing the conversion
+ * (whole-domain `plutil -convert json` refuses those) — which is what made
+ * every read collapse to `[]` and let apply/uninstall clobber real lists.
+ *
+ * Returns ok:false on ANY read error or unexpected shape: writing back a
+ * reconstructed list would silently wipe whatever we failed to read.
+ */
+export const readDefaultsArray = (key: string): TDefaultsArrayRead => {
   try {
     const plist = execFileSync("defaults", ["export", DOMAIN, "-"], {
       encoding: "utf-8",
       stdio: ["ignore", "pipe", "ignore"],
     });
-    const json = execFileSync("plutil", ["-convert", "json", "-o", "-", "-"], {
-      encoding: "utf-8",
-      input: plist,
-      stdio: ["pipe", "pipe", "ignore"],
-    });
-    const parsed = JSON.parse(json) as Record<string, unknown>;
-    const raw = parsed[key];
-    return Array.isArray(raw)
-      ? raw.filter((item): item is string => typeof item === "string")
-      : [];
-  } catch {
-    return [];
+    const json = execFileSync(
+      "plutil",
+      ["-extract", key, "json", "-o", "-", "-"],
+      {
+        encoding: "utf-8",
+        input: plist,
+        stdio: ["pipe", "pipe", "pipe"],
+      },
+    );
+    const parsed: unknown = JSON.parse(json);
+    if (!Array.isArray(parsed)) return { ok: false };
+    if (!parsed.every((item): item is string => typeof item === "string")) {
+      // The array holds non-strings a rewrite would drop — refuse instead.
+      return { ok: false };
+    }
+    return { ok: true, values: parsed };
+  } catch (error) {
+    return isMissingKeyError(error) ? { ok: true, values: [] } : { ok: false };
   }
 };
 
@@ -193,27 +234,43 @@ export const applyRaycast = async (opts?: {
 
   // Prefs: enable Custom Providers (else providers.yaml is ignored entirely)
   // and un-disable our models. Record ONLY what we actually changed.
+  // Fail closed: when an existing list cannot be read, we write NOTHING —
+  // a blind `-array` write would replace the user's entries with our own.
   const prior = readLedger();
   let addedCustomProviders = prior?.prefs.added_custom_providers ?? false;
   let removedDisabled: string[] = [
     ...(prior?.prefs.removed_disabled_ids ?? []),
   ];
-  try {
-    const features = readDefaultsArray(EXPERIMENTAL_KEY);
-    if (!features.includes(CUSTOM_PROVIDERS)) {
-      writeDefaultsArray(EXPERIMENTAL_KEY, [...features, CUSTOM_PROVIDERS]);
-      addedCustomProviders = true;
+  let prefsFailed = false;
+  if (isDarwin()) {
+    try {
+      const features = readDefaultsArray(EXPERIMENTAL_KEY);
+      const disabled = readDefaultsArray(DISABLED_KEY);
+      if (!features.ok || !disabled.ok) {
+        prefsFailed = true;
+      } else {
+        if (!features.values.includes(CUSTOM_PROVIDERS)) {
+          writeDefaultsArray(EXPERIMENTAL_KEY, [
+            ...features.values,
+            CUSTOM_PROVIDERS,
+          ]);
+          addedCustomProviders = true;
+        }
+        const ours = disabled.values.filter((id) =>
+          id.startsWith(OUR_MODEL_PREFIX),
+        );
+        if (ours.length > 0) {
+          writeDefaultsArray(
+            DISABLED_KEY,
+            disabled.values.filter((id) => !ours.includes(id)),
+          );
+          removedDisabled = [...new Set([...removedDisabled, ...ours])];
+        }
+      }
+    } catch {
+      prefsFailed = true;
     }
-    const disabled = readDefaultsArray(DISABLED_KEY);
-    const ours = disabled.filter((id) => id.startsWith(OUR_MODEL_PREFIX));
-    if (ours.length > 0) {
-      writeDefaultsArray(
-        DISABLED_KEY,
-        disabled.filter((id) => !ours.includes(id)),
-      );
-      removedDisabled = [...new Set([...removedDisabled, ...ours])];
-    }
-  } catch {
+  } else {
     process.stdout.write(
       "  note: could not update Raycast preferences (Settings → AI → Custom Providers may need enabling by hand)\n",
     );
@@ -230,6 +287,16 @@ export const applyRaycast = async (opts?: {
       removed_disabled_ids: removedDisabled,
     },
   });
+
+  if (prefsFailed) {
+    process.stderr.write(
+      `providers.yaml updated at ${path}, but Raycast preferences could not be read — ` +
+        "they were left untouched rather than overwritten blind.\n" +
+        "  Re-run `openllm raycast` to retry; if it keeps failing, enable " +
+        "Custom Providers by hand (Settings → AI).\n",
+    );
+    return 1;
+  }
 
   process.stdout.write(
     `✓ Raycast configured → ${path}\n` +
@@ -286,29 +353,33 @@ export const uninstallRaycast = (): number => {
     }
   }
 
-  // Reverse ONLY the prefs the ledger says we changed.
+  // Reverse ONLY the prefs the ledger says we changed. Fail closed exactly
+  // like apply: an unreadable list is left alone, never rewritten blind.
   let prefsRestored = true;
   if (ledger !== null && isDarwin()) {
     try {
       if (ledger.prefs.added_custom_providers) {
         const features = readDefaultsArray(EXPERIMENTAL_KEY);
+        if (!features.ok) throw new Error("preferences unreadable");
         writeDefaultsArray(
           EXPERIMENTAL_KEY,
-          features.filter((f) => f !== CUSTOM_PROVIDERS),
+          features.values.filter((f) => f !== CUSTOM_PROVIDERS),
         );
       }
       if (ledger.prefs.removed_disabled_ids.length > 0) {
         const disabled = readDefaultsArray(DISABLED_KEY);
+        if (!disabled.ok) throw new Error("preferences unreadable");
         const restore = ledger.prefs.removed_disabled_ids.filter(
-          (id) => !disabled.includes(id),
+          (id) => !disabled.values.includes(id),
         );
         if (restore.length > 0)
-          writeDefaultsArray(DISABLED_KEY, [...disabled, ...restore]);
+          writeDefaultsArray(DISABLED_KEY, [...disabled.values, ...restore]);
       }
     } catch {
       prefsRestored = false;
       process.stdout.write(
-        "  note: could not restore Raycast preferences (they may need a manual check)\n",
+        "  note: could not read Raycast preferences — they were left untouched\n" +
+          "  (the ledger is kept; re-run `openllm raycast uninstall` to retry)\n",
       );
     }
   }

@@ -126,6 +126,7 @@ export const runMcpServer = async (
     apiKey: cfg.apiKey,
     cloudOrigin: cfg.gatewayUrl,
     local: false,
+    localToken: null,
   });
   serveStdio(() => createMcpServer({ requested, tier, config }));
   console.log(

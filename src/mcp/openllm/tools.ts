@@ -11,7 +11,7 @@
  * descriptions.
  */
 
-import { callOperation } from "../../sdk/client";
+import { callOperation, localAwareFetch } from "../../sdk/client";
 import {
   OPENLLM_CHAIN_HEADER,
   OPENLLM_RESOLVED_MODEL_HEADER,
@@ -355,7 +355,9 @@ const fetchDurableMedia = async (
 
   let response: Response | null = null;
   for (let attempt = 1; attempt <= 4; attempt += 1) {
-    response = await fetch(durableUrl, {
+    // localAwareFetch: a daemon-hosted media URL is loopback and needs the
+    // local caller token; a cloud/CDN URL passes through untouched.
+    response = await localAwareFetch(durableUrl, {
       signal: AbortSignal.timeout(MEDIA_FETCH_TIMEOUT_MS),
     });
 
@@ -621,7 +623,7 @@ const mediaRedirectResult = async (
     op.hasBody && args.body !== undefined
       ? JSON.stringify(args.body)
       : undefined;
-  const res = await fetch(url, {
+  const res = await localAwareFetch(url, {
     method: op.method.toUpperCase(),
     headers: {
       authorization: `Bearer ${config.apiKey}`,

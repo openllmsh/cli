@@ -17,11 +17,31 @@
  * there is exactly one origin-security contract.
  */
 
-import { CLI_VERSION, cliConfig } from "./env";
+import { evaluateUpdatePolicy } from "@openllmsh/protocol/update-policy";
+import { CLI_VERSION, cliConfig, cliUpdateRoute } from "./env";
 import { isSecureOrigin } from "./self-update";
 
 /** Bound on the best-effort pinned-version probe so `update` never hangs on it. */
 const VERSION_FETCH_TIMEOUT_MS = 5_000;
+
+/**
+ * The installer refuses ANY http:// origin unless `OPENLLM_ALLOW_INSECURE_ORIGIN=1`
+ * is in its environment. `isSecureOrigin` admits exactly the loopback-http
+ * case, so the opt-in is propagated only there — never for a remote origin.
+ */
+const isLoopbackHttpOrigin = (raw: string): boolean => {
+  try {
+    const url = new URL(raw);
+    return (
+      url.protocol === "http:" &&
+      (url.hostname === "localhost" ||
+        url.hostname === "127.0.0.1" ||
+        url.hostname === "[::1]")
+    );
+  } catch {
+    return false;
+  }
+};
 
 /**
  * The gateway's pinned CLI version (`GET /api/cli/version`), normalized without
@@ -87,6 +107,25 @@ export const runUpdate = async (): Promise<number> => {
   // Best-effort: the pinned version covers the CLI binary; the installer also
   // converges the daemon, which may pin its own version.
   const incoming = await fetchPinnedCliVersion(gatewayUrl);
+  // `incoming === CLI_VERSION` is the repair reconverge, not an update — the
+  // policy's strictly-newer rule refuses equal pins, so the gate is skipped
+  // for it deliberately.
+  if (incoming !== null && incoming !== CLI_VERSION) {
+    // Policy gate BEFORE the installer runs: a prerelease install may move to
+    // a strictly newer stable (2.8.0-beta.1 → 2.8.0) but never downgrade —
+    // the installer would otherwise converge onto an older pin.
+    const verdict = evaluateUpdatePolicy({
+      currentVersion: CLI_VERSION,
+      latestVersion: incoming,
+      ...cliUpdateRoute(),
+    });
+    if (!verdict.allow) {
+      process.stderr.write(
+        `[update] refusing ${CLI_VERSION} → ${incoming}: ${verdict.reason ?? "update policy"} — no update applied\n`,
+      );
+      return 1;
+    }
+  }
   process.stderr.write(
     incoming === null
       ? `[update] current v${CLI_VERSION}\n`
@@ -113,9 +152,14 @@ export const runUpdate = async (): Promise<number> => {
     env: {
       ...process.env,
       // Preserve HOME, proxy vars, and OPENLLM_DAEMON_* selectors by inheriting
-      // process.env; pin only the validated origin and the update mode.
+      // process.env; pin only the validated origin and the update mode. The
+      // installer rejects http unless the dev opt-in rides along — legitimate
+      // only for the loopback case isSecureOrigin already admitted.
       OPENLLM_CLOUD_ORIGIN: gatewayUrl,
       OPENLLM_INSTALL_MODE: "update",
+      ...(isLoopbackHttpOrigin(gatewayUrl)
+        ? { OPENLLM_ALLOW_INSECURE_ORIGIN: "1" }
+        : {}),
     },
   });
 

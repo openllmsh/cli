@@ -29,9 +29,9 @@ import {
   unlinkSync,
   writeFileSync,
 } from "node:fs";
-import { basename, join } from "node:path";
+import { basename, dirname, isAbsolute, join } from "node:path";
 import { installCompletion } from "./completion";
-import { userHome } from "./env";
+import { canonicalPath, isIsolatedStateRoot, userHome } from "./env";
 
 const binDir = (): string => join(userHome(), ".openllm", "bin");
 const binPath = (): string => join(binDir(), "openllm");
@@ -46,6 +46,12 @@ export const RC_END = "# <<< openllm (managed) <<<";
 /** Names we link onto PATH — the binary and its short alias. */
 const LINK_NAMES = ["openllm", "ollm"] as const;
 
+/**
+ * The dirs `setup` tries for PATH links, in order. Injectable in every helper
+ * below so tests and unusual installs can confine links to a sandbox — the
+ * default must never appear in test code (TH-3: a writable /usr/local/bin on
+ * a dev or CI host turns a unit test into real system symlinks).
+ */
 const pathDirCandidates = (): readonly string[] =>
   ["/usr/local/bin", join(userHome(), ".local", "bin")] as const;
 
@@ -59,15 +65,18 @@ const pathExists = (path: string): boolean => {
   }
 };
 
-/** True when `link` is a symlink whose target is one of OUR binaries (the
- *  new path, the legacy path, or a sibling `openllm` link). */
+/** True when `link` is a symlink whose resolved target is one of our binaries. */
 const pointsAtOurs = (link: string): boolean => {
   const path = binPath();
   const legacyPath = legacyBinPath();
   try {
     const target = readlinkSync(link);
+    const resolvedTarget = canonicalPath(
+      isAbsolute(target) ? target : join(dirname(link), target),
+    );
     return (
-      target === path || target === legacyPath || basename(target) === "openllm"
+      resolvedTarget === canonicalPath(path) ||
+      resolvedTarget === canonicalPath(legacyPath)
     );
   } catch {
     return false; // not a symlink (or unreadable) — not ours
@@ -76,8 +85,11 @@ const pointsAtOurs = (link: string): boolean => {
 
 /** Best-effort symlink of one name into the first writable PATH dir.
  *  Returns the link path or null when no dir was writable. */
-const linkName = (name: string): string | null => {
-  for (const dir of pathDirCandidates()) {
+export const linkName = (
+  name: string,
+  dirs: readonly string[],
+): string | null => {
+  for (const dir of dirs) {
     const link = join(dir, name);
     try {
       mkdirSync(dir, { recursive: true });
@@ -104,8 +116,8 @@ const linkName = (name: string): string | null => {
  * Also rewrites an existing `openllmc → ...` link/file in ~/.openllm/bin when we
  * need compatibility for absolute-path callers (old MCP entries, old hooks).
  */
-const migrateLegacyLinks = (): void => {
-  for (const dir of pathDirCandidates()) {
+export const migrateLegacyLinks = (dirs: readonly string[]): void => {
+  for (const dir of dirs) {
     const link = join(dir, "openllmc");
     try {
       const path = binPath();
@@ -229,9 +241,11 @@ export const removeRcBlock = (): void => {
 };
 
 /** Remove every PATH symlink we own (uninstall path). Best-effort. */
-export const removeOwnedLinks = (): void => {
+export const removeOwnedLinks = (
+  dirs: readonly string[] = pathDirCandidates(),
+): void => {
   const legacyPath = legacyBinPath();
-  for (const dir of pathDirCandidates()) {
+  for (const dir of dirs) {
     for (const name of [...LINK_NAMES, "openllmc"]) {
       const link = join(dir, name);
       try {
@@ -249,14 +263,25 @@ export const removeOwnedLinks = (): void => {
   }
 };
 
-export const runSetup = (): number => {
+export const runSetup = (opts?: {
+  /** Link target dirs, replacing {@link pathDirCandidates} — tests must pass
+   *  this so a writable system bin dir can never receive a real symlink. */
+  readonly linkDirs?: readonly string[];
+}): number => {
+  if (isIsolatedStateRoot()) {
+    process.stderr.write(
+      "Refusing setup under OPENLLM_DAEMON_STATE_DIR because setup changes user-wide PATH links, shell rc files, and completions.\n",
+    );
+    return 1;
+  }
+  const linkDirs = opts?.linkDirs ?? pathDirCandidates();
   const path = binPath();
   let failures = 0;
 
-  migrateLegacyLinks();
+  migrateLegacyLinks(linkDirs);
 
   for (const name of LINK_NAMES) {
-    const link = linkName(name);
+    const link = linkName(name, linkDirs);
     if (link !== null) {
       process.stdout.write(`✓ PATH     ${link} → ${path}\n`);
     } else {

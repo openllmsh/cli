@@ -9,19 +9,36 @@
  * embeds the Bun runtime. `--minify --bytecode` strips readable identifiers
  * + original source text. No `.ts` source ships.
  *
- * Targets (no Windows): darwin-{arm64,x64-baseline}, linux-{x64-baseline,arm64}.
+ * Targets: the release list (`CLI_RELEASE_TARGETS`) — darwin-{arm64,
+ * x64-baseline}, linux-{x64-baseline,arm64}. win32-x64 is off for
+ * 2.8.0-beta.1 but remains buildable: `--target(s) win32-x64` on a native
+ * Windows host still works.
  * x64 uses the `baseline` (Nehalem) tier — no AVX/AVX2/FMA required.
  *
  * Usage:
- *   bun run packages/cli/scripts/compile.ts            # all targets
+ *   bun run packages/cli/scripts/compile.ts            # the release targets
  *   bun run packages/cli/scripts/compile.ts --host     # current host only
+ *   bun run packages/cli/scripts/compile.ts --target win32-x64 # native Windows only
+ *   bun run packages/cli/scripts/compile.ts --targets darwin-arm64,linux-arm64
  *   bun run packages/cli/scripts/compile.ts --version 1.2.3
  */
-import { readFileSync, writeFileSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import {
+  mkdtempSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
+import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { gzipSync } from "node:zlib";
 import { $ } from "bun";
+import type { TCliTarget } from "../release-types";
+import {
+  CLI_COMPILE_TARGET,
+  CLI_RELEASE_TARGETS,
+  CLI_TARGETS,
+} from "../release-types";
 
 // Resolve paths from THIS script's location, not the cwd — works identically
 // from the monorepo (`packages/cli/scripts`) and the flattened `cli`
@@ -106,13 +123,6 @@ const resolveCloudOrigin = (): string => {
   return raw;
 };
 
-const TARGETS = [
-  "bun-darwin-arm64",
-  "bun-darwin-x64-baseline",
-  "bun-linux-x64-baseline",
-  "bun-linux-arm64",
-] as const;
-
 const argv = process.argv.slice(2);
 const hostOnly = argv.includes("--host");
 const versionIdx = argv.indexOf("--version");
@@ -127,47 +137,122 @@ const version =
 
 const outfileFor = (target: string): string => {
   const suffix = target.replace(/^bun-/, "");
-  return `${OUT_DIR}/openllm-${suffix}`;
+  return `${OUT_DIR}/openllm-${suffix}${target.includes("windows") ? ".exe" : ""}`;
+};
+
+// The DEFAULT (no-args) build set is the release list — Windows is off for
+// 2.8.0-beta.1. `CLI_TARGETS` remains the accepted domain for explicit
+// `--target(s)` (win32-x64 still resolves, then the native-host guard applies).
+const compileTargets = CLI_RELEASE_TARGETS.map(
+  (target) => CLI_COMPILE_TARGET[target],
+);
+export const resolveCliCompileTargets = (
+  args: readonly string[],
+  hostPlatform: NodeJS.Platform = process.platform,
+): readonly string[] => {
+  const targetIndex = args.indexOf("--target");
+  const targetsIndex = args.indexOf("--targets");
+  const selectedTarget = targetIndex < 0 ? null : (args[targetIndex + 1] ?? "");
+  const selectedTargets =
+    targetsIndex < 0 ? null : (args[targetsIndex + 1] ?? "").split(",");
+  const hostOnlyArg = args.includes("--host");
+  if (hostOnlyArg && (selectedTarget !== null || selectedTargets !== null))
+    throw new Error("--host is mutually exclusive with --target and --targets");
+  if (hostOnlyArg) return [];
+  if (selectedTarget !== null && selectedTargets !== null)
+    throw new Error("--target and --targets are mutually exclusive");
+  const requested =
+    selectedTarget !== null
+      ? [selectedTarget]
+      : selectedTargets !== null
+        ? selectedTargets.map((target) => target.trim())
+        : compileTargets;
+  const resolved = requested.map((raw) => {
+    const match = CLI_TARGETS.find(
+      (target) => target === raw || CLI_COMPILE_TARGET[target] === raw,
+    );
+    if (match === undefined)
+      throw new Error(`Invalid CLI compile target: ${raw}`);
+    return CLI_COMPILE_TARGET[match];
+  });
+  if (new Set(resolved).size !== resolved.length)
+    throw new Error("CLI compile target list contains duplicates");
+  if (
+    resolved.some((target) => target.includes("windows")) &&
+    hostPlatform !== "win32"
+  )
+    throw new Error("win32-x64 must be built on a native Windows host");
+  return resolved;
 };
 
 const buildOne = async (
   target: string | null,
   cloudOrigin: string,
 ): Promise<string> => {
-  const outfile = target === null ? `${OUT_DIR}/openllm` : outfileFor(target);
+  // Bun appends .exe on Windows; gzip must read that actual emitted path.
+  const outfile =
+    target === null
+      ? `${OUT_DIR}/openllm${process.platform === "win32" ? ".exe" : ""}`
+      : outfileFor(target);
   const targetArgs = target === null ? [] : ["--target", target];
   const defines = compileDefineArgs(cloudOrigin, version);
-  await $`bun build ${ENTRY} \
-    ${COMPILE_BUN_FLAGS} \
-    ${defines} \
-    ${targetArgs} \
-    --outfile ${outfile}`;
-  // Gzip sidecar for DISTRIBUTION — the published GitHub asset is the `.gz`.
-  // The release pins the sha256 of the DECOMPRESSED binary; install +
-  // self-update decompress before verifying, so the integrity gate is
-  // independent of gzip's non-determinism.
-  writeFileSync(`${outfile}.gz`, gzipSync(readFileSync(outfile), { level: 9 }));
+  // Bun 1.3.14 Windows bytecode crashed at startup on the baseline test host,
+  // so a Windows host/target build drops `--bytecode`. Every other platform
+  // keeps the source-hiding flag. (Same guard the release Windows build needs
+  // when `--host` is used inside the Windows guest.)
+  const windowsBuild =
+    target?.includes("windows") ||
+    (target === null && process.platform === "win32");
+  const bunFlags = windowsBuild
+    ? COMPILE_BUN_FLAGS.filter((flag) => flag !== "--bytecode")
+    : COMPILE_BUN_FLAGS;
+  // Bun's standalone compiler uses process-local intermediate names. Separate
+  // both cwd and outfile directories so concurrent targets cannot collide.
+  const scratch = mkdtempSync(join(OUT_DIR, ".compile-"));
+  const staged = join(scratch, basename(outfile));
+  try {
+    await $`bun build ${ENTRY} \
+      ${bunFlags} \
+      ${defines} \
+      ${targetArgs} \
+      --outfile ${staged}`.cwd(scratch);
+    // Gzip sidecar for DISTRIBUTION — the published GitHub asset is the `.gz`.
+    // The release pins the sha256 of the DECOMPRESSED binary; install +
+    // self-update decompress before verifying, so the integrity gate is
+    // independent of gzip's non-determinism.
+    writeFileSync(`${staged}.gz`, gzipSync(readFileSync(staged), { level: 9 }));
+    renameSync(staged, outfile);
+    renameSync(`${staged}.gz`, `${outfile}.gz`);
+  } finally {
+    rmSync(scratch, { recursive: true, force: true });
+  }
   return outfile;
 };
 
 const main = async (): Promise<void> => {
   const cloudOrigin = resolveCloudOrigin();
+  const targets = resolveCliCompileTargets(argv);
   await $`mkdir -p ${OUT_DIR}`;
   if (hostOnly) {
     const out = await buildOne(null, cloudOrigin);
     console.log(`built host binary → ${out}`);
     return;
   }
-  // All four targets in parallel — independent cross-compiles, no shared state.
+  // Every parallel compiler has private intermediates. Wait for all cleanup
+  // before reporting an error so a failed build leaves no active writers.
   const t0 = Date.now();
-  await Promise.all(
-    TARGETS.map(async (target) => {
+  const builds = await Promise.allSettled(
+    targets.map(async (target) => {
       const out = await buildOne(target, cloudOrigin);
       console.log(`built ${target} → ${out}`);
     }),
   );
-  console.log(`compiled ${TARGETS.length} targets in ${Date.now() - t0}ms`);
+  const failed = builds.find((build) => build.status === "rejected");
+  if (failed?.status === "rejected") throw failed.reason;
+  console.log(`compiled ${targets.length} targets in ${Date.now() - t0}ms`);
 };
+
+export const cliCompileTargetList: readonly TCliTarget[] = CLI_RELEASE_TARGETS;
 
 // Import-safe for unit tests of the pure host allow-list above.
 if (import.meta.main) {

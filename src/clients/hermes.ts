@@ -15,6 +15,7 @@ import {
   existsSync,
   mkdirSync,
   readFileSync,
+  renameSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
@@ -281,6 +282,30 @@ export const applyHermes = async (opts?: {
   return { code: 0, profileHome: dest, apiKey: gateway.apiKey };
 };
 
+/**
+ * Where an uninstalled profile is preserved. Under the Hermes root (same
+ * filesystem as the profile, so the move is a rename) but outside `profiles/`
+ * so Hermes never lists it as a selectable profile.
+ */
+const profileBackupPath = (profileName: string): string => {
+  const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+  for (let i = 0; ; i += 1) {
+    const candidate = join(
+      hermesRoot(),
+      "backups",
+      `${profileName}-${stamp}${i === 0 ? "" : `-${i}`}`,
+    );
+    if (!existsSync(candidate)) return candidate;
+  }
+};
+
+/**
+ * The profile `install` created is the STICKY one — it holds every Hermes
+ * session, memory, state.db and SOUL edit since then. Uninstall must not
+ * delete it: move it to a timestamped backup and tell the user where.
+ * The move runs BEFORE the ledger/sticky-pointer changes so a failure
+ * leaves the wiring intact for a retry.
+ */
 export const uninstallHermes = (): number => {
   const ledger = readHermesLedger();
   if (ledger === null) {
@@ -289,15 +314,34 @@ export const uninstallHermes = (): number => {
     );
     return 0;
   }
-  setActiveProfile(ledger.previousProfile);
   const dest = hermesProfileDir(ledger.profileName);
-  if (ledger.createdProfile) {
-    rmSync(dest, { recursive: true, force: true });
+  let backup: string | null = null;
+  if (ledger.createdProfile && existsSync(dest)) {
+    backup = profileBackupPath(ledger.profileName);
+    try {
+      mkdirSync(join(backup, ".."), { recursive: true, mode: 0o700 });
+      renameSync(dest, backup);
+    } catch {
+      try {
+        cpSync(dest, backup, { recursive: true });
+        rmSync(dest, { recursive: true, force: true });
+      } catch {
+        process.stderr.write(
+          `Could not move the Hermes profile to a backup — leaving ${dest} in place.\n`,
+        );
+        return 1;
+      }
+    }
   }
+  setActiveProfile(ledger.previousProfile);
   rmSync(hermesLedgerPath(), { force: true });
   restartRootGateway(findClientBinary(CLIENTS.hermes));
   process.stdout.write(
-    `Restored Hermes sticky profile to '${ledger.previousProfile}'.\n`,
+    `Restored Hermes sticky profile to '${ledger.previousProfile}'.\n` +
+      (backup !== null
+        ? `  profile preserved at ${backup}\n` +
+          "  (it holds your Hermes sessions and memories — delete it by hand when ready)\n"
+        : ""),
   );
   return 0;
 };
@@ -338,7 +382,10 @@ commands such as profile, gateway, chat, and --tui/--cli are never overwritten.
   openllm hermes -z "prompt"     one-shot prompt (native -z)
   openllm hermes profile list    native profile command, forwarded
   openllm hermes install         sticky openllm profile (gateway/cron)
-  openllm hermes uninstall       restore the previous sticky profile
+  openllm hermes uninstall       restore the previous sticky profile; the
+                                 profile we created is moved to a timestamped
+                                 backup under ~/.hermes/backups/, never deleted
+  openllm hermes uninstall --yes skip the confirmation prompt
   openllm hermes status          report whether the sticky profile is wired
   openllm hermes --no-persist    session overlay (skip sticky profile)
 
@@ -355,6 +402,49 @@ const withImpliedTui = (forwarded: readonly string[]): readonly string[] => {
   return ["--tui"];
 };
 
+/** Read one line of confirmation from the terminal (canonical stdin). */
+const readConfirmLine = async (): Promise<string> =>
+  new Promise<string>((resolve) => {
+    const stdin = process.stdin;
+    let buffer = "";
+    const onData = (chunk: string | Buffer): void => {
+      buffer += chunk.toString();
+      const newline = buffer.indexOf("\n");
+      if (newline >= 0) {
+        stdin.off("data", onData);
+        stdin.pause();
+        resolve(buffer.slice(0, newline));
+      }
+    };
+    stdin.setEncoding("utf-8");
+    stdin.on("data", onData);
+    stdin.resume();
+  });
+
+/**
+ * FS-5: the sticky profile is the user's Hermes history. The standalone
+ * `openllm hermes uninstall` asks for a typed yes before touching it unless
+ * `--yes` was passed; `uninstallHermes` itself never prompts (the product
+ * `openllm uninstall` already confirmed) and only ever moves it to a backup.
+ */
+const confirmHermesUninstall = async (
+  profileDir: string,
+  previousProfile: string,
+): Promise<boolean> => {
+  if (!process.stdin.isTTY) {
+    process.stderr.write(
+      "Refusing to remove the Hermes profile without a terminal — re-run with --yes.\n",
+    );
+    return false;
+  }
+  process.stdout.write(
+    `This moves the Hermes profile at ${profileDir} to a timestamped backup\n` +
+      `(nothing is deleted) and restores sticky profile '${previousProfile}'.\n` +
+      "Type 'yes' to continue: ",
+  );
+  return (await readConfirmLine()).trim().toLowerCase() === "yes";
+};
+
 export const runHermesCommand = async (
   args: readonly string[],
   flags?: TClientFlags,
@@ -368,7 +458,29 @@ export const runHermesCommand = async (
     const applied = await applyHermes({ remote: flags?.remote });
     return applied.code;
   }
-  if (verb === "uninstall") return uninstallHermes();
+  if (verb === "uninstall") {
+    const yes = args.includes("--yes") || args.includes("-y");
+    if (!yes) {
+      const ledger = readHermesLedger();
+      // Confirmation is required only when a created profile would actually
+      // be moved — restoring a pointer the user already had is loss-free.
+      if (
+        ledger?.createdProfile === true &&
+        existsSync(hermesProfileDir(ledger.profileName))
+      ) {
+        if (
+          !(await confirmHermesUninstall(
+            hermesProfileDir(ledger.profileName),
+            ledger.previousProfile,
+          ))
+        ) {
+          process.stdout.write("Aborted — nothing changed.\n");
+          return 1;
+        }
+      }
+    }
+    return uninstallHermes();
+  }
   if (verb === "status") return statusHermes();
   const noPersist = args.includes("--no-persist");
   const forwarded = withImpliedTui(

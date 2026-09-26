@@ -6,6 +6,22 @@
  * and daemon versions can roll independently.
  */
 
+import { readFileSync } from "node:fs";
+import { basename, dirname, isAbsolute, join } from "node:path";
+import {
+  localSessionEndpoint,
+  sessionHostSupported,
+} from "../../../pty-native/session/local-runtime";
+import {
+  encodeSessionPipeFrame,
+  SESSION_PIPE_DRAIN_ACK,
+  SessionPipeFrameDecoder,
+} from "@openllmsh/protocol/session-pipe";
+import {
+  openVerifiedWindowsSessionPipe,
+  verifyWindowsSessionDirectory,
+  verifyWindowsSessionFile,
+} from "../../../pty-native/session/windows-session-pipe";
 import type { TDaemonCli } from "./registry";
 
 export type TBrokerOpen = {
@@ -69,6 +85,99 @@ const OPEN_ACK_TIMEOUT_MS = 5_000;
 // documented custom-header overload; retain the narrow local declaration.
 const BunWebSocket = WebSocket as unknown as {
   new (url: string, options: Bun.WebSocketOptions): WebSocket;
+};
+
+export type TBrokerSocket = {
+  readyState: number;
+  binaryType: BinaryType;
+  onopen: (() => void) | null;
+  onerror: (() => void) | null;
+  onmessage:
+    | ((event: MessageEvent<string | ArrayBuffer | Uint8Array>) => void)
+    | null;
+  onclose: (() => void) | null;
+  send(data: string | ArrayBuffer | ArrayBufferView): void;
+  close(): void;
+};
+
+export const createSessionPipeSocket = (
+  endpoint: string,
+  expectedPid: number,
+  expectedCreationIdentity: string,
+): TBrokerSocket => {
+  const raw = openVerifiedWindowsSessionPipe(
+    endpoint,
+    expectedPid,
+    expectedCreationIdentity,
+  );
+  const decoder = new SessionPipeFrameDecoder();
+  const socket: TBrokerSocket = {
+    readyState: WebSocket.CONNECTING,
+    binaryType: "arraybuffer",
+    onopen: null,
+    onerror: null,
+    onmessage: null,
+    onclose: null,
+    send: (data): void => {
+      const frame =
+        typeof data === "string"
+          ? encodeSessionPipeFrame({ kind: "text", payload: data })
+          : encodeSessionPipeFrame({
+              kind: "binary",
+              payload:
+                data instanceof ArrayBuffer
+                  ? new Uint8Array(data)
+                  : new Uint8Array(
+                      data.buffer,
+                      data.byteOffset,
+                      data.byteLength,
+                    ),
+            });
+      raw.write(frame);
+    },
+    close: (): void => {
+      if (socket.readyState >= WebSocket.CLOSING) return;
+      socket.readyState = WebSocket.CLOSING;
+      raw.close();
+    },
+  };
+  socket.readyState = WebSocket.OPEN;
+  queueMicrotask(() => socket.onopen?.());
+  raw.onData((chunk): void => {
+    try {
+      for (const frame of decoder.push(chunk)) {
+        const data =
+          frame.kind === "text"
+            ? frame.payload
+            : socket.binaryType === "arraybuffer"
+              ? frame.payload.buffer.slice(
+                  frame.payload.byteOffset,
+                  frame.payload.byteOffset + frame.payload.byteLength,
+                )
+              : frame.payload;
+        const envelope =
+          frame.kind === "text" ? parseBrokerEnvelope(frame.payload) : null;
+        if (envelope?.t === "exit" || envelope?.t === "reset")
+          raw.write(
+            encodeSessionPipeFrame({
+              kind: "text",
+              payload: SESSION_PIPE_DRAIN_ACK,
+            }),
+          );
+        socket.onmessage?.({ data } as MessageEvent<
+          string | ArrayBuffer | Uint8Array
+        >);
+      }
+    } catch {
+      socket.onerror?.();
+      raw.close();
+    }
+  });
+  raw.onClose(() => {
+    socket.readyState = WebSocket.CLOSED;
+    socket.onclose?.();
+  });
+  return socket;
 };
 
 /** Parse only the control envelopes this client understands; unknown `t` is skew-safe. */
@@ -170,6 +279,8 @@ export type TBrokerAttachTarget = string;
  * transport test uses this exact spelling).
  */
 export const brokerAttachUrl = (target: TBrokerAttachTarget): string => {
+  if (process.platform === "win32" && isAbsolute(target))
+    return localSessionEndpoint(target);
   if (target.startsWith("ws+unix://")) return target;
   if (target.startsWith("/")) return `ws+unix://${target}`;
   if (target.startsWith("ws://") || target.startsWith("wss://"))
@@ -177,6 +288,42 @@ export const brokerAttachUrl = (target: TBrokerAttachTarget): string => {
       ? target
       : `${target.replace(/\/+$/, "")}/broker/session`;
   return `${target.replace(/^http/, "ws").replace(/\/+$/, "")}/broker/session`;
+};
+
+/** Open a verified Windows endpoint from the caller's ctl.sock path. */
+export const openWindowsSessionSocket = (socketPath: string): TBrokerSocket => {
+  if (!sessionHostSupported())
+    throw new Error("Windows durable session transport is disabled");
+  const directory = dirname(socketPath);
+  if (basename(socketPath) !== "ctl.sock")
+    throw new Error("expected the Windows session control marker path");
+  verifyWindowsSessionDirectory(dirname(directory));
+  verifyWindowsSessionDirectory(directory);
+  verifyWindowsSessionFile(join(directory, "meta.json"));
+  verifyWindowsSessionFile(socketPath);
+  const meta = JSON.parse(
+    readFileSync(join(directory, "meta.json"), "utf8"),
+  ) as unknown;
+  if (
+    typeof meta !== "object" ||
+    meta === null ||
+    typeof (meta as Record<string, unknown>).pid !== "number" ||
+    !Number.isSafeInteger((meta as Record<string, unknown>).pid) ||
+    typeof (meta as Record<string, unknown>).processStartTime !== "string" ||
+    !/^\d+$/.test(
+      (meta as { readonly processStartTime: string }).processStartTime,
+    ) ||
+    (meta as Record<string, unknown>).id !== basename(directory)
+  )
+    throw new Error("invalid Windows session host identity metadata");
+  const marker = readFileSync(socketPath, "utf8").trim();
+  if (marker !== localSessionEndpoint(socketPath, "win32"))
+    throw new Error("invalid Windows session endpoint marker");
+  return createSessionPipeSocket(
+    marker,
+    (meta as { readonly pid: number }).pid,
+    (meta as { readonly processStartTime: string }).processStartTime,
+  );
 };
 
 /** Attach the current terminal to an already-created (or newly spawned) broker session. */
@@ -204,7 +351,7 @@ export const attachBrokerSession = async (args: {
   const url = brokerAttachUrl(args.target);
 
   return new Promise<TAttachResult>((resolve) => {
-    let ws: WebSocket | null = null;
+    let ws: TBrokerSocket | null = null;
     let acknowledged = false;
     let exitCode: number | null = null;
     let settled = false;
@@ -371,13 +518,21 @@ export const attachBrokerSession = async (args: {
       }
     };
 
+    let activeSocket: TBrokerSocket;
     try {
-      ws = new BunWebSocket(
-        url,
-        args.apiKey === undefined
-          ? {}
-          : { headers: { Authorization: `Bearer ${args.apiKey}` } },
-      );
+      if (process.platform === "win32" && isAbsolute(args.target)) {
+        if (!sessionHostSupported())
+          throw new Error("Windows durable session transport is disabled");
+        activeSocket = openWindowsSessionSocket(args.target);
+      } else {
+        activeSocket = new BunWebSocket(
+          url,
+          args.apiKey === undefined
+            ? {}
+            : { headers: { Authorization: `Bearer ${args.apiKey}` } },
+        ) as unknown as TBrokerSocket;
+      }
+      ws = activeSocket;
     } catch {
       settle({ kind: "pre-ack-failed" });
       return;
@@ -390,14 +545,14 @@ export const attachBrokerSession = async (args: {
       }
     }, OPEN_ACK_TIMEOUT_MS);
 
-    ws.binaryType = "arraybuffer";
-    ws.onopen = (): void => {
-      ws?.send(brokerEnvelope("open", { open: args.open }));
+    activeSocket.binaryType = "arraybuffer";
+    activeSocket.onopen = (): void => {
+      activeSocket.send(brokerEnvelope("open", { open: args.open }));
     };
-    ws.onerror = (): void => {
+    activeSocket.onerror = (): void => {
       if (!acknowledged) settle({ kind: "pre-ack-failed" });
     };
-    ws.onmessage = (
+    activeSocket.onmessage = (
       event: MessageEvent<string | ArrayBuffer | Uint8Array>,
     ): void => {
       if (typeof event.data !== "string") {
@@ -452,6 +607,12 @@ export const attachBrokerSession = async (args: {
       }
       if (envelope.t === "exit") {
         exitCode = envelope.code;
+        // The daemon's RTC bridge consumes this pipe. Preserve the broker's
+        // exit status before EOF so remote clients can distinguish failures.
+        if (pipe)
+          io.stdout.write(
+            `${String.fromCharCode(PIPE_CTRL)}${JSON.stringify(envelope)}\n`,
+          );
         return;
       }
       if (envelope.t === "reset") {
@@ -469,7 +630,7 @@ export const attachBrokerSession = async (args: {
         settle({ kind: "completed", code: 1 });
       }
     };
-    ws.onclose = (): void => {
+    activeSocket.onclose = (): void => {
       if (!acknowledged) {
         settle({ kind: "pre-ack-failed" });
         return;

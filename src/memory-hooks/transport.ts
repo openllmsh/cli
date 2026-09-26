@@ -1,3 +1,8 @@
+import {
+  daemonTokenPorts,
+  LOCAL_CALLER_TOKEN_HEADER,
+  localCallerToken,
+} from "../env";
 import type { THttpClientOptions } from "../sdk/client";
 
 const HOOK_USER_AGENT = "OpenLLM/memory-hooks (+https://openllm.sh)";
@@ -56,6 +61,14 @@ const checkedUrl = (value: string): URL => {
 const isLoopback = (url: URL): boolean =>
   url.protocol === "http:" &&
   ["127.0.0.1", "localhost", "[::1]"].includes(url.hostname);
+
+/** A loopback target on THIS machine's daemon port — the only destination a
+ *  307 may re-issue the request body to, and the only socket the per-boot
+ *  local caller token may be sent to. Any other local port is treated as
+ *  untrusted (a redirect there is refused, not followed). */
+const isDaemonTarget = (url: URL): boolean =>
+  isLoopback(url) &&
+  daemonTokenPorts().has(url.port === "" ? 80 : Number(url.port));
 
 /** Historical installs used the apex; only its exact HTTPS canonical move is
  * credential-preserving. Never trust arbitrary cross-origin redirects.
@@ -161,8 +174,22 @@ export const memoryHookTransport =
       });
     for (let hop = 0; hop < 5; hop++) {
       const requestHeaders = new Headers(headers);
-      if (target.origin !== cloudTarget.origin)
+      const daemonTarget = isDaemonTarget(target);
+      if (daemonTarget || target.origin !== cloudTarget.origin)
         requestHeaders.delete("Authorization");
+      // A daemon-port target is this machine's daemon — present its per-boot
+      // local caller token (the credential the `/v1/*` gate requires). The
+      // caller's cloud key is NEVER forwarded to loopback: the Authorization
+      // drop above runs even when the daemon port IS the original target
+      // (OPENLLM_INFERENCE_ORIGIN pointed at the daemon), so a process
+      // squatting on the socket is never handed the `sk-llm`. When no token
+      // file is readable the hop goes unauthenticated and the daemon's 401
+      // is the honest answer.
+      if (daemonTarget) {
+        const token = localCallerToken();
+        if (token !== null)
+          requestHeaders.set(LOCAL_CALLER_TOKEN_HEADER, token);
+      }
       if (noDaemonRetry) requestHeaders.set("x-openllm-no-daemon", "1");
       let response: Response;
       try {
@@ -208,7 +235,7 @@ export const memoryHookTransport =
           !noDaemonRetry &&
           target.origin === cloudTarget.origin &&
           [307, 308].includes(response.status) &&
-          isLoopback(next) &&
+          isDaemonTarget(next) &&
           next.pathname === initial.pathname &&
           next.pathname === "/v1/chat/completions";
         if (

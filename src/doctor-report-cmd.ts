@@ -189,8 +189,15 @@ export const setDoctorLocalFsyncForTests = (
   fsyncImpl = impl ?? fsyncSync;
 };
 
-/** Directory fsync is not portable; only treat these as unsupported, never EPERM/ENOENT. */
-const UNSUPPORTED_DIR_FSYNC = new Set(["EISDIR", "EINVAL", "ENOTSUP"]);
+/** Directory fsync is not portable; only treat these as unsupported, never ENOENT
+ * and never EPERM on POSIX. On win32 Node can only open a directory read-only and
+ * FlushFileBuffers then fails ERROR_ACCESS_DENIED, which libuv maps to EPERM
+ * (nodejs/node#3879); NTFS journals the rename metadata, so it is unsupported there. */
+const UNSUPPORTED_DIR_FSYNC = new Set(
+  process.platform === "win32"
+    ? ["EISDIR", "EINVAL", "ENOTSUP", "EPERM"]
+    : ["EISDIR", "EINVAL", "ENOTSUP"],
+);
 
 const fsyncParentDir = (dir: string): void => {
   let fd: number | null = null;
@@ -214,12 +221,11 @@ const writeLocalPreferenceFile = (record: TLocalPreference): boolean => {
     `.${process.pid}.${crypto.randomUUID()}.tmp`,
   );
   try {
-    writeFileSync(temp, `${JSON.stringify(record)}\n`, {
-      mode: 0o600,
-      flag: "wx",
-    });
-    const fd = openSync(temp, "r");
+    // fsync the writable descriptor: win32 FlushFileBuffers rejects a
+    // read-only handle with EPERM, so reopening "r" cannot flush there.
+    const fd = openSync(temp, "wx", 0o600);
     try {
+      writeFileSync(fd, `${JSON.stringify(record)}\n`);
       fsyncImpl(fd);
     } finally {
       closeSync(fd);

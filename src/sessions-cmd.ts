@@ -5,13 +5,11 @@
  * `ctl.sock`), so these commands remain usable while the daemon is stopped.
  */
 
-import { attachBrokerSession } from "./clients/attach";
+import type { TProcessStartIdentityReader } from "../../pty-native/session/local-runtime";
+import { attachBrokerSession, brokerAttachUrl } from "./clients/attach";
 import type { TDaemonCli } from "./clients/registry";
 import { resolveById } from "./clients/session-picker";
-import {
-  discoverLiveSessionHosts,
-  sessionHostProcessAlive,
-} from "./session-host";
+import { discoverSessionHosts, sessionHostProcessStatus } from "./session-host";
 
 export type TBrokerSessionRow = {
   readonly id: string;
@@ -92,8 +90,10 @@ export const resolveSessionId = (
   resolveById(sessions, supplied);
 
 /** Read and validate live process-owned directories, reaping stale entries. */
-export const listSessionHosts = (): readonly TBrokerSessionRow[] =>
-  discoverLiveSessionHosts().map((session) => ({
+export const listSessionHosts = (
+  readIdentity?: TProcessStartIdentityReader,
+): readonly TBrokerSessionRow[] =>
+  discoverSessionHosts(readIdentity).hosts.map((session) => ({
     id: session.id,
     cli: session.cli,
     title: session.title ?? "",
@@ -145,14 +145,9 @@ const attach = async (
     process.stderr.write("[openllm] session is not attachable\n");
     return 1;
   }
-  if (
-    !opts.pipe &&
-    (!process.stdin.isTTY ||
-      !process.stdout.isTTY ||
-      process.platform === "win32")
-  ) {
+  if (!opts.pipe && (!process.stdin.isTTY || !process.stdout.isTTY)) {
     process.stderr.write(
-      "[openllm] attaching requires an interactive non-Windows terminal\n",
+      "[openllm] attaching requires an interactive terminal\n",
     );
     return 1;
   }
@@ -208,25 +203,29 @@ const sleep = async (ms: number): Promise<void> =>
  * Stop the standalone host through its private control socket.
  *
  * PID-only signals are intentionally not used: after
- * {@link sessionHostProcessAlive} the pid can still be recycled before
+ * {@link sessionHostProcessStatus} the pid can still be recycled before
  * `process.kill`, so identity is preserved only by dialing the host-owned
- * `ctl.sock` and sending a kill close. Returns false when identity cannot be
- * preserved (missing fields, dead process, or socket unreachable).
+ * `ctl.sock` and sending a kill close. Unknown identity never sends a kill and
+ * never counts as success.
  */
 export const killSessionHost = async (
   session: Pick<
     TBrokerSessionRow,
     "id" | "cli" | "pid" | "process_start_time" | "socket_path"
   >,
+  readIdentity?: TProcessStartIdentityReader,
 ): Promise<boolean> => {
   if (
     session.pid === undefined ||
     session.process_start_time === undefined ||
     session.socket_path === undefined ||
-    !sessionHostProcessAlive({
-      pid: session.pid,
-      processStartTime: session.process_start_time,
-    })
+    sessionHostProcessStatus(
+      {
+        pid: session.pid,
+        processStartTime: session.process_start_time,
+      },
+      readIdentity,
+    ) !== "alive"
   ) {
     return false;
   }
@@ -234,8 +233,8 @@ export const killSessionHost = async (
   const socketPath = session.socket_path;
   const pid = session.pid;
   const processStartTime = session.process_start_time;
-  const alive = (): boolean =>
-    sessionHostProcessAlive({ pid, processStartTime });
+  const status = (): ReturnType<typeof sessionHostProcessStatus> =>
+    sessionHostProcessStatus({ pid, processStartTime }, readIdentity);
 
   const killed = await new Promise<boolean>((resolve) => {
     let settled = false;
@@ -247,9 +246,7 @@ export const killSessionHost = async (
 
     let ws: WebSocket;
     try {
-      ws = new WebSocket(
-        socketPath.startsWith("/") ? `ws+unix://${socketPath}` : socketPath,
-      );
+      ws = new WebSocket(brokerAttachUrl(socketPath));
     } catch {
       settle(false);
       return;
@@ -261,14 +258,14 @@ export const killSessionHost = async (
       } catch {
         /* ignore */
       }
-      settle(!alive());
+      settle(status() === "dead");
     }, 2_000);
 
     ws.binaryType = "arraybuffer";
     ws.onopen = (): void => {
       // Final identity check immediately before sending control — refuse if
       // the process exited or the pid was recycled after discovery.
-      if (!alive()) {
+      if (status() !== "alive") {
         clearTimeout(timer);
         try {
           ws.close();
@@ -334,7 +331,7 @@ export const killSessionHost = async (
       void (async () => {
         for (let elapsed = 0; elapsed < 1_000; elapsed += 50) {
           await sleep(50);
-          if (!alive()) {
+          if (status() === "dead") {
             settle(true);
             return;
           }

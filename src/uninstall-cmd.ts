@@ -26,7 +26,7 @@ import { uninstallHermes } from "./clients/hermes";
 import { uninstallRaycast } from "./clients/raycast";
 import { removeCompletion } from "./completion";
 import { findDaemonBinary, runManagedDaemonCommand } from "./daemon-delegation";
-import { openllmDir } from "./env";
+import { isIsolatedStateRoot, openllmDir } from "./env";
 import { removeOwnedLinks, removeRcBlock } from "./setup-cmd";
 
 const CLIENTS_DIR = (): string => join(openllmDir(), "clients");
@@ -139,6 +139,12 @@ export const runUninstall = async (
   if (args.includes("-h") || args.includes("--help")) {
     process.stdout.write(UNINSTALL_USAGE);
     return 0;
+  }
+  if (isIsolatedStateRoot()) {
+    process.stderr.write(
+      "Refusing uninstall under OPENLLM_DAEMON_STATE_DIR because uninstall also removes user-wide links, shell rc entries, completions, and vendor configuration.\n",
+    );
+    return 1;
   }
   const yes = args.includes("--yes") || args.includes("-y");
   const daemon = findDaemonBinary();

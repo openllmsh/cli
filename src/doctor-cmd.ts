@@ -30,6 +30,7 @@ import { managedDaemonBinary } from "./daemon-delegation";
 import {
   cliBinPath,
   cliConfig,
+  isIsolatedStateRoot,
   openllmDir,
   sharedFileConfig,
   userHome,
@@ -98,7 +99,9 @@ const legacyPaths = (): readonly string[] => [
   join(openllmDir(), "installed"),
   join(openllmDir(), "backups"),
   join(openllmDir(), "setup"),
-  join(userHome(), ".claude", "plugins", "openllm"),
+  ...(isIsolatedStateRoot()
+    ? []
+    : [join(userHome(), ".claude", "plugins", "openllm")]),
 ];
 
 /**
@@ -106,6 +109,7 @@ const legacyPaths = (): readonly string[] => [
  * used in each. Only the region is removed — everything else is the user's.
  */
 const legacyRegions = (): readonly TLegacyRegion[] => {
+  if (isIsolatedStateRoot()) return [];
   const home = userHome();
   return [
     {
@@ -128,6 +132,7 @@ const legacyRegions = (): readonly TLegacyRegion[] => {
 
 /** Sibling backups the old installers left next to a user's config. */
 const legacyBackups = (): readonly string[] => {
+  if (isIsolatedStateRoot()) return [join(openllmDir(), "cli.env")];
   const home = userHome();
   return [
     join(home, ".codex", "config.toml.openllm-bak"),
@@ -621,11 +626,28 @@ const redact = (text: string): string => {
   out = out.replace(/xai-[A-Za-z0-9._-]+/g, "***");
   out = out.replace(/AIza[A-Za-z0-9._-]+/g, "***");
   out = out.replace(/eyJ[A-Za-z0-9._-]+/g, "***");
-  out = out.replace(/\bBearer\s+[^\s]+/gi, "Bearer ***");
-  out = out.replace(/[?&](?:token|key|api_key|sig)=[^&\s]+/gi, (match) => {
-    const eq = match.indexOf("=");
-    return `${match.slice(0, eq + 1)}***`;
-  });
+  // Seeds and private-plane credentials need not carry a vendor prefix. Match
+  // their field names (including camelCase) rather than all hex strings,
+  // preserving diagnostic hashes and fields such as tokenCount.
+  // Consume quoted values as a unit (including escaped characters and spaces).
+  out = out.replace(
+    /(\b(?:[a-z0-9_-]*(?:seed|password|passwd|secret|token|api[_-]?key|private[_-]?key|credential)|private_plane_key(?:_[a-z0-9]+)?)["']?\s*[:=]\s*)("(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^\s,;&}\]]+)/gi,
+    (_match, prefix: string, value: string) =>
+      `${prefix}${value.startsWith('"') ? '"***"' : value.startsWith("'") ? "'***'" : "***"}`,
+  );
+  out = out.replace(
+    /-----BEGIN (?:[A-Z]+ )?PRIVATE KEY-----[\s\S]*?-----END (?:[A-Z]+ )?PRIVATE KEY-----/g,
+    "***",
+  );
+  out = out.replace(/(https?:\/\/)[^\s/@:]+:[^\s/@]+@/gi, "$1***@");
+  out = out.replace(/\b(Bearer|Basic)\s+[^\s"',;}]+/gi, "$1 ***");
+  out = out.replace(
+    /[?&](?:token|key|api_key|access_token|refresh_token|sig)=[^&\s"']+/gi,
+    (match) => {
+      const eq = match.indexOf("=");
+      return `${match.slice(0, eq + 1)}***`;
+    },
+  );
   out = out.replace(/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z0-9.-]+/g, "***");
   return out;
 };
@@ -778,6 +800,11 @@ const collectOpenllmdStatus = async (): Promise<readonly string[]> => {
 };
 
 const gatherDaemonHealth = async (): Promise<readonly string[]> => {
+  if (isIsolatedStateRoot()) {
+    return [
+      "  daemon health probe skipped while OPENLLM_DAEMON_STATE_DIR is set (the default localhost port may belong to the production daemon)",
+    ];
+  }
   const portInfo = resolveDaemonPort();
   const port = portInfo.port;
   const endpoint = `http://127.0.0.1:${port}/status`;

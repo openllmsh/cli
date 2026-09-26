@@ -10,24 +10,14 @@
  */
 
 import type { TCliConfig } from "../env";
-import { cliConfig, openllmDir, sharedFileConfig } from "../env";
-import { parseOpenllmDaemonPort } from "../runtime-contracts";
+import { cliConfig, daemonPort, localCallerToken, openllmDir } from "../env";
+
+export { daemonPort };
 
 /** How long to wait for the local daemon's /status before falling back. */
 const PROBE_TIMEOUT_MS = 400;
 /** Catalog fetches are best-effort; a slow gateway must not stall a launch. */
 const CATALOG_TIMEOUT_MS = 8_000;
-
-const DEFAULT_DAEMON_PORT = 8787;
-
-/** Load daemon configuration from env + shared file, defaulting to 8787. */
-export const daemonPort = (): number => {
-  const raw =
-    process.env.OPENLLM_DAEMON_PORT ??
-    sharedFileConfig().OPENLLM_DAEMON_PORT ??
-    String(DEFAULT_DAEMON_PORT);
-  return parseOpenllmDaemonPort(raw, DEFAULT_DAEMON_PORT);
-};
 
 export type TGateway = {
   /** Base origin the client should talk to (no trailing slash, no `/v1`). */
@@ -38,6 +28,12 @@ export type TGateway = {
   readonly cloudOrigin: string;
   /** True when `base` is this machine's daemon. */
   readonly local: boolean;
+  /**
+   * The daemon's per-boot local caller token — present only when `local`.
+   * First-party children inherit it (`OPENLLM_LOCAL_TOKEN`) and present it to
+   * the loopback `/v1/*` surface; it never leaves the machine.
+   */
+  readonly localToken: string | null;
 };
 
 /** Is a local daemon reachable right now? */
@@ -83,12 +79,19 @@ export const resolveGateway = async (opts?: {
     apiKey,
     cloudOrigin: gatewayUrl,
     local: false,
+    localToken: null,
   };
   if (opts?.remote === true) return cloud;
   const forced = process.env.OPENLLM_GATEWAY;
   if (forced === "cloud") return cloud;
   if (forced === "local") {
-    return { base: localBase, apiKey, cloudOrigin: gatewayUrl, local: true };
+    return {
+      base: localBase,
+      apiKey,
+      cloudOrigin: gatewayUrl,
+      local: true,
+      localToken: localCallerToken(),
+    };
   }
   const local = await daemonReachable(port);
   return {
@@ -96,6 +99,7 @@ export const resolveGateway = async (opts?: {
     apiKey,
     cloudOrigin: gatewayUrl,
     local,
+    localToken: local ? localCallerToken() : null,
   };
 };
 
