@@ -912,9 +912,14 @@ env_lock_acquire() {
           return 0
         elif [ "$pub_rc" = 2 ]; then
           # The tmp write failed — drop the dir WE made rather than hold it
-          # unmarked.
-          rm -f "$lockdir/owner.tmp.$$" 2>/dev/null
-          rmdir "$lockdir" 2>/dev/null || true
+          # unmarked, but ONLY while the path still proves OUR generation:
+          # an inode that no longer matches (or was never captured) means a
+          # successor may own this dir now — nothing inside it is ours to
+          # remove (identical guard in the daemon and CLI code).
+          if [ -n "$ino" ] && [ "$(env_lock_path_ino "$lockdir")" = "$ino" ]; then
+            rm -f "$lockdir/owner.tmp.$$" 2>/dev/null
+            rmdir "$lockdir" 2>/dev/null || true
+          fi
           return 1
         fi
         # pub_rc=1 — a successor owns the dir at this path (or it was

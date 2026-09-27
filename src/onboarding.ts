@@ -327,7 +327,9 @@ const envLockStartIdentityForRecord = (
 /**
  * `processIdentityStatus` verdicts, briefly cached per (pid, recorded
  * start) — a mixed-format record costs a second bridging probe, so the
- * verdict is rate-limited like the daemon's.
+ * verdict is rate-limited like the daemon's. Only non-convicting answers
+ * are cached: a cached "dead" could outlive a same-second pid reuse on a
+ * coarse `ps lstart` record, so it is always re-probed before it convicts.
  */
 const statusCache = new Map<
   string,
@@ -346,8 +348,14 @@ const envLockIdentityStatus = (
   const value = processIdentityStatus(pid, recordedStart, (probePid) =>
     envLockStartIdentityForRecord(probePid, recordedStart),
   );
-  if (statusCache.size > 128) statusCache.clear();
-  statusCache.set(key, { value, at: now });
+  // A "dead" verdict is never cached: on a coarse `ps lstart` record (one
+  // second of resolution) the pid can be reused inside the TTL, and a cached
+  // conviction would steal the LIVE successor's lock. "alive" and "unknown"
+  // stay correct for the TTL, anything that convicts re-probes every time.
+  if (value !== "dead") {
+    if (statusCache.size > 128) statusCache.clear();
+    statusCache.set(key, { value, at: now });
+  }
   return value;
 };
 
@@ -376,6 +384,15 @@ export const envLockSeedIdentityCacheForTests = (
   value: string | null,
 ): void => {
   identityCache.set(pid, { value, at: Date.now() });
+};
+
+/** Test seam: runs inside the acquire AFTER our dir's inode is captured and
+ *  BEFORE the owner publish — identical to the daemon side. */
+let envLockPublishGapForTests: ((lockDir: string) => void) | null = null;
+export const envLockPublishGapForTest = (
+  hook: ((lockDir: string) => void) | null,
+): void => {
+  envLockPublishGapForTests = hook;
 };
 
 /**
@@ -996,18 +1013,32 @@ const withEnvFileLock = (
       // unreadable — the marker veto alone still applies
     }
     let published: boolean;
+    envLockPublishGapForTests?.(lockDir);
     try {
       published = envLockPublishOwner(lockDir, nonce, expectedIno);
     } catch {
+      // The tmp write itself failed — drop the lock WE made rather than
+      // hold it unmarked, but ONLY while the path still proves OUR
+      // generation (identical to the daemon side): an inode that no longer
+      // matches means a successor may own this dir now.
+      let ours = false;
       try {
-        unlinkSync(join(lockDir, `owner.tmp.${process.pid}`));
+        ours =
+          expectedIno !== undefined && lstatSync(lockDir).ino === expectedIno;
       } catch {
-        // best effort
+        ours = false;
       }
-      try {
-        rmdirSync(lockDir);
-      } catch {
-        // best effort
+      if (ours) {
+        try {
+          unlinkSync(join(lockDir, `owner.tmp.${process.pid}`));
+        } catch {
+          // best effort
+        }
+        try {
+          rmdirSync(lockDir);
+        } catch {
+          // best effort
+        }
       }
       return false;
     }
