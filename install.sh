@@ -903,8 +903,16 @@ env_lock_acquire() {
     if ! env_lock_legacy_held "$stem"; then
       if mkdir "$lockdir" 2>/dev/null; then
         # Pin the generation we created so the publish veto detects a
-        # quarantine+path-reuse, not only an in-place steal marker.
+        # quarantine+path-reuse, not only an in-place steal marker. When
+        # the inode cannot be captured, publish NOTHING and remove NOTHING:
+        # a blind publish could stamp into a successor's claim, and an
+        # unproven dir is never ours to rmdir — the staleness pass below
+        # re-judges what is actually at the name.
         ino="$(env_lock_path_ino "$lockdir")"
+        if [ -z "$ino" ]; then
+          sleep 0.01 2>/dev/null || sleep 1
+          continue
+        fi
         env_lock_publish_owner "$lockdir" "$ino"
         pub_rc=$?
         if [ "$pub_rc" = 0 ]; then
