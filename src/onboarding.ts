@@ -26,6 +26,7 @@ import type {
   TProcessStartIdentityReader,
 } from "../../tunnel/session/local-runtime";
 import {
+  legacyProcessStartIdentity,
   processIdentityStatus,
   processStartIdentity,
 } from "../../tunnel/session/local-runtime";
@@ -255,11 +256,22 @@ const identityCache = new Map<
   { readonly value: string | null; readonly at: number }
 >();
 let envLockProbe: TProcessStartIdentityReader = processStartIdentity;
+let envLockLegacyProbe: TProcessStartIdentityReader =
+  legacyProcessStartIdentity;
 let selfIdentity: string | null | undefined;
 let selfIdentityRead = false;
 
 const envLockStartIdentityProbe = (pid: number): string | null | undefined => {
   const raw = envLockProbe(pid);
+  if (typeof raw !== "string") return raw;
+  const value = raw.trim().replace(/\s+/g, " ");
+  return value.length > 0 ? value : undefined;
+};
+
+const envLockLegacyStartIdentityProbe = (
+  pid: number,
+): string | null | undefined => {
+  const raw = envLockLegacyProbe(pid);
   if (typeof raw !== "string") return raw;
   const value = raw.trim().replace(/\s+/g, " ");
   return value.length > 0 ? value : undefined;
@@ -346,8 +358,11 @@ const envLockIdentityStatus = (
   const hit = statusCache.get(key);
   if (hit !== undefined && now - hit.at < IDENTITY_PROBE_TTL_MS)
     return hit.value;
-  const value = processIdentityStatus(pid, recordedStart, (probePid) =>
-    envLockStartIdentityForRecord(probePid, recordedStart),
+  const value = processIdentityStatus(
+    pid,
+    recordedStart,
+    (probePid) => envLockStartIdentityForRecord(probePid, recordedStart),
+    envLockLegacyStartIdentityProbe,
   );
   // Only an "alive" verdict is cached: a cached "dead" could outlive a
   // same-second pid reuse on a coarse `ps lstart` record and convict the
@@ -370,6 +385,7 @@ export const envLockSwapProbeForTest = (
   impl?: TProcessStartIdentityReader,
 ): void => {
   envLockProbe = impl ?? processStartIdentity;
+  envLockLegacyProbe = impl ?? legacyProcessStartIdentity;
   selfIdentity = undefined;
   selfIdentityRead = false;
   identityCache.clear();
@@ -1005,7 +1021,7 @@ const withEnvFileLock = (
     pollMs: 10,
     inode: envLockDirIno,
     startIdentity: envLockStartIdentity,
-    legacyStartIdentity: envLockStartIdentity,
+    legacyStartIdentity: envLockLegacyStartIdentityProbe,
     isStale: envLockDirIsStale,
     legacyHeld: (): boolean => envLockLegacyHeld(stem, nonce),
     onStep: (step, path): void => {
