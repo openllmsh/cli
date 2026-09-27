@@ -22,7 +22,8 @@
 
 import { existsSync, readdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
-import { uninstallHermes } from "./clients/hermes";
+import { readHermesLedger, uninstallHermes } from "./clients/hermes";
+import { hermesRoot } from "./clients/hermes-home";
 import { uninstallRaycast } from "./clients/raycast";
 import { removeCompletion } from "./completion";
 import { findDaemonBinary, runManagedDaemonCommand } from "./daemon-delegation";
@@ -40,6 +41,28 @@ const appliedAlwaysOnClients = (): string[] => {
   } catch {
     return [];
   }
+};
+
+/**
+ * The newest `backups/<profile>-*` dir under the Hermes root — the preserved
+ * profile uninstall keeps — so a failed redaction can name exactly where the
+ * key still sits. Falls back to the backups root when nothing was moved yet.
+ */
+const hermesLatestBackupDir = (): string => {
+  const backupsRoot = join(hermesRoot(), "backups");
+  try {
+    const ledger = readHermesLedger();
+    if (ledger !== null) {
+      const latest = readdirSync(backupsRoot)
+        .filter((entry) => entry.startsWith(`${ledger.profileName}-`))
+        .sort()
+        .at(-1);
+      if (latest !== undefined) return join(backupsRoot, latest);
+    }
+  } catch {
+    // fall through to the directory that holds them
+  }
+  return backupsRoot;
 };
 
 /**
@@ -189,7 +212,16 @@ export const runUninstall = async (
     }
     if (client === "hermes") {
       process.stdout.write("Reversing Hermes profile wiring...\n");
-      uninstallHermes();
+      const code = uninstallHermes();
+      if (code !== 0) {
+        // The preserved profile may still hold OPENLLM_API_KEY — stop here
+        // and name where it sits, so nothing claims a clean removal while
+        // the key is still on disk (FSS-19).
+        process.stderr.write(
+          `Hermes uninstall failed — the backup at ${hermesLatestBackupDir()} may still contain OPENLLM_API_KEY. Remove it by hand, then re-run.\n`,
+        );
+        return code;
+      }
     }
   }
 
