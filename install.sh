@@ -278,9 +278,12 @@ else
 fi
 
 # Skip the download when what's installed already matches (see the daemon
-# installer for the macOS codesign/stamp rationale).
+# installer for the macOS codesign/stamp rationale). NEVER in --from-file
+# mode: the supplied file must always be hashed and verified — a shortcut
+# here would accept a wrong local file whenever the installed binary
+# already carries the expected digest.
 SKIP=0
-if [ -x "$DEST" ]; then
+if [ -x "$DEST" ] && [ -z "$FROM_FILE" ]; then
   INSTALLED="$(sha256_of "$DEST" || true)"
   if [ -n "$INSTALLED" ]; then
     if [ "$INSTALLED" = "$PUBLISHED" ]; then
