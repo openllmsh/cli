@@ -119,6 +119,42 @@ const parseConfig = (path: string): TJsonObject => {
   }
 };
 
+/** Read a profile config strictly: `{}` when absent or blank (nothing to
+ *  lose), `null` when it exists but does not parse to an object — never
+ *  silently `{}` (FS-12). */
+const readProfileConfig = (path: string): TJsonObject | null => {
+  if (!existsSync(path)) return {};
+  let text: string;
+  try {
+    text = readFileSync(path, "utf-8");
+  } catch {
+    return null;
+  }
+  if (text.trim().length === 0) return {};
+  return parseYaml(text);
+};
+
+/** Copy an unparseable config aside before refusing — timestamped like the
+ *  profile backups, private `0600`, never overwriting an earlier backup.
+ *  Returns the backup path, or null when the backup itself could not be
+ *  written (the refusal still stands either way). */
+const backupUnparseableConfig = (configPath: string): string | null => {
+  const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+  for (let i = 0; ; i += 1) {
+    const candidate = `${configPath}.${stamp}${i === 0 ? "" : `-${i}`}.bak`;
+    try {
+      writeFileSync(candidate, readFileSync(configPath, "utf-8"), {
+        mode: 0o600,
+        flag: "wx",
+      });
+      return candidate;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "EEXIST") continue;
+      return null;
+    }
+  }
+};
+
 const copyIfExists = (from: string, to: string): void => {
   if (!existsSync(from)) return;
   mkdirSync(join(to, ".."), { recursive: true, mode: 0o700 });
@@ -128,12 +164,18 @@ const copyIfExists = (from: string, to: string): void => {
 const cloneProfile = (sourceName: string, destDir: string): void => {
   const sourceDir = hermesProfileDir(sourceName);
   mkdirSync(destDir, { recursive: true, mode: 0o700 });
+  // cpSync preserves the source mode — a world-readable source .env would
+  // stay world-readable with the API key inside (FS-11). Normalize: profile
+  // dir owner-only, the .env owner read/write only.
+  chmodSync(destDir, 0o700);
   for (const file of CLONE_FILES) {
     copyIfExists(join(sourceDir, file), join(destDir, file));
   }
   for (const dir of CLONE_DIRS) {
     copyIfExists(join(sourceDir, dir), join(destDir, dir));
   }
+  const envPath = join(destDir, ".env");
+  if (existsSync(envPath)) chmodSync(envPath, 0o600);
 };
 
 const upsertEnvKey = (envPath: string, key: string, value: string): void => {
@@ -146,6 +188,9 @@ const upsertEnvKey = (envPath: string, key: string, value: string): void => {
   writeFileSync(envPath, body.endsWith("\n") ? body : `${body}\n`, {
     mode: 0o600,
   });
+  // The create mode is ignored for an existing file — a .env carried over with
+  // loose permissions stays loose while holding the API key (FS-11).
+  chmodSync(envPath, 0o600);
 };
 
 const pickProfileName = (ledger: THermesLedger | null): string => {
@@ -243,6 +288,9 @@ export const applyHermes = async (opts?: {
       const to = join(dest, file);
       if (existsSync(from) && !existsSync(to)) copyIfExists(from, to);
     }
+    // An existing profile dir keeps its own mode — re-normalize it owner-only
+    // (FS-11; cloneProfile does the same on the create path).
+    chmodSync(dest, 0o700);
   }
   const tier = await fetchTier(gateway);
   const overlay = buildOverlay({
@@ -255,13 +303,41 @@ export const applyHermes = async (opts?: {
   const sourceCfg = parseConfig(
     join(hermesProfileDir(sourceName), "config.yaml"),
   );
-  const existing = parseConfig(join(dest, "config.yaml"));
+  const destConfigPath = join(dest, "config.yaml");
+  const existing = readProfileConfig(destConfigPath);
+  if (existing === null) {
+    // FS-12: a config that fails to parse must never be rewritten from {} —
+    // that would silently drop the user's profile. Back it up (0600), then
+    // refuse and tell the user how to repair.
+    if (created) {
+      // This run just cloned the profile: its config is only a copy of the
+      // SOURCE profile's config, which stays untouched. Remove the clone, or
+      // the next run sees `openllm` taken, picks the collision name and
+      // clones the same broken config again.
+      const sourceConfig = join(hermesProfileDir(sourceName), "config.yaml");
+      rmSync(dest, { recursive: true, force: true });
+      process.stderr.write(
+        `Refusing to install: ${sourceConfig} does not parse as YAML.\n` +
+          `  repair it, then re-run \`openllm hermes install\`. Nothing was changed.\n`,
+      );
+      return { code: 1 };
+    }
+    const backup = backupUnparseableConfig(destConfigPath);
+    process.stderr.write(
+      `Refusing to rewrite ${destConfigPath}: it does not parse as YAML.\n` +
+        (backup !== null
+          ? `  the file was backed up to ${backup}\n`
+          : "  the backup could not be written — the file was left untouched\n") +
+        "  repair or remove it, then re-run `openllm hermes install`.\n",
+    );
+    return { code: 1 };
+  }
   // Source fills gaps; existing profile edits win on conflict; overlay last.
   const merged = deepMerge(
     deepMerge(sourceCfg, existing),
     overlay,
   ) as TJsonObject;
-  writeFileSync(join(dest, "config.yaml"), serializeYaml(merged), {
+  writeFileSync(destConfigPath, serializeYaml(merged), {
     mode: 0o600,
   });
   upsertEnvKey(join(dest, ".env"), "OPENLLM_API_KEY", gateway.apiKey);
