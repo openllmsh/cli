@@ -303,6 +303,31 @@ const profileBackupPath = (profileName: string): string => {
 const KEY_LINE = /^\s*(export\s+)?OPENLLM_API_KEY\s*=/;
 
 /**
+ * Write the redacted `.env` as a NEW regular file swapped atomically over
+ * the checked path — the checked path is never opened for writing, so a
+ * symlink swapped in after the `lstat` can never redirect the write into an
+ * external target.
+ */
+const writeRedactedEnv = (envPath: string, kept: string[]): boolean => {
+  const tmp = `${envPath}.${process.pid}.tmp`;
+  try {
+    writeFileSync(tmp, kept.join("\n").replace(/\n*$/, "\n"), {
+      mode: 0o600,
+      flag: "wx",
+    });
+    renameSync(tmp, envPath);
+    return true;
+  } catch {
+    try {
+      rmSync(tmp, { force: true });
+    } catch {
+      // best effort — a leftover temp is not the secret itself
+    }
+    return false;
+  }
+};
+
+/**
  * FSS-19: a preserved profile must not keep a copy of the API key. Strip the
  * `OPENLLM_API_KEY=` lines `install` wrote (any other keys in a cloned .env
  * are the user's own and stay). A .env symlink is never followed for writing:
@@ -313,6 +338,20 @@ const KEY_LINE = /^\s*(export\s+)?OPENLLM_API_KEY\s*=/;
  */
 const redactProfileBackupKey = (backupDir: string): boolean => {
   const envPath = join(backupDir, ".env");
+  // Verified-absent: the path is gone, or it is a REGULAR non-symlink file
+  // with no key line. Anything else fails the check loudly.
+  const verifiedAbsent = (): boolean => {
+    try {
+      const stat = lstatSync(envPath);
+      return (
+        stat.isFile() &&
+        !stat.isSymbolicLink() &&
+        !KEY_LINE.test(readFileSync(envPath, "utf-8"))
+      );
+    } catch {
+      return !existsSync(envPath);
+    }
+  };
   try {
     let stat: ReturnType<typeof lstatSync>;
     try {
@@ -325,11 +364,9 @@ const redactProfileBackupKey = (backupDir: string): boolean => {
       rmSync(envPath, { force: true });
       const kept = target.split("\n").filter((line) => !KEY_LINE.test(line));
       if (!kept.every((line) => line.trim() === "")) {
-        writeFileSync(envPath, kept.join("\n").replace(/\n*$/, "\n"), {
-          mode: 0o600,
-        });
+        return writeRedactedEnv(envPath, kept) && verifiedAbsent();
       }
-      return !KEY_LINE.test(readFileSync(envPath, "utf-8"));
+      return verifiedAbsent();
     }
     if (!stat.isFile()) {
       rmSync(envPath, { force: true, recursive: true });
@@ -340,12 +377,9 @@ const redactProfileBackupKey = (backupDir: string): boolean => {
       .filter((line) => !KEY_LINE.test(line));
     if (kept.every((line) => line.trim() === "")) {
       rmSync(envPath, { force: true });
-      return !existsSync(envPath);
+      return verifiedAbsent();
     }
-    writeFileSync(envPath, kept.join("\n").replace(/\n*$/, "\n"), {
-      mode: 0o600,
-    });
-    return !KEY_LINE.test(readFileSync(envPath, "utf-8"));
+    return writeRedactedEnv(envPath, kept) && verifiedAbsent();
   } catch {
     try {
       rmSync(envPath, { force: true });
