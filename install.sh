@@ -678,6 +678,8 @@ env_lock_steal() {
   [ -n "$ino_before" ] || return 0  # vanished — the outer acquire retries
   before_owner="$(cat "$lockdir/owner" 2>/dev/null || true)"
   marker="$lockdir/steal.$$.$ENV_LOCK_NONCE"
+  # Do not put a marker in a successor that took this path.
+  [ "$(env_lock_path_ino "$lockdir")" = "$ino_before" ] || return 0
   if ! (set -C; : > "$marker") 2>/dev/null; then
     # A plain FILE at the lock path can never gain an owner record — park
     # it like a stale dir. Anything else (dir vanished) retries at the top.
