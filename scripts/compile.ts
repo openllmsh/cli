@@ -33,6 +33,8 @@ import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { gzipSync } from "node:zlib";
 import { $ } from "bun";
+// Build-time only: the same MAC-2 guard the daemon compile uses.
+import { assertDarwinSafeBunRuntime } from "../../daemon/release-types";
 import type { TCliTarget } from "../release-types";
 import {
   CLI_COMPILE_TARGET,
@@ -189,6 +191,11 @@ const buildOne = async (
   target: string | null,
   cloudOrigin: string,
 ): Promise<string> => {
+  // MAC-2 guard on every compile path (round-3 audit P2).
+  assertDarwinSafeBunRuntime(
+    [target ?? (process.platform === "darwin" ? "darwin-host" : "")],
+    Bun.version,
+  );
   // Bun appends .exe on Windows; gzip must read that actual emitted path.
   const outfile =
     target === null
