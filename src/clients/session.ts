@@ -138,15 +138,27 @@ const RUN_MANIFEST_KIND = "openllm-run/v1";
  * Proof a dead run dir's contents were persisted to the real config dir.
  * The reaper deletes ONLY dirs carrying this marker (or dirs it just
  * restored successfully itself) — a failed restore keeps the dir, so the
- * next launch tries again instead of losing the data (SH-1).
+ * next launch tries again instead of losing the data (SH-1). The marker is
+ * BINDING, not just present: its content must equal the run's manifest
+ * `nonce`, so a vendor file that happens to carry the same name never
+ * authorizes a deletion (codex P2 — a bare `openllm-restored-ok` file used
+ * to be enough). Only the restore code below ever writes it.
  */
 const RUN_RESTORED_OK_NAME = "openllm-restored-ok";
+const RUN_MANIFEST_NONCE_RE = /^[0-9a-f]{32}$/;
 
 type TRunManifest = {
   readonly clientId: string;
   readonly pid: number;
   readonly mirrorDir: string | null;
   readonly ownedPaths: readonly string[];
+  /**
+   * Per-run unguessable token minted at materialize time. The restored-ok
+   * marker is honored only when its content equals this nonce — a marker
+   * without a manifest nonce (pre-nonce builds, or a forged file) is not
+   * proof of anything and the dir goes through a real restore instead.
+   */
+  readonly nonce: string | null;
 };
 
 const readRunManifest = (runDir: string): TRunManifest | null => {
@@ -175,6 +187,10 @@ const readRunManifest = (runDir: string): TRunManifest | null => {
     pid: m.pid as number,
     mirrorDir: typeof m.mirrorDir === "string" ? m.mirrorDir : null,
     ownedPaths: m.ownedPaths as string[],
+    nonce:
+      typeof m.nonce === "string" && RUN_MANIFEST_NONCE_RE.test(m.nonce)
+        ? m.nonce
+        : null,
   };
 };
 
@@ -189,6 +205,7 @@ const writeRunManifest = (
     pid: process.pid,
     mirrorDir: plan.mirrorDir === undefined ? null : expandHome(plan.mirrorDir),
     ownedPaths: [...planOwnedPaths(plan)],
+    nonce: randomBytes(16).toString("hex"),
   };
   writeFileSync(
     join(runDir, RUN_MANIFEST_NAME),
@@ -198,84 +215,377 @@ const writeRunManifest = (
 };
 
 /**
- * Reap one dead-pid run dir. Returns true when the dir is gone or emptied
- * to the point only plan-owned entries remain. Never deletes unrestored
- * vendor data: a manifest-less or failed-restore dir is KEPT (SH-1).
+ * True when every entry in the run dir is disposable: plan-owned at any
+ * depth, or a symlink (whose TARGET lives outside the run dir, so the link
+ * itself holds no data). Anything else is unrestored vendor data and the
+ * dir must be kept.
  */
-const reapStaleRunDir = async (dir: string): Promise<boolean> => {
-  let entries: string[];
-  try {
-    entries = readdirSync(dir);
-  } catch {
-    return true; // unreadable/gone — nothing to preserve
-  }
-  if (entries.includes(RUN_RESTORED_OK_NAME)) {
+const runDirOnlyDisposable = (
+  dir: string,
+  entries: readonly string[],
+  owned: ReadonlySet<string>,
+): boolean => {
+  const onlyOwned = (abs: string, rel: string): boolean => {
+    if (owned.has(rel)) return true;
+    let stat: ReturnType<typeof lstatSync>;
     try {
-      rmSync(dir, { recursive: true, force: true });
+      stat = lstatSync(abs);
     } catch {
-      // best-effort
+      return true; // vanished mid-check — nothing left to preserve
     }
-    return true;
-  }
-  const manifest = readRunManifest(dir);
-  if (manifest === null) {
-    // No manifest: written by a pre-SH-1 build or a crashed materialize.
-    // The plan-owned set is unknowable, so nothing can be proven safe to
-    // delete — keep the dir for manual recovery.
-    return false;
-  }
-  if (manifest.mirrorDir !== null) {
-    const outcome = await restoreMirrorEntries(
-      manifest.mirrorDir,
-      dir,
-      manifest.ownedPaths,
+    if (stat.isSymbolicLink()) return true;
+    if (!stat.isDirectory()) return false;
+    let children: string[];
+    try {
+      children = readdirSync(abs);
+    } catch {
+      return false; // unreadable dir — cannot prove it empty of data
+    }
+    return children.every((child) =>
+      onlyOwned(join(abs, child), `${rel}/${child}`),
     );
-    if (!outcome.ok) return false;
-  } else {
-    // No mirror target: the run dir is pure plan content unless a stray
-    // vendor write landed — prove nothing non-owned survives before
-    // deleting. A symlink's TARGET lives outside the run dir, so links are
-    // always safe to drop; an owned rel path is safe at any depth.
-    const owned = new Set(manifest.ownedPaths);
-    const onlyOwned = (abs: string, rel: string): boolean => {
-      if (owned.has(rel)) return true;
-      let stat: ReturnType<typeof lstatSync>;
-      try {
-        stat = lstatSync(abs);
-      } catch {
-        return true; // vanished mid-check — nothing left to preserve
-      }
-      if (stat.isSymbolicLink()) return true;
-      if (!stat.isDirectory()) return false;
-      let children: string[];
-      try {
-        children = readdirSync(abs);
-      } catch {
-        return false; // unreadable dir — cannot prove it empty of data
-      }
-      return children.every((child) =>
-        onlyOwned(join(abs, child), `${rel}/${child}`),
-      );
-    };
-    if (!entries.every((entry) => onlyOwned(join(dir, entry), entry)))
-      return false;
-  }
+  };
+  return entries.every((entry) => onlyOwned(join(dir, entry), entry));
+};
+
+/**
+ * The restored-ok marker is honored only when it was written by THIS run's
+ * own restore: its content must equal the manifest nonce. A vendor file
+ * named `openllm-restored-ok` (or a marker left by a build that did not
+ * bind it to the run) fails this check and falls through to a real
+ * restore. A non-regular or oversized marker is never trusted.
+ */
+const restoredMarkerMatches = (dir: string, nonce: string): boolean => {
+  const markerPath = join(dir, RUN_RESTORED_OK_NAME);
   try {
-    // Marker first: if we crash between here and the rm, the next launch
-    // sees restored-ok and deletes without re-restoring.
-    writeFileSync(join(dir, RUN_RESTORED_OK_NAME), "ok\n", { mode: 0o600 });
-    rmSync(dir, { recursive: true, force: true });
-    return true;
+    const stat = lstatSync(markerPath);
+    if (!stat.isFile() || stat.size > 64) return false;
+    return readFileSync(markerPath, "utf8").trim() === nonce;
   } catch {
-    return true; // best-effort — the marker or next pass finishes it
+    return false;
   }
 };
 
 /**
+ * Per-run-dir restore bookkeeping, persisted NEXT to the dir as
+ * `.openllm-restore-state-<name>.json` so a restore can never move it into
+ * the user's real config dir and a crash mid-restore cannot lose the
+ * count. This is also the doctor-visible record: it says why a dead run
+ * dir still exists and what was tried. The file dies with its dir (the
+ * reaper removes it on delete and renames it on `kept-*` quarantine).
+ */
+const RUN_RESTORE_STATE_PREFIX = ".openllm-restore-state-";
+const RUN_RESTORE_STATE_SUFFIX = ".json";
+const RUN_RESTORE_STATE_KIND = "openllm-restore-state/v1";
+const RUN_RESTORE_STATE_RE = /^\.openllm-restore-state-(.+)\.json$/;
+
+/** Defaults: a few spread-out retries, then the dir is left for manual
+ *  recovery. Env overrides exist for operators and deterministic tests. */
+const RUN_RESTORE_MAX_ATTEMPTS = 5;
+const RUN_RESTORE_BACKOFF_BASE_MS = 60_000;
+const RUN_RESTORE_BACKOFF_CAP_MS = 6 * 3_600_000;
+/** Restore work (lock + moves) is the expensive part of a launch pass; cap
+ *  how many dirs get one per launch so N permanently-failing runs cannot
+ *  stall startup without bound. */
+const REAP_MAX_RESTORES_PER_PASS = 8;
+
+const envBoundedInt = (name: string, fallback: number): number => {
+  const raw = Number(process.env[name]);
+  return Number.isSafeInteger(raw) && raw >= 0 ? raw : fallback;
+};
+
+const runRestoreMaxAttempts = (): number =>
+  Math.max(
+    1,
+    envBoundedInt("OPENLLM_RUN_RESTORE_MAX_ATTEMPTS", RUN_RESTORE_MAX_ATTEMPTS),
+  );
+
+const runRestoreBackoffMs = (attempts: number): number => {
+  const base = envBoundedInt(
+    "OPENLLM_RUN_RESTORE_BACKOFF_MS",
+    RUN_RESTORE_BACKOFF_BASE_MS,
+  );
+  return Math.min(
+    base * 2 ** Math.max(0, attempts - 1),
+    RUN_RESTORE_BACKOFF_CAP_MS,
+  );
+};
+
+const reapMaxRestoresPerPass = (): number =>
+  Math.max(
+    1,
+    envBoundedInt("OPENLLM_RUN_REAP_MAX_RESTORES", REAP_MAX_RESTORES_PER_PASS),
+  );
+
+type TRestoreStateRecord = {
+  readonly attempts: number;
+  readonly firstFailedAt: string | null;
+  readonly lastFailedAt: string | null;
+  readonly lastFailedAtMs: number | null;
+  readonly lastError: string | null;
+  readonly suspended: boolean;
+  readonly reason: string | null;
+};
+
+const restoreStatePath = (clientRoot: string, dirName: string): string =>
+  join(
+    clientRoot,
+    `${RUN_RESTORE_STATE_PREFIX}${dirName}${RUN_RESTORE_STATE_SUFFIX}`,
+  );
+
+const readRestoreState = (path: string): TRestoreStateRecord | null => {
+  try {
+    const parsed: unknown = JSON.parse(readFileSync(path, "utf8"));
+    if (typeof parsed !== "object" || parsed === null) return null;
+    const r = parsed as Record<string, unknown>;
+    if (r.kind !== RUN_RESTORE_STATE_KIND) return null;
+    if (!Number.isSafeInteger(r.attempts) || (r.attempts as number) < 0)
+      return null;
+    return {
+      attempts: r.attempts as number,
+      firstFailedAt:
+        typeof r.firstFailedAt === "string" ? r.firstFailedAt : null,
+      lastFailedAt: typeof r.lastFailedAt === "string" ? r.lastFailedAt : null,
+      lastFailedAtMs:
+        typeof r.lastFailedAtMs === "number" &&
+        Number.isFinite(r.lastFailedAtMs)
+          ? r.lastFailedAtMs
+          : null,
+      lastError: typeof r.lastError === "string" ? r.lastError : null,
+      suspended: r.suspended === true,
+      reason: typeof r.reason === "string" ? r.reason : null,
+    };
+  } catch {
+    return null;
+  }
+};
+
+/** Write the record atomically (tmp + rename) so a crash cannot tear it. */
+const writeRestoreState = (path: string, record: TRestoreStateRecord): void => {
+  const tmp = `${path}.${process.pid}.tmp`;
+  try {
+    writeFileSync(
+      tmp,
+      `${JSON.stringify({ kind: RUN_RESTORE_STATE_KIND, ...record })}\n`,
+      { mode: 0o600 },
+    );
+    renameSync(tmp, path);
+  } catch {
+    try {
+      rmSync(tmp, { force: true });
+    } catch {
+      // best-effort
+    }
+  }
+};
+
+const removeRestoreState = (path: string): void => {
+  try {
+    rmSync(path, { force: true });
+  } catch {
+    // best-effort
+  }
+};
+
+type TReapOutcome = {
+  /** The dir is gone (deleted, or never readable). */
+  readonly gone: boolean;
+  /** A real restore attempt ran — counts against the per-pass budget. */
+  readonly attempted: boolean;
+};
+
+const REAP_GONE: TReapOutcome = { gone: true, attempted: false };
+const REAP_KEPT: TReapOutcome = { gone: false, attempted: false };
+const REAP_ATTEMPTED: TReapOutcome = { gone: false, attempted: true };
+const REAP_RESTORED: TReapOutcome = { gone: true, attempted: true };
+
+/**
+ * Mark a run dir's restore permanently suspended: the record (kept beside
+ * the dir) is the doctor-visible explanation, and a stderr note names the
+ * recovery path. The dir itself is retained — data is never deleted on a
+ * failure path (SH-1).
+ */
+const suspendStaleRunDir = (
+  clientRoot: string,
+  name: string,
+  record: TRestoreStateRecord,
+): void => {
+  writeRestoreState(restoreStatePath(clientRoot, name), {
+    ...record,
+    suspended: true,
+    reason: `restore failed ${record.attempts} times; kept for manual recovery`,
+  });
+  process.stderr.write(
+    `[openllm] restore of ${join(clientRoot, name)} failed ${record.attempts} times; ` +
+      `kept for manual recovery (see ${restoreStatePath(clientRoot, name)})\n`,
+  );
+};
+
+/**
+ * Reap one dead-pid run dir. Never deletes unrestored vendor data: a
+ * manifest-less, suspended or failed-restore dir is KEPT (SH-1). A dir is
+ * deleted only when a manifest-nonce-bound restored-ok marker proves an
+ * earlier pass persisted everything (and nothing non-owned appeared
+ * since), or this pass restores it cleanly. Failed restores are recorded
+ * per dir with a backoff and a hard attempt cap — a permanently failing
+ * restore is retried a bounded number of times, then suspended for manual
+ * recovery instead of stalling every launch forever.
+ */
+const reapStaleRunDir = async (
+  clientRoot: string,
+  name: string,
+  budget: { remaining: number },
+): Promise<TReapOutcome> => {
+  const dir = join(clientRoot, name);
+  let entries: string[];
+  try {
+    entries = readdirSync(dir);
+  } catch {
+    return REAP_GONE; // unreadable/gone — nothing to preserve
+  }
+  const manifest = readRunManifest(dir);
+  if (manifest === null) {
+    // No manifest: written by a pre-SH-1 build or a crashed materialize.
+    // The plan-owned set is unknowable and no marker can be verified, so
+    // nothing can be proven safe to delete — keep the dir for manual
+    // recovery.
+    return REAP_KEPT;
+  }
+  // The manifest plus the marker name are ours regardless of what an older
+  // or partial manifest recorded.
+  const owned = new Set([
+    ...manifest.ownedPaths,
+    RUN_MANIFEST_NAME,
+    RUN_RESTORED_OK_NAME,
+  ]);
+  if (
+    manifest.nonce !== null &&
+    entries.includes(RUN_RESTORED_OK_NAME) &&
+    restoredMarkerMatches(dir, manifest.nonce) &&
+    runDirOnlyDisposable(dir, entries, owned)
+  ) {
+    try {
+      rmSync(dir, { recursive: true, force: true });
+    } catch {
+      // best-effort — the marker still proves it next pass
+    }
+    removeRestoreState(restoreStatePath(clientRoot, name));
+    return REAP_GONE;
+  }
+  const statePath = restoreStatePath(clientRoot, name);
+  const record = readRestoreState(statePath);
+  if (record?.suspended === true) return REAP_KEPT;
+  const attempts = record?.attempts ?? 0;
+  if (attempts >= runRestoreMaxAttempts()) {
+    suspendStaleRunDir(
+      clientRoot,
+      name,
+      record ?? {
+        attempts,
+        firstFailedAt: null,
+        lastFailedAt: null,
+        lastFailedAtMs: null,
+        lastError: null,
+        suspended: false,
+        reason: null,
+      },
+    );
+    return REAP_KEPT;
+  }
+  if (
+    record !== null &&
+    record.lastFailedAtMs !== null &&
+    Date.now() - record.lastFailedAtMs < runRestoreBackoffMs(attempts)
+  ) {
+    return REAP_KEPT; // backoff — a later launch retries
+  }
+  if (manifest.mirrorDir === null) {
+    // No mirror target: the run dir is pure plan content unless a stray
+    // vendor write landed — prove nothing non-owned survives before
+    // deleting.
+    if (!runDirOnlyDisposable(dir, entries, owned)) return REAP_KEPT;
+    try {
+      // Marker first: if we crash between here and the rm, the next launch
+      // sees a verified restored-ok and deletes without re-checking.
+      if (manifest.nonce !== null) {
+        writeFileSync(join(dir, RUN_RESTORED_OK_NAME), `${manifest.nonce}\n`, {
+          mode: 0o600,
+        });
+      }
+      rmSync(dir, { recursive: true, force: true });
+      removeRestoreState(statePath);
+      return REAP_GONE;
+    } catch {
+      return REAP_GONE; // best-effort — the marker or next pass finishes it
+    }
+  }
+  if (budget.remaining <= 0) return REAP_KEPT;
+  budget.remaining -= 1;
+  const attemptNo = attempts + 1;
+  const nowMs = Date.now();
+  const base: TRestoreStateRecord = {
+    attempts: attemptNo,
+    firstFailedAt: record?.firstFailedAt ?? new Date(nowMs).toISOString(),
+    lastFailedAt: new Date(nowMs).toISOString(),
+    lastFailedAtMs: nowMs,
+    lastError: "attempt in progress",
+    suspended: false,
+    reason: null,
+  };
+  // Count the attempt BEFORE restoring: a crash mid-restore still leaves a
+  // record that this dir consumed a try.
+  writeRestoreState(statePath, base);
+  let outcome: TRestoreOutcome;
+  try {
+    outcome = await restoreMirrorEntries(manifest.mirrorDir, dir, owned);
+  } catch (error) {
+    outcome = {
+      ok: false,
+      moved: [],
+      skipped: [],
+      problems: [error instanceof Error ? error.message : String(error)],
+    };
+  }
+  if (!outcome.ok) {
+    const failed: TRestoreStateRecord = {
+      ...base,
+      lastError: outcome.problems.slice(0, 4).join("; ") || "restore failed",
+    };
+    if (attemptNo >= runRestoreMaxAttempts()) {
+      suspendStaleRunDir(clientRoot, name, failed);
+    } else {
+      writeRestoreState(statePath, failed);
+    }
+    return REAP_ATTEMPTED;
+  }
+  try {
+    // Marker first: if we crash between here and the rm, the next launch
+    // sees a verified restored-ok and deletes without re-restoring.
+    if (manifest.nonce !== null) {
+      writeFileSync(join(dir, RUN_RESTORED_OK_NAME), `${manifest.nonce}\n`, {
+        mode: 0o600,
+      });
+    }
+    rmSync(dir, { recursive: true, force: true });
+  } catch {
+    // best-effort — the marker or next pass finishes it
+  }
+  removeRestoreState(statePath);
+  return REAP_RESTORED;
+};
+
+/** The run-dir name a state record belongs to, or null for other files. */
+const restoreStateTarget = (entryName: string): string | null =>
+  RUN_RESTORE_STATE_RE.exec(entryName)?.[1] ?? null;
+
+/**
  * Reap run dirs from launches that crashed without cleaning up. Best-effort
  * and conservative: only directories whose recorded pid is dead are
- * touched, and those are RESTORED FIRST — a dir is deleted only when it is
- * marked `restored-ok` or this pass just restored it cleanly (SH-1).
+ * touched, and those are RESTORED FIRST — a dir is deleted only when a
+ * verified `restored-ok` marker proves an earlier pass persisted it, or
+ * this pass just restored it cleanly (SH-1). Restore work is bounded per
+ * pass so a pile of unrecoverable dirs cannot stall a launch, and each
+ * dir's failures are bounded by a persisted backoff + cap.
  */
 const reapStaleRuns = async (clientRoot: string): Promise<void> => {
   let entries: string[];
@@ -284,12 +594,22 @@ const reapStaleRuns = async (clientRoot: string): Promise<void> => {
   } catch {
     return;
   }
+  const budget = { remaining: reapMaxRestoresPerPass() };
   for (const name of entries) {
     // `<pid>` or the `<pid>-<hex>` suffix createRunDir uses when a recycled
     // pid collides with an unreaped dir; `kept-*` is quarantined on purpose
     // and only manual recovery touches it.
     const pidMatch = /^(\d+)(?:-[0-9a-f]{8})?$/.exec(name);
-    if (pidMatch === null) continue;
+    if (pidMatch === null) {
+      // Sweep a state record whose run dir is gone (deleted by hand or
+      // renamed without the record). A record whose dir exists — even a
+      // `kept-*` one — is the doctor-visible trail, so it stays.
+      const target = restoreStateTarget(name);
+      if (target !== null && !existsSync(join(clientRoot, target))) {
+        removeRestoreState(join(clientRoot, name));
+      }
+      continue;
+    }
     const pid = Number.parseInt(pidMatch[1] as string, 10);
     if (!Number.isSafeInteger(pid) || pid <= 0 || pid === process.pid) continue;
     try {
@@ -301,7 +621,7 @@ const reapStaleRuns = async (clientRoot: string): Promise<void> => {
       if (fsErrorCode(error) !== "ESRCH") continue;
     }
     try {
-      await reapStaleRunDir(join(clientRoot, name));
+      await reapStaleRunDir(clientRoot, name, budget);
     } catch {
       // best-effort — a failed restore keeps the dir for the next launch
     }
@@ -327,21 +647,29 @@ const createRunDir = async (clientId: string): Promise<string> => {
     // name, and never delete it outright (SH-1).
     let recovered = false;
     try {
-      recovered = await reapStaleRunDir(dir);
+      recovered = (
+        await reapStaleRunDir(clientRoot, String(process.pid), {
+          remaining: reapMaxRestoresPerPass(),
+        })
+      ).gone;
     } catch {
       recovered = false;
     }
     if (!recovered) {
       // Keep the data under a name the numeric-pid scan skips: it stays
-      // for manual recovery rather than blocking this launch.
+      // for manual recovery rather than blocking this launch. The restore
+      // record moves with the dir so the doctor-visible trail still pairs.
+      const keptName = `kept-${process.pid}-${randomBytes(4).toString("hex")}`;
       try {
-        renameSync(
-          dir,
-          join(
-            clientRoot,
-            `kept-${process.pid}-${randomBytes(4).toString("hex")}`,
-          ),
-        );
+        renameSync(dir, join(clientRoot, keptName));
+        try {
+          renameSync(
+            restoreStatePath(clientRoot, String(process.pid)),
+            restoreStatePath(clientRoot, keptName),
+          );
+        } catch {
+          // no record to carry — fine
+        }
       } catch {
         // rename failed — fall back to a suffixed run dir name
       }
@@ -2017,6 +2345,21 @@ export const runSessionClient = async (
           planOwnedPaths(plan),
         );
         if (outcome.ok) {
+          // Drop the nonce-bound marker first: a crash between here and the
+          // rm leaves the next launch a proof it can verify and trust
+          // without re-restoring. Only restore code ever writes it.
+          const manifest = readRunManifest(runDir);
+          if (manifest !== null && manifest.nonce !== null) {
+            try {
+              writeFileSync(
+                join(runDir, RUN_RESTORED_OK_NAME),
+                `${manifest.nonce}\n`,
+                { mode: 0o600 },
+              );
+            } catch {
+              // best-effort — an unmarked dir just gets re-restored
+            }
+          }
           rmSync(runDir, { recursive: true, force: true });
         } else if (code === 0) {
           code = 1;
