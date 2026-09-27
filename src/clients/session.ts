@@ -43,6 +43,7 @@ import crossSpawnModule from "cross-spawn";
 import cmdEscapeModule from "cross-spawn/lib/util/escape.js";
 import type { TProcessStartIdentityReader } from "../../../tunnel/session/local-runtime";
 import {
+  legacyProcessStartIdentity,
   processIdentityStatus,
   processStartCommand,
   processStartIdentity,
@@ -289,6 +290,11 @@ const RUN_RESTORE_BACKOFF_CAP_MS = 6 * 3_600_000;
  *  stall startup without bound. */
 const REAP_MAX_RESTORES_PER_PASS = 8;
 
+/** A manifest-less dead run dir is kept only this long for manual recovery —
+ *  past the bound, retention is unbounded growth for a dir nothing can
+ *  restore. */
+const RUN_MANIFESTLESS_KEEP_MS = 7 * 24 * 60 * 60 * 1_000;
+
 const envBoundedInt = (name: string, fallback: number): number => {
   const raw = Number(process.env[name]);
   return Number.isSafeInteger(raw) && raw >= 0 ? raw : fallback;
@@ -316,6 +322,9 @@ const reapMaxRestoresPerPass = (): number =>
     1,
     envBoundedInt("OPENLLM_RUN_REAP_MAX_RESTORES", REAP_MAX_RESTORES_PER_PASS),
   );
+
+const runManifestlessKeepMs = (): number =>
+  envBoundedInt("OPENLLM_RUN_MANIFESTLESS_KEEP_MS", RUN_MANIFESTLESS_KEEP_MS);
 
 type TRestoreStateRecord = {
   readonly attempts: number;
@@ -447,9 +456,20 @@ const reapStaleRunDir = async (
   if (manifest === null) {
     // No manifest: written by a pre-SH-1 build or a crashed materialize.
     // The plan-owned set is unknowable and no marker can be verified, so
-    // nothing can be proven safe to delete — keep the dir for manual
-    // recovery.
-    return REAP_KEPT;
+    // nothing can be proven safe to delete — kept for manual recovery, but
+    // BOUNDED: past the keep window a dir nothing can restore is just
+    // unbounded growth, so it is reaped like any other dead residue.
+    const newestMs = newestMtimeMs(dir);
+    // 0 means nothing inside could be stated — unverifiable stays kept.
+    if (newestMs === 0 || Date.now() - newestMs < runManifestlessKeepMs())
+      return REAP_KEPT;
+    try {
+      rmSync(dir, { recursive: true, force: true });
+    } catch {
+      // best-effort — a failed delete is retried by the next launch
+    }
+    removeRestoreState(restoreStatePath(clientRoot, name));
+    return REAP_GONE;
   }
   // The manifest plus the marker name are ours regardless of what an older
   // or partial manifest recorded.
@@ -1019,6 +1039,43 @@ const boundedProcessStartIdentity = (
   return value || undefined;
 };
 
+/**
+ * The same bounded probe in the LEGACY `ps lstart` format — the shape older
+ * owner records carry. `processIdentityStatus`'s mixed-format bridge re-reads
+ * the pid in the record's own format; an unbounded reader there would let a
+ * slow `ps` outspend the caller's remaining restore-lock budget (SH-2).
+ */
+const boundedLegacyProcessStartIdentity = (
+  pid: number,
+  budgetMs: number,
+): string | null | undefined => {
+  if (identityProbeForTests !== null)
+    return identityProbeForTests(pid, budgetMs);
+  if (budgetMs <= 0) return undefined;
+  // Windows reads FILETIME through non-blocking FFI — no helper spawn.
+  if (process.platform === "win32") return legacyProcessStartIdentity(pid);
+  const [bin, ...args] = processStartCommand(pid);
+  if (bin === undefined) return undefined;
+  const result = spawnForProbe(bin, args, {
+    encoding: "utf8",
+    timeout: Math.max(1, Math.min(RESTORE_PROBE_MAX_MS, Math.floor(budgetMs))),
+    windowsHide: true,
+    env: { ...process.env, LC_ALL: "C", LANG: "C", TZ: "UTC" },
+  });
+  if (result.error) return undefined;
+  if (result.status !== 0) {
+    try {
+      process.kill(pid, 0);
+      return undefined;
+    } catch (error) {
+      if (fsErrorCode(error) === "ESRCH") return null;
+      return undefined;
+    }
+  }
+  const value = result.stdout.trim();
+  return value || undefined;
+};
+
 type TRestoreLockOwner = {
   readonly pid: number;
   /** Process-start identity; null means the acquirer could not probe itself. */
@@ -1326,8 +1383,11 @@ const restoreLockDiagnosis = (
   if (owner.start !== null) {
     // Identity-verified: "dead" covers a gone pid AND a live pid whose
     // start time proves the recorded owner is dead (pid reuse).
-    const status = processIdentityStatus(owner.pid, owner.start, (pid) =>
-      boundedProcessStartIdentity(pid, budgetMs),
+    const status = processIdentityStatus(
+      owner.pid,
+      owner.start,
+      (pid) => boundedProcessStartIdentity(pid, budgetMs),
+      (pid) => boundedLegacyProcessStartIdentity(pid, budgetMs),
     );
     if (status === "dead")
       return { verdict: "stale", unproven: false, ino: stat.ino };
@@ -1344,6 +1404,14 @@ let restoreLockStealCounter = 0;
 /** The creator pid embedded in a `<lock>.stealing-<pid>-<nonce>` marker. */
 const restoreStealMarkerPid = (name: string): number | null => {
   const match = RESTORE_STEAL_MARKER_RE.exec(name);
+  if (match === null) return null;
+  const pid = Number.parseInt(match[1] ?? "", 10);
+  return Number.isSafeInteger(pid) && pid > 0 ? pid : null;
+};
+
+/** The creator pid embedded in a `<lock>.rel-<pid>-<ms>-<seq>` quarantine. */
+const restoreRelQuarantinePid = (name: string): number | null => {
+  const match = /^\.openllm-restore\.lock\.rel-(\d+)-\d+-\d+$/.exec(name);
   if (match === null) return null;
   const pid = Number.parseInt(match[1] ?? "", 10);
   return Number.isSafeInteger(pid) && pid > 0 ? pid : null;
@@ -1573,8 +1641,11 @@ const gcRestoreLockQuarantine = (realDir: string): void => {
       // owner — it is parked here only because a successor won the live path
       // mid-repair. Revalidate before deleting: a proven-live owner is never
       // reaped, and gets its lock back when the live path has freed up.
-      // The .rel-* exception: an entry still carrying OUR pid is our own
-      // released record — that one is residue, safe to reap like any other.
+      // The .rel-* exception: an entry OUR release created AND still
+      // carrying OUR record is released residue — safe to reap like any
+      // other. A `.rel-*` made by ANOTHER pid that captured OUR live lock is
+      // not residue: it still holds a live owner's record, so it goes
+      // through the same revalidate-then-restore path as a steal quarantine.
       const isStealQuarantine = name.startsWith(RESTORE_QUARANTINE_PREFIX);
       const isReleaseQuarantine = name.startsWith(
         RESTORE_REL_QUARANTINE_PREFIX,
@@ -1584,7 +1655,10 @@ const gcRestoreLockQuarantine = (realDir: string): void => {
           ? (readRestoreLockOwner(entry) ?? readRestoreLockTmpOwner(entry))
           : null;
         const ownReleasedLock =
-          relOwner !== null && relOwner.pid === process.pid;
+          relOwner !== null &&
+          relOwner.pid === process.pid &&
+          relOwner.nonce !== null &&
+          restoreRelQuarantinePid(name) === process.pid;
         if (!ownReleasedLock) {
           const diagnosis = restoreLockDiagnosis(
             entry,
@@ -1735,6 +1809,12 @@ const acquireRestoreLock = async (
           } catch {
             // a restore raced the dir out from under us — leave it
           }
+          verdict = "held";
+        } else if (createdIno === null) {
+          // The dir's inode could not be proven: the name may already sit on
+          // a successor's dir, where a blind publish's rename would stamp
+          // over the successor's record. Never write blind — the dir stays
+          // as-is and the stale-lock path re-judges what is actually there.
           verdict = "held";
         } else {
           restorePublishGapHookForTests?.(lockPath);
