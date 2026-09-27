@@ -405,9 +405,25 @@ fi
 # only `owner.tmp.*`/`steal.*` residue (or empty) or a complete marked
 # owner record.
 #
-# Release is `mv .lock.d .lock.rel.<pid>.<nonce>` first, then the record's
-# nonce is verified before deleting — a holder whose lock was stolen or
-# replaced finds a successor's record and puts it back instead of deleting.
+# The publisher's veto is bound to the dir GENERATION, not the path: the
+# inode of the just-`mkdir`'d dir is captured at acquire and re-stat'd
+# after the record lands. A different inode — or a vanished dir — means
+# this generation was quarantined and the path re-taken by a successor, so
+# the publish drops its own record instead of writing into the
+# successor's dir. A fresh unmarked dir is immovable (never stale, and a
+# release only moves a dir that reads as its own), so the inode captured
+# right after `mkdir` can only be ours.
+#
+# Release first reads the owner AT the live path and moves `.lock.d` to
+# `.lock.rel.<pid>.<nonce>` ONLY when that record is marked with our nonce
+# — a foreign marked owner (a successor that re-took the path after our
+# dir was stolen) is never touched. The captured dir is then verified
+# inside the quarantine: our nonce means delete; a foreign record means
+# the path was swapped mid-move and the dir is put back NO-REPLACE — a
+# fresh `mkdir` plus a verbatim copy of its flat files. `mv` could
+# silently replace a successor's just-`mkdir`'d (still empty) dir that
+# landed in the check->move gap; `mkdir` fails outright and the captured
+# dir stays parked for the sweep instead.
 #
 # The pre-dir `.env.lock` FILE is still honoured for one release: HELD
 # only inside the bounded orphan window — while a recorded pid is alive or
@@ -707,12 +723,14 @@ env_lock_legacy_held() {
 # and its path re-taken by a successor, and `mv` would silently stamp over
 # the successor's record. `ln` fails outright on an existing owner; the
 # noclobber create carries the same guarantee where hardlinks do not work.
-# rc 0 = published AND the live record still carries OUR nonce (the dir may
-# be swapped even after a successful link — verify before believing the
-# lock is held); 1 = did not acquire, the caller retries from the top;
-# 2 = the tmp write itself failed, the caller drops its own dir.
+# $2 = the inode of the just-`mkdir`'d dir, captured at acquire — empty
+# means unknown and only the marker veto applies. rc 0 = published AND the
+# live record still carries OUR nonce (the dir may be swapped even after a
+# successful link — verify before believing the lock is held);
+# 1 = did not acquire, the caller retries from the top; 2 = the tmp write
+# itself failed, the caller drops its own dir.
 env_lock_publish_owner() {
-  local lockdir="$1" start stolen marker
+  local lockdir="$1" want_ino="${2:-}" start stolen same_gen marker now_ino
   start="$(env_lock_start_identity "$$")"
   [ -n "$start" ] || start="-"
   printf 'kind=openllm-env-lock/v1 pid=%s start=%s nonce=%s\n' \
@@ -721,23 +739,36 @@ env_lock_publish_owner() {
   if ln "$lockdir/owner.tmp.$$" "$lockdir/owner" 2>/dev/null \
     || (set -C; cat "$lockdir/owner.tmp.$$" > "$lockdir/owner") 2>/dev/null; then
     rm -f "$lockdir/owner.tmp.$$" 2>/dev/null
-    # Steal veto — checked AFTER our record lands: a contender that
-    # committed to reclaiming this dir while we published left a `steal.*`
-    # marker inside (or the dir itself is gone, moved wholesale). Our hold
-    # is already lost, so drop OUR record — only when it is still ours —
-    # and report failure; the caller retries acquisition from the top.
+    # Generation + steal veto — checked AFTER our record lands: the dir at
+    # the path must still be the SAME generation we `mkdir`'d (inode match
+    # — a successor's dir carries no `steal.*` marker for OUR quarantined
+    # generation) AND hold no steal marker. stolen=1 means the hold is
+    # already lost: drop OUR record — only when it is still ours — and
+    # report failure; the caller retries acquisition from the top. An
+    # unknown want_ino falls back to the marker veto alone, exactly like
+    # the daemon (expectedIno undefined → same generation assumed).
     stolen=1
-    for marker in "$lockdir"/steal.*; do
-      if [ -e "$marker" ]; then stolen=0; break; fi
-    done
-    [ -d "$lockdir" ] || stolen=0
-    if [ "$stolen" = 0 ]; then
+    same_gen=0
+    if [ -d "$lockdir" ]; then
+      now_ino="$(env_lock_path_ino "$lockdir")"
+      if [ -z "$want_ino" ] \
+        || { [ -n "$now_ino" ] && [ "$now_ino" = "$want_ino" ]; }; then
+        same_gen=1
+        stolen=0
+        for marker in "$lockdir"/steal.*; do
+          if [ -e "$marker" ]; then stolen=1; break; fi
+        done
+      fi
+    fi
+    if [ "$stolen" = 1 ]; then
       env_lock_read_owner "$lockdir"
       if [ "$ENV_LOCK_OWNER_STATE" = "marked" ] \
         && [ "$ENV_LOCK_OWNER_NONCE" = "$ENV_LOCK_NONCE" ]; then
         rm -f "$lockdir/owner" 2>/dev/null
       fi
-      rmdir "$lockdir" 2>/dev/null || true
+      # Only OUR generation is ours to remove — a successor's dir at the
+      # same path is left for its real publisher.
+      [ "$same_gen" = 1 ] && rmdir "$lockdir" 2>/dev/null || true
       return 1
     fi
     env_lock_read_owner "$lockdir"
@@ -753,7 +784,7 @@ env_lock_publish_owner() {
 # success sets ENV_LOCK_DIR + ENV_LOCK_NONCE (env_lock_release consumes
 # them) and returns 0.
 env_lock_acquire() {
-  local envfile="$1" stem lockdir deadline attempts pub_rc
+  local envfile="$1" stem lockdir deadline attempts pub_rc ino
   stem="$envfile.lock"
   lockdir="$stem.d"
   deadline=$((SECONDS + ENV_LOCK_WAIT_SECS))
@@ -765,7 +796,10 @@ env_lock_acquire() {
   while [ "$SECONDS" -lt "$deadline" ]; do
     if ! env_lock_legacy_held "$stem"; then
       if mkdir "$lockdir" 2>/dev/null; then
-        env_lock_publish_owner "$lockdir"
+        # Pin the generation we created so the publish veto detects a
+        # quarantine+path-reuse, not only an in-place steal marker.
+        ino="$(env_lock_path_ino "$lockdir")"
+        env_lock_publish_owner "$lockdir" "$ino"
         pub_rc=$?
         if [ "$pub_rc" = 0 ]; then
           ENV_LOCK_DIR="$lockdir"
@@ -792,24 +826,49 @@ env_lock_acquire() {
   return 1
 }
 
-# Release OUR lock: move `.lock.d` to `.lock.rel.<pid>.<nonce>` first, then
-# delete only when the owner record inside is provably ours — a stolen or
-# replaced lock holds a successor's record, which is put back (no-replace)
-# instead of deleted.
+# Restore a quarantined lock dir at the live path — NO-REPLACE. `mv` would
+# silently replace a successor's just-`mkdir`'d (still empty) dir that
+# landed in the check->move gap; `mkdir` is the atomic no-replace claim —
+# a re-taken path leaves the captured dir parked for the sweep. On a
+# successful claim each regular file is copied back verbatim, then the
+# quarantine is drained.
+env_lock_restore_dir() {
+  local rel="$1" lockdir="$2" child
+  mkdir "$lockdir" 2>/dev/null || return 0
+  for child in "$rel"/*; do
+    [ -f "$child" ] || continue
+    cat "$child" > "$lockdir/${child##*/}" 2>/dev/null || true
+  done
+  for child in "$rel"/*; do rm -f "$child" 2>/dev/null || true; done
+  rmdir "$rel" 2>/dev/null || true
+  return 0
+}
+
+# Release OUR lock: move `.lock.d` to `.lock.rel.<pid>.<nonce>` ONLY when
+# the record at the live path still reads as ours — a foreign marked owner
+# (a successor that re-took the path after our dir was stolen) is never
+# touched. The captured dir is then verified inside the quarantine: our
+# nonce means delete; a foreign record means the path was swapped mid-move
+# and the dir is restored NO-REPLACE (env_lock_restore_dir), never
+# `mv`'d over a successor's fresh dir.
 env_lock_release() {
   local lockdir="${ENV_LOCK_DIR:-}" stem rel
   [ -n "$lockdir" ] || return 0
   ENV_LOCK_DIR=""
   stem="${lockdir%.d}"
   rel="$stem.rel.$$.$ENV_LOCK_NONCE"
-  if mv "$lockdir" "$rel" 2>/dev/null; then
-    env_lock_read_owner "$rel"
-    if [ "$ENV_LOCK_OWNER_STATE" = "marked" ] && [ "$ENV_LOCK_OWNER_NONCE" = "$ENV_LOCK_NONCE" ]; then
-      local child
-      for child in "$rel"/*; do rm -f "$child" 2>/dev/null || true; done
-      rmdir "$rel" 2>/dev/null || true
-    elif [ ! -e "$lockdir" ] && [ ! -L "$lockdir" ]; then
-      mv "$rel" "$lockdir" 2>/dev/null || true
+  env_lock_read_owner "$lockdir"
+  if [ "$ENV_LOCK_OWNER_STATE" = "marked" ] \
+    && [ "$ENV_LOCK_OWNER_NONCE" = "$ENV_LOCK_NONCE" ]; then
+    if mv "$lockdir" "$rel" 2>/dev/null; then
+      env_lock_read_owner "$rel"
+      if [ "$ENV_LOCK_OWNER_STATE" = "marked" ] && [ "$ENV_LOCK_OWNER_NONCE" = "$ENV_LOCK_NONCE" ]; then
+        local child
+        for child in "$rel"/*; do rm -f "$child" 2>/dev/null || true; done
+        rmdir "$rel" 2>/dev/null || true
+      else
+        env_lock_restore_dir "$rel" "$lockdir"
+      fi
     fi
   fi
   return 0
