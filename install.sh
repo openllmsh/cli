@@ -473,7 +473,13 @@ env_lock_pid_alive() {
   # "08" is invalid octal to [[ -gt ]] but decimal pid 8 to the daemon's
   # Number() — validate digits, convert through 10#, compare in decimal [ ].
   [[ "$1" =~ ^[0-9]+$ ]] || return 1
-  local pid=$((10#$1))
+  local pid=$((10#$1)) stat state
+  if [ -r "/proc/$pid/stat" ]; then
+    stat="$(cat "/proc/$pid/stat" 2>/dev/null || true)"
+    stat="${stat##*) }"
+    read -r state _ <<< "$stat"
+    [ "$state" = "Z" ] && return 1
+  fi
   [ "$pid" -gt 0 ] && kill -0 "$pid" 2>/dev/null
 }
 

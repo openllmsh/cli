@@ -350,8 +350,8 @@ const redactProfileBackupKey = (backupDir: string): boolean => {
         !stat.isSymbolicLink() &&
         !KEY_LINE.test(readFileSync(envPath, "utf-8"))
       );
-    } catch {
-      return !existsSync(envPath);
+    } catch (error) {
+      return (error as NodeJS.ErrnoException).code === "ENOENT";
     }
   };
   try {
@@ -369,8 +369,9 @@ const redactProfileBackupKey = (backupDir: string): boolean => {
     let stat: ReturnType<typeof lstatSync>;
     try {
       stat = lstatSync(envPath);
-    } catch {
-      return true;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return true;
+      return false;
     }
     if (stat.isSymbolicLink()) {
       const target = readFileSync(envPath, "utf-8");
@@ -382,8 +383,9 @@ const redactProfileBackupKey = (backupDir: string): boolean => {
       return verifiedAbsent();
     }
     if (!stat.isFile()) {
-      rmSync(envPath, { force: true, recursive: true });
-      return !existsSync(envPath);
+      // A directory or other non-regular entry is not a backup env file.
+      // Never remove it recursively. The caller must fail closed.
+      return false;
     }
     const kept = readFileSync(envPath, "utf-8")
       .split("\n")
@@ -394,12 +396,7 @@ const redactProfileBackupKey = (backupDir: string): boolean => {
     }
     return writeRedactedEnv(envPath, kept) && verifiedAbsent();
   } catch {
-    try {
-      rmSync(envPath, { force: true });
-      return !existsSync(envPath);
-    } catch {
-      return false;
-    }
+    return false;
   }
 };
 
