@@ -853,39 +853,124 @@ export const spawnSessionHost = (args: {
   }
 };
 
+/** Bounded SIGTERM grace before the group SIGKILL escalation (SH-4). */
+const HOST_KILL_TERM_GRACE_MS = 2_000;
+const HOST_KILL_POLL_MS = 50;
+/** Short post-SIGKILL settle so the next step never overlaps a dying tree. */
+const HOST_KILL_SETTLE_MS = 500;
+
+/** True while a process exists (zombies count until init/Bun reaps them). */
+const hostPidAlive = (pid: number): boolean => {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === "EPERM";
+  }
+};
+
+/** True while the detached leader's process group has any live member. */
+const hostGroupAlive = (pid: number): boolean => {
+  try {
+    process.kill(-pid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === "EPERM";
+  }
+};
+
+const killSleep = (ms: number): Promise<void> =>
+  new Promise<void>((resolve) => {
+    setTimeout(resolve, ms);
+  });
+
 /**
  * Kill a spawned-but-unusable host and its WHOLE tree (SH-4). On Windows the
  * spawned leader is a `cmd.exe` wrapper (or the ConPTY host) whose children
  * would survive a bare `proc.kill()` — `taskkill /T /F` takes the entire
- * tree. POSIX uses the direct kill; the detached child is its own process
- * group leader, so a group signal is tried first and a bare-pid kill is the
- * fallback.
+ * tree, and a nonzero exit means the tree was NOT killed (the direct kill
+ * runs as the fallback, never a silent pretend). POSIX gives the detached
+ * group a bounded SIGTERM grace, then escalates to SIGKILL — a TERM-ignoring
+ * host must not survive to coexist with the fallback vendor launch.
  */
-export const killSpawnedSessionHost = (proc: {
+export const killSpawnedSessionHost = async (proc: {
   readonly pid?: number;
+  readonly exited?: Promise<number>;
   kill: () => unknown;
-}): void => {
+}): Promise<void> => {
   const pid = typeof proc.pid === "number" && proc.pid > 0 ? proc.pid : null;
   if (process.platform === "win32" && pid !== null) {
     try {
-      spawnSync("taskkill", ["/pid", String(pid), "/t", "/f"], {
+      const result = spawnSync("taskkill", ["/pid", String(pid), "/t", "/f"], {
         stdio: "ignore",
         timeout: 5_000,
         windowsHide: true,
       });
-      return;
+      if (result.error === undefined && result.status === 0) return;
     } catch {
-      // fall through to the direct kill
+      // taskkill unavailable — fall through to the direct kill
     }
+    try {
+      proc.kill();
+    } catch {
+      // already gone
+    }
+    return;
   }
   if (process.platform !== "win32" && pid !== null) {
+    let leaderGone = false;
+    if (proc.exited !== undefined) {
+      proc.exited.then(
+        () => {
+          leaderGone = true;
+        },
+        () => {
+          leaderGone = true;
+        },
+      );
+    }
+    // SIGTERM the whole group first; the detached child is its own group
+    // leader so `-pid` reaches every member. A bare-pid kill covers the
+    // non-grouped case.
     try {
       process.kill(-pid, "SIGTERM");
-      return;
     } catch {
-      // No such group (setsid never ran, or the leader is already gone) —
-      // fall through to the direct pid.
+      // No such group (setsid never ran, or the leader is already gone)
     }
+    try {
+      proc.kill();
+    } catch {
+      // already gone
+    }
+    // Bounded grace: a TERM-ignoring member keeps the group (and maybe the
+    // leader) alive — both are re-polled until the deadline.
+    const gone = (): boolean =>
+      !hostGroupAlive(pid) && (leaderGone || !hostPidAlive(pid));
+    const deadline = Date.now() + HOST_KILL_TERM_GRACE_MS;
+    while (Date.now() < deadline && !gone()) {
+      await killSleep(HOST_KILL_POLL_MS);
+    }
+    if (!gone()) {
+      try {
+        process.kill(-pid, "SIGKILL");
+      } catch {
+        // group already empty
+      }
+      if (!leaderGone) {
+        try {
+          process.kill(pid, "SIGKILL");
+        } catch {
+          // already gone
+        }
+      }
+      // Brief settle: KILL is not ignorable, but reaping takes a tick — a
+      // second vendor launch must not overlap a still-dying tree.
+      const settleDeadline = Date.now() + HOST_KILL_SETTLE_MS;
+      while (Date.now() < settleDeadline && !gone()) {
+        await killSleep(HOST_KILL_POLL_MS);
+      }
+    }
+    return;
   }
   try {
     proc.kill();
