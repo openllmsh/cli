@@ -276,6 +276,14 @@ export const readBodyCapped = async (
     }
   }
   if (total === 0) throw new Error(`${label} returned an empty body`);
+  if (
+    res.headers.has("content-length") &&
+    Number.isSafeInteger(declared) &&
+    declared >= 0 &&
+    total !== declared
+  ) {
+    throw new Error(`${label} length differs from Content-Length`);
+  }
   return Buffer.concat(chunks);
 };
 
@@ -1319,7 +1327,7 @@ export type TManualUpdateResult =
  * without `process.exit`. TD-4: a TRANSPORT failure (HTTP error, socket
  * drop, stall/total timeout, unreadable checksum stream) only records the
  * attempt — rejections are reserved for what the bytes themselves prove
- * (oversize, bad gzip, deterministic probe failure).
+ * (checksum mismatch, oversize, bad gzip, deterministic probe failure).
  */
 export const applyManualCliUpdate = async (args: {
   readonly gatewayUrl: string;
@@ -1491,11 +1499,7 @@ export const applyManualCliUpdate = async (args: {
     try {
       bytes = gunzipSync(bytes, { maxOutputLength: MAX_BINARY_BYTES });
     } catch (err) {
-      if (
-        !(err instanceof Error && "code" in err && err.code === "Z_BUF_ERROR")
-      ) {
-        rejectCliUpdateVersion(latest, expected);
-      }
+      rejectCliUpdateVersion(latest, expected);
       recordCliUpdateAttempt(latest, expected);
       return {
         code: 1,
@@ -1506,7 +1510,8 @@ export const applyManualCliUpdate = async (args: {
 
   const actual = createHash("sha256").update(bytes).digest("hex");
   if (actual !== expected) {
-    // These bytes do not identify the published artifact. Retry after backoff.
+    // A complete body with the wrong checksum rejects this artifact.
+    rejectCliUpdateVersion(latest, expected);
     recordCliUpdateAttempt(latest, expected);
     return {
       code: 1,
