@@ -13,6 +13,7 @@ import { execFileSync } from "node:child_process";
 import {
   cpSync,
   existsSync,
+  lstatSync,
   mkdirSync,
   readFileSync,
   renameSync,
@@ -299,35 +300,59 @@ const profileBackupPath = (profileName: string): string => {
   }
 };
 
+const KEY_LINE = /^\s*(export\s+)?OPENLLM_API_KEY\s*=/;
+
 /**
  * FSS-19: a preserved profile must not keep a copy of the API key. Strip the
  * `OPENLLM_API_KEY=` lines `install` wrote (any other keys in a cloned .env
- * are the user's own and stay). If the strip cannot be verified, drop the
- * .env outright; the last resort is a loud warning, never a silent retain.
+ * are the user's own and stay). A .env symlink is never followed for writing:
+ * the link's target is an external file that must not be modified, so the
+ * link is dropped and replaced by a redacted regular file built from the
+ * target's contents. Returns true only when the key is verifiably absent —
+ * an unverifiable result makes the caller fail loudly, never silently retain.
  */
-const redactProfileBackupKey = (backupDir: string): void => {
+const redactProfileBackupKey = (backupDir: string): boolean => {
   const envPath = join(backupDir, ".env");
   try {
-    if (!existsSync(envPath)) return;
+    let stat: ReturnType<typeof lstatSync>;
+    try {
+      stat = lstatSync(envPath);
+    } catch {
+      return true;
+    }
+    if (stat.isSymbolicLink()) {
+      const target = readFileSync(envPath, "utf-8");
+      rmSync(envPath, { force: true });
+      const kept = target.split("\n").filter((line) => !KEY_LINE.test(line));
+      if (!kept.every((line) => line.trim() === "")) {
+        writeFileSync(envPath, kept.join("\n").replace(/\n*$/, "\n"), {
+          mode: 0o600,
+        });
+      }
+      return !KEY_LINE.test(readFileSync(envPath, "utf-8"));
+    }
+    if (!stat.isFile()) {
+      rmSync(envPath, { force: true, recursive: true });
+      return !existsSync(envPath);
+    }
     const kept = readFileSync(envPath, "utf-8")
       .split("\n")
-      .filter((line) => !/^\s*(export\s+)?OPENLLM_API_KEY\s*=/.test(line));
+      .filter((line) => !KEY_LINE.test(line));
     if (kept.every((line) => line.trim() === "")) {
       rmSync(envPath, { force: true });
-      return;
+      return !existsSync(envPath);
     }
-    const body = kept.join("\n").replace(/\n*$/, "\n");
-    writeFileSync(envPath, body, { mode: 0o600 });
+    writeFileSync(envPath, kept.join("\n").replace(/\n*$/, "\n"), {
+      mode: 0o600,
+    });
+    return !KEY_LINE.test(readFileSync(envPath, "utf-8"));
   } catch {
     try {
       rmSync(envPath, { force: true });
-      if (!existsSync(envPath)) return;
+      return !existsSync(envPath);
     } catch {
-      // fall through to the warning
+      return false;
     }
-    process.stderr.write(
-      `Could not remove OPENLLM_API_KEY from the preserved profile — delete ${envPath} by hand.\n`,
-    );
   }
 };
 
@@ -358,13 +383,28 @@ export const uninstallHermes = (): number => {
         cpSync(dest, backup, { recursive: true });
         rmSync(dest, { recursive: true, force: true });
       } catch {
+        // The profile stays live at `dest`, but a partial backup may already
+        // hold a copied .env — redact whatever landed before reporting the
+        // failure so no copy of the key is left behind.
+        const redacted = redactProfileBackupKey(backup);
         process.stderr.write(
-          `Could not move the Hermes profile to a backup — leaving ${dest} in place.\n`,
+          `Could not move the Hermes profile to a backup — leaving ${dest} in place.\n` +
+            (redacted
+              ? ""
+              : `  the partial backup at ${backup} may still contain OPENLLM_API_KEY — delete it by hand.\n`),
         );
         return 1;
       }
     }
-    redactProfileBackupKey(backup);
+    if (!redactProfileBackupKey(backup)) {
+      process.stderr.write(
+        `Could not remove OPENLLM_API_KEY from the preserved profile — delete ${join(
+          backup,
+          ".env",
+        )} by hand.\n`,
+      );
+      return 1;
+    }
   }
   setActiveProfile(ledger.previousProfile);
   rmSync(hermesLedgerPath(), { force: true });
