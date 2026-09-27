@@ -14,7 +14,7 @@
 import { dlopen, FFIType } from "bun:ffi";
 import { createHash, randomBytes } from "node:crypto";
 import * as fs from "node:fs";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { gunzipSync } from "node:zlib";
 import type { TUpdateRouteConfig } from "@openllmsh/protocol/update-policy";
 import {
@@ -235,7 +235,7 @@ export const readBodyCapped = async (
     await teardownBounded(res.body?.cancel(), cancelMs);
     throw new ArtifactFetchError(`${label} exceeds the ${maxBytes}-byte cap`);
   }
-  if (res.body === null) return Buffer.alloc(0);
+  if (res.body === null) throw new Error(`${label} returned an empty body`);
   const reader = res.body.getReader();
   const chunks: Uint8Array[] = [];
   const stallMs = bounds?.stallMs ?? DOWNLOAD_STALL_MS;
@@ -275,6 +275,7 @@ export const readBodyCapped = async (
       if (stallTimer !== null) clearTimeout(stallTimer);
     }
   }
+  if (total === 0) throw new Error(`${label} returned an empty body`);
   return Buffer.concat(chunks);
 };
 
@@ -803,7 +804,9 @@ const mutateDaemonState = (fn: (s: TJsonObject) => TJsonObject): boolean => {
           : {};
       fs.mkdirSync(dirname(path), { recursive: true });
       fs.writeFileSync(tmp, JSON.stringify(fn(base)), { mode: 0o600 });
+      fsyncFileSync(tmp);
       fs.renameSync(tmp, path);
+      if (process.platform !== "win32") fsyncFileSync(dirname(path));
       return true;
     } catch {
       try {
@@ -918,7 +921,7 @@ export const isCliUpdateRejected = (
 export const recordCliUpdateAttempt = (
   version: string,
   digest?: string,
-): void => {
+): boolean => {
   const ok = mutateDaemonState((s) => {
     const attempts = isJsonObject(s.updateAttempts) ? s.updateAttempts : {};
     const prev = isJsonObject(attempts.cli) ? attempts.cli : {};
@@ -941,6 +944,7 @@ export const recordCliUpdateAttempt = (
     };
   });
   if (!ok) suspendedStateDirs.add(daemonStateDir());
+  return ok;
 };
 
 /**
@@ -1006,7 +1010,7 @@ export const clearCliUpdateGuardsForTests = (): void => {
  * the restore path now probes it before swapping it back.
  */
 const writePrevBinaryAtomic = (src: string, prev: string): void => {
-  const tmp = `${prev}.${process.pid}.tmp`;
+  const tmp = join(dirname(prev), `.${basename(prev)}.${process.pid}.tmp`);
   try {
     fs.copyFileSync(src, tmp);
     const fd = fs.openSync(tmp, "r");
@@ -1283,6 +1287,8 @@ export const commitCliSwap = async (args: {
     } catch {
       return "backup-failed";
     }
+    if (!recordCliUpdateAttempt(args.latest, args.digest))
+      return "stage-failed";
     fs.renameSync(args.staged, args.self);
     // FSS-18: fsync the directory so the rename's dirent survives a crash —
     // the LAST filesystem step, after which nothing mutates the install dir.
@@ -1296,7 +1302,6 @@ export const commitCliSwap = async (args: {
         }`,
       );
     }
-    recordCliUpdateAttempt(args.latest, args.digest);
     return "updated";
   } finally {
     release();
@@ -1314,7 +1319,7 @@ export type TManualUpdateResult =
  * without `process.exit`. TD-4: a TRANSPORT failure (HTTP error, socket
  * drop, stall/total timeout, unreadable checksum stream) only records the
  * attempt — rejections are reserved for what the bytes themselves prove
- * (checksum mismatch, oversize, bad gzip, deterministic probe failure).
+ * (oversize, bad gzip, deterministic probe failure).
  */
 export const applyManualCliUpdate = async (args: {
   readonly gatewayUrl: string;
@@ -1486,7 +1491,11 @@ export const applyManualCliUpdate = async (args: {
     try {
       bytes = gunzipSync(bytes, { maxOutputLength: MAX_BINARY_BYTES });
     } catch (err) {
-      rejectCliUpdateVersion(latest, expected);
+      if (
+        !(err instanceof Error && "code" in err && err.code === "Z_BUF_ERROR")
+      ) {
+        rejectCliUpdateVersion(latest, expected);
+      }
       recordCliUpdateAttempt(latest, expected);
       return {
         code: 1,
@@ -1497,9 +1506,7 @@ export const applyManualCliUpdate = async (args: {
 
   const actual = createHash("sha256").update(bytes).digest("hex");
   if (actual !== expected) {
-    // A checksum mismatch is a mis-published artifact — deterministic, so the
-    // artifact is pinned rejected (the daemon converger won't retry it either).
-    rejectCliUpdateVersion(latest, expected);
+    // These bytes do not identify the published artifact. Retry after backoff.
     recordCliUpdateAttempt(latest, expected);
     return {
       code: 1,
