@@ -73,17 +73,26 @@ fi
 # move to a newer stable (or newer prerelease). The only refusal left is a
 # DOWNGRADE: an installed build strictly newer than the advertised release.
 DEST="$BIN_DIR/openllm"
-VERSION_PROBE_TIMEOUT=3
+# The --version probe bound (DR-7): TERM after VERSION_PROBE_TIMEOUT, then KILL
+# after VERSION_PROBE_KILL_GRACE more, so a binary that ignores TERM can never
+# hang the installer.
+VERSION_PROBE_TIMEOUT=10
+VERSION_PROBE_KILL_GRACE=2
 probe_version() {
   local binary="$1" probe_file="${TMPDIR:-/tmp}/openllm-version-probe.$$" pid watchdog status
   "$binary" --version >"$probe_file" 2>/dev/null &
   pid=$!
   (
+    trap 'kill "$timer" 2>/dev/null || true; exit 0' TERM INT
     sleep "$VERSION_PROBE_TIMEOUT" &
     local timer=$!
-    trap 'kill "$timer" 2>/dev/null || true; exit 0' TERM INT
     wait "$timer"
-    kill "$pid" 2>/dev/null || true
+    # The probe outlived its bound: TERM, then KILL after the grace window.
+    kill -TERM "$pid" 2>/dev/null || true
+    sleep "$VERSION_PROBE_KILL_GRACE" &
+    timer=$!
+    wait "$timer"
+    kill -KILL "$pid" 2>/dev/null || true
   ) &
   watchdog=$!
   if wait "$pid"; then status=0; else status=$?; fi
@@ -92,7 +101,8 @@ probe_version() {
   PROBE_OUTPUT="$(cat "$probe_file" 2>/dev/null || true)"
   rm -f "$probe_file"
   [ "$status" -eq 0 ] \
-    || die "version probe timed out or failed at $binary; refusing to overwrite it"
+    || die "version probe timed out or failed at $binary; refusing to overwrite it.
+  To repair by hand: move the binary aside ('mv \"$binary\" \"$binary.bak\"') and re-run this installer."
 }
 # SemVer numeric-identifier predicate: a numeric identifier is `0` or digits
 # with NO leading zero. An all-digit identifier WITH a leading zero ("01") is
@@ -223,20 +233,25 @@ if [ "$INSECURE_DEV_ORIGIN" = 1 ]; then
 else
   CURL_SCHEME=(--proto "=https" --proto-redir "=https")
 fi
+# And bound every call (NET-7): a stalled TCP connection must never hang the
+# installer. The manifest, the digest fetch and the capability probe are tiny,
+# so they get the short bound; the binary download gets the long one.
+CURL_META=(--connect-timeout 10 --max-time 60)
+CURL_GET=(--connect-timeout 10 --max-time 300)
 
 CLI_VERSION=""
 if [ -z "$FROM_FILE" ]; then
   # --proto/--proto-redir need a curl new enough to know the options (≈7.21):
   # an older system curl fails the FIRST fetch with an opaque option error, so
   # detect support once and fail with the upgrade remedy up front.
-  curl "${CURL_SCHEME[@]}" -V >/dev/null 2>&1 \
+  curl "${CURL_SCHEME[@]}" "${CURL_META[@]}" -V >/dev/null 2>&1 \
     || die "this curl does not support --proto/--proto-redir — upgrade to curl 7.21.0 or newer and re-run"
 
   # /api/install validates the committed release pins server-side and fails
   # closed, so a mis-pinned or half-published release is refused before any
   # download. No query parameters.
   echo "Resolving the current OpenLLM CLI release..."
-  MANIFEST="$(curl "${CURL_SCHEME[@]}" -fsSL "$ORIGIN/api/install" 2>/dev/null)" \
+  MANIFEST="$(curl "${CURL_SCHEME[@]}" "${CURL_META[@]}" -fsSL "$ORIGIN/api/install" 2>/dev/null)" \
     || die "could not reach $ORIGIN/api/install — check OPENLLM_CLOUD_ORIGIN and your network"
 
   json_field() {
@@ -270,7 +285,7 @@ if [ -n "$FROM_FILE" ]; then
   [ -f "$FROM_FILE" ] && [ -r "$FROM_FILE" ] \
     || die "--from-file path is not a readable regular file: $FROM_FILE"
 else
-  PUBLISHED="$(curl "${CURL_SCHEME[@]}" -fsSL "$URL.sha256" 2>/dev/null | cut -d' ' -f1 || true)"
+  PUBLISHED="$(curl "${CURL_SCHEME[@]}" "${CURL_META[@]}" -fsSL "$URL.sha256" 2>/dev/null | cut -d' ' -f1 || true)"
   case "$PUBLISHED" in
     [0-9a-f]*) [ ${#PUBLISHED} -eq 64 ] || die "malformed published checksum" ;;
     *) die "no published binary for $TARGET yet" ;;
@@ -319,9 +334,9 @@ else
       [ "$ACTUAL" = "$PUBLISHED" ] \
         || die "checksum mismatch (expected $PUBLISHED, got $ACTUAL) — refusing to install"
     elif [ -t 2 ]; then
-      curl "${CURL_SCHEME[@]}" -fL --progress-bar "$URL" -o "$DL" || die "download failed: $URL"
+      curl "${CURL_SCHEME[@]}" "${CURL_GET[@]}" -fL --progress-bar "$URL" -o "$DL" || die "download failed: $URL"
     else
-      curl "${CURL_SCHEME[@]}" -fsSL "$URL" -o "$DL" || die "download failed: $URL"
+      curl "${CURL_SCHEME[@]}" "${CURL_GET[@]}" -fsSL "$URL" -o "$DL" || die "download failed: $URL"
     fi
     # The pinned digest is over the DECOMPRESSED binary.
     if gzip -t "$DL" >/dev/null 2>&1; then
