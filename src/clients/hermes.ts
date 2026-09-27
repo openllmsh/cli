@@ -11,6 +11,7 @@
 
 import { execFileSync } from "node:child_process";
 import {
+  chmodSync,
   cpSync,
   existsSync,
   lstatSync,
@@ -18,6 +19,7 @@ import {
   readFileSync,
   renameSync,
   rmSync,
+  statSync,
   writeFileSync,
 } from "node:fs";
 import { join } from "node:path";
@@ -353,6 +355,17 @@ const redactProfileBackupKey = (backupDir: string): boolean => {
     }
   };
   try {
+    // The backup dir may carry a read-only mode cloned from the profile —
+    // cpSync preserves directory modes, and a renamed dir keeps its own.
+    // Every write below (tmp + rename, rm) needs owner write+exec on the
+    // dir itself, so normalize it before the first mutation attempt.
+    try {
+      const dirStat = statSync(backupDir);
+      if ((dirStat.mode & 0o700) !== 0o700)
+        chmodSync(backupDir, dirStat.mode | 0o700);
+    } catch {
+      // cannot normalize — the writes below report their own failure
+    }
     let stat: ReturnType<typeof lstatSync>;
     try {
       stat = lstatSync(envPath);
