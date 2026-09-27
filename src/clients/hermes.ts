@@ -11,12 +11,15 @@
 
 import { execFileSync } from "node:child_process";
 import {
+  chmodSync,
   cpSync,
   existsSync,
+  lstatSync,
   mkdirSync,
   readFileSync,
   renameSync,
   rmSync,
+  statSync,
   writeFileSync,
 } from "node:fs";
 import { join } from "node:path";
@@ -299,6 +302,104 @@ const profileBackupPath = (profileName: string): string => {
   }
 };
 
+const KEY_LINE = /^\s*(export\s+)?OPENLLM_API_KEY\s*=/;
+
+/**
+ * Write the redacted `.env` as a NEW regular file swapped atomically over
+ * the checked path — the checked path is never opened for writing, so a
+ * symlink swapped in after the `lstat` can never redirect the write into an
+ * external target.
+ */
+const writeRedactedEnv = (envPath: string, kept: string[]): boolean => {
+  const tmp = `${envPath}.${process.pid}.tmp`;
+  try {
+    writeFileSync(tmp, kept.join("\n").replace(/\n*$/, "\n"), {
+      mode: 0o600,
+      flag: "wx",
+    });
+    renameSync(tmp, envPath);
+    return true;
+  } catch {
+    try {
+      rmSync(tmp, { force: true });
+    } catch {
+      // best effort — a leftover temp is not the secret itself
+    }
+    return false;
+  }
+};
+
+/**
+ * FSS-19: a preserved profile must not keep a copy of the API key. Strip the
+ * `OPENLLM_API_KEY=` lines `install` wrote (any other keys in a cloned .env
+ * are the user's own and stay). A .env symlink is never followed for writing:
+ * the link's target is an external file that must not be modified, so the
+ * link is dropped and replaced by a redacted regular file built from the
+ * target's contents. Returns true only when the key is verifiably absent —
+ * an unverifiable result makes the caller fail loudly, never silently retain.
+ */
+const redactProfileBackupKey = (backupDir: string): boolean => {
+  const envPath = join(backupDir, ".env");
+  // Verified-absent: the path is gone, or it is a REGULAR non-symlink file
+  // with no key line. Anything else fails the check loudly.
+  const verifiedAbsent = (): boolean => {
+    try {
+      const stat = lstatSync(envPath);
+      return (
+        stat.isFile() &&
+        !stat.isSymbolicLink() &&
+        !KEY_LINE.test(readFileSync(envPath, "utf-8"))
+      );
+    } catch (error) {
+      return (error as NodeJS.ErrnoException).code === "ENOENT";
+    }
+  };
+  try {
+    // The backup dir may carry a read-only mode cloned from the profile —
+    // cpSync preserves directory modes, and a renamed dir keeps its own.
+    // Every write below (tmp + rename, rm) needs owner write+exec on the
+    // dir itself, so normalize it before the first mutation attempt.
+    try {
+      const dirStat = statSync(backupDir);
+      if ((dirStat.mode & 0o700) !== 0o700)
+        chmodSync(backupDir, dirStat.mode | 0o700);
+    } catch {
+      // cannot normalize — the writes below report their own failure
+    }
+    let stat: ReturnType<typeof lstatSync>;
+    try {
+      stat = lstatSync(envPath);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return true;
+      return false;
+    }
+    if (stat.isSymbolicLink()) {
+      const target = readFileSync(envPath, "utf-8");
+      rmSync(envPath, { force: true });
+      const kept = target.split("\n").filter((line) => !KEY_LINE.test(line));
+      if (!kept.every((line) => line.trim() === "")) {
+        return writeRedactedEnv(envPath, kept) && verifiedAbsent();
+      }
+      return verifiedAbsent();
+    }
+    if (!stat.isFile()) {
+      // A directory or other non-regular entry is not a backup env file.
+      // Never remove it recursively. The caller must fail closed.
+      return false;
+    }
+    const kept = readFileSync(envPath, "utf-8")
+      .split("\n")
+      .filter((line) => !KEY_LINE.test(line));
+    if (kept.every((line) => line.trim() === "")) {
+      rmSync(envPath, { force: true });
+      return verifiedAbsent();
+    }
+    return writeRedactedEnv(envPath, kept) && verifiedAbsent();
+  } catch {
+    return false;
+  }
+};
+
 /**
  * The profile `install` created is the STICKY one — it holds every Hermes
  * session, memory, state.db and SOUL edit since then. Uninstall must not
@@ -326,11 +427,27 @@ export const uninstallHermes = (): number => {
         cpSync(dest, backup, { recursive: true });
         rmSync(dest, { recursive: true, force: true });
       } catch {
+        // The profile stays live at `dest`, but a partial backup may already
+        // hold a copied .env — redact whatever landed before reporting the
+        // failure so no copy of the key is left behind.
+        const redacted = redactProfileBackupKey(backup);
         process.stderr.write(
-          `Could not move the Hermes profile to a backup — leaving ${dest} in place.\n`,
+          `Could not move the Hermes profile to a backup — leaving ${dest} in place.\n` +
+            (redacted
+              ? ""
+              : `  the partial backup at ${backup} may still contain OPENLLM_API_KEY — delete it by hand.\n`),
         );
         return 1;
       }
+    }
+    if (!redactProfileBackupKey(backup)) {
+      process.stderr.write(
+        `Could not remove OPENLLM_API_KEY from the preserved profile — delete ${join(
+          backup,
+          ".env",
+        )} by hand.\n`,
+      );
+      return 1;
     }
   }
   setActiveProfile(ledger.previousProfile);

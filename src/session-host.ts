@@ -22,6 +22,9 @@ import type {
   TProcessStartIdentityReader,
 } from "../../tunnel/session/local-runtime";
 import {
+  bootScopedStartIdentityMs,
+  isBootScopedStartIdentity,
+  legacyProcessStartIdentity,
   processIdentityStatus,
   processStartIdentity,
   SESSION_HOST_STARTUP_GRACE_MS,
@@ -275,6 +278,9 @@ export const startIdentityMs = (identity: string): number | null => {
     const ms = (BigInt(identity) - 11_644_473_600_000_000_000n) / 10_000n;
     return Number(ms);
   }
+  // A post-RT-1 Linux identity is boot-scoped; translate it through btime.
+  if (isBootScopedStartIdentity(identity))
+    return bootScopedStartIdentityMs(identity);
   const match =
     /([A-Z][a-z]{2})\s+(\d{1,2})\s+(\d{2}):(\d{2}):(\d{2})\s+(\d{4})/.exec(
       identity,
@@ -314,7 +320,10 @@ const legacyPidIsSessionHost = (
   if (meta.startedAtMs === null) return null;
   let identity: string | null | undefined;
   try {
-    identity = (readIdentity ?? processStartIdentity)(meta.pid);
+    // The comparison below parses a wall-clock timestamp, so the default
+    // probe must be the LEGACY-format reader — a boot-scoped identity would
+    // fail to parse and leave every legacy meta undecidable (RT-1).
+    identity = (readIdentity ?? legacyProcessStartIdentity)(meta.pid);
   } catch {
     return null;
   }
@@ -749,6 +758,14 @@ export const discoverSessionHosts = (
 export const discoverLiveSessionHosts = (): readonly TLiveSessionHost[] =>
   discoverSessionHosts().hosts;
 
+/**
+ * How long the CLI waits for a freshly spawned host's socket before falling
+ * back (SH-4). A ConPTY first-compile can take ~12 s on Windows, so the
+ * fallback path uses this longer bound — never the old 2 s, which fired
+ * mid-compile and orphaned the vendor process.
+ */
+export const SESSION_HOST_SOCKET_WAIT_MS = 15_000;
+
 /** Wait for the detached host to publish its private local control endpoint. */
 export const waitForSessionHostSocket = async (
   id: string,
@@ -833,5 +850,131 @@ export const spawnSessionHost = (args: {
     return proc;
   } catch {
     return null;
+  }
+};
+
+/** Bounded SIGTERM grace before the group SIGKILL escalation (SH-4). */
+const HOST_KILL_TERM_GRACE_MS = 2_000;
+const HOST_KILL_POLL_MS = 50;
+/** Short post-SIGKILL settle so the next step never overlaps a dying tree. */
+const HOST_KILL_SETTLE_MS = 500;
+
+/** True while a process exists (zombies count until init/Bun reaps them). */
+const hostPidAlive = (pid: number): boolean => {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === "EPERM";
+  }
+};
+
+/** True while the detached leader's process group has any live member. */
+const hostGroupAlive = (pid: number): boolean => {
+  try {
+    process.kill(-pid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === "EPERM";
+  }
+};
+
+const killSleep = (ms: number): Promise<void> =>
+  new Promise<void>((resolve) => {
+    setTimeout(resolve, ms);
+  });
+
+/**
+ * Kill a spawned-but-unusable host and its WHOLE tree (SH-4). On Windows the
+ * spawned leader is a `cmd.exe` wrapper (or the ConPTY host) whose children
+ * would survive a bare `proc.kill()` — `taskkill /T /F` takes the entire
+ * tree, and a nonzero exit means the tree was NOT killed (the direct kill
+ * runs as the fallback, never a silent pretend). POSIX gives the detached
+ * group a bounded SIGTERM grace, then escalates to SIGKILL — a TERM-ignoring
+ * host must not survive to coexist with the fallback vendor launch.
+ */
+export const killSpawnedSessionHost = async (proc: {
+  readonly pid?: number;
+  readonly exited?: Promise<number>;
+  kill: () => unknown;
+}): Promise<void> => {
+  const pid = typeof proc.pid === "number" && proc.pid > 0 ? proc.pid : null;
+  if (process.platform === "win32" && pid !== null) {
+    try {
+      const result = spawnSync("taskkill", ["/pid", String(pid), "/t", "/f"], {
+        stdio: "ignore",
+        timeout: 5_000,
+        windowsHide: true,
+      });
+      if (result.error === undefined && result.status === 0) return;
+    } catch {
+      // taskkill unavailable — fall through to the direct kill
+    }
+    try {
+      proc.kill();
+    } catch {
+      // already gone
+    }
+    return;
+  }
+  if (process.platform !== "win32" && pid !== null) {
+    let leaderGone = false;
+    if (proc.exited !== undefined) {
+      proc.exited.then(
+        () => {
+          leaderGone = true;
+        },
+        () => {
+          leaderGone = true;
+        },
+      );
+    }
+    // SIGTERM the whole group first; the detached child is its own group
+    // leader so `-pid` reaches every member. A bare-pid kill covers the
+    // non-grouped case.
+    try {
+      process.kill(-pid, "SIGTERM");
+    } catch {
+      // No such group (setsid never ran, or the leader is already gone)
+    }
+    try {
+      proc.kill();
+    } catch {
+      // already gone
+    }
+    // Bounded grace: a TERM-ignoring member keeps the group (and maybe the
+    // leader) alive — both are re-polled until the deadline.
+    const gone = (): boolean =>
+      !hostGroupAlive(pid) && (leaderGone || !hostPidAlive(pid));
+    const deadline = Date.now() + HOST_KILL_TERM_GRACE_MS;
+    while (Date.now() < deadline && !gone()) {
+      await killSleep(HOST_KILL_POLL_MS);
+    }
+    if (!gone()) {
+      try {
+        process.kill(-pid, "SIGKILL");
+      } catch {
+        // group already empty
+      }
+      if (!leaderGone) {
+        try {
+          process.kill(pid, "SIGKILL");
+        } catch {
+          // already gone
+        }
+      }
+      // Brief settle: KILL is not ignorable, but reaping takes a tick — a
+      // second vendor launch must not overlap a still-dying tree.
+      const settleDeadline = Date.now() + HOST_KILL_SETTLE_MS;
+      while (Date.now() < settleDeadline && !gone()) {
+        await killSleep(HOST_KILL_POLL_MS);
+      }
+    }
+    return;
+  }
+  try {
+    proc.kill();
+  } catch {
+    // already gone
   }
 };
