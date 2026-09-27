@@ -138,13 +138,18 @@ export const runUpdate = async (): Promise<number> => {
   process.stderr.write(`[update] running the installer from ${url}\n`);
 
   // curl streams the installer script to bash's stdin. Both are argv arrays, so
-  // the origin can never be evaluated as shell.
-  const curl = Bun.spawn(["curl", "-fsSL", url], {
-    stdin: "ignore",
-    stdout: "pipe",
-    stderr: "inherit",
-    env: process.env,
-  });
+  // the origin can never be evaluated as shell. The connect/total bounds keep a
+  // stalled network from hanging `openllm update` (CLI-1) — they mirror the
+  // bounds the daemon's self-update puts on its own downloads.
+  const curl = Bun.spawn(
+    ["curl", "-fsSL", "--connect-timeout", "10", "--max-time", "300", url],
+    {
+      stdin: "ignore",
+      stdout: "pipe",
+      stderr: "inherit",
+      env: process.env,
+    },
+  );
   const bash = Bun.spawn(["bash", "-s", "--"], {
     stdin: curl.stdout,
     stdout: "inherit",
