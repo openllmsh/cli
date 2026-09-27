@@ -17,6 +17,10 @@ import {
   writeFileSync,
 } from "node:fs";
 import { basename, dirname, join } from "node:path";
+import {
+  acquireDirLockSync,
+  envDirLockCodec,
+} from "../../tunnel/session/dir-lock";
 import type {
   TProcessIdentity,
   TProcessStartIdentityReader,
@@ -996,87 +1000,25 @@ const withEnvFileLock = (
   const parentDir = dirname(targetPath);
   const baseName = basename(targetPath);
   const nonce = crypto.randomUUID().replace(/-/g, "");
-  const deadline = Date.now() + (waitMs ?? envLockWaitMs());
-  let sweeps = 0;
-  let attempts = 0;
-  let acquired = false;
-  envLockSweepQuarantine(parentDir, baseName);
-  while (attempts === 0 || Date.now() < deadline) {
-    attempts += 1;
-    if (envLockLegacyHeld(stem, nonce)) {
-      lockWait();
-      continue;
-    }
-    try {
-      mkdirSync(lockDir);
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "EEXIST") return false;
-      sweeps += 1;
-      if (sweeps % 25 === 0) envLockSweepQuarantine(parentDir, baseName);
-      try {
-        if (envLockDirIsStale(lockDir)) {
-          envLockSteal(lockDir, stem, nonce);
-        }
-      } catch {
-        // Another writer may have released/replaced it; retry normally.
-      }
-      lockWait();
-      continue;
-    }
-    // Pin the generation we just created so the publish veto detects a
-    // quarantine + path-reuse, not only an in-place steal marker.
-    const expectedIno = envLockDirIno(lockDir);
-    if (expectedIno === undefined) {
-      // Never publish into a dir whose generation we cannot prove — a
-      // swap can neither be confirmed nor excluded, and a blind publish
-      // could stamp into a successor's claim. Never rmdir either: the
-      // name may already sit on a dir that is not ours (identical guard
-      // in the daemon and the shared installer block).
-      lockWait();
-      continue;
-    }
-    let published: boolean;
-    envLockPublishGapForTests?.(lockDir);
-    try {
-      published = envLockPublishOwner(lockDir, nonce, expectedIno);
-    } catch {
-      // The tmp write itself failed — drop the lock WE made rather than
-      // hold it unmarked, but ONLY while the path still proves OUR
-      // generation (identical to the daemon side): an inode that no longer
-      // matches means a successor may own this dir now.
-      let ours = false;
-      try {
-        ours =
-          expectedIno !== undefined && lstatSync(lockDir).ino === expectedIno;
-      } catch {
-        ours = false;
-      }
-      if (ours) {
-        try {
-          unlinkSync(join(lockDir, `owner.tmp.${process.pid}`));
-        } catch {
-          // best effort
-        }
-        try {
-          rmdirSync(lockDir);
-        } catch {
-          // best effort
-        }
-      }
-      return false;
-    }
-    if (!published) {
-      lockWait();
-      continue;
-    }
-    acquired = true;
-    break;
-  }
-  if (!acquired) return false;
+  const release = acquireDirLockSync(lockDir, envDirLockCodec, {
+    waitMs: waitMs ?? envLockWaitMs(),
+    reclaimMs: envLockStaleMs(),
+    pollMs: 10,
+    inode: envLockDirIno,
+    startIdentity: envLockStartIdentity,
+    legacyStartIdentity: envLockStartIdentity,
+    isStale: envLockDirIsStale,
+    removeOnUnprovenInode: false,
+    legacyHeld: (deadline): boolean => envLockLegacyHeld(stem, nonce),
+    onStep: (step, path): void => {
+      if (step === "before-publish") envLockPublishGapForTests?.(path);
+    },
+  });
+  if (release === null) return false;
   try {
     return operation();
   } finally {
-    envLockReleaseDir(lockDir, nonce);
+    release();
   }
 };
 

@@ -41,6 +41,12 @@ import {
 } from "@openllmsh/protocol/executable-paths";
 import crossSpawnModule from "cross-spawn";
 import cmdEscapeModule from "cross-spawn/lib/util/escape.js";
+import {
+  acquireDirLock,
+  type TDirLockCodec,
+  type TDirLockOptions,
+  type TDirLockOwner,
+} from "../../../tunnel/session/dir-lock";
 import type { TProcessStartIdentityReader } from "../../../tunnel/session/local-runtime";
 import {
   legacyProcessStartIdentity,
@@ -956,6 +962,12 @@ const RESTORE_QUARANTINE_GC_MS = 10 * 60_000;
  * covered by this rule — unverifiable is held, not stale.
  */
 const RESTORE_OWNERLESS_RECLAIM_MS = 30_000;
+const restoreOwnerlessReclaimMs = (): number => {
+  const override = Number(process.env.OPENLLM_RESTORE_OWNERLESS_RECLAIM_MS);
+  return Number.isFinite(override) && override > 0
+    ? Math.floor(override)
+    : RESTORE_OWNERLESS_RECLAIM_MS;
+};
 
 /**
  * Nonces this process minted AND released. A `.rel-<pid>` quarantine is
@@ -1097,6 +1109,28 @@ type TRestoreLockOwner = {
    * diagnose the same, but only a nonce'd record can be released by us.
    */
   readonly nonce: string | null;
+};
+
+const restoreDirLockCodec: TDirLockCodec = {
+  kind: RESTORE_LOCK_KIND,
+  ownerFile: RESTORE_LOCK_OWNER_NAME,
+  readOwner: (dir: string): TDirLockOwner | null => {
+    const owner = readRestoreLockOwner(dir);
+    if (owner === null) return null;
+    return {
+      kind: RESTORE_LOCK_KIND,
+      pid: owner.pid,
+      start: owner.start ?? "",
+      nonce: owner.nonce ?? "",
+    };
+  },
+  serializeOwner: (owner: TDirLockOwner): string =>
+    `${JSON.stringify({
+      kind: RESTORE_LOCK_KIND,
+      pid: owner.pid,
+      start: owner.start,
+      nonce: owner.nonce,
+    })}\n`,
 };
 
 /** fsync a file, then its parent dir, so a published record survives a crash. */
@@ -1385,7 +1419,7 @@ const restoreLockDiagnosis = (
     } catch {
       // unstatable — cannot prove the bound, keep holding
     }
-    return ageMs > RESTORE_OWNERLESS_RECLAIM_MS
+    return ageMs > restoreOwnerlessReclaimMs()
       ? { verdict: "stale", unproven: false, ino: stat.ino }
       : { verdict: "held", unproven: true, ino: stat.ino };
   }
@@ -1720,7 +1754,7 @@ const gcRestoreLockQuarantine = (realDir: string): void => {
  * dir rather than touching contested data. Returns a release function, or
  * null when a live process still holds the lock past the wait window.
  */
-const acquireRestoreLock = async (
+const acquireRestoreLockLegacy = async (
   realDir: string,
 ): Promise<(() => void) | null> => {
   const lockPath = join(realDir, RESTORE_LOCK_NAME);
@@ -1906,6 +1940,69 @@ const acquireRestoreLock = async (
       // for GC; the live lock at the name is never replaced or deleted.
     }
   };
+};
+
+/** Acquire the restore lock through the shared directory-lock core. */
+const acquireRestoreLock = async (
+  realDir: string,
+): Promise<(() => void) | null> => {
+  const lockPath = join(realDir, RESTORE_LOCK_NAME);
+  gcRestoreLockQuarantine(realDir);
+  const deadline = Date.now() + restoreLockWaitMs();
+  const remaining = (): number => Math.max(0, deadline - Date.now());
+  const lockOptions: TDirLockOptions = {
+    waitMs: restoreLockWaitMs(),
+    reclaimMs: restoreOwnerlessReclaimMs(),
+    pollMs: RESTORE_LOCK_POLL_MS,
+    inode: restoreLockDirIno,
+    removeOnUnprovenInode: false,
+    propagatePublishErrors: true,
+    startIdentity: (pid) => {
+      const budget = Math.min(RESTORE_PROBE_MAX_MS, remaining());
+      return budget > 0 ? boundedProcessStartIdentity(pid, budget) : undefined;
+    },
+    legacyStartIdentity: (pid) => {
+      const budget = Math.min(RESTORE_PROBE_MAX_MS, remaining());
+      return budget > 0
+        ? boundedLegacyProcessStartIdentity(pid, budget)
+        : undefined;
+    },
+    legacyHeld: (limit): boolean => {
+      try {
+        if (lstatSync(lockPath).isDirectory()) return false;
+      } catch {
+        return false;
+      }
+      const diagnosis = restoreLockDiagnosis(
+        lockPath,
+        Math.max(0, limit - Date.now()),
+      );
+      if (diagnosis.verdict === "stale") {
+        stealRestoreLock(
+          lockPath,
+          Math.max(0, limit - Date.now()),
+          diagnosis.ino,
+        );
+      }
+      return existsSync(lockPath);
+    },
+    onStep: (step): void => {
+      if (step === "before-publish") restorePublishGapHookForTests?.(lockPath);
+      if (step === "after-steal-rename")
+        restoreStealGapHookForTests?.(lockPath);
+    },
+  };
+  const release = await acquireDirLock(
+    lockPath,
+    restoreDirLockCodec,
+    lockOptions,
+  );
+  if (release === null) {
+    process.stderr.write(
+      `[openllm] restore lock ${lockPath} is held but its owner could not be verified; if no openllm teardown is running, remove it manually and retry\n`,
+    );
+  }
+  return release;
 };
 
 /** Test seam: the cross-process restore lock's acquire/release pair. */
