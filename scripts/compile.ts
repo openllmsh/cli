@@ -33,8 +33,6 @@ import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { gzipSync } from "node:zlib";
 import { $ } from "bun";
-// Build-time only: the same MAC-2 guard the daemon compile uses.
-import { assertDarwinSafeBunRuntime } from "../../daemon/release-types";
 import type { TCliTarget } from "../release-types";
 import {
   CLI_COMPILE_TARGET,
@@ -185,6 +183,29 @@ export const resolveCliCompileTargets = (
   )
     throw new Error("win32-x64 must be built on a native Windows host");
   return resolved;
+};
+
+/**
+ * MAC-2 guard (round-3 audit P2), kept local: the public CLI mirror is a
+ * subtree of packages/cli only, so this script must not import the daemon
+ * package. Keep the list equal to DARWIN_BROKEN_BUN_RUNTIMES in
+ * packages/daemon/release-types.ts (a test checks it).
+ */
+export const CLI_DARWIN_BROKEN_BUN_RUNTIMES = ["1.4.0"] as const;
+const assertDarwinSafeBunRuntime = (
+  targets: readonly string[],
+  bunVersion: string,
+): void => {
+  if (!targets.some((t) => t.includes("darwin"))) return;
+  if (
+    (CLI_DARWIN_BROKEN_BUN_RUNTIMES as readonly string[]).includes(bunVersion)
+  ) {
+    throw new Error(
+      `Refusing to compile darwin targets with Bun ${bunVersion}: that darwin ` +
+        "runtime produces binaries macOS 27 SIGKILLs at exec. Use the pinned " +
+        "toolchain (package.json packageManager).",
+    );
+  }
 };
 
 const buildOne = async (
