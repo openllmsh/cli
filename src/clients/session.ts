@@ -1383,6 +1383,29 @@ export const setRestoreLockPublishGapHookForTests = (
 };
 
 /**
+ * The dir inode used to pin a lock generation — null when it cannot be
+ * read. A capture failure must never widen into a delete: an unknown inode
+ * means the path may already be a successor's, so every cleanup that keys
+ * off it is skipped.
+ */
+const restoreLockDirInoDefault = (path: string): number | null => {
+  try {
+    return statSync(path).ino;
+  } catch {
+    return null;
+  }
+};
+let restoreLockDirIno = restoreLockDirInoDefault;
+
+/** Test seam: force the "inode unknown" branch — a failed capture must
+ *  never let a later owner-write failure delete the lock path. */
+export const setRestoreLockDirInoProbeForTests = (
+  probe: ((path: string) => number | null) | null,
+): void => {
+  restoreLockDirIno = probe ?? restoreLockDirInoDefault;
+};
+
+/**
  * Seize a lock judged stale. The `.stealing-*` marker goes up BEFORE the
  * quarantine rename and stays until the re-validation is final, so the
  * name gap can never admit a second logical owner (FSS-15): an acquirer
@@ -1629,7 +1652,11 @@ const acquireRestoreLock = async (
       const code = fsErrorCode(error);
       if (code === "ENOENT" || code === "ENOTDIR") return false;
       try {
-        if (expectedIno === null || statSync(lockPath).ino === expectedIno)
+        // Only a dir that still proves OUR generation is ours to remove —
+        // an unknown inode (expectedIno null) means the path may already be
+        // a successor's, so nothing is deleted here; the stale-lock path
+        // owns its cleanup.
+        if (expectedIno !== null && restoreLockDirIno(lockPath) === expectedIno)
           rmSync(lockPath, { recursive: true, force: true });
       } catch {
         // ownership stays unrecorded — and nothing foreign was removed
@@ -1699,12 +1726,7 @@ const acquireRestoreLock = async (
         // Our mkdir succeeded. Re-check the marker: landing inside a steal's
         // gap means undoing ONLY our own just-made dir — inode-verified, and
         // still empty because nothing has been published into it yet.
-        let createdIno: number | null = null;
-        try {
-          createdIno = statSync(lockPath).ino;
-        } catch {
-          createdIno = null;
-        }
+        const createdIno = restoreLockDirIno(lockPath);
         if (createdIno !== null) ourIno = createdIno;
         if (restoreStealInFlight(realDir)) {
           try {
