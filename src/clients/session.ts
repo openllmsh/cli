@@ -1121,7 +1121,7 @@ type TRestoreLockOwner = {
   readonly nonce: string | null;
 };
 
-const restoreDirLockCodec: TDirLockCodec = {
+export const restoreDirLockCodec: TDirLockCodec = {
   kind: RESTORE_LOCK_KIND,
   ownerFile: RESTORE_LOCK_OWNER_NAME,
   readOwner: (dir: string): TDirLockOwner | null => {
