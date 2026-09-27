@@ -327,9 +327,10 @@ const envLockStartIdentityForRecord = (
 /**
  * `processIdentityStatus` verdicts, briefly cached per (pid, recorded
  * start) — a mixed-format record costs a second bridging probe, so the
- * verdict is rate-limited like the daemon's. Only non-convicting answers
- * are cached: a cached "dead" could outlive a same-second pid reuse on a
- * coarse `ps lstart` record, so it is always re-probed before it convicts.
+ * verdict is rate-limited like the daemon's. Only "alive" answers are
+ * cached: a cached "dead" could outlive a same-second pid reuse on a
+ * coarse `ps lstart` record, and a cached "unknown" would make a
+ * transient probe outage outlive the TTL — both re-probe every call.
  */
 const statusCache = new Map<
   string,
@@ -348,11 +349,12 @@ const envLockIdentityStatus = (
   const value = processIdentityStatus(pid, recordedStart, (probePid) =>
     envLockStartIdentityForRecord(probePid, recordedStart),
   );
-  // A "dead" verdict is never cached: on a coarse `ps lstart` record (one
-  // second of resolution) the pid can be reused inside the TTL, and a cached
-  // conviction would steal the LIVE successor's lock. "alive" and "unknown"
-  // stay correct for the TTL, anything that convicts re-probes every time.
-  if (value !== "dead") {
+  // Only an "alive" verdict is cached: a cached "dead" could outlive a
+  // same-second pid reuse on a coarse `ps lstart` record and convict the
+  // LIVE successor, and a cached "unknown" would keep a dead owner
+  // unreclaimed while a transient probe failure clears — both re-probe
+  // every time.
+  if (value === "alive") {
     if (statusCache.size > 128) statusCache.clear();
     statusCache.set(key, { value, at: now });
   }
@@ -393,6 +395,23 @@ export const envLockPublishGapForTest = (
   hook: ((lockDir: string) => void) | null,
 ): void => {
   envLockPublishGapForTests = hook;
+};
+
+const envLockDirInoDefault = (dir: string): number | undefined => {
+  try {
+    return lstatSync(dir).ino;
+  } catch {
+    return undefined;
+  }
+};
+let envLockDirIno = envLockDirInoDefault;
+
+/** Test seam: force the "inode unknown" acquire branch — identical to the
+ *  daemon side. */
+export const envLockDirInoProbeForTest = (
+  probe: ((dir: string) => number | undefined) | null,
+): void => {
+  envLockDirIno = probe ?? envLockDirInoDefault;
 };
 
 /**
@@ -1006,11 +1025,15 @@ const withEnvFileLock = (
     }
     // Pin the generation we just created so the publish veto detects a
     // quarantine + path-reuse, not only an in-place steal marker.
-    let expectedIno: number | undefined;
-    try {
-      expectedIno = lstatSync(lockDir).ino;
-    } catch {
-      // unreadable — the marker veto alone still applies
+    const expectedIno = envLockDirIno(lockDir);
+    if (expectedIno === undefined) {
+      // Never publish into a dir whose generation we cannot prove — a
+      // swap can neither be confirmed nor excluded, and a blind publish
+      // could stamp into a successor's claim. Never rmdir either: the
+      // name may already sit on a dir that is not ours (identical guard
+      // in the daemon and the shared installer block).
+      lockWait();
+      continue;
     }
     let published: boolean;
     envLockPublishGapForTests?.(lockDir);
