@@ -1429,7 +1429,10 @@ const restoreRelQuarantinePid = (name: string): number | null => {
 /**
  * True while a `.stealing-*` sibling exists — a steal is in flight and the
  * lock name is inside its rename gap: an acquirer must not let an mkdir
- * there become a second holder (FSS-15).
+ * there become a second holder (FSS-15). A marker whose creator pid is
+ * PROVABLY dead is residue, not an in-flight steal — a dead process has no
+ * pending rename, so honoring its marker can only wedge the wait window
+ * until GC happens to sweep it. Only a live (or unprovable) creator blocks.
  */
 const restoreStealInFlight = (realDir: string): boolean => {
   let names: string[];
@@ -1438,7 +1441,10 @@ const restoreStealInFlight = (realDir: string): boolean => {
   } catch {
     return false;
   }
-  return names.some((name) => restoreStealMarkerPid(name) !== null);
+  return names.some((name) => {
+    const markerPid = restoreStealMarkerPid(name);
+    return markerPid !== null && restoreLockPidAlive(markerPid) !== false;
+  });
 };
 
 /** Test seam: runs inside a steal AFTER the quarantine rename — the exact
