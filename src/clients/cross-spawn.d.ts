@@ -11,6 +11,7 @@ declare module "cross-spawn" {
 }
 
 declare module "cross-spawn/lib/util/escape.js" {
+  // biome-ignore lint/suspicious/noShadowRestrictedNames: mirrors the upstream module's export name
   const escape: {
     readonly command: (command: string) => string;
     readonly argument: (
