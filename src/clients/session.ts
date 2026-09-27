@@ -10,21 +10,27 @@
 
 import type { ChildProcess, SpawnOptions } from "node:child_process";
 import { spawn, spawnSync } from "node:child_process";
+import { randomBytes } from "node:crypto";
 import {
   chmodSync,
+  closeSync,
   copyFileSync,
   existsSync,
   constants as fsConstants,
+  fsyncSync,
   linkSync,
   lstatSync,
   mkdirSync,
+  openSync,
   readdirSync,
   readFileSync,
   renameSync,
   rmdirSync,
   rmSync,
+  statSync,
   symlinkSync,
   writeFileSync,
+  writeSync,
 } from "node:fs";
 import { constants as osConstants } from "node:os";
 import { basename, dirname, join } from "node:path";
@@ -49,6 +55,8 @@ import type { TLiveSessionHost } from "../session-host";
 import {
   discoverSessionHosts,
   hasUnknownSessionHost,
+  killSpawnedSessionHost,
+  SESSION_HOST_SOCKET_WAIT_MS,
   sessionHostProcessStatus,
   sessionHostSpawnArgv,
   spawnSessionHost,
@@ -118,44 +126,561 @@ export const findClientBinary = (client: TClient): string | null => {
 };
 
 /**
- * Reap run dirs from launches that crashed without cleaning up. Best-effort and
- * conservative: only directories whose pid is no longer alive are removed, so a
- * concurrent launch is never disturbed.
+ * Run-dir self-description (SH-1/TD-6/FSS-06). Written at materialize time so
+ * a LATER launch's stale-run reaper can restore a crashed run's vendor data
+ * before deleting anything. `ownedPaths` is the exact plan-owned set the
+ * live teardown uses; `mirrorDir` is the restore target (null for clients
+ * whose vendor home is not redirected into the run dir).
  */
-const reapStaleRuns = (clientRoot: string): void => {
-  let entries: string[];
+const RUN_MANIFEST_NAME = "openllm-run.json";
+const RUN_MANIFEST_KIND = "openllm-run/v1";
+/**
+ * Proof a dead run dir's contents were persisted to the real config dir.
+ * The reaper deletes ONLY dirs carrying this marker (or dirs it just
+ * restored successfully itself) — a failed restore keeps the dir, so the
+ * next launch tries again instead of losing the data (SH-1). The marker is
+ * BINDING, not just present: its content must equal the run's manifest
+ * `nonce`, so a vendor file that happens to carry the same name never
+ * authorizes a deletion (codex P2 — a bare `openllm-restored-ok` file used
+ * to be enough). Only the restore code below ever writes it.
+ */
+const RUN_RESTORED_OK_NAME = "openllm-restored-ok";
+const RUN_MANIFEST_NONCE_RE = /^[0-9a-f]{32}$/;
+
+type TRunManifest = {
+  readonly clientId: string;
+  readonly pid: number;
+  readonly mirrorDir: string | null;
+  readonly ownedPaths: readonly string[];
+  /**
+   * Per-run unguessable token minted at materialize time. The restored-ok
+   * marker is honored only when its content equals this nonce — a marker
+   * without a manifest nonce (pre-nonce builds, or a forged file) is not
+   * proof of anything and the dir goes through a real restore instead.
+   */
+  readonly nonce: string | null;
+};
+
+const readRunManifest = (runDir: string): TRunManifest | null => {
+  let parsed: unknown;
   try {
-    entries = readdirSync(clientRoot);
+    parsed = JSON.parse(readFileSync(join(runDir, RUN_MANIFEST_NAME), "utf8"));
   } catch {
-    return;
+    return null;
   }
-  for (const name of entries) {
-    const pid = Number.parseInt(name, 10);
-    if (!Number.isFinite(pid)) continue;
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed))
+    return null;
+  const m = parsed as Record<string, unknown>;
+  if (m.kind !== RUN_MANIFEST_KIND) return null;
+  if (
+    typeof m.clientId !== "string" ||
+    m.clientId.length === 0 ||
+    !Number.isSafeInteger(m.pid) ||
+    (m.pid as number) <= 0 ||
+    (m.mirrorDir !== null && typeof m.mirrorDir !== "string") ||
+    !Array.isArray(m.ownedPaths) ||
+    !m.ownedPaths.every((p) => typeof p === "string")
+  )
+    return null;
+  return {
+    clientId: m.clientId,
+    pid: m.pid as number,
+    mirrorDir: typeof m.mirrorDir === "string" ? m.mirrorDir : null,
+    ownedPaths: m.ownedPaths as string[],
+    nonce:
+      typeof m.nonce === "string" && RUN_MANIFEST_NONCE_RE.test(m.nonce)
+        ? m.nonce
+        : null,
+  };
+};
+
+/** Write the manifest LAST so it describes the final owned-paths set. */
+const writeRunManifest = (
+  runDir: string,
+  clientId: string,
+  plan: TLaunchPlan,
+): void => {
+  const manifest: TRunManifest = {
+    clientId,
+    pid: process.pid,
+    mirrorDir: plan.mirrorDir === undefined ? null : expandHome(plan.mirrorDir),
+    ownedPaths: [...planOwnedPaths(plan)],
+    nonce: randomBytes(16).toString("hex"),
+  };
+  writeFileSync(
+    join(runDir, RUN_MANIFEST_NAME),
+    `${JSON.stringify(manifest)}\n`,
+    { mode: 0o600 },
+  );
+};
+
+/**
+ * True when every entry in the run dir is disposable: plan-owned at any
+ * depth, or a symlink (whose TARGET lives outside the run dir, so the link
+ * itself holds no data). Anything else is unrestored vendor data and the
+ * dir must be kept.
+ */
+const runDirOnlyDisposable = (
+  dir: string,
+  entries: readonly string[],
+  owned: ReadonlySet<string>,
+): boolean => {
+  const onlyOwned = (abs: string, rel: string): boolean => {
+    if (owned.has(rel)) return true;
+    let stat: ReturnType<typeof lstatSync>;
     try {
-      process.kill(pid, 0); // signal 0 = liveness probe, kills nothing
-      continue; // still running — leave it
+      stat = lstatSync(abs);
     } catch {
-      // ESRCH (dead) → its run dir is garbage
+      return true; // vanished mid-check — nothing left to preserve
     }
+    if (stat.isSymbolicLink()) return true;
+    if (!stat.isDirectory()) return false;
+    let children: string[];
     try {
-      rmSync(join(clientRoot, name), { recursive: true, force: true });
+      children = readdirSync(abs);
+    } catch {
+      return false; // unreadable dir — cannot prove it empty of data
+    }
+    return children.every((child) =>
+      onlyOwned(join(abs, child), `${rel}/${child}`),
+    );
+  };
+  return entries.every((entry) => onlyOwned(join(dir, entry), entry));
+};
+
+/**
+ * The restored-ok marker is honored only when it was written by THIS run's
+ * own restore: its content must equal the manifest nonce. A vendor file
+ * named `openllm-restored-ok` (or a marker left by a build that did not
+ * bind it to the run) fails this check and falls through to a real
+ * restore. A non-regular or oversized marker is never trusted.
+ */
+const restoredMarkerMatches = (dir: string, nonce: string): boolean => {
+  const markerPath = join(dir, RUN_RESTORED_OK_NAME);
+  try {
+    const stat = lstatSync(markerPath);
+    if (!stat.isFile() || stat.size > 64) return false;
+    return readFileSync(markerPath, "utf8").trim() === nonce;
+  } catch {
+    return false;
+  }
+};
+
+/**
+ * Per-run-dir restore bookkeeping, persisted NEXT to the dir as
+ * `.openllm-restore-state-<name>.json` so a restore can never move it into
+ * the user's real config dir and a crash mid-restore cannot lose the
+ * count. This is also the doctor-visible record: it says why a dead run
+ * dir still exists and what was tried. The file dies with its dir (the
+ * reaper removes it on delete and renames it on `kept-*` quarantine).
+ */
+const RUN_RESTORE_STATE_PREFIX = ".openllm-restore-state-";
+const RUN_RESTORE_STATE_SUFFIX = ".json";
+const RUN_RESTORE_STATE_KIND = "openllm-restore-state/v1";
+const RUN_RESTORE_STATE_RE = /^\.openllm-restore-state-(.+)\.json$/;
+
+/** Defaults: a few spread-out retries, then the dir is left for manual
+ *  recovery. Env overrides exist for operators and deterministic tests. */
+const RUN_RESTORE_MAX_ATTEMPTS = 5;
+const RUN_RESTORE_BACKOFF_BASE_MS = 60_000;
+const RUN_RESTORE_BACKOFF_CAP_MS = 6 * 3_600_000;
+/** Restore work (lock + moves) is the expensive part of a launch pass; cap
+ *  how many dirs get one per launch so N permanently-failing runs cannot
+ *  stall startup without bound. */
+const REAP_MAX_RESTORES_PER_PASS = 8;
+
+const envBoundedInt = (name: string, fallback: number): number => {
+  const raw = Number(process.env[name]);
+  return Number.isSafeInteger(raw) && raw >= 0 ? raw : fallback;
+};
+
+const runRestoreMaxAttempts = (): number =>
+  Math.max(
+    1,
+    envBoundedInt("OPENLLM_RUN_RESTORE_MAX_ATTEMPTS", RUN_RESTORE_MAX_ATTEMPTS),
+  );
+
+const runRestoreBackoffMs = (attempts: number): number => {
+  const base = envBoundedInt(
+    "OPENLLM_RUN_RESTORE_BACKOFF_MS",
+    RUN_RESTORE_BACKOFF_BASE_MS,
+  );
+  return Math.min(
+    base * 2 ** Math.max(0, attempts - 1),
+    RUN_RESTORE_BACKOFF_CAP_MS,
+  );
+};
+
+const reapMaxRestoresPerPass = (): number =>
+  Math.max(
+    1,
+    envBoundedInt("OPENLLM_RUN_REAP_MAX_RESTORES", REAP_MAX_RESTORES_PER_PASS),
+  );
+
+type TRestoreStateRecord = {
+  readonly attempts: number;
+  readonly firstFailedAt: string | null;
+  readonly lastFailedAt: string | null;
+  readonly lastFailedAtMs: number | null;
+  readonly lastError: string | null;
+  readonly suspended: boolean;
+  readonly reason: string | null;
+};
+
+const restoreStatePath = (clientRoot: string, dirName: string): string =>
+  join(
+    clientRoot,
+    `${RUN_RESTORE_STATE_PREFIX}${dirName}${RUN_RESTORE_STATE_SUFFIX}`,
+  );
+
+const readRestoreState = (path: string): TRestoreStateRecord | null => {
+  try {
+    const parsed: unknown = JSON.parse(readFileSync(path, "utf8"));
+    if (typeof parsed !== "object" || parsed === null) return null;
+    const r = parsed as Record<string, unknown>;
+    if (r.kind !== RUN_RESTORE_STATE_KIND) return null;
+    if (!Number.isSafeInteger(r.attempts) || (r.attempts as number) < 0)
+      return null;
+    return {
+      attempts: r.attempts as number,
+      firstFailedAt:
+        typeof r.firstFailedAt === "string" ? r.firstFailedAt : null,
+      lastFailedAt: typeof r.lastFailedAt === "string" ? r.lastFailedAt : null,
+      lastFailedAtMs:
+        typeof r.lastFailedAtMs === "number" &&
+        Number.isFinite(r.lastFailedAtMs)
+          ? r.lastFailedAtMs
+          : null,
+      lastError: typeof r.lastError === "string" ? r.lastError : null,
+      suspended: r.suspended === true,
+      reason: typeof r.reason === "string" ? r.reason : null,
+    };
+  } catch {
+    return null;
+  }
+};
+
+/** Write the record atomically (tmp + rename) so a crash cannot tear it. */
+const writeRestoreState = (path: string, record: TRestoreStateRecord): void => {
+  const tmp = `${path}.${process.pid}.tmp`;
+  try {
+    writeFileSync(
+      tmp,
+      `${JSON.stringify({ kind: RUN_RESTORE_STATE_KIND, ...record })}\n`,
+      { mode: 0o600 },
+    );
+    renameSync(tmp, path);
+  } catch {
+    try {
+      rmSync(tmp, { force: true });
     } catch {
       // best-effort
     }
   }
 };
 
+const removeRestoreState = (path: string): void => {
+  try {
+    rmSync(path, { force: true });
+  } catch {
+    // best-effort
+  }
+};
+
+type TReapOutcome = {
+  /** The dir is gone (deleted, or never readable). */
+  readonly gone: boolean;
+  /** A real restore attempt ran — counts against the per-pass budget. */
+  readonly attempted: boolean;
+};
+
+const REAP_GONE: TReapOutcome = { gone: true, attempted: false };
+const REAP_KEPT: TReapOutcome = { gone: false, attempted: false };
+const REAP_ATTEMPTED: TReapOutcome = { gone: false, attempted: true };
+const REAP_RESTORED: TReapOutcome = { gone: true, attempted: true };
+
+/**
+ * Mark a run dir's restore permanently suspended: the record (kept beside
+ * the dir) is the doctor-visible explanation, and a stderr note names the
+ * recovery path. The dir itself is retained — data is never deleted on a
+ * failure path (SH-1).
+ */
+const suspendStaleRunDir = (
+  clientRoot: string,
+  name: string,
+  record: TRestoreStateRecord,
+): void => {
+  writeRestoreState(restoreStatePath(clientRoot, name), {
+    ...record,
+    suspended: true,
+    reason: `restore failed ${record.attempts} times; kept for manual recovery`,
+  });
+  process.stderr.write(
+    `[openllm] restore of ${join(clientRoot, name)} failed ${record.attempts} times; ` +
+      `kept for manual recovery (see ${restoreStatePath(clientRoot, name)})\n`,
+  );
+};
+
+/**
+ * Reap one dead-pid run dir. Never deletes unrestored vendor data: a
+ * manifest-less, suspended or failed-restore dir is KEPT (SH-1). A dir is
+ * deleted only when a manifest-nonce-bound restored-ok marker proves an
+ * earlier pass persisted everything (and nothing non-owned appeared
+ * since), or this pass restores it cleanly. Failed restores are recorded
+ * per dir with a backoff and a hard attempt cap — a permanently failing
+ * restore is retried a bounded number of times, then suspended for manual
+ * recovery instead of stalling every launch forever.
+ */
+const reapStaleRunDir = async (
+  clientRoot: string,
+  name: string,
+  budget: { remaining: number },
+): Promise<TReapOutcome> => {
+  const dir = join(clientRoot, name);
+  let entries: string[];
+  try {
+    entries = readdirSync(dir);
+  } catch {
+    return REAP_GONE; // unreadable/gone — nothing to preserve
+  }
+  const manifest = readRunManifest(dir);
+  if (manifest === null) {
+    // No manifest: written by a pre-SH-1 build or a crashed materialize.
+    // The plan-owned set is unknowable and no marker can be verified, so
+    // nothing can be proven safe to delete — keep the dir for manual
+    // recovery.
+    return REAP_KEPT;
+  }
+  // The manifest plus the marker name are ours regardless of what an older
+  // or partial manifest recorded.
+  const owned = new Set([
+    ...manifest.ownedPaths,
+    RUN_MANIFEST_NAME,
+    RUN_RESTORED_OK_NAME,
+  ]);
+  if (
+    manifest.nonce !== null &&
+    entries.includes(RUN_RESTORED_OK_NAME) &&
+    restoredMarkerMatches(dir, manifest.nonce) &&
+    runDirOnlyDisposable(dir, entries, owned)
+  ) {
+    try {
+      rmSync(dir, { recursive: true, force: true });
+    } catch {
+      // best-effort — the marker still proves it next pass
+    }
+    removeRestoreState(restoreStatePath(clientRoot, name));
+    return REAP_GONE;
+  }
+  const statePath = restoreStatePath(clientRoot, name);
+  const record = readRestoreState(statePath);
+  if (record?.suspended === true) return REAP_KEPT;
+  const attempts = record?.attempts ?? 0;
+  if (attempts >= runRestoreMaxAttempts()) {
+    suspendStaleRunDir(
+      clientRoot,
+      name,
+      record ?? {
+        attempts,
+        firstFailedAt: null,
+        lastFailedAt: null,
+        lastFailedAtMs: null,
+        lastError: null,
+        suspended: false,
+        reason: null,
+      },
+    );
+    return REAP_KEPT;
+  }
+  if (
+    record !== null &&
+    record.lastFailedAtMs !== null &&
+    Date.now() - record.lastFailedAtMs < runRestoreBackoffMs(attempts)
+  ) {
+    return REAP_KEPT; // backoff — a later launch retries
+  }
+  if (manifest.mirrorDir === null) {
+    // No mirror target: the run dir is pure plan content unless a stray
+    // vendor write landed — prove nothing non-owned survives before
+    // deleting.
+    if (!runDirOnlyDisposable(dir, entries, owned)) return REAP_KEPT;
+    try {
+      // Marker first: if we crash between here and the rm, the next launch
+      // sees a verified restored-ok and deletes without re-checking.
+      if (manifest.nonce !== null) {
+        writeFileSync(join(dir, RUN_RESTORED_OK_NAME), `${manifest.nonce}\n`, {
+          mode: 0o600,
+        });
+      }
+      rmSync(dir, { recursive: true, force: true });
+      removeRestoreState(statePath);
+      return REAP_GONE;
+    } catch {
+      return REAP_GONE; // best-effort — the marker or next pass finishes it
+    }
+  }
+  if (budget.remaining <= 0) return REAP_KEPT;
+  budget.remaining -= 1;
+  const attemptNo = attempts + 1;
+  const nowMs = Date.now();
+  const base: TRestoreStateRecord = {
+    attempts: attemptNo,
+    firstFailedAt: record?.firstFailedAt ?? new Date(nowMs).toISOString(),
+    lastFailedAt: new Date(nowMs).toISOString(),
+    lastFailedAtMs: nowMs,
+    lastError: "attempt in progress",
+    suspended: false,
+    reason: null,
+  };
+  // Count the attempt BEFORE restoring: a crash mid-restore still leaves a
+  // record that this dir consumed a try.
+  writeRestoreState(statePath, base);
+  let outcome: TRestoreOutcome;
+  try {
+    outcome = await restoreMirrorEntries(manifest.mirrorDir, dir, owned);
+  } catch (error) {
+    outcome = {
+      ok: false,
+      moved: [],
+      skipped: [],
+      problems: [error instanceof Error ? error.message : String(error)],
+    };
+  }
+  if (!outcome.ok) {
+    const failed: TRestoreStateRecord = {
+      ...base,
+      lastError: outcome.problems.slice(0, 4).join("; ") || "restore failed",
+    };
+    if (attemptNo >= runRestoreMaxAttempts()) {
+      suspendStaleRunDir(clientRoot, name, failed);
+    } else {
+      writeRestoreState(statePath, failed);
+    }
+    return REAP_ATTEMPTED;
+  }
+  try {
+    // Marker first: if we crash between here and the rm, the next launch
+    // sees a verified restored-ok and deletes without re-restoring.
+    if (manifest.nonce !== null) {
+      writeFileSync(join(dir, RUN_RESTORED_OK_NAME), `${manifest.nonce}\n`, {
+        mode: 0o600,
+      });
+    }
+    rmSync(dir, { recursive: true, force: true });
+  } catch {
+    // best-effort — the marker or next pass finishes it
+  }
+  removeRestoreState(statePath);
+  return REAP_RESTORED;
+};
+
+/** The run-dir name a state record belongs to, or null for other files. */
+const restoreStateTarget = (entryName: string): string | null =>
+  RUN_RESTORE_STATE_RE.exec(entryName)?.[1] ?? null;
+
+/**
+ * Reap run dirs from launches that crashed without cleaning up. Best-effort
+ * and conservative: only directories whose recorded pid is dead are
+ * touched, and those are RESTORED FIRST — a dir is deleted only when a
+ * verified `restored-ok` marker proves an earlier pass persisted it, or
+ * this pass just restored it cleanly (SH-1). Restore work is bounded per
+ * pass so a pile of unrecoverable dirs cannot stall a launch, and each
+ * dir's failures are bounded by a persisted backoff + cap.
+ */
+const reapStaleRuns = async (clientRoot: string): Promise<void> => {
+  let entries: string[];
+  try {
+    entries = readdirSync(clientRoot);
+  } catch {
+    return;
+  }
+  const budget = { remaining: reapMaxRestoresPerPass() };
+  for (const name of entries) {
+    // `<pid>` or the `<pid>-<hex>` suffix createRunDir uses when a recycled
+    // pid collides with an unreaped dir; `kept-*` is quarantined on purpose
+    // and only manual recovery touches it.
+    const pidMatch = /^(\d+)(?:-[0-9a-f]{8})?$/.exec(name);
+    if (pidMatch === null) {
+      // Sweep a state record whose run dir is gone (deleted by hand or
+      // renamed without the record). A record whose dir exists — even a
+      // `kept-*` one — is the doctor-visible trail, so it stays.
+      const target = restoreStateTarget(name);
+      if (target !== null && !existsSync(join(clientRoot, target))) {
+        removeRestoreState(join(clientRoot, name));
+      }
+      continue;
+    }
+    const pid = Number.parseInt(pidMatch[1] as string, 10);
+    if (!Number.isSafeInteger(pid) || pid <= 0 || pid === process.pid) continue;
+    try {
+      process.kill(pid, 0); // signal 0 = liveness probe, kills nothing
+      continue; // still running — leave it
+    } catch (error) {
+      // Only a confirmed ESRCH is death: EPERM means the pid is alive and
+      // owned by another user — anything else cannot be proven either.
+      if (fsErrorCode(error) !== "ESRCH") continue;
+    }
+    try {
+      await reapStaleRunDir(clientRoot, name, budget);
+    } catch {
+      // best-effort — a failed restore keeps the dir for the next launch
+    }
+  }
+};
+
+/** Test seam: run the stale-run reaper over a client run root directly. */
+export const reapStaleRunsForTests = async (
+  clientRoot: string,
+): Promise<void> => {
+  await reapStaleRuns(clientRoot);
+};
+
 /** Create `~/.openllm/run/<client>/<pid>/` (0700) and return it. */
-const createRunDir = (clientId: string): string => {
+const createRunDir = async (clientId: string): Promise<string> => {
   const clientRoot = join(runRoot(), clientId);
   mkdirSync(clientRoot, { recursive: true, mode: 0o700 });
-  reapStaleRuns(clientRoot);
+  await reapStaleRuns(clientRoot);
   const dir = join(clientRoot, String(process.pid));
-  rmSync(dir, { recursive: true, force: true }); // pid reuse after a crash
-  mkdirSync(dir, { recursive: true, mode: 0o700 });
-  chmodSync(dir, 0o700); // force mode regardless of umask
-  return dir;
+  if (existsSync(dir)) {
+    // Pid reuse after a crash: the dir was a DIFFERENT process's run dir and
+    // may hold unrestored vendor data — restore it before reclaiming the
+    // name, and never delete it outright (SH-1).
+    let recovered = false;
+    try {
+      recovered = (
+        await reapStaleRunDir(clientRoot, String(process.pid), {
+          remaining: reapMaxRestoresPerPass(),
+        })
+      ).gone;
+    } catch {
+      recovered = false;
+    }
+    if (!recovered) {
+      // Keep the data under a name the numeric-pid scan skips: it stays
+      // for manual recovery rather than blocking this launch. The restore
+      // record moves with the dir so the doctor-visible trail still pairs.
+      const keptName = `kept-${process.pid}-${randomBytes(4).toString("hex")}`;
+      try {
+        renameSync(dir, join(clientRoot, keptName));
+        try {
+          renameSync(
+            restoreStatePath(clientRoot, String(process.pid)),
+            restoreStatePath(clientRoot, keptName),
+          );
+        } catch {
+          // no record to carry — fine
+        }
+      } catch {
+        // rename failed — fall back to a suffixed run dir name
+      }
+    }
+  }
+  const target = existsSync(dir)
+    ? join(clientRoot, `${process.pid}-${randomBytes(4).toString("hex")}`)
+    : dir;
+  mkdirSync(target, { recursive: true, mode: 0o700 });
+  chmodSync(target, 0o700); // force mode regardless of umask
+  return target;
 };
 
 /**
@@ -182,12 +707,19 @@ const mirrorConfigDir = (
 };
 
 /** Write the plan's files, materialize hooks, and set up any symlink farm. */
-const materialize = (plan: TLaunchPlan, runDir: string): void => {
+const materialize = (
+  plan: TLaunchPlan,
+  runDir: string,
+  clientId: string,
+): void => {
   if (plan.mirrorDir !== undefined) {
     mirrorConfigDir(
       expandHome(plan.mirrorDir),
       runDir,
-      Object.keys(plan.files),
+      // The manifest name is OURS — never let a same-named real-dir entry be
+      // symlinked in, or the manifest write would follow the link into the
+      // user's real config dir.
+      [...Object.keys(plan.files), RUN_MANIFEST_NAME, RUN_RESTORED_OK_NAME],
     );
   }
   for (const [rel, contents] of Object.entries(plan.files)) {
@@ -212,6 +744,10 @@ const materialize = (plan: TLaunchPlan, runDir: string): void => {
     writeFileSync(abs, body, { mode: 0o700 });
     chmodSync(abs, 0o700); // force mode regardless of umask
   }
+  // SH-1: the manifest goes last so the next launch's reaper can restore this
+  // dir even when we die mid-session. A failure here is fatal to the launch:
+  // a run dir without a manifest can never be reaped, so it must not start.
+  writeRunManifest(runDir, clientId, plan);
 };
 
 /**
@@ -226,7 +762,11 @@ const materialize = (plan: TLaunchPlan, runDir: string): void => {
  * `rules/openllm.md`) is still preserved.
  */
 const planOwnedPaths = (plan: TLaunchPlan): ReadonlySet<string> => {
-  const owned = new Set<string>([LIVE_JSON_NAME]);
+  const owned = new Set<string>([
+    LIVE_JSON_NAME,
+    RUN_MANIFEST_NAME,
+    RUN_RESTORED_OK_NAME,
+  ]);
   if (plan.hooks) owned.add("hooks");
   for (const rel of [
     ...Object.keys(plan.files),
@@ -348,16 +888,33 @@ const RESTORE_LOCK_OWNER_NAME = "owner.json";
 /** Marks an owner record written by this code; anything else is unverifiable. */
 const RESTORE_LOCK_KIND = "openllm-restore-lock/v1";
 /** Exact start-identity shapes processStartIdentity produces: POSIX
- *  `ps -o lstart=` under LC_ALL=C/TZ=UTC, or a Windows FILETIME integer. */
+ *  `ps -o lstart=` under LC_ALL=C/TZ=UTC, a Windows FILETIME integer, or the
+ *  post-RT-1 Linux `boot:<boot_id>:<ticks>` pair. */
 const RESTORE_LOCK_START_RE =
-  /^(?:(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun) (?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) {1,2}\d{1,2} \d{2}:\d{2}:\d{2} \d{4}|\d{1,20})$/;
-/** Exact names this code gives quarantined locks (see the steal path). */
+  /^(?:(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun) (?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) {1,2}\d{1,2} \d{2}:\d{2}:\d{2} \d{4}|\d{1,20}|boot:[0-9a-f-]{36}:\d+)$/;
+/** Exact names this code gives quarantined locks (steal + release paths). */
 const RESTORE_QUARANTINE_NAME_RE =
-  /^\.openllm-restore\.lock\.stale-\d+-\d+-\d+$/;
+  /^\.openllm-restore\.lock\.(?:stale|rel)-\d+-\d+-\d+$/;
+/** Steal-in-flight marker siblings (`<lock>.stealing-<pid>-<nonce>`). */
+const RESTORE_STEAL_MARKER_RE =
+  /^\.openllm-restore\.lock\.stealing-(\d+)-[0-9a-f]+$/;
 const RESTORE_LOCK_OWNER_FILE_RE = /^owner\.json(?:\.\d+\.tmp)?$/;
 const RESTORE_LOCK_WAIT_MS = 5_000;
+/**
+ * Teardown waits on a contended restore lock only this long; on a very slow
+ * filesystem an operator can widen it. The bound stays finite either way —
+ * it exists so a wedged lock cannot hang an exit forever.
+ */
+const restoreLockWaitMs = (): number => {
+  const override = Number(process.env.OPENLLM_RESTORE_LOCK_WAIT_MS);
+  return Number.isFinite(override) && override > 0
+    ? Math.floor(override)
+    : RESTORE_LOCK_WAIT_MS;
+};
 const RESTORE_LOCK_POLL_MS = 50;
 const RESTORE_QUARANTINE_PREFIX = `${RESTORE_LOCK_NAME}.stale-`;
+const RESTORE_REL_QUARANTINE_PREFIX = `${RESTORE_LOCK_NAME}.rel-`;
+const RESTORE_STEAL_MARKER_PREFIX = `${RESTORE_LOCK_NAME}.stealing-`;
 /**
  * The identity probe in local-runtime caps its `ps` spawn at 1.5 s; the
  * restore wait is a hard 5 s budget, so each probe gets only the time that
@@ -370,6 +927,15 @@ const RESTORE_PROBE_MAX_MS = 1_500;
  * its race; it is garbage-collected during acquisition.
  */
 const RESTORE_QUARANTINE_GC_MS = 10 * 60_000;
+/**
+ * FSS-07/PM-3: a crash between `mkdir(lock)` and the owner publish leaves a
+ * lock dir with NO record that nothing can reclaim — every later teardown
+ * timed out on it. The publish window is milliseconds, so a dir that has
+ * carried no owner record for this long is orphaned residue, stealable like
+ * any stale lock. A dir with an unreadable-but-PRESENT owner.json is never
+ * covered by this rule — unverifiable is held, not stale.
+ */
+const RESTORE_OWNERLESS_RECLAIM_MS = 30_000;
 
 const sleep = (ms: number): Promise<void> =>
   new Promise<void>((resolve) => {
@@ -393,12 +959,24 @@ let spawnForProbe: typeof spawnSync = spawnSync;
 
 /**
  * Test-only: substitute the identity-probe spawn — e.g. to script process
- * start times or to make a probe run to its full timeout.
+ * start times or to make a probe run to its full timeout. Only reaches the
+ * POSIX `ps` path: win32 (FFI) and linux (/proc) resolve in-process, so
+ * tests that must script THOSE identities use the reader seam below.
  */
 export const setRestoreLockProbeSpawnForTests = (
   impl: typeof spawnSync | null,
 ): void => {
   spawnForProbe = impl ?? spawnSync;
+};
+
+/** Test seam: replaces the whole bounded identity probe (any platform). */
+let identityProbeForTests:
+  | ((pid: number, budgetMs: number) => string | null | undefined)
+  | null = null;
+export const setRestoreLockIdentityProbeForTests = (
+  probe: ((pid: number, budgetMs: number) => string | null | undefined) | null,
+): void => {
+  identityProbeForTests = probe;
 };
 
 /**
@@ -411,9 +989,14 @@ const boundedProcessStartIdentity = (
   pid: number,
   budgetMs: number,
 ): string | null | undefined => {
+  if (identityProbeForTests !== null)
+    return identityProbeForTests(pid, budgetMs);
   if (budgetMs <= 0) return undefined;
-  // Windows reads identity through non-blocking FFI calls — nothing spawns.
-  if (process.platform === "win32") return processStartIdentity(pid);
+  // Windows reads identity through non-blocking FFI calls, and Linux reads
+  // /proc directly — neither spawns a helper, so a `ps` that rejects
+  // `lstart` (busybox) cannot wedge the restore wait (SH-2).
+  if (process.platform === "win32" || process.platform === "linux")
+    return processStartIdentity(pid);
   const [bin, ...args] = processStartCommand(pid);
   if (bin === undefined) return undefined;
   const result = spawnForProbe(bin, args, {
@@ -440,13 +1023,50 @@ type TRestoreLockOwner = {
   readonly pid: number;
   /** Process-start identity; null means the acquirer could not probe itself. */
   readonly start: string | null;
+  /**
+   * 128-bit ownership token (FSS-15/SH-7): release renames the lock to
+   * quarantine and deletes it only when the record inside still carries OUR
+   * nonce, so a stolen-and-re-acquired lock is never deleted out from under
+   * its new owner. Records written by older builds have no nonce — they
+   * diagnose the same, but only a nonce'd record can be released by us.
+   */
+  readonly nonce: string | null;
+};
+
+/** fsync a file, then its parent dir, so a published record survives a crash. */
+const fsyncFileAndDir = (file: string, dir: string): void => {
+  try {
+    const fd = openSync(file, "r");
+    try {
+      fsyncSync(fd);
+    } finally {
+      closeSync(fd);
+    }
+  } catch {
+    // durability is best-effort on filesystems without fsync support
+  }
+  try {
+    const fd = openSync(dir, "r");
+    try {
+      fsyncSync(fd);
+    } finally {
+      closeSync(fd);
+    }
+  } catch {
+    // a directory fsync is unsupported on some platforms — best-effort
+  }
 };
 
 /** Record who holds the lock: pid PLUS process-start identity, so a pid
  * recycled onto an unrelated process cannot keep the lock alive. The record
- * is published atomically — a temp file inside the lock directory, then
- * rename — so a reader never observes a partial owner.json. */
-const writeRestoreLockOwner = (lockPath: string, budgetMs: number): void => {
+ * is published atomically — a temp file inside the lock directory, fsynced,
+ * then renamed — so a reader never observes a partial owner.json and a crash
+ * cannot lose a record that was reported published. */
+const writeRestoreLockOwner = (
+  lockPath: string,
+  budgetMs: number,
+  nonce: string,
+): void => {
   let start: string | null = null;
   try {
     start = boundedProcessStartIdentity(process.pid, budgetMs) ?? null;
@@ -454,11 +1074,16 @@ const writeRestoreLockOwner = (lockPath: string, budgetMs: number): void => {
     start = null;
   }
   const tmp = join(lockPath, `${RESTORE_LOCK_OWNER_NAME}.${process.pid}.tmp`);
-  writeFileSync(
-    tmp,
-    `${JSON.stringify({ kind: RESTORE_LOCK_KIND, pid: process.pid, start })}\n`,
-    { mode: 0o600 },
-  );
+  const fd = openSync(tmp, "w", 0o600);
+  try {
+    writeSync(
+      fd,
+      `${JSON.stringify({ kind: RESTORE_LOCK_KIND, pid: process.pid, start, nonce })}\n`,
+    );
+    fsyncSync(fd);
+  } finally {
+    closeSync(fd);
+  }
   try {
     renameSync(tmp, join(lockPath, RESTORE_LOCK_OWNER_NAME));
   } catch (error) {
@@ -469,6 +1094,7 @@ const writeRestoreLockOwner = (lockPath: string, budgetMs: number): void => {
     }
     throw error;
   }
+  fsyncFileAndDir(join(lockPath, RESTORE_LOCK_OWNER_NAME), lockPath);
 };
 
 const readRestoreLockOwner = (lockPath: string): TRestoreLockOwner | null => {
@@ -498,10 +1124,83 @@ const readRestoreLockOwner = (lockPath: string): TRestoreLockOwner | null => {
     return {
       pid: owner.pid,
       start: typeof owner.start === "string" ? owner.start : null,
+      nonce:
+        typeof owner.nonce === "string" && /^[0-9a-f]{32}$/.test(owner.nonce)
+          ? owner.nonce
+          : null,
     };
   } catch {
     return null;
   }
+};
+
+/**
+ * A single un-renamed publish temp is still a readable owner record — the
+ * holder died between the temp write and the rename. Two or more temps (or
+ * an unreadable one) prove nothing: unmarked.
+ */
+const readRestoreLockTmpOwner = (
+  lockPath: string,
+): TRestoreLockOwner | null => {
+  let names: string[];
+  try {
+    names = readdirSync(lockPath);
+  } catch {
+    return null;
+  }
+  const tmps = names.filter(
+    (name) =>
+      name !== RESTORE_LOCK_OWNER_NAME && RESTORE_LOCK_OWNER_FILE_RE.test(name),
+  );
+  if (names.includes(RESTORE_LOCK_OWNER_NAME) || tmps.length !== 1) return null;
+  try {
+    const parsed: unknown = JSON.parse(
+      readFileSync(join(lockPath, tmps[0] ?? ""), "utf8"),
+    );
+    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed))
+      return null;
+    const owner = parsed as Record<string, unknown>;
+    if (
+      owner.kind !== RESTORE_LOCK_KIND ||
+      typeof owner.pid !== "number" ||
+      !Number.isSafeInteger(owner.pid) ||
+      owner.pid <= 0
+    )
+      return null;
+    if (owner.start !== undefined && owner.start !== null) {
+      if (
+        typeof owner.start !== "string" ||
+        !RESTORE_LOCK_START_RE.test(owner.start)
+      )
+        return null;
+    }
+    return {
+      pid: owner.pid,
+      start: typeof owner.start === "string" ? owner.start : null,
+      nonce:
+        typeof owner.nonce === "string" && /^[0-9a-f]{32}$/.test(owner.nonce)
+          ? owner.nonce
+          : null,
+    };
+  } catch {
+    return null;
+  }
+};
+
+/**
+ * True when the lock dir carries NO owner-record-shaped entry at all — the
+ * crash-between-mkdir-and-publish shape (FSS-07). Any `owner.json` or
+ * `owner.json.*.tmp` entry — even an unreadable one — counts as presence:
+ * unverifiable is held, never ownerless. A failed listing is also presence.
+ */
+const restoreLockIsOwnerless = (lockPath: string): boolean => {
+  let names: string[];
+  try {
+    names = readdirSync(lockPath);
+  } catch {
+    return false;
+  }
+  return !names.some((name) => RESTORE_LOCK_OWNER_FILE_RE.test(name));
 };
 
 type TRestoreLockVerdict = "held" | "stale" | "gone";
@@ -594,8 +1293,27 @@ const restoreLockDiagnosis = (
     return { verdict: "gone", unproven: false };
   }
   if (!stat.isDirectory()) return diagnoseLegacyFileLock(lockPath, budgetMs);
-  const owner = readRestoreLockOwner(lockPath);
-  if (owner === null) return { verdict: "held", unproven: true };
+  // The published record wins; a LONE publish-temp (`owner.json.<pid>.tmp`)
+  // is still a readable record from a holder that died mid-publish.
+  const owner =
+    readRestoreLockOwner(lockPath) ?? readRestoreLockTmpOwner(lockPath);
+  if (owner === null) {
+    // No complete owner record: a dir that carries any `owner.json`-shaped
+    // entry is mid-publish or unreadable — held, never aged out. A dir with
+    // NO owner record at all is the crash-between-mkdir-and-publish shape
+    // (FSS-07/PM-3): reclaimable once it has been ownerless for the bound.
+    if (!restoreLockIsOwnerless(lockPath))
+      return { verdict: "held", unproven: true };
+    let ageMs = Number.POSITIVE_INFINITY;
+    try {
+      ageMs = Date.now() - stat.mtimeMs;
+    } catch {
+      // unstatable — cannot prove the bound, keep holding
+    }
+    return ageMs > RESTORE_OWNERLESS_RECLAIM_MS
+      ? { verdict: "stale", unproven: false }
+      : { verdict: "held", unproven: true };
+  }
   if (owner.start !== null) {
     // Identity-verified: "dead" covers a gone pid AND a live pid whose
     // start time proves the recorded owner is dead (pid reuse).
@@ -612,49 +1330,103 @@ const restoreLockDiagnosis = (
 
 let restoreLockStealCounter = 0;
 
+/** The creator pid embedded in a `<lock>.stealing-<pid>-<nonce>` marker. */
+const restoreStealMarkerPid = (name: string): number | null => {
+  const match = RESTORE_STEAL_MARKER_RE.exec(name);
+  if (match === null) return null;
+  const pid = Number.parseInt(match[1] ?? "", 10);
+  return Number.isSafeInteger(pid) && pid > 0 ? pid : null;
+};
+
 /**
- * Seize a lock judged stale by atomically renaming it to a unique quarantine
- * name — only ONE racing stealer's rename can succeed, because the source
- * vanishes under the loser (ENOENT). The diagnosis is then RE-CHECKED on the
- * seized entry: a lock that became live again in the microseconds between
- * verdict and rename is put back with a NO-REPLACE move, never by rename —
- * a lock path reclaimed by a fresh owner during the repair window must not
- * be overwritten. When the destination now exists (or the move fails) the
- * quarantine entry is left in place for the acquisition-time GC.
+ * True while a `.stealing-*` sibling exists — a steal is in flight and the
+ * lock name is inside its rename gap: an acquirer must not let an mkdir
+ * there become a second holder (FSS-15).
+ */
+const restoreStealInFlight = (realDir: string): boolean => {
+  let names: string[];
+  try {
+    names = readdirSync(realDir);
+  } catch {
+    return false;
+  }
+  return names.some((name) => restoreStealMarkerPid(name) !== null);
+};
+
+/** Test seam: runs inside a steal AFTER the quarantine rename — the exact
+ *  window the FSS-15 regression test exploits. */
+let restoreStealGapHookForTests: ((lockPath: string) => void) | null = null;
+export const setRestoreLockStealGapHookForTests = (
+  hook: ((lockPath: string) => void) | null,
+): void => {
+  restoreStealGapHookForTests = hook;
+};
+
+/**
+ * Seize a lock judged stale. The `.stealing-*` marker goes up BEFORE the
+ * quarantine rename and stays until the re-validation is final, so the
+ * name gap can never admit a second logical owner (FSS-15): an acquirer
+ * whose mkdir lands in the gap sees the marker and undoes its own empty
+ * dir. The diagnosis is then RE-CHECKED on the seized entry: a lock that
+ * became live again between verdict and rename is put back with a
+ * NO-REPLACE move — a lock path reclaimed by a fresh owner during the
+ * repair window must not be overwritten.
  */
 const stealRestoreLock = (lockPath: string, budgetMs: number): void => {
-  restoreLockStealCounter += 1;
-  const quarantine = `${RESTORE_QUARANTINE_PREFIX}${process.pid}-${Date.now()}-${restoreLockStealCounter}`;
-  const quarantinePath = join(dirname(lockPath), quarantine);
+  const realDir = dirname(lockPath);
+  const nonce = randomBytes(16).toString("hex");
+  const marker = join(
+    realDir,
+    `${RESTORE_STEAL_MARKER_PREFIX}${process.pid}-${nonce}`,
+  );
   try {
-    renameSync(lockPath, quarantinePath);
+    mkdirSync(marker, { mode: 0o700 });
   } catch {
-    // The lock vanished or a racing stealer's rename won first.
-    return;
+    return; // another steal (or a stranded marker) is in flight
   }
-  if (restoreLockDiagnosis(quarantinePath, budgetMs).verdict === "stale") {
+  try {
+    restoreLockStealCounter += 1;
+    const quarantine = `${RESTORE_QUARANTINE_PREFIX}${process.pid}-${Date.now()}-${restoreLockStealCounter}`;
+    const quarantinePath = join(realDir, quarantine);
     try {
-      rmSync(quarantinePath, { recursive: true, force: true });
+      renameSync(lockPath, quarantinePath);
     } catch {
-      // a leftover quarantine entry is inert — GC reaps it later
+      // The lock vanished or a racing stealer's rename won first.
+      return;
     }
-    return;
-  }
-  try {
-    moveNoReplace(quarantinePath, lockPath);
-  } catch {
-    // A fresh lock claimed the path during the repair window, or the move
-    // failed partway: leave the quarantine entry — GC reaps it, and the
-    // live lock that won the path is never replaced.
+    restoreStealGapHookForTests?.(lockPath);
+    if (restoreLockDiagnosis(quarantinePath, budgetMs).verdict === "stale") {
+      try {
+        rmSync(quarantinePath, { recursive: true, force: true });
+      } catch {
+        // a leftover quarantine entry is inert — GC reaps it later
+      }
+      return;
+    }
+    try {
+      moveNoReplace(quarantinePath, lockPath);
+    } catch {
+      // A fresh lock claimed the path during the repair window, or the move
+      // failed partway: leave the quarantine entry — GC reaps it, and the
+      // live lock that won the path is never replaced.
+    }
+  } finally {
+    try {
+      rmdirSync(marker);
+    } catch {
+      // a stranded marker is swept once its pid dies or it ages out
+    }
   }
 };
 
 /**
- * Best-effort removal of abandoned quarantine entries — left behind when a
- * stealer crashed mid-recovery or a repair found the lock path reclaimed.
- * Only entries older than the GC window are removed: a young entry may
- * belong to a steal in progress. Runs once per acquisition so residue from
- * transient failures or crashes cannot accumulate indefinitely.
+ * Best-effort removal of abandoned quarantine entries and steal markers —
+ * left behind when a stealer crashed mid-recovery or a repair found the
+ * lock path reclaimed. Quarantine entries are removed only past the GC
+ * window (a young entry may belong to a steal in progress); a marker is
+ * removed when its creator pid is dead OR it has outlived the GC window —
+ * a live steal never takes that long, and a reused pid cannot wedge the
+ * lock on a stale marker. Runs once per acquisition.
  */
 const gcRestoreLockQuarantine = (realDir: string): void => {
   let entries: string[];
@@ -665,8 +1437,22 @@ const gcRestoreLockQuarantine = (realDir: string): void => {
   }
   const cutoff = Date.now() - RESTORE_QUARANTINE_GC_MS;
   for (const name of entries) {
-    // Only exact names the steal path generates; a user entry that merely
-    // shares the prefix is never touched.
+    // A stranded steal marker: remove once its creator is dead or the GC
+    // window passed — a live marker is honored, never swept.
+    const markerPid = restoreStealMarkerPid(name);
+    if (markerPid !== null) {
+      const markerPath = join(realDir, name);
+      try {
+        const aged = lstatSync(markerPath).mtimeMs <= cutoff;
+        if (aged || restoreLockPidAlive(markerPid) === false)
+          rmdirSync(markerPath);
+      } catch {
+        // raced or non-empty marker — retried by the next acquirer
+      }
+      continue;
+    }
+    // Only exact names the steal and release paths generate; a user entry
+    // that merely shares the prefix is never touched.
     if (!RESTORE_QUARANTINE_NAME_RE.test(name)) continue;
     const entry = join(realDir, name);
     try {
@@ -727,7 +1513,10 @@ const acquireRestoreLock = async (
 ): Promise<(() => void) | null> => {
   const lockPath = join(realDir, RESTORE_LOCK_NAME);
   gcRestoreLockQuarantine(realDir);
-  const deadline = performance.now() + RESTORE_LOCK_WAIT_MS;
+  const deadline = performance.now() + restoreLockWaitMs();
+  // Minted once per acquisition — the owner record carries it and release
+  // verifies it inside quarantine before deleting (FSS-15/SH-7).
+  const nonce = randomBytes(16).toString("hex");
   let unprovenHold = false;
   for (;;) {
     // Every non-acquire path funnels back here, so contention, racing
@@ -741,22 +1530,57 @@ const acquireRestoreLock = async (
       }
       return null;
     }
-    let verdict: TRestoreLockVerdict | "acquired";
-    try {
-      mkdirSync(lockPath, { mode: 0o700 });
+    let verdict: TRestoreLockVerdict | "acquired" | undefined;
+    // FSS-15: while a steal marker is up the lock name sits inside a rename
+    // gap — an mkdir that lands there would become a second holder. Honor
+    // the marker before AND after our own mkdir.
+    if (!restoreStealInFlight(realDir)) {
       try {
-        writeRestoreLockOwner(lockPath, remaining);
+        mkdirSync(lockPath, { mode: 0o700 });
       } catch (error) {
-        // Ownership could not be recorded: do not hold an anonymous lock.
-        rmSync(lockPath, { recursive: true, force: true });
-        throw error;
+        if (fsErrorCode(error) !== "EEXIST") throw error;
+        const diagnosis = restoreLockDiagnosis(lockPath, remaining);
+        verdict = diagnosis.verdict;
+        unprovenHold = verdict === "held" && diagnosis.unproven;
       }
-      verdict = "acquired";
-    } catch (error) {
-      if (fsErrorCode(error) !== "EEXIST") throw error;
-      const diagnosis = restoreLockDiagnosis(lockPath, remaining);
-      verdict = diagnosis.verdict;
-      unprovenHold = verdict === "held" && diagnosis.unproven;
+      if (verdict === undefined) {
+        // Our mkdir succeeded. Re-check the marker: landing inside a steal's
+        // gap means undoing ONLY our own just-made dir — inode-verified, and
+        // still empty because nothing has been published into it yet.
+        let ourIno: number | null = null;
+        try {
+          ourIno = statSync(lockPath).ino;
+        } catch {
+          ourIno = null;
+        }
+        if (restoreStealInFlight(realDir)) {
+          try {
+            if (ourIno !== null && statSync(lockPath).ino === ourIno)
+              rmdirSync(lockPath);
+          } catch {
+            // a restore raced the dir out from under us — leave it
+          }
+          verdict = "held";
+        } else {
+          try {
+            writeRestoreLockOwner(lockPath, remaining, nonce);
+            // The publish must land in the dir WE created — a restore during
+            // our setup can swap the name to another dir's inode, in which
+            // case nothing of ours holds that name.
+            if (ourIno !== null && statSync(lockPath).ino === ourIno) {
+              verdict = "acquired";
+            } else {
+              verdict = "held";
+            }
+          } catch (error) {
+            // Ownership could not be recorded: do not hold an anonymous lock.
+            rmSync(lockPath, { recursive: true, force: true });
+            throw error;
+          }
+        }
+      }
+    } else {
+      verdict = "held";
     }
     if (verdict === "acquired") break;
     if (verdict === "gone") {
@@ -775,13 +1599,41 @@ const acquireRestoreLock = async (
   return (): void => {
     if (released) return;
     released = true;
+    // FSS-15/SH-7: release ONLY our own lock. Rename to quarantine first,
+    // then delete only when the record inside still carries our pid + nonce
+    // — a lock that was stolen and re-acquired while we held it (or a
+    // successor that claimed the freed name) is moved back untouched, never
+    // recursively deleted.
+    restoreLockStealCounter += 1;
+    const quarantine = `${RESTORE_REL_QUARANTINE_PREFIX}${process.pid}-${Date.now()}-${restoreLockStealCounter}`;
+    const quarantinePath = join(realDir, quarantine);
     try {
-      rmSync(lockPath, { recursive: true, force: true });
+      renameSync(lockPath, quarantinePath);
     } catch {
-      // stale-owner recovery already removed it
+      return; // already stolen or released — nothing of ours at that name
+    }
+    const owner = readRestoreLockOwner(quarantinePath);
+    if (owner !== null && owner.pid === process.pid && owner.nonce === nonce) {
+      try {
+        rmSync(quarantinePath, { recursive: true, force: true });
+      } catch {
+        // a leftover quarantine entry is inert — GC reaps it later
+      }
+      return;
+    }
+    try {
+      moveNoReplace(quarantinePath, lockPath);
+    } catch {
+      // A successor already claimed the name — leave the quarantine entry
+      // for GC; the live lock at the name is never replaced or deleted.
     }
   };
 };
+
+/** Test seam: the cross-process restore lock's acquire/release pair. */
+export const acquireRestoreLockForTests = (
+  realDir: string,
+): Promise<(() => void) | null> => acquireRestoreLock(realDir);
 
 type TRestoreState = {
   readonly problems: string[];
@@ -1107,15 +1959,19 @@ const launchDurableSessionHost = async (args: {
   if (argv === null) return null;
   const spawned = spawnSessionHost({ binary, argv });
   if (spawned === null) return null;
-  const socketPath = await waitForSessionHostSocket(id);
+  // SH-4: the ConPTY first-compile on Windows can take ~12 s — a 2 s wait
+  // killed the host mid-startup and fell back to a direct launch, leaving
+  // TWO vendor processes on the same cwd.
+  const socketPath = await waitForSessionHostSocket(
+    id,
+    SESSION_HOST_SOCKET_WAIT_MS,
+  );
   if (socketPath === null) {
-    // The host may still be starting. Reap it so the direct-launch fallback
-    // does not leave a second vendor PTY on the same cwd.
-    try {
-      spawned.kill();
-    } catch {
-      // best-effort
-    }
+    // The host may still be starting. Kill the whole tree (SH-4): on Windows
+    // the spawned leader is a wrapper whose children would otherwise outlive
+    // it — the direct-launch fallback must not leave a second vendor PTY on
+    // the same cwd.
+    killSpawnedSessionHost(spawned);
     return null;
   }
   const result = await attachBrokerSession({
@@ -1130,11 +1986,7 @@ const launchDurableSessionHost = async (args: {
     announce: true,
   });
   if (result.kind === "completed") return result.code;
-  try {
-    spawned.kill();
-  } catch {
-    // best-effort
-  }
+  killSpawnedSessionHost(spawned);
   return null;
 };
 
@@ -1411,7 +2263,7 @@ export const runSessionClient = async (
     fetchTier(gateway),
   ]);
 
-  const runDir = createRunDir(client.id);
+  const runDir = await createRunDir(client.id);
   let code = 1;
   let plan: TLaunchPlan | undefined;
   try {
@@ -1438,7 +2290,7 @@ export const runSessionClient = async (
       tier,
       bare: flags.bare,
     });
-    materialize(plan, runDir);
+    materialize(plan, runDir, client.id);
     const tuiDir =
       client.id === "hermes" ? hermesBundledTuiDir(bin) : undefined;
     // First-party children (the openllm MCP server, hook scripts) inherit the
@@ -1493,6 +2345,21 @@ export const runSessionClient = async (
           planOwnedPaths(plan),
         );
         if (outcome.ok) {
+          // Drop the nonce-bound marker first: a crash between here and the
+          // rm leaves the next launch a proof it can verify and trust
+          // without re-restoring. Only restore code ever writes it.
+          const manifest = readRunManifest(runDir);
+          if (manifest !== null && manifest.nonce !== null) {
+            try {
+              writeFileSync(
+                join(runDir, RUN_RESTORED_OK_NAME),
+                `${manifest.nonce}\n`,
+                { mode: 0o600 },
+              );
+            } catch {
+              // best-effort — an unmarked dir just gets re-restored
+            }
+          }
           rmSync(runDir, { recursive: true, force: true });
         } else if (code === 0) {
           code = 1;
