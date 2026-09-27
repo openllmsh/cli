@@ -309,6 +309,19 @@ export const applyHermes = async (opts?: {
     // FS-12: a config that fails to parse must never be rewritten from {} —
     // that would silently drop the user's profile. Back it up (0600), then
     // refuse and tell the user how to repair.
+    if (created) {
+      // This run just cloned the profile: its config is only a copy of the
+      // SOURCE profile's config, which stays untouched. Remove the clone, or
+      // the next run sees `openllm` taken, picks the collision name and
+      // clones the same broken config again.
+      const sourceConfig = join(hermesProfileDir(sourceName), "config.yaml");
+      rmSync(dest, { recursive: true, force: true });
+      process.stderr.write(
+        `Refusing to install: ${sourceConfig} does not parse as YAML.\n` +
+          `  repair it, then re-run \`openllm hermes install\`. Nothing was changed.\n`,
+      );
+      return { code: 1 };
+    }
     const backup = backupUnparseableConfig(destConfigPath);
     process.stderr.write(
       `Refusing to rewrite ${destConfigPath}: it does not parse as YAML.\n` +
