@@ -957,6 +957,15 @@ const RESTORE_QUARANTINE_GC_MS = 10 * 60_000;
  */
 const RESTORE_OWNERLESS_RECLAIM_MS = 30_000;
 
+/**
+ * Nonces this process minted AND released. A `.rel-<pid>` quarantine is
+ * released residue only when its owner record carries one of these: a
+ * same-pid record with any other nonce — an acquisition this process still
+ * holds, or one a pid-reuse predecessor minted — is never ours to reap and
+ * goes through the same revalidate-then-restore path as a steal quarantine.
+ */
+const releasedRestoreNonces = new Set<string>();
+
 const sleep = (ms: number): Promise<void> =>
   new Promise<void>((resolve) => {
     setTimeout(resolve, ms);
@@ -1473,6 +1482,12 @@ export const setRestoreLockDirInoProbeForTests = (
   restoreLockDirIno = probe ?? restoreLockDirInoDefault;
 };
 
+/** Test seam: mark a nonce as released by this process, so a `.rel-*`
+ *  quarantine carrying it counts as our own released residue. */
+export const restoreLockMarkNonceReleasedForTests = (nonce: string): void => {
+  releasedRestoreNonces.add(nonce);
+};
+
 /**
  * Seize a lock judged stale. The `.stealing-*` marker goes up BEFORE the
  * quarantine rename and stays until the re-validation is final, so the
@@ -1658,6 +1673,7 @@ const gcRestoreLockQuarantine = (realDir: string): void => {
           relOwner !== null &&
           relOwner.pid === process.pid &&
           relOwner.nonce !== null &&
+          releasedRestoreNonces.has(relOwner.nonce) &&
           restoreRelQuarantinePid(name) === process.pid;
         if (!ownReleasedLock) {
           const diagnosis = restoreLockDiagnosis(
@@ -1851,6 +1867,10 @@ const acquireRestoreLock = async (
   return (): void => {
     if (released) return;
     released = true;
+    // A `.rel` entry that still carries our record is released residue
+    // only from here on — while this acquisition is live its nonce must
+    // never mark a stranded quarantine as ours to reap.
+    releasedRestoreNonces.add(nonce);
     // FSS-15/SH-7: release ONLY our own lock. Rename to quarantine first,
     // then delete only when the record inside still carries our pid + nonce
     // — a lock that was stolen and re-acquired while we held it (or a
