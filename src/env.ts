@@ -73,10 +73,41 @@ export const canonicalPath = (path: string): string => {
 export const isIsolatedStateRoot = (): boolean =>
   process.env.OPENLLM_DAEMON_STATE_DIR !== undefined;
 
+/**
+ * Fold a canonical path into the form the local filesystem compares it in.
+ * The default macOS and Windows volumes ignore letter case, so a
+ * case-mismatched alias (`/Users/a/.OpenLLM` vs `/Users/a/.openllm`) names
+ * the same file and must compare equal — fold both sides to lowercase there.
+ * On Windows the filesystem also ignores a `\\?\` verbatim prefix (`\\?\UNC\`
+ * is the verbatim form of a `\\` UNC root) and trailing dots in a name
+ * (`foo.` is `foo`), so strip them — otherwise each is an alias that escapes
+ * the containment check below.
+ */
+const foldPathForCompare = (path: string): string => {
+  let out = path;
+  if (process.platform === "win32") {
+    out = out.replace(/^\\\\\?\\UNC\\/i, "\\\\").replace(/^\\\\\?\\/, "");
+    out = out.replace(/\.+(?=[\\/]|$)/g, "");
+  }
+  return process.platform === "darwin" || process.platform === "win32"
+    ? out.toLowerCase()
+    : out;
+};
+
+/**
+ * `relative()` from the production `~/.openllm` root to `path`, with both
+ * sides canonicalised AND folded to the platform's comparison form — so the
+ * containment checks below cannot be bypassed by a case, verbatim-prefix, or
+ * trailing-dot alias of the real production tree.
+ */
+const relativeToProductionRoot = (path: string): string =>
+  relative(
+    foldPathForCompare(canonicalPath(join(userHome(), ".openllm"))),
+    foldPathForCompare(canonicalPath(path)),
+  );
+
 export const isProductionOpenllmPath = (path: string): boolean => {
-  const productionRoot = canonicalPath(join(userHome(), ".openllm"));
-  const candidate = canonicalPath(path);
-  const rel = relative(productionRoot, candidate);
+  const rel = relativeToProductionRoot(path);
   return (
     rel === "" ||
     (rel !== ".." && !rel.startsWith(`..${sep}`) && !isAbsolute(rel))
@@ -96,9 +127,7 @@ export const openllmDir = (): string => {
       "OPENLLM_DAEMON_STATE_DIR must be a non-empty absolute path",
     );
   }
-  const productionRoot = canonicalPath(join(userHome(), ".openllm"));
-  const isolatedRoot = canonicalPath(override);
-  const relativeToProduction = relative(productionRoot, isolatedRoot);
+  const relativeToProduction = relativeToProductionRoot(override);
   if (
     relativeToProduction === "" ||
     (relativeToProduction !== ".." &&
