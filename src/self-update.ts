@@ -276,7 +276,14 @@ export const readBodyCapped = async (
     }
   }
   if (total === 0) throw new Error(`${label} returned an empty body`);
+  // Content-Length counts the bytes ON THE WIRE. When the response is
+  // compressed (Content-Encoding other than identity), fetch hands back the
+  // decoded body, so the two lengths differ on every good download.
+  const encoding = (res.headers.get("content-encoding") ?? "identity")
+    .trim()
+    .toLowerCase();
   if (
+    (encoding === "" || encoding === "identity") &&
     res.headers.has("content-length") &&
     Number.isSafeInteger(declared) &&
     declared >= 0 &&
