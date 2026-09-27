@@ -1213,6 +1213,12 @@ type TRestoreLockDiagnosis = {
    * it with a remediation hint instead of silently failing.
    */
   readonly unproven: boolean;
+  /**
+   * Inode of the entry this verdict judged. stealRestoreLock re-checks it
+   * before renaming so a fresh dir created after the verdict can never be
+   * quarantined in the stale entry's place.
+   */
+  readonly ino: number | null;
 };
 
 /**
@@ -1236,6 +1242,8 @@ const parseLegacyLockRecord = (
   };
 };
 
+type TRestoreLockVerdictOnly = Omit<TRestoreLockDiagnosis, "ino">;
+
 /**
  * A legacy FILE lock still serializes restores exactly like the lock
  * directory — but it is never declared stale by age. A dead recorded pid is
@@ -1247,7 +1255,7 @@ const parseLegacyLockRecord = (
 const diagnoseLegacyFileLock = (
   lockPath: string,
   budgetMs: number,
-): TRestoreLockDiagnosis => {
+): TRestoreLockVerdictOnly => {
   let content: string;
   try {
     content = readFileSync(lockPath, "utf8");
@@ -1290,9 +1298,10 @@ const restoreLockDiagnosis = (
   try {
     stat = lstatSync(lockPath);
   } catch {
-    return { verdict: "gone", unproven: false };
+    return { verdict: "gone", unproven: false, ino: null };
   }
-  if (!stat.isDirectory()) return diagnoseLegacyFileLock(lockPath, budgetMs);
+  if (!stat.isDirectory())
+    return { ...diagnoseLegacyFileLock(lockPath, budgetMs), ino: stat.ino };
   // The published record wins; a LONE publish-temp (`owner.json.<pid>.tmp`)
   // is still a readable record from a holder that died mid-publish.
   const owner =
@@ -1303,7 +1312,7 @@ const restoreLockDiagnosis = (
     // NO owner record at all is the crash-between-mkdir-and-publish shape
     // (FSS-07/PM-3): reclaimable once it has been ownerless for the bound.
     if (!restoreLockIsOwnerless(lockPath))
-      return { verdict: "held", unproven: true };
+      return { verdict: "held", unproven: true, ino: stat.ino };
     let ageMs = Number.POSITIVE_INFINITY;
     try {
       ageMs = Date.now() - stat.mtimeMs;
@@ -1311,8 +1320,8 @@ const restoreLockDiagnosis = (
       // unstatable — cannot prove the bound, keep holding
     }
     return ageMs > RESTORE_OWNERLESS_RECLAIM_MS
-      ? { verdict: "stale", unproven: false }
-      : { verdict: "held", unproven: true };
+      ? { verdict: "stale", unproven: false, ino: stat.ino }
+      : { verdict: "held", unproven: true, ino: stat.ino };
   }
   if (owner.start !== null) {
     // Identity-verified: "dead" covers a gone pid AND a live pid whose
@@ -1320,12 +1329,14 @@ const restoreLockDiagnosis = (
     const status = processIdentityStatus(owner.pid, owner.start, (pid) =>
       boundedProcessStartIdentity(pid, budgetMs),
     );
-    if (status === "dead") return { verdict: "stale", unproven: false };
-    return { verdict: "held", unproven: status !== "alive" };
+    if (status === "dead")
+      return { verdict: "stale", unproven: false, ino: stat.ino };
+    return { verdict: "held", unproven: status !== "alive", ino: stat.ino };
   }
   const alive = restoreLockPidAlive(owner.pid);
-  if (alive === false) return { verdict: "stale", unproven: false };
-  return { verdict: "held", unproven: alive !== true };
+  if (alive === false)
+    return { verdict: "stale", unproven: false, ino: stat.ino };
+  return { verdict: "held", unproven: alive !== true, ino: stat.ino };
 };
 
 let restoreLockStealCounter = 0;
@@ -1362,6 +1373,15 @@ export const setRestoreLockStealGapHookForTests = (
   restoreStealGapHookForTests = hook;
 };
 
+/** Test seam: runs inside an acquisition just before the owner publish —
+ *  the window where a racing steal's rename can take our just-made dir. */
+let restorePublishGapHookForTests: ((lockPath: string) => void) | null = null;
+export const setRestoreLockPublishGapHookForTests = (
+  hook: ((lockPath: string) => void) | null,
+): void => {
+  restorePublishGapHookForTests = hook;
+};
+
 /**
  * Seize a lock judged stale. The `.stealing-*` marker goes up BEFORE the
  * quarantine rename and stays until the re-validation is final, so the
@@ -1370,9 +1390,16 @@ export const setRestoreLockStealGapHookForTests = (
  * dir. The diagnosis is then RE-CHECKED on the seized entry: a lock that
  * became live again between verdict and rename is put back with a
  * NO-REPLACE move — a lock path reclaimed by a fresh owner during the
- * repair window must not be overwritten.
+ * repair window must not be overwritten. The rename is additionally PINNED
+ * to the inode the verdict judged: a verdict is only ever of one specific
+ * entry, and a fresh dir that claimed the name between diagnosis and the
+ * rename is never ours to quarantine.
  */
-const stealRestoreLock = (lockPath: string, budgetMs: number): void => {
+const stealRestoreLock = (
+  lockPath: string,
+  budgetMs: number,
+  expectedIno: number | null,
+): void => {
   const realDir = dirname(lockPath);
   const nonce = randomBytes(16).toString("hex");
   const marker = join(
@@ -1385,6 +1412,17 @@ const stealRestoreLock = (lockPath: string, budgetMs: number): void => {
     return; // another steal (or a stranded marker) is in flight
   }
   try {
+    // Pin the rename to the entry we judged: if the stale entry vanished or
+    // a different dir claimed the name after our diagnosis, this steal does
+    // not apply — an acquirer's fresh dir is never quarantined by a verdict
+    // that was not about it.
+    if (expectedIno !== null) {
+      try {
+        if (statSync(lockPath).ino !== expectedIno) return;
+      } catch {
+        return; // already gone — nothing to seize
+      }
+    }
     restoreLockStealCounter += 1;
     const quarantine = `${RESTORE_QUARANTINE_PREFIX}${process.pid}-${Date.now()}-${restoreLockStealCounter}`;
     const quarantinePath = join(realDir, quarantine);
@@ -1393,6 +1431,24 @@ const stealRestoreLock = (lockPath: string, budgetMs: number): void => {
     } catch {
       // The lock vanished or a racing stealer's rename won first.
       return;
+    }
+    if (expectedIno !== null) {
+      // The name was swapped between the pin check and the rename: the dir
+      // we seized is not the one judged — restore it untouched.
+      let seizedIno: number | null = null;
+      try {
+        seizedIno = statSync(quarantinePath).ino;
+      } catch {
+        seizedIno = null;
+      }
+      if (seizedIno !== expectedIno) {
+        try {
+          moveNoReplace(quarantinePath, lockPath);
+        } catch {
+          // GC reaps the leftover; the live lock at the name is untouched
+        }
+        return;
+      }
     }
     restoreStealGapHookForTests?.(lockPath);
     if (restoreLockDiagnosis(quarantinePath, budgetMs).verdict === "stale") {
@@ -1436,6 +1492,10 @@ const gcRestoreLockQuarantine = (realDir: string): void => {
     return;
   }
   const cutoff = Date.now() - RESTORE_QUARANTINE_GC_MS;
+  // Identity probes during GC share one bounded budget: each entry's
+  // revalidation gets only what remains, and an exhausted budget degrades
+  // to "unproven" — kept, never deleted.
+  const gcProbeDeadline = Date.now() + RESTORE_PROBE_MAX_MS;
   for (const name of entries) {
     // A stranded steal marker: remove once its creator is dead or the GC
     // window passed — a live marker is honored, never swept.
@@ -1486,6 +1546,39 @@ const gcRestoreLockQuarantine = (realDir: string): void => {
         if (st.size > 64) continue;
         if (!/^\d+\s+\d+\s*$/.test(readFileSync(entry, "utf8"))) continue;
       } else continue;
+      // A stolen OR released lock's quarantine may still belong to a LIVE
+      // owner — it is parked here only because a successor won the live path
+      // mid-repair. Revalidate before deleting: a proven-live owner is never
+      // reaped, and gets its lock back when the live path has freed up.
+      // The .rel-* exception: an entry still carrying OUR pid is our own
+      // released record — that one is residue, safe to reap like any other.
+      const isStealQuarantine = name.startsWith(RESTORE_QUARANTINE_PREFIX);
+      const isReleaseQuarantine = name.startsWith(
+        RESTORE_REL_QUARANTINE_PREFIX,
+      );
+      if (isStealQuarantine || isReleaseQuarantine) {
+        const relOwner = isReleaseQuarantine
+          ? (readRestoreLockOwner(entry) ?? readRestoreLockTmpOwner(entry))
+          : null;
+        const ownReleasedLock =
+          relOwner !== null && relOwner.pid === process.pid;
+        if (!ownReleasedLock) {
+          const diagnosis = restoreLockDiagnosis(
+            entry,
+            Math.max(0, gcProbeDeadline - Date.now()),
+          );
+          if (diagnosis.verdict === "held") {
+            if (!diagnosis.unproven) {
+              try {
+                moveNoReplace(entry, join(realDir, RESTORE_LOCK_NAME));
+              } catch {
+                // name still taken — keep the quarantine for the next pass
+              }
+            }
+            continue;
+          }
+        }
+      }
       rmSync(entry, { recursive: true, force: true });
     } catch {
       // retried by the next acquirer
@@ -1518,6 +1611,32 @@ const acquireRestoreLock = async (
   // verifies it inside quarantine before deleting (FSS-15/SH-7).
   const nonce = randomBytes(16).toString("hex");
   let unprovenHold = false;
+  // The inode of a lock dir OUR mkdir made, kept across retries: a steal's
+  // move-back can return our own just-made dir to the name — provably ours,
+  // still unowned, and reclaimable without waiting out the ownerless bound.
+  let ourIno: number | null = null;
+  // Publish the owner record, treating a vanished dir as transient
+  // contention: a steal whose verdict predated our mkdir can rename our dir
+  // out from under the publish — ENOENT/ENOTDIR then mean "retry from the
+  // top", not a failed acquisition. Anything else is a real failure: the
+  // cleanup then removes ONLY the dir that is still provably ours — the
+  // name may have been swapped to a live successor's entry by a restore.
+  const publish = (remaining: number, expectedIno: number | null): boolean => {
+    try {
+      writeRestoreLockOwner(lockPath, remaining, nonce);
+      return true;
+    } catch (error) {
+      const code = fsErrorCode(error);
+      if (code === "ENOENT" || code === "ENOTDIR") return false;
+      try {
+        if (expectedIno === null || statSync(lockPath).ino === expectedIno)
+          rmSync(lockPath, { recursive: true, force: true });
+      } catch {
+        // ownership stays unrecorded — and nothing foreign was removed
+      }
+      throw error;
+    }
+  };
   for (;;) {
     // Every non-acquire path funnels back here, so contention, racing
     // stealers, and flapping stale locks are all bounded by the same window.
@@ -1531,6 +1650,7 @@ const acquireRestoreLock = async (
       return null;
     }
     let verdict: TRestoreLockVerdict | "acquired" | undefined;
+    let staleIno: number | null = null;
     // FSS-15: while a steal marker is up the lock name sits inside a rename
     // gap — an mkdir that lands there would become a second holder. Honor
     // the marker before AND after our own mkdir.
@@ -1539,43 +1659,73 @@ const acquireRestoreLock = async (
         mkdirSync(lockPath, { mode: 0o700 });
       } catch (error) {
         if (fsErrorCode(error) !== "EEXIST") throw error;
-        const diagnosis = restoreLockDiagnosis(lockPath, remaining);
-        verdict = diagnosis.verdict;
-        unprovenHold = verdict === "held" && diagnosis.unproven;
+        let own = false;
+        if (ourIno !== null) {
+          try {
+            own = statSync(lockPath).ino === ourIno;
+          } catch {
+            own = false;
+          }
+        }
+        const mine = own ? readRestoreLockOwner(lockPath) : null;
+        if (mine !== null && mine.pid === process.pid && mine.nonce === nonce) {
+          // Our publish already landed before the dir rode out and back.
+          verdict = "acquired";
+        } else if (
+          own &&
+          !existsSync(join(lockPath, RESTORE_LOCK_OWNER_NAME))
+        ) {
+          // Our own dir returned with no record — finish the publish we were
+          // interrupted in (a leftover tmp of ours is rewritten in place).
+          verdict =
+            publish(remaining, ourIno) &&
+            ((): boolean => {
+              try {
+                return statSync(lockPath).ino === ourIno;
+              } catch {
+                return false;
+              }
+            })()
+              ? "acquired"
+              : "held";
+        } else {
+          const diagnosis = restoreLockDiagnosis(lockPath, remaining);
+          verdict = diagnosis.verdict;
+          staleIno = diagnosis.ino;
+          unprovenHold = verdict === "held" && diagnosis.unproven;
+        }
       }
       if (verdict === undefined) {
         // Our mkdir succeeded. Re-check the marker: landing inside a steal's
         // gap means undoing ONLY our own just-made dir — inode-verified, and
         // still empty because nothing has been published into it yet.
-        let ourIno: number | null = null;
+        let createdIno: number | null = null;
         try {
-          ourIno = statSync(lockPath).ino;
+          createdIno = statSync(lockPath).ino;
         } catch {
-          ourIno = null;
+          createdIno = null;
         }
+        if (createdIno !== null) ourIno = createdIno;
         if (restoreStealInFlight(realDir)) {
           try {
-            if (ourIno !== null && statSync(lockPath).ino === ourIno)
+            if (createdIno !== null && statSync(lockPath).ino === createdIno)
               rmdirSync(lockPath);
           } catch {
             // a restore raced the dir out from under us — leave it
           }
           verdict = "held";
         } else {
-          try {
-            writeRestoreLockOwner(lockPath, remaining, nonce);
+          restorePublishGapHookForTests?.(lockPath);
+          if (publish(remaining, createdIno)) {
             // The publish must land in the dir WE created — a restore during
             // our setup can swap the name to another dir's inode, in which
             // case nothing of ours holds that name.
-            if (ourIno !== null && statSync(lockPath).ino === ourIno) {
-              verdict = "acquired";
-            } else {
-              verdict = "held";
-            }
-          } catch (error) {
-            // Ownership could not be recorded: do not hold an anonymous lock.
-            rmSync(lockPath, { recursive: true, force: true });
-            throw error;
+            verdict =
+              ourIno !== null && statSync(lockPath).ino === ourIno
+                ? "acquired"
+                : "held";
+          } else {
+            verdict = "held";
           }
         }
       }
@@ -1589,7 +1739,7 @@ const acquireRestoreLock = async (
     }
     if (verdict === "stale") {
       unprovenHold = false;
-      stealRestoreLock(lockPath, deadline - performance.now());
+      stealRestoreLock(lockPath, deadline - performance.now(), staleIno);
       continue;
     }
     const waitMs = Math.min(RESTORE_LOCK_POLL_MS, deadline - performance.now());
@@ -1971,7 +2121,7 @@ const launchDurableSessionHost = async (args: {
     // the spawned leader is a wrapper whose children would otherwise outlive
     // it — the direct-launch fallback must not leave a second vendor PTY on
     // the same cwd.
-    killSpawnedSessionHost(spawned);
+    await killSpawnedSessionHost(spawned);
     return null;
   }
   const result = await attachBrokerSession({
@@ -1986,7 +2136,7 @@ const launchDurableSessionHost = async (args: {
     announce: true,
   });
   if (result.kind === "completed") return result.code;
-  killSpawnedSessionHost(spawned);
+  await killSpawnedSessionHost(spawned);
   return null;
 };
 
