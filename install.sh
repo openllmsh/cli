@@ -630,13 +630,9 @@ env_lock_is_stale_dir() {
     # same collapse here so a padded legacy record still matches.
     recorded="$(env_lock_normalize_identity "$ENV_LOCK_OWNER_START")"
     if [ "$recorded" = "-" ]; then
-      # The start identity can never be proven ("-": written only by
-      # builds that latched a failed probe — this build never writes it):
-      # the live pid holds for the full CONSERVATIVE stale window, never
-      # the orphan bound — a transient probe failure on the owner's side
-      # must not make a live lock reclaimable in seconds.
-      { [ "$age" -ge 0 ] && [ "$age" -ge "$ENV_LOCK_STALE_SECS" ]; }
-      return
+      # An unproven identity is held. Only a fresh probe that proves the
+      # recorded owner is dead may make a marked lock stale.
+      return 1
     fi
     current="$(env_lock_start_identity "$ENV_LOCK_OWNER_PID")"
     if [ -z "$current" ]; then
@@ -676,10 +672,11 @@ env_lock_is_stale_dir() {
 # so a committed steal can never leave two holders. A committed quarantine
 # is never moved back; the sweep removes it once it ages out.
 env_lock_steal() {
-  local lockdir="$1" stem="$2" marker q ino_before ino_after mtime
+  local lockdir="$1" stem="$2" marker q ino_before ino_after q_ino mtime before_owner after_owner
   ino_before="$(env_lock_path_ino "$lockdir")"
   mtime="$(stat -c %Y "$lockdir" 2>/dev/null || stat -f %m "$lockdir" 2>/dev/null || true)"
   [ -n "$ino_before" ] || return 0  # vanished — the outer acquire retries
+  before_owner="$(cat "$lockdir/owner" 2>/dev/null || true)"
   marker="$lockdir/steal.$$.$ENV_LOCK_NONCE"
   if ! (set -C; : > "$marker") 2>/dev/null; then
     # A plain FILE at the lock path can never gain an owner record — park
@@ -692,11 +689,20 @@ env_lock_steal() {
     return 0
   fi
   ino_after="$(env_lock_path_ino "$lockdir")"
+  after_owner="$(cat "$lockdir/owner" 2>/dev/null || true)"
   if [ -n "$ino_after" ] && [ "$ino_after" = "$ino_before" ] \
+    && [ "$after_owner" = "$before_owner" ] \
     && env_lock_is_stale_dir "$lockdir" "$mtime"; then
     ENV_LOCK_QSEQ=$((ENV_LOCK_QSEQ + 1))
     q="$stem.stale.$$.$ENV_LOCK_NONCE.$ENV_LOCK_QSEQ"
     if mv "$lockdir" "$q" 2>/dev/null; then
+      q_ino="$(env_lock_path_ino "$q")"
+      if [ "$q_ino" != "$ino_before" ]; then
+        # A moved path that no longer proves the marked generation is not
+        # ours to delete. Restore its contents no-replace, or leave the
+        # quarantine parked for bounded sweep.
+        env_lock_restore_dir "$q" "$lockdir"
+      fi
       return 0  # committed — the marker (and dir) are parked with it
     fi
   fi
@@ -831,6 +837,9 @@ env_lock_legacy_held() {
 # itself failed, the caller drops its own dir.
 env_lock_publish_owner() {
   local lockdir="$1" want_ino="${2:-}" start stolen same_gen marker now_ino
+  for marker in "$lockdir"/steal.*; do
+    [ -e "$marker" ] && return 1
+  done
   start="$(env_lock_start_identity "$$")"
   if [ -z "$start" ]; then
     # A live owner MUST carry a provable start identity — `start=-` made a
@@ -910,13 +919,12 @@ env_lock_acquire() {
       if mkdir "$lockdir" 2>/dev/null; then
         # Pin the generation we created so the publish veto detects a
         # quarantine+path-reuse, not only an in-place steal marker. When
-        # the inode cannot be captured, publish NOTHING and remove NOTHING:
-        # a blind publish could stamp into a successor's claim, and an
-        # unproven dir is never ours to rmdir — the staleness pass below
-        # re-judges what is actually at the name.
+        # the inode cannot be captured, publish NOTHING: a blind publish
+        # could stamp into a successor's claim. Remove this empty generation
+        # and retry immediately so the next attempt re-proves its own inode.
         ino="$(env_lock_path_ino "$lockdir")"
         if [ -z "$ino" ]; then
-          sleep 0.01 2>/dev/null || sleep 1
+          rmdir "$lockdir" 2>/dev/null || true
           continue
         fi
         env_lock_publish_owner "$lockdir" "$ino"

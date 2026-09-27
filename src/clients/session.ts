@@ -920,7 +920,7 @@ const RESTORE_LOCK_START_RE =
   /^(?:(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun) (?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) {1,2}\d{1,2} \d{2}:\d{2}:\d{2} \d{4}|\d{1,20}|boot:[0-9a-f-]{36}:\d+)$/;
 /** Exact names this code gives quarantined locks (steal + release paths). */
 const RESTORE_QUARANTINE_NAME_RE =
-  /^\.openllm-restore\.lock\.(?:stale|rel)-\d+-\d+-\d+$/;
+  /^\.openllm-restore\.lock\.(?:stale-\d+-\d+-\d+|rel-(?:\d+-\d+-\d+|\d+-[0-9a-f]{32}))$/;
 /** Steal-in-flight marker siblings (`<lock>.stealing-<pid>-<nonce>`). */
 const RESTORE_STEAL_MARKER_RE =
   /^\.openllm-restore\.lock\.stealing-(\d+)-[0-9a-f]+$/;
@@ -985,6 +985,16 @@ const sleep = (ms: number): Promise<void> =>
 
 /** PID liveness probe: true = running, false = confirmed dead, null = cannot tell. */
 const restoreLockPidAlive = (pid: number): boolean | null => {
+  if (!Number.isSafeInteger(pid) || pid <= 0) return false;
+  if (process.platform === "linux") {
+    try {
+      const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
+      const commEnd = stat.lastIndexOf(") ");
+      if (commEnd >= 0 && stat[commEnd + 2] === "Z") return false;
+    } catch {
+      // Fall through to kill(2); a missing proc entry is handled there.
+    }
+  }
   try {
     process.kill(pid, 0);
     return true;
@@ -1452,12 +1462,17 @@ const restoreStealMarkerPid = (name: string): number | null => {
   return Number.isSafeInteger(pid) && pid > 0 ? pid : null;
 };
 
-/** The creator pid embedded in a `<lock>.rel-<pid>-<ms>-<seq>` quarantine. */
-const restoreRelQuarantinePid = (name: string): number | null => {
-  const match = /^\.openllm-restore\.lock\.rel-(\d+)-\d+-\d+$/.exec(name);
+/** The pid and nonce embedded in a release quarantine name. */
+const restoreRelQuarantineIdentity = (
+  name: string,
+): { readonly pid: number; readonly nonce: string | null } | null => {
+  const match =
+    /^\.openllm-restore\.lock\.rel-(\d+)-(\d+)-(\d+)$/.exec(name) ??
+    /^\.openllm-restore\.lock\.rel-(\d+)-([0-9a-f]{32})$/.exec(name);
   if (match === null) return null;
   const pid = Number.parseInt(match[1] ?? "", 10);
-  return Number.isSafeInteger(pid) && pid > 0 ? pid : null;
+  const nonce = match[0]?.match(/[0-9a-f]{32}$/)?.[0] ?? null;
+  return Number.isSafeInteger(pid) && pid > 0 ? { pid, nonce } : null;
 };
 
 /**
@@ -1714,7 +1729,9 @@ const gcRestoreLockQuarantine = (realDir: string): void => {
           relOwner.pid === process.pid &&
           relOwner.nonce !== null &&
           releasedRestoreNonces.has(relOwner.nonce) &&
-          restoreRelQuarantinePid(name) === process.pid;
+          restoreRelQuarantineIdentity(name)?.pid === process.pid &&
+          (restoreRelQuarantineIdentity(name)?.nonce === null ||
+            restoreRelQuarantineIdentity(name)?.nonce === relOwner.nonce);
         if (!ownReleasedLock) {
           const diagnosis = restoreLockDiagnosis(
             entry,
@@ -1955,7 +1972,6 @@ const acquireRestoreLock = async (
     reclaimMs: restoreOwnerlessReclaimMs(),
     pollMs: RESTORE_LOCK_POLL_MS,
     inode: restoreLockDirIno,
-    removeOnUnprovenInode: false,
     propagatePublishErrors: true,
     startIdentity: (pid) => {
       const budget = Math.min(RESTORE_PROBE_MAX_MS, remaining());

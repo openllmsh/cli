@@ -16,7 +16,7 @@ import {
   unlinkSync,
   writeFileSync,
 } from "node:fs";
-import { basename, dirname, join } from "node:path";
+import { dirname, join } from "node:path";
 import {
   acquireDirLockSync,
   envDirLockCodec,
@@ -188,10 +188,6 @@ const envLockWaitMs = (): number => {
   if (raw !== undefined && /^[0-9]+$/.test(raw) && Number(raw) > 0)
     return Number(raw) * 1000;
   return 10_000;
-};
-
-const lockWait = (): void => {
-  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10);
 };
 
 type TEnvLockOwner =
@@ -400,6 +396,12 @@ export const envLockPublishGapForTest = (
 ): void => {
   envLockPublishGapForTests = hook;
 };
+let envLockStealGapForTests: ((lockDir: string) => void) | null = null;
+export const envLockStealGapForTest = (
+  hook: ((lockDir: string) => void) | null,
+): void => {
+  envLockStealGapForTests = hook;
+};
 
 const envLockDirInoDefault = (dir: string): number | undefined => {
   try {
@@ -438,13 +440,12 @@ const envLockDirIsStale = (dir: string, asOfMtimeMs?: number): boolean => {
   }
   if (owner.state === "marked") {
     if (!envLockOwnerAlive(owner.pid)) return true;
-    if (owner.start.trim().replace(/\s+/g, " ") === "-")
-      // "-" is unprovable — a live pid holds for the full stale window,
-      // never the orphan bound (identical to the daemon side).
-      return Number.isFinite(ageMs) && ageMs >= envLockStaleMs();
+    if (owner.start.trim().replace(/\s+/g, " ") === "-") return false;
     // `processIdentityStatus` bridges the legacy `ps lstart` records older
     // builds and pre-XS-1 installers wrote against this build's canonical
     // probe; an unreadable identity is "unknown" — the lock stays held.
+    // An unproven identity is held. Only a fresh probe that proves the
+    // recorded owner is dead may make a marked lock stale.
     return envLockIdentityStatus(owner.pid, owner.start) === "dead";
   }
   if (!(ageMs >= envLockOrphanMs())) return false;
@@ -997,8 +998,6 @@ const withEnvFileLock = (
 ): boolean => {
   const stem = `${targetPath}.lock`;
   const lockDir = `${stem}.d`;
-  const parentDir = dirname(targetPath);
-  const baseName = basename(targetPath);
   const nonce = crypto.randomUUID().replace(/-/g, "");
   const release = acquireDirLockSync(lockDir, envDirLockCodec, {
     waitMs: waitMs ?? envLockWaitMs(),
@@ -1008,10 +1007,10 @@ const withEnvFileLock = (
     startIdentity: envLockStartIdentity,
     legacyStartIdentity: envLockStartIdentity,
     isStale: envLockDirIsStale,
-    removeOnUnprovenInode: false,
-    legacyHeld: (deadline): boolean => envLockLegacyHeld(stem, nonce),
+    legacyHeld: (): boolean => envLockLegacyHeld(stem, nonce),
     onStep: (step, path): void => {
       if (step === "before-publish") envLockPublishGapForTests?.(path);
+      if (step === "after-steal-marker") envLockStealGapForTests?.(path);
     },
   });
   if (release === null) return false;
