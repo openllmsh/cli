@@ -13,15 +13,12 @@ import { spawn, spawnSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import {
   chmodSync,
-  closeSync,
   copyFileSync,
   existsSync,
   constants as fsConstants,
-  fsyncSync,
   linkSync,
   lstatSync,
   mkdirSync,
-  openSync,
   readdirSync,
   readFileSync,
   renameSync,
@@ -30,11 +27,9 @@ import {
   statSync,
   symlinkSync,
   writeFileSync,
-  writeSync,
 } from "node:fs";
 import { constants as osConstants } from "node:os";
 import { basename, dirname, join } from "node:path";
-import { performance } from "node:perf_hooks";
 import {
   executableCandidates,
   executablePathDirs,
@@ -978,11 +973,6 @@ const restoreOwnerlessReclaimMs = (): number => {
  */
 const releasedRestoreNonces = new Set<string>();
 
-const sleep = (ms: number): Promise<void> =>
-  new Promise<void>((resolve) => {
-    setTimeout(resolve, ms);
-  });
-
 /** PID liveness probe: true = running, false = confirmed dead, null = cannot tell. */
 const restoreLockPidAlive = (pid: number): boolean | null => {
   if (!Number.isSafeInteger(pid) || pid <= 0) return false;
@@ -1141,70 +1131,6 @@ export const restoreDirLockCodec: TDirLockCodec = {
       start: owner.start,
       nonce: owner.nonce,
     })}\n`,
-};
-
-/** fsync a file, then its parent dir, so a published record survives a crash. */
-const fsyncFileAndDir = (file: string, dir: string): void => {
-  try {
-    const fd = openSync(file, "r");
-    try {
-      fsyncSync(fd);
-    } finally {
-      closeSync(fd);
-    }
-  } catch {
-    // durability is best-effort on filesystems without fsync support
-  }
-  try {
-    const fd = openSync(dir, "r");
-    try {
-      fsyncSync(fd);
-    } finally {
-      closeSync(fd);
-    }
-  } catch {
-    // a directory fsync is unsupported on some platforms — best-effort
-  }
-};
-
-/** Record who holds the lock: pid PLUS process-start identity, so a pid
- * recycled onto an unrelated process cannot keep the lock alive. The record
- * is published atomically — a temp file inside the lock directory, fsynced,
- * then renamed — so a reader never observes a partial owner.json and a crash
- * cannot lose a record that was reported published. */
-const writeRestoreLockOwner = (
-  lockPath: string,
-  budgetMs: number,
-  nonce: string,
-): void => {
-  let start: string | null = null;
-  try {
-    start = boundedProcessStartIdentity(process.pid, budgetMs) ?? null;
-  } catch {
-    start = null;
-  }
-  const tmp = join(lockPath, `${RESTORE_LOCK_OWNER_NAME}.${process.pid}.tmp`);
-  const fd = openSync(tmp, "w", 0o600);
-  try {
-    writeSync(
-      fd,
-      `${JSON.stringify({ kind: RESTORE_LOCK_KIND, pid: process.pid, start, nonce })}\n`,
-    );
-    fsyncSync(fd);
-  } finally {
-    closeSync(fd);
-  }
-  try {
-    renameSync(tmp, join(lockPath, RESTORE_LOCK_OWNER_NAME));
-  } catch (error) {
-    try {
-      rmSync(tmp, { force: true });
-    } catch {
-      // a stray temp file is inert — ownership simply stays unpublished
-    }
-    throw error;
-  }
-  fsyncFileAndDir(join(lockPath, RESTORE_LOCK_OWNER_NAME), lockPath);
 };
 
 const readRestoreLockOwner = (lockPath: string): TRestoreLockOwner | null => {
@@ -1475,27 +1401,6 @@ const restoreRelQuarantineIdentity = (
   return Number.isSafeInteger(pid) && pid > 0 ? { pid, nonce } : null;
 };
 
-/**
- * True while a `.stealing-*` sibling exists — a steal is in flight and the
- * lock name is inside its rename gap: an acquirer must not let an mkdir
- * there become a second holder (FSS-15). A marker whose creator pid is
- * PROVABLY dead is residue, not an in-flight steal — a dead process has no
- * pending rename, so honoring its marker can only wedge the wait window
- * until GC happens to sweep it. Only a live (or unprovable) creator blocks.
- */
-const restoreStealInFlight = (realDir: string): boolean => {
-  let names: string[];
-  try {
-    names = readdirSync(realDir);
-  } catch {
-    return false;
-  }
-  return names.some((name) => {
-    const markerPid = restoreStealMarkerPid(name);
-    return markerPid !== null && restoreLockPidAlive(markerPid) !== false;
-  });
-};
-
 /** Test seam: runs inside a steal AFTER the quarantine rename — the exact
  *  window the FSS-15 regression test exploits. */
 let restoreStealGapHookForTests: ((lockPath: string) => void) | null = null;
@@ -1512,6 +1417,13 @@ export const setRestoreLockPublishGapHookForTests = (
   hook: ((lockPath: string) => void) | null,
 ): void => {
   restorePublishGapHookForTests = hook;
+};
+
+let restoreReleaseGapHookForTests: ((path: string) => void) | null = null;
+export const setRestoreLockReleaseGapHookForTests = (
+  hook: ((path: string) => void) | null,
+): void => {
+  restoreReleaseGapHookForTests = hook;
 };
 
 /**
@@ -1658,6 +1570,9 @@ const gcRestoreLockQuarantine = (realDir: string): void => {
   // to "unproven" — kept, never deleted.
   const gcProbeDeadline = Date.now() + RESTORE_PROBE_MAX_MS;
   for (const name of entries) {
+    // The shared core owns nonce-qualified releases and their markers.
+    // Do not restore a release that the shared core must finish deleting.
+    if (/^\.openllm-restore\.lock\.rel-\d+-[0-9a-f]{32}$/.test(name)) continue;
     // A stranded steal marker: remove once its creator is dead or the GC
     // window passed — a live marker is honored, never swept.
     const markerPid = restoreStealMarkerPid(name);
@@ -1756,209 +1671,6 @@ const gcRestoreLockQuarantine = (realDir: string): void => {
   }
 };
 
-/**
- * Cross-process restore lock for one vendor dir, claimed by an atomic
- * exclusive mkdir so concurrent `openllm` teardowns serialize. Ownership is
- * the pid + process-start identity inside the lock directory, so a crashed
- * acquirer's recycled pid cannot wedge the lock. Stale locks are recovered
- * by atomically RENAMING the lock aside to a unique quarantine name — only
- * the first stealer's rename can succeed, so two racing restorers can never
- * both believe they reclaimed it — then reclaiming via mkdir. The wait is
- * asynchronous (setTimeout polling bounded by a monotonic RESTORE_LOCK_WAIT_MS
- * deadline — every synchronous identity probe is capped by the time that
- * remains so the bound holds even when a probe is slow), never blocking the
- * CLI event loop longer than needed, and on timeout the caller keeps the run
- * dir rather than touching contested data. Returns a release function, or
- * null when a live process still holds the lock past the wait window.
- */
-const acquireRestoreLockLegacy = async (
-  realDir: string,
-): Promise<(() => void) | null> => {
-  const lockPath = join(realDir, RESTORE_LOCK_NAME);
-  gcRestoreLockQuarantine(realDir);
-  const deadline = performance.now() + restoreLockWaitMs();
-  // Minted once per acquisition — the owner record carries it and release
-  // verifies it inside quarantine before deleting (FSS-15/SH-7).
-  const nonce = randomBytes(16).toString("hex");
-  let unprovenHold = false;
-  // The inode of a lock dir OUR mkdir made, kept across retries: a steal's
-  // move-back can return our own just-made dir to the name — provably ours,
-  // still unowned, and reclaimable without waiting out the ownerless bound.
-  let ourIno: number | null = null;
-  // Publish the owner record, treating a vanished dir as transient
-  // contention: a steal whose verdict predated our mkdir can rename our dir
-  // out from under the publish — ENOENT/ENOTDIR then mean "retry from the
-  // top", not a failed acquisition. Anything else is a real failure: the
-  // cleanup then removes ONLY the dir that is still provably ours — the
-  // name may have been swapped to a live successor's entry by a restore.
-  const publish = (remaining: number, expectedIno: number | null): boolean => {
-    try {
-      writeRestoreLockOwner(lockPath, remaining, nonce);
-      return true;
-    } catch (error) {
-      const code = fsErrorCode(error);
-      if (code === "ENOENT" || code === "ENOTDIR") return false;
-      try {
-        // Only a dir that still proves OUR generation is ours to remove —
-        // an unknown inode (expectedIno null) means the path may already be
-        // a successor's, so nothing is deleted here; the stale-lock path
-        // owns its cleanup.
-        if (expectedIno !== null && restoreLockDirIno(lockPath) === expectedIno)
-          rmSync(lockPath, { recursive: true, force: true });
-      } catch {
-        // ownership stays unrecorded — and nothing foreign was removed
-      }
-      throw error;
-    }
-  };
-  for (;;) {
-    // Every non-acquire path funnels back here, so contention, racing
-    // stealers, and flapping stale locks are all bounded by the same window.
-    const remaining = deadline - performance.now();
-    if (remaining <= 0) {
-      if (unprovenHold) {
-        process.stderr.write(
-          `[openllm] restore lock ${lockPath} is held but its owner could not be verified; if no openllm teardown is running, remove it manually and retry\n`,
-        );
-      }
-      return null;
-    }
-    let verdict: TRestoreLockVerdict | "acquired" | undefined;
-    let staleIno: number | null = null;
-    // FSS-15: while a steal marker is up the lock name sits inside a rename
-    // gap — an mkdir that lands there would become a second holder. Honor
-    // the marker before AND after our own mkdir.
-    if (!restoreStealInFlight(realDir)) {
-      try {
-        mkdirSync(lockPath, { mode: 0o700 });
-      } catch (error) {
-        if (fsErrorCode(error) !== "EEXIST") throw error;
-        let own = false;
-        if (ourIno !== null) {
-          try {
-            own = statSync(lockPath).ino === ourIno;
-          } catch {
-            own = false;
-          }
-        }
-        const mine = own ? readRestoreLockOwner(lockPath) : null;
-        if (mine !== null && mine.pid === process.pid && mine.nonce === nonce) {
-          // Our publish already landed before the dir rode out and back.
-          verdict = "acquired";
-        } else if (
-          own &&
-          !existsSync(join(lockPath, RESTORE_LOCK_OWNER_NAME))
-        ) {
-          // Our own dir returned with no record — finish the publish we were
-          // interrupted in (a leftover tmp of ours is rewritten in place).
-          verdict =
-            publish(remaining, ourIno) &&
-            ((): boolean => {
-              try {
-                return statSync(lockPath).ino === ourIno;
-              } catch {
-                return false;
-              }
-            })()
-              ? "acquired"
-              : "held";
-        } else {
-          const diagnosis = restoreLockDiagnosis(lockPath, remaining);
-          verdict = diagnosis.verdict;
-          staleIno = diagnosis.ino;
-          unprovenHold = verdict === "held" && diagnosis.unproven;
-        }
-      }
-      if (verdict === undefined) {
-        // Our mkdir succeeded. Re-check the marker: landing inside a steal's
-        // gap means undoing ONLY our own just-made dir — inode-verified, and
-        // still empty because nothing has been published into it yet.
-        const createdIno = restoreLockDirIno(lockPath);
-        if (createdIno !== null) ourIno = createdIno;
-        if (restoreStealInFlight(realDir)) {
-          try {
-            if (createdIno !== null && statSync(lockPath).ino === createdIno)
-              rmdirSync(lockPath);
-          } catch {
-            // a restore raced the dir out from under us — leave it
-          }
-          verdict = "held";
-        } else if (createdIno === null) {
-          // The dir's inode could not be proven: the name may already sit on
-          // a successor's dir, where a blind publish's rename would stamp
-          // over the successor's record. Never write blind — the dir stays
-          // as-is and the stale-lock path re-judges what is actually there.
-          verdict = "held";
-        } else {
-          restorePublishGapHookForTests?.(lockPath);
-          if (publish(remaining, createdIno)) {
-            // The publish must land in the dir WE created — a restore during
-            // our setup can swap the name to another dir's inode, in which
-            // case nothing of ours holds that name.
-            verdict =
-              ourIno !== null && statSync(lockPath).ino === ourIno
-                ? "acquired"
-                : "held";
-          } else {
-            verdict = "held";
-          }
-        }
-      }
-    } else {
-      verdict = "held";
-    }
-    if (verdict === "acquired") break;
-    if (verdict === "gone") {
-      unprovenHold = false;
-      continue; // vanished mid-check — retry the mkdir
-    }
-    if (verdict === "stale") {
-      unprovenHold = false;
-      stealRestoreLock(lockPath, deadline - performance.now(), staleIno);
-      continue;
-    }
-    const waitMs = Math.min(RESTORE_LOCK_POLL_MS, deadline - performance.now());
-    if (waitMs > 0) await sleep(waitMs);
-  }
-  let released = false;
-  return (): void => {
-    if (released) return;
-    released = true;
-    // A `.rel` entry that still carries our record is released residue
-    // only from here on — while this acquisition is live its nonce must
-    // never mark a stranded quarantine as ours to reap.
-    releasedRestoreNonces.add(nonce);
-    // FSS-15/SH-7: release ONLY our own lock. Rename to quarantine first,
-    // then delete only when the record inside still carries our pid + nonce
-    // — a lock that was stolen and re-acquired while we held it (or a
-    // successor that claimed the freed name) is moved back untouched, never
-    // recursively deleted.
-    restoreLockStealCounter += 1;
-    const quarantine = `${RESTORE_REL_QUARANTINE_PREFIX}${process.pid}-${Date.now()}-${restoreLockStealCounter}`;
-    const quarantinePath = join(realDir, quarantine);
-    try {
-      renameSync(lockPath, quarantinePath);
-    } catch {
-      return; // already stolen or released — nothing of ours at that name
-    }
-    const owner = readRestoreLockOwner(quarantinePath);
-    if (owner !== null && owner.pid === process.pid && owner.nonce === nonce) {
-      try {
-        rmSync(quarantinePath, { recursive: true, force: true });
-      } catch {
-        // a leftover quarantine entry is inert — GC reaps it later
-      }
-      return;
-    }
-    try {
-      moveNoReplace(quarantinePath, lockPath);
-    } catch {
-      // A successor already claimed the name — leave the quarantine entry
-      // for GC; the live lock at the name is never replaced or deleted.
-    }
-  };
-};
-
 /** Acquire the restore lock through the shared directory-lock core. */
 const acquireRestoreLock = async (
   realDir: string,
@@ -2002,10 +1714,12 @@ const acquireRestoreLock = async (
       }
       return existsSync(lockPath);
     },
-    onStep: (step): void => {
+    onStep: (step, path): void => {
       if (step === "before-publish") restorePublishGapHookForTests?.(lockPath);
       if (step === "after-steal-rename")
         restoreStealGapHookForTests?.(lockPath);
+      if (step === "after-release-rename")
+        restoreReleaseGapHookForTests?.(path);
     },
   };
   const release = await acquireDirLock(
