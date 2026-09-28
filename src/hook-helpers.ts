@@ -52,6 +52,7 @@ export const startHookWorker = (
   new Promise((resolve) => {
     const child = spawn(invocation[0], invocation.slice(1), {
       detached: true,
+      windowsHide: true,
       stdio: ["pipe", logFd ?? "ignore", logFd ?? "ignore"],
       env: process.env,
     });
