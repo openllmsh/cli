@@ -477,11 +477,29 @@ const redactProfileBackupKey = (backupDir: string): boolean => {
 };
 
 /**
+ * Move a profile tree `from` to `to`: a same-filesystem rename, with a
+ * copy+remove fallback for the cross-device case. The uninstall move and
+ * its rollback run through this one helper so a restore puts back the same
+ * shape the move found.
+ */
+const moveProfileDir = (from: string, to: string): void => {
+  mkdirSync(join(to, ".."), { recursive: true, mode: 0o700 });
+  try {
+    renameSync(from, to);
+  } catch {
+    cpSync(from, to, { recursive: true });
+    rmSync(from, { recursive: true, force: true });
+  }
+};
+
+/**
  * The profile `install` created is the STICKY one — it holds every Hermes
  * session, memory, state.db and SOUL edit since then. Uninstall must not
  * delete it: move it to a timestamped backup and tell the user where.
  * The move runs BEFORE the ledger/sticky-pointer changes so a failure
- * leaves the wiring intact for a retry.
+ * leaves the wiring intact for a retry. A redaction failure after the move
+ * rolls the move back (LM-1): a failed uninstall leaves the profile, the
+ * ledger and the sticky pointer exactly as they were — no half-state.
  */
 export const uninstallHermes = (): number => {
   const ledger = readHermesLedger();
@@ -496,33 +514,39 @@ export const uninstallHermes = (): number => {
   if (ledger.createdProfile && existsSync(dest)) {
     backup = profileBackupPath(ledger.profileName);
     try {
-      mkdirSync(join(backup, ".."), { recursive: true, mode: 0o700 });
-      renameSync(dest, backup);
+      moveProfileDir(dest, backup);
     } catch {
-      try {
-        cpSync(dest, backup, { recursive: true });
-        rmSync(dest, { recursive: true, force: true });
-      } catch {
-        // The profile stays live at `dest`, but a partial backup may already
-        // hold a copied .env — redact whatever landed before reporting the
-        // failure so no copy of the key is left behind.
-        const redacted = redactProfileBackupKey(backup);
-        process.stderr.write(
-          `Could not move the Hermes profile to a backup — leaving ${dest} in place.\n` +
-            (redacted
-              ? ""
-              : `  the partial backup at ${backup} may still contain OPENLLM_API_KEY — delete it by hand.\n`),
-        );
-        return 1;
-      }
+      // The profile stays live at `dest`, but a partial backup may already
+      // hold a copied .env — redact whatever landed before reporting the
+      // failure so no copy of the key is left behind.
+      const redacted = redactProfileBackupKey(backup);
+      process.stderr.write(
+        `Could not move the Hermes profile to a backup — leaving ${dest} in place.\n` +
+          (redacted
+            ? ""
+            : `  the partial backup at ${backup} may still contain OPENLLM_API_KEY — delete it by hand.\n`),
+      );
+      return 1;
     }
     if (!redactProfileBackupKey(backup)) {
-      process.stderr.write(
-        `Could not remove OPENLLM_API_KEY from the preserved profile — delete ${join(
-          backup,
-          ".env",
-        )} by hand.\n`,
-      );
+      // The move is final only once the key is verifiably gone from the
+      // copy. Put the profile back so the ledger, the sticky pointer and
+      // the profile still agree, and the retry sees the same state the
+      // first run saw.
+      try {
+        moveProfileDir(backup, dest);
+        process.stderr.write(
+          `Could not strip OPENLLM_API_KEY from ${join(dest, ".env")} — the profile stays in place, unchanged and still wired.\n` +
+            "  fix or remove that entry, then re-run the uninstall.\n",
+        );
+      } catch {
+        process.stderr.write(
+          `Could not remove OPENLLM_API_KEY from the preserved profile — delete ${join(
+            backup,
+            ".env",
+          )} by hand.\n` + `  the profile itself is preserved at ${backup}.\n`,
+        );
+      }
       return 1;
     }
   }
