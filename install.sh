@@ -685,7 +685,7 @@ env_lock_is_stale_dir() {
 # The marker bridges check->move: a publisher that commits its owner record
 # while the steal is in flight sees the marker and fails its own publish,
 # so a committed steal can never leave two holders. A committed quarantine
-# is never moved back; the sweep removes it once it ages out.
+# is restored if a new owner record appears before the rename.
 env_lock_steal() {
   local lockdir="$1" stem="$2" marker q ino_before ino_after q_ino mtime before_owner after_owner
   ino_before="$(env_lock_path_ino "$lockdir")"
@@ -714,11 +714,14 @@ env_lock_steal() {
     q="$stem.stale.$$.$ENV_LOCK_NONCE.$ENV_LOCK_QSEQ"
     if mv "$lockdir" "$q" 2>/dev/null; then
       q_ino="$(env_lock_path_ino "$q")"
-      if [ "$q_ino" != "$ino_before" ]; then
-        # A moved path that no longer proves the marked generation is not
-        # ours to delete. Restore its contents no-replace, or leave the
-        # quarantine parked for bounded sweep.
+      if [ "$q_ino" != "$ino_before" ] \
+        || { [ -e "$q/owner" ] \
+          && [ "$(cat "$q/owner" 2>/dev/null || true)" != "$before_owner" ]; }; then
+        # A new owner record means publication raced the rename.
+        # Restore only at a free path. Keep a blocked quarantine.
         env_lock_restore_dir "$q" "$lockdir"
+        rm -f "$marker" "$q/steal.$$.$ENV_LOCK_NONCE" 2>/dev/null || true
+        return 0  # Retry acquisition. This steal did not claim the lock.
       fi
       return 0  # committed — the marker (and dir) are parked with it
     fi
