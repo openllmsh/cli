@@ -617,9 +617,11 @@ const withEnvFileLock = (
   const release = acquireDirLockSync(lockDir, envDirLockCodec, {
     waitMs: waitMs ?? envLockWaitMs(),
     reclaimMs: envLockStaleMs(),
+    ownerlessMs: envLockOrphanMs(),
     pollMs: 10,
     inode: envLockDirIno,
     startIdentity: envLockStartIdentity,
+    ownerStartIdentity: envLockStartIdentity,
     legacyStartIdentity: envLockLegacyStartIdentityProbe,
     isStale: envLockDirIsStale,
     legacyHeld:
