@@ -37,11 +37,18 @@ die() { echo "Error: $*" >&2; exit 1; }
 # arguments are rejected so a typo can never silently change an install.
 FROM_FILE=""
 FROM_SHA=""
+# Publish-time tag binding: the release pipeline stamps the ONE literal below
+# into the published copy of this script before it serves a prerelease tag.
+# It is a fixed per-invocation assignment, NOT an environment default.
+OPENLLM_PRERELEASE_TAG=''
+PRERELEASE_OPT=""
+PRERELEASE_SEEN=0
 usage() {
   cat <<'USAGE'
 Usage: install.sh [options]
   --from-file <path>   install the openllm CLI binary from a local file
   --sha256 <hex>       sha256 digest of the --from-file file (required with it)
+  --prerelease <tag>   install the published prerelease tag (vX.Y.Z-label.N)
   -h, --help           show this text
 USAGE
 }
@@ -59,13 +66,57 @@ while [ $# -gt 0 ]; do
       shift 2
       ;;
     --sha256=*) FROM_SHA="${1#*=}"; shift ;;
+    --prerelease)
+      [ "$PRERELEASE_SEEN" = 0 ] || die "--prerelease must not be repeated"
+      PRERELEASE_SEEN=1
+      PRERELEASE_OPT="${2:-}"
+      [ -n "$PRERELEASE_OPT" ] || die "--prerelease needs a tag"
+      shift 2
+      ;;
+    --prerelease=*)
+      [ "$PRERELEASE_SEEN" = 0 ] || die "--prerelease must not be repeated"
+      PRERELEASE_SEEN=1
+      PRERELEASE_OPT="${1#*=}"
+      [ -n "$PRERELEASE_OPT" ] || die "--prerelease needs a tag"
+      shift
+      ;;
     -h|--help) usage; exit 0 ;;
-    *) die "unknown argument: $1 (supported: --from-file, --sha256)" ;;
+    *) die "unknown argument: $1 (supported: --from-file, --sha256, --prerelease)" ;;
   esac
 done
 if [ -n "$FROM_FILE" ] || [ -n "$FROM_SHA" ]; then
   [ -n "$FROM_FILE" ] && [ -n "$FROM_SHA" ] \
     || die "--from-file and --sha256 must be given together"
+fi
+
+# --- prerelease tag selection ----------------------------------------------
+# Tag grammar: vMAJOR.MINOR.PATCH-LABEL.N. Numeric fields are `0` or digits
+# with NO leading zero. LABEL starts with a letter and holds only ASCII
+# letters, digits or hyphens. A stable tag (vX.Y.Z) is NOT a prerelease tag —
+# grammar and shape reject whitespace, paths, queries and shell syntax too.
+is_prerelease_tag() {
+  [[ "$1" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)-[A-Za-z][A-Za-z0-9-]*\.(0|[1-9][0-9]*)$ ]]
+}
+# The selected prerelease tag, or "" for the normal stable flow. A resolved
+# embedded marker supplies the default; an explicit --prerelease must equal it.
+# Local-file mode never selects the marker.
+PRERELEASE_TAG=""
+if [ "$PRERELEASE_SEEN" = 1 ]; then
+  [ -z "$FROM_FILE" ] && [ -z "$FROM_SHA" ] \
+    || die "--prerelease cannot be combined with --from-file/--sha256"
+  is_prerelease_tag "$PRERELEASE_OPT" \
+    || die "not a prerelease tag: $PRERELEASE_OPT (want vMAJOR.MINOR.PATCH-LABEL.N, e.g. v2.8.0-beta.3)"
+  if [ -n "$OPENLLM_PRERELEASE_TAG" ]; then
+    is_prerelease_tag "$OPENLLM_PRERELEASE_TAG" \
+      || die "this script's embedded prerelease tag is invalid: $OPENLLM_PRERELEASE_TAG"
+    [ "$PRERELEASE_OPT" = "$OPENLLM_PRERELEASE_TAG" ] \
+      || die "--prerelease $PRERELEASE_OPT does not match this script's published tag $OPENLLM_PRERELEASE_TAG"
+  fi
+  PRERELEASE_TAG="$PRERELEASE_OPT"
+elif [ -z "$FROM_FILE" ] && [ -z "$FROM_SHA" ] && [ -n "$OPENLLM_PRERELEASE_TAG" ]; then
+  is_prerelease_tag "$OPENLLM_PRERELEASE_TAG" \
+    || die "this script's embedded prerelease tag is invalid: $OPENLLM_PRERELEASE_TAG"
+  PRERELEASE_TAG="$OPENLLM_PRERELEASE_TAG"
 fi
 
 # Replacement policy: the version advertised by /api/install is the release of
@@ -78,8 +129,11 @@ DEST="$BIN_DIR/openllm"
 # hang the installer.
 VERSION_PROBE_TIMEOUT=10
 VERSION_PROBE_KILL_GRACE=2
-probe_version() {
-  local binary="$1" probe_file="${TMPDIR:-/tmp}/openllm-version-probe.$$" pid watchdog status
+# Bounded --version probe: TERM after VERSION_PROBE_TIMEOUT, then KILL after
+# VERSION_PROBE_KILL_GRACE more. Sets PROBE_STATUS (exit code) and PROBE_OUTPUT
+# (stdout). Never dies — the caller chooses the failure.
+bounded_version_probe() {
+  local binary="$1" probe_file="${TMPDIR:-/tmp}/openllm-version-probe.$$" pid watchdog
   "$binary" --version >"$probe_file" 2>/dev/null &
   pid=$!
   (
@@ -95,12 +149,16 @@ probe_version() {
     kill -KILL "$pid" 2>/dev/null || true
   ) &
   watchdog=$!
-  if wait "$pid"; then status=0; else status=$?; fi
+  if wait "$pid"; then PROBE_STATUS=0; else PROBE_STATUS=$?; fi
   kill -TERM "$watchdog" 2>/dev/null || true
   wait "$watchdog" 2>/dev/null || true
   PROBE_OUTPUT="$(cat "$probe_file" 2>/dev/null || true)"
   rm -f "$probe_file"
-  [ "$status" -eq 0 ] \
+}
+probe_version() {
+  local binary="$1"
+  bounded_version_probe "$binary"
+  [ "$PROBE_STATUS" -eq 0 ] \
     || die "version probe timed out or failed at $binary; refusing to overwrite it.
   To repair by hand: move the binary aside ('mv \"$binary\" \"$binary.bak\"') and re-run this installer."
 }
@@ -189,6 +247,327 @@ sha256_of() {
   fi
 }
 
+# >>> openllm-prerelease/v1 (identical block in both shell installers) >>>>>>>
+# Public-prerelease resolution. The manifest and the asset come from the SAME
+# tag on the component's own repository: the manifest is tagged source, the
+# asset is that tag's published release file. The digest gate is the manifest
+# sha256 of the DECOMPRESSED bytes.
+#
+#   manifest:  https://raw.githubusercontent.com/<repo>/<tag>/manifest.ts
+#   asset:     https://github.com/<repo>/releases/download/<tag>/<asset>
+#
+# OPENLLM_PRERELEASE_BASE_URL is a test-only override: it must parse to an
+# http URL on a loopback host (127.0.0.1, localhost or [::1]); redirects are
+# refused and the value is never persisted. The scheme list carries the
+# redirect bound: production follows at most five, loopback follows none.
+PRE_BASE=""
+PR_SCHEME=(--proto "=https" --proto-redir "=https" --max-redirs 5)
+
+# $1 = repository (openllmsh/daemon or openllmsh/cli), $2 = file in the tag's
+# source tree. Prints the URL for that tagged file.
+prerelease_repo_url() {
+  if [ -n "$PRE_BASE" ]; then
+    printf '%s/%s/%s/%s' "$PRE_BASE" "$1" "$PRERELEASE_TAG" "$2"
+  else
+    printf 'https://raw.githubusercontent.com/%s/%s/%s' "$1" "$PRERELEASE_TAG" "$2"
+  fi
+}
+
+# $1 = repository, $2 = asset basename. Prints the release-asset URL.
+prerelease_asset_url() {
+  if [ -n "$PRE_BASE" ]; then
+    prerelease_repo_url "$1" "$2"
+  else
+    printf 'https://github.com/%s/releases/download/%s/%s' "$1" "$PRERELEASE_TAG" "$2"
+  fi
+}
+
+# Fetch one repository's tagged manifest and print the sha256 digest it pins
+# for the host TARGET. Dies on any fetch, parse or content failure — the
+# caller never picks another tag to recover.
+prerelease_manifest_digest() {
+  local repo="$1" export_name="$2" url body digest
+  url="$(prerelease_repo_url "$repo" manifest.ts)"
+  # The trailing 'x' sentinel keeps command substitution from stripping the
+  # manifest's final newlines, so the parser sees the exact served bytes.
+  body="$(curl "${PR_SCHEME[@]}" "${CURL_META[@]}" -fsSL "$url" 2>/dev/null || exit; printf x)" \
+    || die "could not fetch the $repo manifest for $PRERELEASE_TAG"
+  body="${body%x}"
+  digest="$(printf '%s' "$body" | LC_ALL=C awk \
+    -v want_export="$export_name" -v want_repo="$repo" \
+    -v want_tag="$PRERELEASE_TAG" -v want_target="$TARGET" '
+function die(m) { printf "manifest: %s\n", m > "/dev/stderr"; exit 1 }
+function hex2num(h,   i, v) {
+  v = 0
+  for (i = 1; i <= length(h); i++)
+    v = v * 16 + index("0123456789abcdef", tolower(substr(h, i, 1))) - 1
+  return v
+}
+function parse_object(   key, k2) {
+  if (typ[p] != "{") die("release must be an object")
+  p++
+  while (1) {
+    if (p > nt) die("unterminated object")
+    if (typ[p] == "}") { p++; break }
+    if (typ[p] != "id" && typ[p] != "str") die("bad field name")
+    key = val[p]; p++
+    if (typ[p] != ":") die("field " key " needs :")
+    p++
+    if (key == "repo" || key == "tag") {
+      if (typ[p] != "str") die(key " must be a string")
+      if (key == "repo") { if (f_repo++) die("duplicate repo"); v_repo = val[p] }
+      else { if (f_tag++) die("duplicate tag"); v_tag = val[p] }
+      p++
+    } else if (key == "targets") {
+      if (f_targets++) die("duplicate targets")
+      if (typ[p] != "[") die("targets must be an array")
+      p++
+      while (1) {
+        if (p > nt) die("unterminated targets")
+        if (typ[p] == "]") { p++; break }
+        if (typ[p] != "str") die("target must be a string")
+        if (val[p] in targ) die("duplicate target " val[p])
+        targ[val[p]] = 1; p++
+        if (typ[p] == ",") { p++; continue }
+        if (typ[p] == "]") { p++; break }
+        die("bad targets array")
+      }
+    } else if (key == "sha256") {
+      if (f_sha++) die("duplicate sha256")
+      if (typ[p] != "{") die("sha256 must be an object")
+      p++
+      while (1) {
+        if (p > nt) die("unterminated sha256")
+        if (typ[p] == "}") { p++; break }
+        if (typ[p] != "str") die("sha256 keys must be strings")
+        k2 = val[p]; p++
+        if (typ[p] != ":") die("sha256 field needs :")
+        p++
+        if (typ[p] != "str") die("sha256 value must be a string")
+        if (k2 in dig) die("duplicate sha256 key " k2)
+        if (length(val[p]) != 64 || val[p] !~ /^[0-9a-f]+$/)
+          die("bad sha256 for " k2)
+        dig[k2] = val[p]; p++
+        if (typ[p] == ",") { p++; continue }
+        if (typ[p] == "}") { p++; break }
+        die("bad sha256 object")
+      }
+    } else die("unknown field " key)
+    if (p > nt) die("unterminated object")
+    if (typ[p] == ",") { p++; continue }
+    if (typ[p] == "}") { p++; break }
+    die("expected , or } after " key)
+  }
+}
+{ buf = buf $0 "\n" }
+END {
+  s = buf
+  if (length(s) > 65536) die("manifest exceeds 64 KiB")
+  if (substr(s, 1, 3) == sprintf("%c%c%c", 239, 187, 191)) s = substr(s, 4)
+  n = length(s); i = 1; nt = 0
+  while (i <= n) {
+    c = substr(s, i, 1)
+    if (c ~ /[[:space:]]/) { i++; continue }
+    if (c == "/") {
+      d = substr(s, i + 1, 1)
+      if (d == "/") {
+        j = index(substr(s, i + 2), "\n")
+        if (j == 0) break
+        i += j + 2; continue
+      }
+      if (d == "*") {
+        j = index(substr(s, i + 2), "*/")
+        if (j == 0) die("unterminated comment")
+        i += j + 3; continue
+      }
+      die("unexpected /")
+    }
+    if (c == "\"") {
+      i++; v = ""
+      while (1) {
+        if (i > n) die("unterminated string")
+        c = substr(s, i, 1)
+        if (c == "\"") { i++; break }
+        if (c == "\n" || c == "\r") die("unterminated string")
+        if (c == "\\") {
+          e = substr(s, i + 1, 1)
+          if (index("\"\\/", e) > 0) { v = v e; i += 2; continue }
+          if (e == "n") { v = v "\n"; i += 2; continue }
+          if (e == "t") { v = v "\t"; i += 2; continue }
+          if (e == "r") { v = v "\r"; i += 2; continue }
+          if (e == "b") { v = v "\b"; i += 2; continue }
+          if (e == "f") { v = v "\f"; i += 2; continue }
+          if (e == "u") {
+            h = substr(s, i + 2, 4)
+            if (length(h) != 4 || h !~ /^[0-9a-fA-F]+$/) die("bad \\u escape")
+            cp = hex2num(h)
+            if (cp < 32 || cp > 126) die("unsupported \\u escape")
+            v = v sprintf("%c", cp); i += 6; continue
+          }
+          die("bad string escape")
+        }
+        v = v c; i++
+      }
+      nt++; typ[nt] = "str"; val[nt] = v; continue
+    }
+    if (c ~ /[A-Za-z_$]/) {
+      j = i
+      while (j <= n && substr(s, j, 1) ~ /[A-Za-z0-9_$]/) j++
+      nt++; typ[nt] = "id"; val[nt] = substr(s, i, j - i); i = j; continue
+    }
+    if (index("{}[]:,;=", c) > 0) { nt++; typ[nt] = c; val[nt] = ""; i++; continue }
+    die("unexpected character")
+  }
+  p = 1; seen = 0
+  while (p <= nt) {
+    if (typ[p] == "id" && val[p] == "import") {
+      p++
+      if (!(typ[p] == "id" && val[p] == "type")) die("only type imports are allowed")
+      p++
+      if (typ[p] == "{") {
+        p++
+        while (1) {
+          if (p > nt) die("unterminated import")
+          if (typ[p] == "}") { p++; break }
+          if (typ[p] != "id") die("bad import")
+          p++
+          if (typ[p] == ",") { p++; continue }
+          if (typ[p] == "}") { p++; break }
+          die("bad import")
+        }
+      } else if (typ[p] == "id") {
+        p++
+      } else die("bad import")
+      if (!(typ[p] == "id" && val[p] == "from")) die("import needs from")
+      p++
+      if (typ[p] != "str") die("import path must be a string")
+      p++
+      if (typ[p] == ";") p++
+      continue
+    }
+    if (typ[p] == "id" && val[p] == "export") {
+      p++
+      if (!(typ[p] == "id" && val[p] == "const")) die("only const exports are allowed")
+      p++
+      if (typ[p] != "id") die("export needs a name")
+      if (val[p] != want_export) die("unexpected export " val[p])
+      p++
+      if (seen) die("duplicate " want_export)
+      seen = 1
+      if (typ[p] != ":") die("export needs a type annotation")
+      p++
+      if (typ[p] != "id") die("export type must be a name")
+      p++
+      if (typ[p] != "=") die("export needs a value")
+      p++
+      parse_object()
+      if (typ[p] == ";") p++
+      continue
+    }
+    die("unexpected statement")
+  }
+  if (!seen) die("no " want_export " export")
+  if (!f_repo || !f_tag || !f_targets || !f_sha) die("incomplete release record")
+  if (v_repo != want_repo) die("repo is " v_repo ", want " want_repo)
+  if (v_tag != want_tag) die("tag is " v_tag ", want " want_tag)
+  if (!(want_target in targ)) die("no target " want_target " in targets")
+  if (!(want_target in dig)) die("no sha256 for " want_target)
+  for (k in dig) if (!(k in targ)) die("sha256 for undeclared target " k)
+  print dig[want_target]
+}')" || die "the $repo manifest for $PRERELEASE_TAG has no usable $TARGET digest"
+  printf '%s' "$digest"
+}
+
+# Read 4 bytes at offset $2 of file $1 as a hex string, then as a number.
+_pr_hex4() { od -An -tx1 -j "$2" -N 4 "$1" 2>/dev/null | tr -d ' \n'; }
+_be32() {
+  local h; h="$(_pr_hex4 "$1" "$2")"
+  [[ "$h" =~ ^[0-9a-f]{8}$ ]] || die "short read checking the executable format"
+  printf '%d' "$((16#$h))"
+}
+_le32() {
+  local h; h="$(_pr_hex4 "$1" "$2")"
+  [[ "$h" =~ ^[0-9a-f]{8}$ ]] || die "short read checking the executable format"
+  printf '%d' "$((16#${h:6:2}${h:4:2}${h:2:2}${h:0:2}))"
+}
+
+# Executable-format check for a verified staged download: the published POSIX
+# assets are 64-bit ELF (Linux/WSL2) or 64-bit Mach-O (macOS) matching the host
+# architecture. A `#!` script is also an executable payload and stays allowed —
+# the manifest digest and the version probe still gate it. Anything else, or a
+# wrong machine type, is refused before the file is ever executed.
+verify_exec_format() {
+  local file="$1" magic cls enc lo hi machine want_m ct ct_want nfat i esz
+  magic="$(od -An -tx1 -N4 "$file" 2>/dev/null | tr -d ' \n')"
+  case "$magic" in
+    2321*) return 0 ;;  # '#!' script payload
+  esac
+  case "$OS" in
+    linux)
+      [ "$magic" = "7f454c46" ] || die "downloaded $file is not an ELF executable for $TARGET"
+      cls="$(od -An -tx1 -j4 -N1 "$file" 2>/dev/null | tr -d ' \n')"
+      [ "$cls" = "02" ] || die "downloaded $file is not a 64-bit executable"
+      enc="$(od -An -tx1 -j5 -N1 "$file" 2>/dev/null | tr -d ' \n')"
+      lo="$(od -An -tx1 -j18 -N1 "$file" 2>/dev/null | tr -d ' \n')"
+      hi="$(od -An -tx1 -j19 -N1 "$file" 2>/dev/null | tr -d ' \n')"
+      case "$enc" in
+        01) machine=$((16#${hi}${lo})) ;;
+        02) machine=$((16#${lo}${hi})) ;;
+        *) die "downloaded $file has an invalid ELF encoding" ;;
+      esac
+      # e_machine: x86-64 = 62, AArch64 = 183.
+      if [ "$ARCH" = "x64-baseline" ]; then want_m=62; else want_m=183; fi
+      [ "$machine" = "$want_m" ] \
+        || die "downloaded $file is built for ELF machine $machine, not $TARGET"
+      ;;
+    darwin)
+      # cputype: x86_64 = 0x01000007, arm64 = 0x0100000c.
+      if [ "$ARCH" = "x64-baseline" ]; then ct_want=16777223; else ct_want=16777228; fi
+      case "$magic" in
+        cffaedfe) ct="$(_le32 "$file" 4)" ;;   # 64-bit Mach-O, little-endian
+        feedfacf) ct="$(_be32 "$file" 4)" ;;   # 64-bit Mach-O, big-endian
+        cafebabe|cafebabf)
+          # Fat/universal header: scan the arch list for the host slice.
+          nfat="$(_be32 "$file" 4)"
+          ct=-1; i=0; esz=20
+          [ "$magic" = "cafebabf" ] && esz=32
+          while [ "$i" -lt "$nfat" ] && [ "$i" -lt 64 ]; do
+            ct="$(_be32 "$file" $((8 + i * esz)))"
+            [ "$ct" = "$ct_want" ] && break
+            i=$((i + 1))
+          done
+          ;;
+        bebafeca|bfbafeca)
+          nfat="$(_le32 "$file" 4)"
+          ct=-1; i=0; esz=20
+          [ "$magic" = "bfbafeca" ] && esz=32
+          while [ "$i" -lt "$nfat" ] && [ "$i" -lt 64 ]; do
+            ct="$(_le32 "$file" $((8 + i * esz)))"
+            [ "$ct" = "$ct_want" ] && break
+            i=$((i + 1))
+          done
+          ;;
+        *) die "downloaded $file is not a Mach-O executable for $TARGET" ;;
+      esac
+      [ "$ct" = "$ct_want" ] \
+        || die "downloaded $file has no $TARGET slice"
+      ;;
+  esac
+}
+# <<< openllm-prerelease/v1 <<<
+
+# Bounded --version probe for a staged prerelease download: the binary must
+# exit 0 and report EXACTLY the selected version — never an older manifest pin.
+probe_staged_version() {
+  local binary="$1" want="$2" got=""
+  bounded_version_probe "$binary"
+  [ "$PROBE_STATUS" -eq 0 ] \
+    || die "the downloaded $binary failed its --version probe — refusing to install"
+  got="$(version_of_output "$PROBE_OUTPUT")" || got=""
+  [ "$got" = "$want" ] \
+    || die "the downloaded $binary reports '${got:-no parseable version}', not $want — refusing to install"
+}
+
 case "$(uname -s)" in
   Darwin) OS="darwin" ;;
   Linux)  OS="linux" ;;
@@ -238,9 +617,47 @@ fi
 # so they get the short bound; the binary download gets the long one.
 CURL_META=(--connect-timeout 10 --max-time 60)
 CURL_GET=(--connect-timeout 10 --max-time 300)
+# Public-prerelease transport (P): fixed GitHub URLs over HTTPS with at most
+# five redirects. OPENLLM_PRERELEASE_BASE_URL is a test-only override — it must
+# parse to an http URL on a loopback host, refuses redirects, and is never
+# persisted. Checked BEFORE the first fetch so a bad value fails early.
+if [ -n "$PRERELEASE_TAG" ]; then
+  has_command awk || die "awk is required to parse the release manifest"
+  has_command gzip || die "gzip is required to unpack the release asset"
+  has_command od || die "od is required to check the executable format"
+  if [ -n "${OPENLLM_PRERELEASE_BASE_URL:-}" ]; then
+    pre_authority="${OPENLLM_PRERELEASE_BASE_URL#http://}"
+    [ "$pre_authority" != "$OPENLLM_PRERELEASE_BASE_URL" ] \
+      || die "OPENLLM_PRERELEASE_BASE_URL must be an http:// URL on a loopback host (127.0.0.1, localhost or [::1])"
+    pre_authority="${pre_authority%%[/?#]*}"
+    case "$pre_authority" in
+      127.0.0.1|localhost|\[::1\]) ;;
+      127.0.0.1:*|localhost:*|\[::1\]:*)
+        pre_port="${pre_authority#*:}"
+        [[ "$pre_port" =~ ^[0-9]+$ ]] \
+          || die "OPENLLM_PRERELEASE_BASE_URL has a bad port" ;;
+      *) die "OPENLLM_PRERELEASE_BASE_URL must be an http:// URL on a loopback host (127.0.0.1, localhost or [::1])" ;;
+    esac
+    PRE_BASE="${OPENLLM_PRERELEASE_BASE_URL%/}"
+    PR_SCHEME=(--proto "=http" --proto-redir "=http" --max-redirs 0)
+  fi
+fi
 
 CLI_VERSION=""
-if [ -z "$FROM_FILE" ]; then
+PRE_PUBLISHED=""
+if [ -n "$PRERELEASE_TAG" ]; then
+  # --proto/--proto-redir need a curl new enough to know the options (≈7.21).
+  curl "${PR_SCHEME[@]}" "${CURL_META[@]}" -V >/dev/null 2>&1 \
+    || die "this curl does not support --proto/--proto-redir — upgrade to curl 7.21.0 or newer and re-run"
+  CLI_VERSION="${PRERELEASE_TAG#v}"
+  # The requested version is known without the network — refuse a downgrade of
+  # a managed binary before any fetch (current and legacy CLI names).
+  assert_no_downgrade "$DEST" "$CLI_VERSION"
+  assert_no_downgrade "$BIN_DIR/openllmc" "$CLI_VERSION"
+  # The tag's own CLI manifest pins the digest — never a stable checksum route.
+  echo "Resolving the OpenLLM CLI prerelease $PRERELEASE_TAG..."
+  PRE_PUBLISHED="$(prerelease_manifest_digest openllmsh/cli CLI_RELEASE)" || exit 1
+elif [ -z "$FROM_FILE" ]; then
   # --proto/--proto-redir need a curl new enough to know the options (≈7.21):
   # an older system curl fails the FIRST fetch with an opaque option error, so
   # detect support once and fail with the upgrade remedy up front.
@@ -271,7 +688,11 @@ fi
 
 mkdir -p "$BIN_DIR"
 
-URL="$ORIGIN/api/cli/binary/$TARGET"
+if [ -n "$PRERELEASE_TAG" ]; then
+  URL="$(prerelease_asset_url openllmsh/cli "openllm-$TARGET.gz")"
+else
+  URL="$ORIGIN/api/cli/binary/$TARGET"
+fi
 STAMP="$BIN_DIR/.openllm.sha256.stamp"
 
 if [ -n "$FROM_FILE" ]; then
@@ -284,6 +705,8 @@ if [ -n "$FROM_FILE" ]; then
     || die "malformed --sha256 digest (expected 64 hex chars)"
   [ -f "$FROM_FILE" ] && [ -r "$FROM_FILE" ] \
     || die "--from-file path is not a readable regular file: $FROM_FILE"
+elif [ -n "$PRERELEASE_TAG" ]; then
+  PUBLISHED="$PRE_PUBLISHED"
 else
   PUBLISHED="$(curl "${CURL_SCHEME[@]}" "${CURL_META[@]}" -fsSL "$URL.sha256" 2>/dev/null | cut -d' ' -f1 || true)"
   case "$PUBLISHED" in
@@ -333,14 +756,26 @@ else
       [ -n "$ACTUAL" ] || die "could not hash $FROM_FILE"
       [ "$ACTUAL" = "$PUBLISHED" ] \
         || die "checksum mismatch (expected $PUBLISHED, got $ACTUAL) — refusing to install"
+    elif [ -n "$PRERELEASE_TAG" ]; then
+      # The same-tag release asset over the prerelease scheme (HTTPS with a
+      # bounded redirect count, or redirect-free loopback in test mode).
+      if [ -t 2 ]; then
+        curl "${PR_SCHEME[@]}" "${CURL_GET[@]}" -fL --progress-bar "$URL" -o "$DL" || die "download failed: $URL"
+      else
+        curl "${PR_SCHEME[@]}" "${CURL_GET[@]}" -fsSL "$URL" -o "$DL" || die "download failed: $URL"
+      fi
     elif [ -t 2 ]; then
       curl "${CURL_SCHEME[@]}" "${CURL_GET[@]}" -fL --progress-bar "$URL" -o "$DL" || die "download failed: $URL"
     else
       curl "${CURL_SCHEME[@]}" "${CURL_GET[@]}" -fsSL "$URL" -o "$DL" || die "download failed: $URL"
     fi
-    # The pinned digest is over the DECOMPRESSED binary.
+    # The pinned digest is over the DECOMPRESSED binary. A published
+    # prerelease asset is ALWAYS gzip — a plain or empty response is a bad
+    # release, never a format to pass through.
     if gzip -t "$DL" >/dev/null 2>&1; then
       gzip -dc "$DL" > "$BIN" || die "could not decompress openllm"
+    elif [ -n "$PRERELEASE_TAG" ]; then
+      die "the $PRERELEASE_TAG asset is not gzip data — refusing to install"
     else
       mv "$DL" "$BIN"
     fi
@@ -350,6 +785,7 @@ else
       [ "$ACTUAL" = "$PUBLISHED" ] \
         || die "checksum mismatch (expected $PUBLISHED, got $ACTUAL) — refusing to install"
     fi
+    if [ -n "$PRERELEASE_TAG" ]; then verify_exec_format "$BIN"; fi
     chmod 0755 "$BIN"
     # Preserve a valid Developer ID / notarized signature; only ad-hoc when invalid.
     if [ "$OS" = "darwin" ]; then
@@ -371,6 +807,10 @@ else
       probe_version "$BIN"
       CHECK_VERSION="$(version_of_output "$PROBE_OUTPUT")" \
         || die "could not parse a version from $FROM_FILE — refusing to install"
+    elif [ -n "$PRERELEASE_TAG" ]; then
+      # The staged binary must execute and report EXACTLY the selected
+      # version — a stale or foreign asset is refused before it lands.
+      probe_staged_version "$BIN" "$CLI_VERSION"
     fi
     assert_no_downgrade "$DEST" "$CHECK_VERSION"
     mv -f "$BIN" "$DEST"
@@ -1130,6 +1570,23 @@ echo "  gateway config written → $ENV_FILE"
 # names — the same code path a human runs as `openllm setup`.
 "$DEST" setup || echo "  note: run '$DEST setup' yourself to finish shell setup"
 
+if [ -n "$PRERELEASE_TAG" ]; then
+  # The daemon half comes from the SAME tag — print the bounded bootstrap the
+  # release docs publish, not the stable /install route.
+  cat <<EOF
+
+The OpenLLM CLI prerelease $PRERELEASE_TAG is installed.
+
+  openllm claude           run Claude Code through OpenLLM
+  ollm codex               (short alias) run Codex through OpenLLM
+  openllm --help           everything else
+
+Open a new shell (or source your rc) so \`openllm\` and \`ollm\` are on PATH.
+Subscription providers (Claude / Codex / Kimi) need the local daemon from the
+same prerelease tag:
+  ( f=\$(mktemp) && trap 'rm -f "\$f"' EXIT && curl --proto '=https' --proto-redir '=https' --connect-timeout 10 --max-time 60 --max-redirs 5 -fsSL -o "\$f" https://raw.githubusercontent.com/openllmsh/daemon/$PRERELEASE_TAG/install.sh && bash "\$f" --prerelease $PRERELEASE_TAG )
+EOF
+else
 cat <<EOF
 
 The OpenLLM CLI is installed.
@@ -1142,3 +1599,4 @@ Open a new shell (or source your rc) so \`openllm\` and \`ollm\` are on PATH.
 Subscription providers (Claude / Codex / Kimi) need the local daemon too:
   curl -fsSL $ORIGIN/install | bash
 EOF
+fi
