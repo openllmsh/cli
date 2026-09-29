@@ -854,10 +854,21 @@ const uninstallHermesLocked = (): number => {
     try {
       writeLedger({ ...ledger, pendingBackup: basename(backup) });
     } catch {
-      process.stderr.write(
-        `Could not save the Hermes recovery record. The profile stays preserved at ${backup}.\n` +
-          `  Restore write access to ${hermesLedgerPath()}. Move the preserved profile back to ${dest} before you retry. Do not merge it into another profile.\n`,
-      );
+      // Without the record a later run cannot find the moved profile, so undo
+      // the move now. Only when that rename fails does the profile stay parked.
+      try {
+        moveProfileDir(backup, dest);
+        dropBackupsShell();
+        process.stderr.write(
+          `Could not save the Hermes recovery record. Nothing was changed.\n` +
+            `  Restore write access to ${hermesLedgerPath()} and retry.\n`,
+        );
+      } catch {
+        process.stderr.write(
+          `Could not save the Hermes recovery record. The profile stays preserved at ${backup}.\n` +
+            `  Restore write access to ${hermesLedgerPath()}. Move the preserved profile back to ${dest} before you retry. Do not merge it into another profile.\n`,
+        );
+      }
       return 1;
     }
     const redact = redactProfileBackupKey(backup);
