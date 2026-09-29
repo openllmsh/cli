@@ -383,6 +383,7 @@ fi
 # and read only AFTER acquiring the lock. Preserve every unrelated setting and
 # the latest device/key a concurrent daemon may have persisted during download.
 # This installer owns the origin, and the key only when explicitly supplied.
+ENV_LOCK_BINARY="$DEST"
 # >>> openllm-env-lock/v3 >>>
 # The installed helper owns all lock metadata operations.
 env_lock_acquire() {
@@ -390,7 +391,7 @@ env_lock_acquire() {
   ENV_LOCK_DIR=""
   helper="${LOCKLAB_HELPER_BIN:-${OPENLLM_LOCK_HELPER:-}}"
   if [ -z "$helper" ]; then
-    helper="${DEST:-}"
+    helper="${ENV_LOCK_BINARY:-}"
   fi
   [ -n "$helper" ] && [ -x "$helper" ] || { echo 'lock helper is missing or incompatible' >&2; return 74; }
   ENV_LOCK_CHANNEL="$(mktemp -d "${TMPDIR:-/tmp}/openllm-lock.XXXXXXXX")" || return 74
