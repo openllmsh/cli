@@ -397,7 +397,7 @@ env_lock_acquire() {
   worker_pid="${BASHPID:-$$}"
   case "$(uname -s 2>/dev/null)" in
     MINGW*|MSYS*|CYGWIN*)
-      worker_pid="$(ps -l -p "$worker_pid" 2>/dev/null | awk 'NR == 1 { for (i = 1; i <= NF; i++) if ($i == "WINPID") column = i; next } column > 0 { print $column; exit }')" || return 74
+      worker_pid="$(ps -l -p "$worker_pid" 2>/dev/null | awk -v wanted="$worker_pid" 'NR == 1 { for (i = 1; i <= NF; i++) { if ($i == "PID") pidColumn = i; if ($i == "WINPID") winColumn = i }; next } pidColumn > 0 && winColumn > 0 { shift = ($1 ~ /^[A-Z]$/ && pidColumn == 1) ? 1 : 0; if ($(pidColumn + shift) == wanted) { print $(winColumn + shift); exit } }')" || return 74
       case "$worker_pid" in ''|0|*[!0-9]*) return 74 ;; esac
       ;;
   esac
