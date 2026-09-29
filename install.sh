@@ -656,6 +656,48 @@ if [ -n "$PRERELEASE_TAG" ]; then
   fi
 fi
 
+# Keep the caller's traps while the binary transaction owns the install lock.
+install_lock_acquire() {
+  local saved_exit
+  INSTALL_SAVED_TRAPS="$(trap -p EXIT INT TERM)"
+  saved_exit="$(trap -p EXIT)"
+  INSTALL_SAVED_EXIT=""
+  INSTALL_ROLLBACK=""
+  if [ -n "$saved_exit" ]; then
+    saved_exit="${saved_exit#trap -- }"
+    saved_exit="${saved_exit% EXIT}"
+    # Bash supplies this quoted command. It does not come from a manifest.
+    eval "INSTALL_SAVED_EXIT=$saved_exit"
+  fi
+  env_lock_acquire "$OPENLLM_DIR/install" \
+    || die "could not acquire install lock: $OPENLLM_DIR/install.lock.d"
+  trap 'install_lock_exit $?' EXIT
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+}
+
+install_lock_exit() {
+  local status="$1"
+  trap - EXIT
+  if [ -n "$INSTALL_ROLLBACK" ]; then "$INSTALL_ROLLBACK"; fi
+  env_lock_release
+  # Supply the original exit status to the caller's saved EXIT command.
+  (exit "$status") && :
+  eval "$INSTALL_SAVED_EXIT"
+  exit "$status"
+}
+
+install_lock_release() {
+  env_lock_release
+  trap - EXIT INT TERM
+  eval "$INSTALL_SAVED_TRAPS"
+}
+
+# Call this after the shared lock functions are defined.
+install_cli_binary() {
+  mkdir -p "$BIN_DIR"
+  install_lock_acquire
+
 CLI_VERSION=""
 PRE_PUBLISHED=""
 if [ -n "$PRERELEASE_TAG" ]; then
@@ -833,6 +875,9 @@ else
   ) || exit 1
   echo "  openllm installed → $DEST"
 fi
+
+install_lock_release
+}
 
 # Record the gateway origin (and a key, when supplied) in the SHARED config file
 # the daemon also boots from. Match its exclusive .lock + atomic rename protocol,
@@ -1523,6 +1568,9 @@ env_lock_release() {
   return 0
 }
 # <<< openllm-env-lock/v1 <<<
+
+install_cli_binary
+
 # The env write runs in a subshell so the lock traps and private umask stay
 # scoped — and every fallible step is guarded explicitly (`|| die`): a
 # half-written tmp must never reach the rename, and a write failure must
