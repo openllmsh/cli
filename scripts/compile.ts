@@ -11,6 +11,7 @@
  *
  * Targets include macOS, Linux, and Windows.
  * Windows targets require a native Windows host.
+ * Default builds include Windows only on a Windows host.
  * Select each host partition with --targets for prerelease builds.
  * Stable releases select the four non-Windows targets.
  * x64 uses the `baseline` (Nehalem) tier — no AVX/AVX2/FMA required.
@@ -146,10 +147,6 @@ export const cliCompileFilename = (target: string): string => {
     : cliRawFilename(key);
 };
 
-// The default build set contains every release target.
-const compileTargets = CLI_RELEASE_TARGETS.map(
-  (target) => CLI_COMPILE_TARGET[target],
-);
 export const resolveCliCompileTargets = (
   args: readonly string[],
   hostPlatform: NodeJS.Platform = process.platform,
@@ -170,7 +167,9 @@ export const resolveCliCompileTargets = (
       ? [selectedTarget]
       : selectedTargets !== null
         ? selectedTargets.map((target) => target.trim())
-        : compileTargets;
+        : CLI_RELEASE_TARGETS.filter(
+            (target) => hostPlatform === "win32" || target !== "win32-x64",
+          );
   const resolved = requested.map((raw) => {
     const match = CLI_TARGETS.find(
       (target) => target === raw || CLI_COMPILE_TARGET[target] === raw,
