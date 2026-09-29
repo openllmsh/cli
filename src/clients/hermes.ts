@@ -18,6 +18,7 @@ import {
   existsSync,
   lstatSync,
   mkdirSync,
+  mkdtempSync,
   readdirSync,
   readFileSync,
   readlinkSync,
@@ -824,8 +825,23 @@ const profileRenameBlocker = (dest: string, backups: string): boolean => {
         ? win32.parse(realpathSync(dest)).root.toLowerCase() ===
           win32.parse(realpathSync(ancestor)).root.toLowerCase()
         : profileStat.dev === ancestorStat.dev;
-    if (sameFilesystem) return false;
-    process.stderr.write(profileRenameError(dest, backups, "EXDEV"));
+    if (!sameFilesystem) {
+      process.stderr.write(profileRenameError(dest, backups, "EXDEV"));
+      return true;
+    }
+    // Equal devices do not prove that rename works: Linux returns EXDEV
+    // across bind mounts and btrfs subvolumes on one device. Rename an empty
+    // probe directory from the profile into the destination and remove it.
+    const probe = mkdtempSync(join(dest, ".openllm-rename-probe-"));
+    const moved = join(ancestor, basename(probe));
+    try {
+      renameSync(probe, moved);
+    } catch (error) {
+      rmSync(probe, { recursive: true, force: true });
+      throw error;
+    }
+    rmSync(moved, { recursive: true, force: true });
+    return false;
   } catch (error) {
     process.stderr.write(
       profileRenameError(
