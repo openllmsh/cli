@@ -25,6 +25,13 @@ export type TCliTarget = (typeof CLI_TARGETS)[number];
  */
 export const CLI_RELEASE_TARGETS: readonly TCliTarget[] = CLI_TARGETS;
 
+/** Windows distribution is limited to prereleases. */
+export const CLI_STABLE_TARGETS: readonly TCliTarget[] =
+  CLI_RELEASE_TARGETS.filter((target) => target !== "win32-x64");
+
+export const cliReleaseTargets = (version: string): readonly TCliTarget[] =>
+  version.includes("-") ? CLI_RELEASE_TARGETS : CLI_STABLE_TARGETS;
+
 /** Bun compiler spelling for each release target. */
 export const CLI_COMPILE_TARGET: Readonly<Record<TCliTarget, string>> = {
   "darwin-arm64": "bun-darwin-arm64",
