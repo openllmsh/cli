@@ -5,8 +5,14 @@
  * through session).
  */
 
-import { existsSync, readFileSync, realpathSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, realpathSync } from "node:fs";
 import { dirname, join } from "node:path";
+import type { TDirLockRelease } from "../../../tunnel/session/dir-lock";
+import {
+  acquireDirLock,
+  acquireDirLockSync,
+  envDirLockCodec,
+} from "../../../tunnel/session/dir-lock";
 import { openllmDir, userHome } from "../env";
 
 export const hermesRoot = (): string =>
@@ -14,6 +20,40 @@ export const hermesRoot = (): string =>
   process.env.OPENLLM_HERMES_HOME.length > 0
     ? process.env.OPENLLM_HERMES_HOME
     : join(userHome(), ".hermes");
+
+// Both profile names share one ledger and one active pointer.
+// Lock the home before reading either file or choosing a profile name.
+const profileLockPath = (): string => {
+  mkdirSync(hermesRoot(), { recursive: true, mode: 0o700 });
+  return join(hermesRoot(), ".openllm-profile.lock.d");
+};
+
+const profileLockOptions = { waitMs: 5_000, reclaimMs: 30_000, pollMs: 50 };
+
+const requireProfileLock = (
+  release: TDirLockRelease | null,
+): TDirLockRelease => {
+  if (release === null) {
+    throw new Error(
+      "Timed out waiting for the Hermes profile lock. Another install or uninstall may be running. Retry after it finishes.",
+    );
+  }
+  return release;
+};
+
+export const acquireHermesProfileLock = async (): Promise<TDirLockRelease> =>
+  requireProfileLock(
+    await acquireDirLock(
+      profileLockPath(),
+      envDirLockCodec,
+      profileLockOptions,
+    ),
+  );
+
+export const acquireHermesProfileLockSync = (): TDirLockRelease =>
+  requireProfileLock(
+    acquireDirLockSync(profileLockPath(), envDirLockCodec, profileLockOptions),
+  );
 
 /** Hermes profile ids: `default` or the same charset as `hermes profile create`. */
 const PROFILE_ID_RE = /^[a-z0-9][a-z0-9_-]{0,63}$/;

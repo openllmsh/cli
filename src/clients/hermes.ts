@@ -16,6 +16,7 @@ import {
   existsSync,
   lstatSync,
   mkdirSync,
+  readdirSync,
   readFileSync,
   readlinkSync,
   renameSync,
@@ -25,11 +26,13 @@ import {
   symlinkSync,
   writeFileSync,
 } from "node:fs";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { CLI_VERSION } from "../env";
 import { requireCliApiKey } from "../onboarding";
 import { contextStateDir, fetchTier, resolveGateway } from "./gateway";
 import {
+  acquireHermesProfileLock,
+  acquireHermesProfileLockSync,
   hermesActiveProfilePath,
   hermesBundledTuiDir,
   hermesLedgerPath,
@@ -70,6 +73,7 @@ export type THermesLedger = {
   readonly previousProfile: string;
   readonly profileName: string;
   readonly createdProfile: boolean;
+  readonly pendingBackup?: string;
 };
 
 export const readHermesLedger = (): THermesLedger | null => {
@@ -94,7 +98,58 @@ export const readHermesLedger = (): THermesLedger | null => {
 const writeLedger = (ledger: THermesLedger): void => {
   const path = hermesLedgerPath();
   mkdirSync(join(path, ".."), { recursive: true, mode: 0o700 });
-  writeFileSync(path, `${JSON.stringify(ledger, null, 2)}\n`, { mode: 0o600 });
+  const temp = `${path}.tmp`;
+  try {
+    writeFileSync(temp, `${JSON.stringify(ledger, null, 2)}\n`, {
+      mode: 0o600,
+    });
+    renameSync(temp, path);
+  } finally {
+    rmSync(temp, { force: true });
+  }
+};
+
+const pendingProfileBackup = (ledger: THermesLedger | null): string | null => {
+  if (ledger === null || !ledger.createdProfile) return null;
+  const root = join(hermesRoot(), "backups");
+  const dest = hermesProfileDir(ledger.profileName);
+  let backup: string | null = null;
+  if (ledger.pendingBackup !== undefined) {
+    const name = ledger.pendingBackup;
+    if (
+      typeof name !== "string" ||
+      basename(name) !== name ||
+      name.includes("\\") ||
+      !name.startsWith(`${ledger.profileName}-`)
+    ) {
+      backup = root;
+    } else {
+      backup = join(root, name);
+      if (!existsSync(backup) && existsSync(dest)) {
+        const { pendingBackup: _pending, ...restored } = ledger;
+        writeLedger(restored);
+        return null;
+      }
+    }
+  } else if (!existsSync(dest)) {
+    // Older versions did not record a failed move in the ledger.
+    try {
+      const name = readdirSync(root)
+        .filter((entry) => entry.startsWith(`${ledger.profileName}-`))
+        .sort()
+        .at(-1);
+      if (name !== undefined) backup = join(root, name);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") backup = root;
+    }
+  }
+  if (backup !== null) {
+    process.stderr.write(
+      `The Hermes profile has an unfinished uninstall at ${backup}.\n` +
+        `  Repair its .env entry. Move the preserved profile back to ${dest} before you retry. Do not merge it into another profile.\n`,
+    );
+  }
+  return backup;
 };
 
 export const setActiveProfile = (name: string): void => {
@@ -245,6 +300,24 @@ export const applyHermes = async (opts?: {
   readonly remote?: boolean;
   readonly restartGateway?: boolean;
 }): Promise<THermesApplyResult> => {
+  let release: () => void;
+  try {
+    release = await acquireHermesProfileLock();
+  } catch (error) {
+    process.stderr.write(`${String(error)}\n`);
+    return { code: 1 };
+  }
+  try {
+    return await applyHermesLocked(opts);
+  } finally {
+    release();
+  }
+};
+
+const applyHermesLocked = async (
+  opts: Parameters<typeof applyHermes>[0],
+): Promise<THermesApplyResult> => {
+  if (pendingProfileBackup(readHermesLedger()) !== null) return { code: 1 };
   const credential = requireCliApiKey("human");
   if (!credential.ok) {
     process.stderr.write(credential.message);
@@ -638,17 +711,25 @@ const MOVE_CONFLICT = "OPENLLM_MOVE_CONFLICT";
  */
 const moveProfileDir = (from: string, to: string): void => {
   mkdirSync(join(to, ".."), { recursive: true, mode: 0o700 });
+  const refuseOccupied = (): void => {
+    try {
+      lstatSync(to);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+      throw error;
+    }
+    const conflict = new Error(
+      `destination exists: ${to}`,
+    ) as NodeJS.ErrnoException;
+    conflict.code = MOVE_CONFLICT;
+    throw conflict;
+  };
+  refuseOccupied();
   try {
     renameSync(from, to);
   } catch {
-    if (existsSync(to)) {
-      const conflict = new Error(`destination exists: ${to}`) as Error & {
-        code?: string;
-      };
-      conflict.code = MOVE_CONFLICT;
-      throw conflict;
-    }
-    cpSync(from, to, { recursive: true });
+    refuseOccupied();
+    cpSync(from, to, { recursive: true, force: false, errorOnExist: true });
     rmSync(from, { recursive: true, force: true });
   }
 };
@@ -673,7 +754,45 @@ export const hermesUninstallResiduePath = (): string | null => residuePath;
  * ledger and the sticky pointer exactly as they were — no half-state.
  */
 export const uninstallHermes = (): number => {
+  let release: () => void;
+  try {
+    release = acquireHermesProfileLockSync();
+  } catch (error) {
+    process.stderr.write(`${String(error)}\n`);
+    return 1;
+  }
+  try {
+    return uninstallHermesLocked();
+  } finally {
+    release();
+  }
+};
+
+// The command holds this lock through preflight and all later cleanup.
+export const withHermesUninstallLock = async (
+  operation: (uninstall: () => number) => Promise<number>,
+): Promise<number> => {
+  let release: () => void;
+  try {
+    release = await acquireHermesProfileLock();
+  } catch (error) {
+    process.stderr.write(`${String(error)}\n`);
+    return 1;
+  }
+  try {
+    return await operation(uninstallHermesLocked);
+  } finally {
+    release();
+  }
+};
+
+const uninstallHermesLocked = (): number => {
   residuePath = null;
+  const pending = pendingProfileBackup(readHermesLedger());
+  if (pending !== null) {
+    residuePath = join(pending, ".env");
+    return 1;
+  }
   const ledger = readHermesLedger();
   if (ledger === null) {
     process.stdout.write(
@@ -697,6 +816,9 @@ export const uninstallHermes = (): number => {
         // not empty or cannot be removed — a leftover dir is harmless
       }
     };
+    // Save the recovery path before the first move. Keep it until rollback
+    // succeeds or uninstall removes the ledger.
+    writeLedger({ ...ledger, pendingBackup: basename(backup) });
     try {
       moveProfileDir(dest, backup);
     } catch (error) {
@@ -706,6 +828,7 @@ export const uninstallHermes = (): number => {
       const conflict = (error as NodeJS.ErrnoException).code === MOVE_CONFLICT;
       const redacted =
         conflict || redactProfileBackupKey(backup) === "redacted";
+      if (conflict || !existsSync(backup)) writeLedger(ledger);
       dropBackupsShell();
       residuePath =
         conflict || existsSync(join(dest, ".env"))
@@ -730,7 +853,7 @@ export const uninstallHermes = (): number => {
         residuePath = join(backup, ".env");
         process.stderr.write(
           `Could not strip OPENLLM_API_KEY from ${join(backup, ".env")}, and the original .env could not be restored — the profile stays preserved at ${backup}.\n` +
-            "  fix or remove that entry, then move the profile back or re-run the uninstall.\n",
+            "  Repair that entry. Move the preserved profile back before you retry. Do not merge it into another profile.\n",
         );
         return 1;
       }
@@ -740,21 +863,30 @@ export const uninstallHermes = (): number => {
       // retry sees the same state the first run saw.
       try {
         moveProfileDir(backup, dest);
-        dropBackupsShell();
-        residuePath = join(dest, ".env");
-        process.stderr.write(
-          `Could not strip OPENLLM_API_KEY from ${join(dest, ".env")} — the profile stays in place, unchanged and still wired.\n` +
-            "  fix or remove that entry, then re-run the uninstall.\n",
-        );
       } catch {
         residuePath = join(backup, ".env");
         process.stderr.write(
           `Could not remove OPENLLM_API_KEY from the preserved profile — delete ${join(
             backup,
             ".env",
-          )} by hand.\n` + `  the profile itself is preserved at ${backup}.\n`,
+          )} by hand.\n` +
+            `  the profile itself is preserved at ${backup}.\n` +
+            "  Move the preserved profile back before you retry. Do not merge it into another profile.\n",
         );
+        return 1;
       }
+      dropBackupsShell();
+      residuePath = join(dest, ".env");
+      try {
+        writeLedger(ledger);
+      } catch {
+        // The profile is back. The next locked operation can clear the record.
+        process.stderr.write("Could not clear the Hermes recovery record.\n");
+      }
+      process.stderr.write(
+        `Could not strip OPENLLM_API_KEY from ${join(dest, ".env")} — the profile stays in place, unchanged and still wired.\n` +
+          "  fix or remove that entry, then re-run the uninstall.\n",
+      );
       return 1;
     }
   }
@@ -783,6 +915,8 @@ export const uninstallHermes = (): number => {
  */
 export const hermesUninstallBlocker = (): string | null => {
   const ledger = readHermesLedger();
+  const pending = pendingProfileBackup(ledger);
+  if (pending !== null) return join(pending, ".env");
   if (ledger === null || !ledger.createdProfile) return null;
   const dest = hermesProfileDir(ledger.profileName);
   if (!existsSync(dest)) return null;
@@ -914,27 +1048,29 @@ export const runHermesCommand = async (
     return applied.code;
   }
   if (verb === "uninstall") {
-    const yes = args.includes("--yes") || args.includes("-y");
-    if (!yes) {
-      const ledger = readHermesLedger();
-      // Confirmation is required only when a created profile would actually
-      // be moved — restoring a pointer the user already had is loss-free.
-      if (
-        ledger?.createdProfile === true &&
-        existsSync(hermesProfileDir(ledger.profileName))
-      ) {
+    return withHermesUninstallLock(async (uninstall): Promise<number> => {
+      const yes = args.includes("--yes") || args.includes("-y");
+      if (!yes) {
+        const ledger = readHermesLedger();
+        // Confirmation is required only when a created profile would actually
+        // be moved — restoring a pointer the user already had is loss-free.
         if (
-          !(await confirmHermesUninstall(
-            hermesProfileDir(ledger.profileName),
-            ledger.previousProfile,
-          ))
+          ledger?.createdProfile === true &&
+          existsSync(hermesProfileDir(ledger.profileName))
         ) {
-          process.stdout.write("Aborted — nothing changed.\n");
-          return 1;
+          if (
+            !(await confirmHermesUninstall(
+              hermesProfileDir(ledger.profileName),
+              ledger.previousProfile,
+            ))
+          ) {
+            process.stdout.write("Aborted — nothing changed.\n");
+            return 1;
+          }
         }
       }
-    }
-    return uninstallHermes();
+      return uninstall();
+    });
   }
   if (verb === "status") return statusHermes();
   const noPersist = args.includes("--no-persist");

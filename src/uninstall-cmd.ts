@@ -30,7 +30,7 @@ import {
   hermesUninstallBlocker,
   hermesUninstallResiduePath,
   readHermesLedger,
-  uninstallHermes,
+  withHermesUninstallLock,
 } from "./clients/hermes";
 import { hermesProfileDir, hermesRoot } from "./clients/hermes-home";
 import { uninstallRaycast } from "./clients/raycast";
@@ -184,6 +184,15 @@ export const runUninstall = async (
     );
     return 1;
   }
+  return withHermesUninstallLock(
+    (uninstall): Promise<number> => runUninstallLocked(args, uninstall),
+  );
+};
+
+const runUninstallLocked = async (
+  args: readonly string[],
+  uninstallHermes: () => number,
+): Promise<number> => {
   const yes = args.includes("--yes") || args.includes("-y");
 
   // 0. LM-1: a Hermes `.env` entry the redactor cannot even inspect (a
@@ -194,7 +203,7 @@ export const runUninstall = async (
   if (hermesBlocker !== null) {
     process.stderr.write(
       `Cannot uninstall safely — the Hermes profile entry ${hermesBlocker} cannot be inspected, so OPENLLM_API_KEY could not be verifiably removed from it.\n` +
-        "  fix or remove that entry, then re-run the uninstall — nothing was changed.\n",
+        "  Resolve the Hermes profile error before you retry. Nothing was changed.\n",
     );
     return 1;
   }
@@ -247,7 +256,7 @@ export const runUninstall = async (
         // stop here and name where, so nothing claims a clean removal while
         // the key is still on disk (FSS-19, LM-1).
         process.stderr.write(
-          `Hermes uninstall failed — OPENLLM_API_KEY may still be present at ${hermesKeyResiduePath()}. Remove it by hand, then re-run.\n`,
+          `Hermes uninstall failed — OPENLLM_API_KEY may still be present at ${hermesKeyResiduePath()}. Follow the profile recovery steps above before you retry.\n`,
         );
         return code;
       }
