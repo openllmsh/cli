@@ -26,6 +26,7 @@
 
 import { existsSync, readdirSync, rmdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
+import { removeIdleLockControls } from "../../tunnel/session/dir-lock-control";
 import {
   hermesUninstallBlocker,
   withHermesUninstallLock,
@@ -158,8 +159,11 @@ export const runUninstall = async (
     (uninstall): Promise<number> => runUninstallLocked(args, uninstall),
   );
   if (code === 0) {
-    // The lock kept the state root open during cleanup.
+    // The lock kept the state root open during cleanup. The lock protocol
+    // leaves the control directory. Remove an idle one so this rmdir can
+    // delete an otherwise empty root.
     try {
+      removeIdleLockControls(openllmDir());
       rmdirSync(openllmDir());
     } catch {
       // Keep the root if another entry remains.
