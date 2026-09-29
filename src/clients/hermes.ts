@@ -181,7 +181,11 @@ const pendingProfileBackup = (ledger: THermesLedger | null): string | null => {
         .filter((entry) => isProfileBackupName(entry, ledger.profileName))
         .filter((entry) => {
           try {
-            return readFileSync(join(root, entry, ".env"), "utf8")
+            const envPath = join(root, entry, ".env");
+            // Read only a regular file: a FIFO or device would block the read.
+            // Anything else cannot prove that the key is absent.
+            if (!statSync(envPath).isFile()) return true;
+            return readFileSync(envPath, "utf8")
               .split("\n")
               .some((line) => KEY_LINE.test(line));
           } catch (error) {
