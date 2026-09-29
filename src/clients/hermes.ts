@@ -128,10 +128,26 @@ const movedProfileRecovery = (backup: string, dest: string): string =>
   `The Hermes profile has an unfinished uninstall at ${backup}.\n` +
   `  The backup at ${backup} is the original profile. The live path is ${dest}. Choose which profile to keep. Keep both trees until you decide. Do not merge them. Do not delete .env. Move the other tree to a separate safe path before you restore the chosen profile to ${dest} and retry.\n`;
 
+const inspectProfilePath = (path: string): boolean | null => {
+  try {
+    lstatSync(path);
+    return true;
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code ?? "UNKNOWN";
+    if (code === "ENOENT") return false;
+    process.stderr.write(
+      `Cannot inspect the Hermes profile path ${path} (${code}). Restore access before you retry.\n`,
+    );
+    return null;
+  }
+};
+
 const pendingProfileBackup = (ledger: THermesLedger | null): string | null => {
   if (ledger === null || !ledger.createdProfile) return null;
   const root = join(hermesRoot(), "backups");
   const dest = hermesProfileDir(ledger.profileName);
+  const liveExists = inspectProfilePath(dest);
+  if (liveExists === null) return dest;
   let backup: string | null = null;
   if (ledger.pendingBackup !== undefined) {
     const name = ledger.pendingBackup;
@@ -144,12 +160,12 @@ const pendingProfileBackup = (ledger: THermesLedger | null): string | null => {
       backup = root;
     } else {
       backup = join(root, name);
-      if (!existsSync(backup) && existsSync(dest)) {
+      if (inspectProfilePath(backup) === false && liveExists) {
         clearPendingBackup(ledger);
         return null;
       }
     }
-  } else if (!existsSync(dest)) {
+  } else if (!liveExists) {
     // Older versions did not record a failed move in the ledger.
     try {
       const name = readdirSync(root)
@@ -866,7 +882,9 @@ const uninstallHermesLocked = (): number => {
   }
   const dest = hermesProfileDir(ledger.profileName);
   let backup: string | null = null;
-  if (ledger.createdProfile && existsSync(dest)) {
+  const liveExists = ledger.createdProfile ? inspectProfilePath(dest) : false;
+  if (liveExists === null) return 1;
+  if (liveExists) {
     backup = profileBackupPath(ledger.profileName);
     const backupsRoot = join(backup, "..");
     const backupsExisted = existsSync(backupsRoot);
@@ -970,7 +988,11 @@ const uninstallHermesLocked = (): number => {
  * Later write failures restore the profile in uninstallHermes.
  */
 export const hermesUninstallBlocker = (): {
-  readonly kind: "pending-backup" | "unreadable-env" | "rename-error";
+  readonly kind:
+    | "pending-backup"
+    | "unreadable-env"
+    | "rename-error"
+    | "profile-error";
   readonly path: string;
 } | null => {
   const ledger = readHermesLedger();
@@ -979,7 +1001,9 @@ export const hermesUninstallBlocker = (): {
     return { kind: "pending-backup", path: join(pending, ".env") };
   if (ledger === null || !ledger.createdProfile) return null;
   const dest = hermesProfileDir(ledger.profileName);
-  if (!existsSync(dest)) return null;
+  const liveExists = inspectProfilePath(dest);
+  if (liveExists === null) return { kind: "profile-error", path: dest };
+  if (!liveExists) return null;
   const backups = join(hermesRoot(), "backups");
   if (profileRenameBlocker(dest, backups))
     return { kind: "rename-error", path: backups };
