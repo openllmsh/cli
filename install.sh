@@ -286,16 +286,22 @@ prerelease_asset_url() {
 # for the host TARGET. Dies on any fetch, parse or content failure — the
 # caller never picks another tag to recover.
 prerelease_manifest_digest() {
-  local repo="$1" export_name="$2" url body digest
+  local repo="$1" export_name="$2" url body digest body_end
   url="$(prerelease_repo_url "$repo" manifest.ts)"
   # The trailing 'x' sentinel keeps command substitution from stripping the
   # manifest's final newlines, so the parser sees the exact served bytes.
   body="$(curl "${PR_SCHEME[@]}" "${CURL_META[@]}" -fsSL "$url" 2>/dev/null || exit; printf x)" \
     || die "could not fetch the $repo manifest for $PRERELEASE_TAG"
   body="${body%x}"
+  # body_end tells the lexer whether the input ended in a newline — the
+  # per-record buffer rebuild below hides one, which would let a `//` comment
+  # cut off at EOF pass as terminated.
+  body_end=0
+  case "$body" in *$'\n') body_end=1 ;; esac
   digest="$(printf '%s' "$body" | LC_ALL=C awk \
     -v want_export="$export_name" -v want_repo="$repo" \
-    -v want_tag="$PRERELEASE_TAG" -v want_target="$TARGET" '
+    -v want_tag="$PRERELEASE_TAG" -v want_target="$TARGET" \
+    -v body_end="$body_end" '
 function die(m) { printf "manifest: %s\n", m > "/dev/stderr"; exit 1 }
 function hex2num(h,   i, v) {
   v = 0
@@ -345,9 +351,9 @@ function parse_object(   key, k2) {
         p++
         if (typ[p] != "str") die("sha256 value must be a string")
         if (k2 in dig) die("duplicate sha256 key " k2)
-        if (length(val[p]) != 64 || val[p] !~ /^[0-9a-f]+$/)
+        if (length(val[p]) != 64 || val[p] !~ /^[0-9A-Fa-f]+$/)
           die("bad sha256 for " k2)
-        dig[k2] = val[p]; p++
+        dig[k2] = tolower(val[p]); p++
         if (typ[p] == ",") { p++; continue }
         if (typ[p] == "}") { p++; break }
         die("bad sha256 object")
@@ -359,9 +365,10 @@ function parse_object(   key, k2) {
     die("expected , or } after " key)
   }
 }
-{ buf = buf $0 "\n" }
+{ buf = buf (NR == 1 ? "" : "\n") $0 }
 END {
   s = buf
+  if (body_end) s = s "\n"
   if (length(s) > 65536) die("manifest exceeds 64 KiB")
   if (substr(s, 1, 3) == sprintf("%c%c%c", 239, 187, 191)) s = substr(s, 4)
   n = length(s); i = 1; nt = 0
@@ -372,7 +379,7 @@ END {
       d = substr(s, i + 1, 1)
       if (d == "/") {
         j = index(substr(s, i + 2), "\n")
-        if (j == 0) break
+        if (j == 0) die("unterminated comment")
         i += j + 2; continue
       }
       if (d == "*") {
@@ -493,15 +500,12 @@ _le32() {
 
 # Executable-format check for a verified staged download: the published POSIX
 # assets are 64-bit ELF (Linux/WSL2) or 64-bit Mach-O (macOS) matching the host
-# architecture. A `#!` script is also an executable payload and stays allowed —
-# the manifest digest and the version probe still gate it. Anything else, or a
-# wrong machine type, is refused before the file is ever executed.
+# architecture. Anything else — a script, a PE file, a truncated download — is
+# refused before it is ever executed. On macOS this gate is also what makes the
+# codesign step safe: only a Mach-O file ever reaches it.
 verify_exec_format() {
   local file="$1" magic cls enc lo hi machine want_m ct ct_want nfat i esz
   magic="$(od -An -tx1 -N4 "$file" 2>/dev/null | tr -d ' \n')"
-  case "$magic" in
-    2321*) return 0 ;;  # '#!' script payload
-  esac
   case "$OS" in
     linux)
       [ "$magic" = "7f454c46" ] || die "downloaded $file is not an ELF executable for $TARGET"
@@ -632,7 +636,13 @@ if [ -n "$PRERELEASE_TAG" ]; then
     pre_authority="${pre_authority%%[/?#]*}"
     case "$pre_authority" in
       127.0.0.1|localhost|\[::1\]) ;;
-      127.0.0.1:*|localhost:*|\[::1\]:*)
+      \[::1\]:*)
+        # The port follows `]:` — ${var#*:} would stop at the first ':' INSIDE
+        # the brackets and reject the documented [::1]:port form.
+        pre_port="${pre_authority#*\]:}"
+        [[ "$pre_port" =~ ^[0-9]+$ ]] \
+          || die "OPENLLM_PRERELEASE_BASE_URL has a bad port" ;;
+      127.0.0.1:*|localhost:*)
         pre_port="${pre_authority#*:}"
         [[ "$pre_port" =~ ^[0-9]+$ ]] \
           || die "OPENLLM_PRERELEASE_BASE_URL has a bad port" ;;
