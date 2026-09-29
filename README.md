@@ -203,6 +203,7 @@ Stop older installers and their workers before you clear their locks.
 Run `openllm doctor --clear-legacy-locks` or
 `openllmd doctor --clear-legacy-locks`.
 Add `--env-file /absolute/path/to/.env` to select another env file.
+Add `--restore-dir /absolute/path/to/client-home` to select a client mirror.
 Add `--json` to get a structured report.
 Do not combine this command with `--fix` or AI diagnosis options.
 
