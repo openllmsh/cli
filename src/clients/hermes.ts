@@ -10,7 +10,7 @@
  */
 
 import { execFileSync } from "node:child_process";
-import { randomUUID } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import type { Dirent } from "node:fs";
 import {
   chmodSync,
@@ -623,16 +623,21 @@ const restoreEnvEntry = (envPath: string, saved: TEnvRestore): boolean => {
       // Build the link under a temp name, then rename it over `.env`: the
       // redacted file stays until the link is in place, and a failure
       // prints the target so the user can recreate the link.
-      const linkTmp = `${envPath}.openllm-${process.pid}.lnk`;
+      // A fresh random name: never remove a file we did not create.
+      const linkTmp = `${envPath}.openllm-${process.pid}-${randomBytes(6).toString("hex")}.lnk`;
+      let created = false;
       try {
-        rmSync(linkTmp, { force: true });
         symlinkSync(saved.target, linkTmp);
+        created = true;
         renameSync(linkTmp, envPath);
+        created = false;
       } catch (error) {
-        try {
-          rmSync(linkTmp, { force: true });
-        } catch {
-          // a leftover link holds no secret
+        if (created) {
+          try {
+            rmSync(linkTmp, { force: true });
+          } catch {
+            // a leftover link holds no secret
+          }
         }
         process.stderr.write(
           `The original ${envPath} was a symbolic link to ${saved.target}. Recreate that link.\n`,
