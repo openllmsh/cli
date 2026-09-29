@@ -13,6 +13,7 @@ import { execFileSync } from "node:child_process";
 import {
   chmodSync,
   cpSync,
+  type Dirent,
   existsSync,
   lstatSync,
   mkdirSync,
@@ -498,12 +499,23 @@ const profileBackupPath = (profileName: string): string => {
 
 const KEY_LINE = /^\s*(export\s+)?OPENLLM_API_KEY\s*=/;
 
-// Remove env temp files from interrupted writes. Do not follow links.
+// Our own env temp name. The `openllm-` prefix keeps it apart from user files.
+const ENV_TMP_NAME = /^\.env\.openllm-[0-9]+\.tmp$/;
+
+// Remove env temp files that an interrupted write of ours left next to the
+// profile's `.env`. Only the profile root is checked (we write nowhere else),
+// only regular files with our exact name, and a listing error changes nothing.
 const removeStaleEnvTemps = (root: string): void => {
-  for (const entry of readdirSync(root, { withFileTypes: true })) {
-    const path = join(root, entry.name);
-    if (entry.isDirectory()) removeStaleEnvTemps(path);
-    else if (/^\.env\.[0-9]+\.tmp$/.test(entry.name)) rmSync(path);
+  let entries: Dirent[];
+  try {
+    entries = readdirSync(root, { withFileTypes: true });
+  } catch {
+    return;
+  }
+  for (const entry of entries) {
+    if (entry.isFile() && ENV_TMP_NAME.test(entry.name)) {
+      rmSync(join(root, entry.name), { force: true });
+    }
   }
 };
 
@@ -526,7 +538,7 @@ type TEnvRestore =
  * alone.
  */
 const writeEnvTmp = (envPath: string, content: string): string | null => {
-  const tmp = `${envPath}.${process.pid}.tmp`;
+  const tmp = `${envPath}.openllm-${process.pid}.tmp`;
   try {
     writeFileSync(tmp, content, { mode: 0o600, flag: "wx" });
     return tmp;
