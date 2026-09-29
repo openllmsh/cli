@@ -48,8 +48,10 @@ const requireProfileLock = (
   release: TDirLockRelease | null,
 ): TDirLockRelease => {
   if (release === null) {
+    const owner = envDirLockCodec.readOwner(profileLockPath());
+    const pid = owner === null ? "unknown" : String(owner.pid);
     throw new Error(
-      "Timed out waiting for the Hermes profile lock. Another install or uninstall may be running. Retry after it finishes.",
+      `another openllm uninstall/install is running (pid ${pid}); retry when it ends`,
     );
   }
   return release;

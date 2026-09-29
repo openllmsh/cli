@@ -28,11 +28,8 @@ import { existsSync, readdirSync, rmdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import {
   hermesUninstallBlocker,
-  hermesUninstallResiduePath,
-  readHermesLedger,
   withHermesUninstallLock,
 } from "./clients/hermes";
-import { hermesProfileDir, hermesRoot } from "./clients/hermes-home";
 import { uninstallRaycast } from "./clients/raycast";
 import { removeCompletion } from "./completion";
 import { findDaemonBinary, runManagedDaemonCommand } from "./daemon-delegation";
@@ -50,34 +47,6 @@ const appliedAlwaysOnClients = (): string[] => {
   } catch {
     return [];
   }
-};
-
-/**
- * Where OPENLLM_API_KEY may still sit after a failed Hermes unwind — exactly
- * the `.env` path the failed run reported. When nothing was reported, fall
- * back to the live profile's `.env` while the profile still stands (the move
- * was rolled back), else the newest preserved backup's `.env`, else the
- * backups root. Older backups are never a substitute for the real location.
- */
-const hermesKeyResiduePath = (): string => {
-  const reported = hermesUninstallResiduePath();
-  if (reported !== null) return reported;
-  const backupsRoot = join(hermesRoot(), "backups");
-  try {
-    const ledger = readHermesLedger();
-    if (ledger !== null) {
-      const profileDir = hermesProfileDir(ledger.profileName);
-      if (existsSync(profileDir)) return join(profileDir, ".env");
-      const latest = readdirSync(backupsRoot)
-        .filter((entry) => entry.startsWith(`${ledger.profileName}-`))
-        .sort()
-        .at(-1);
-      if (latest !== undefined) return join(backupsRoot, latest, ".env");
-    }
-  } catch {
-    // fall through to the directory that holds the backups
-  }
-  return backupsRoot;
 };
 
 /**
@@ -262,15 +231,7 @@ const runUninstallLocked = async (
     if (client === "hermes") {
       process.stdout.write("Reversing Hermes profile wiring...\n");
       const code = uninstallHermes();
-      if (code !== 0) {
-        // The key may still sit in the live profile or a preserved backup —
-        // stop here and name where, so nothing claims a clean removal while
-        // the key is still on disk (FSS-19, LM-1).
-        process.stderr.write(
-          `Hermes uninstall failed — OPENLLM_API_KEY may still be present at ${hermesKeyResiduePath()}. Follow the profile recovery steps above before you retry.\n`,
-        );
-        return code;
-      }
+      if (code !== 0) return code;
     }
   }
 

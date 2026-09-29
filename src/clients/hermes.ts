@@ -10,10 +10,10 @@
  */
 
 import { execFileSync } from "node:child_process";
+import type { Dirent } from "node:fs";
 import {
   chmodSync,
   cpSync,
-  type Dirent,
   existsSync,
   lstatSync,
   mkdirSync,
@@ -75,7 +75,6 @@ export type THermesLedger = {
   readonly profileName: string;
   readonly createdProfile: boolean;
   readonly pendingBackup?: string;
-  readonly pendingBackupState?: "moving" | "copying" | "copied" | "moved";
 };
 
 export const readHermesLedger = (): THermesLedger | null => {
@@ -97,12 +96,12 @@ export const readHermesLedger = (): THermesLedger | null => {
   }
 };
 
-const writeLedger = (ledger: THermesLedger): void => {
+const writeLedgerText = (content: string): void => {
   const path = hermesLedgerPath();
   mkdirSync(join(path, ".."), { recursive: true, mode: 0o700 });
   const temp = `${path}.tmp`;
   try {
-    writeFileSync(temp, `${JSON.stringify(ledger, null, 2)}\n`, {
+    writeFileSync(temp, content, {
       mode: 0o600,
     });
     renameSync(temp, path);
@@ -111,12 +110,11 @@ const writeLedger = (ledger: THermesLedger): void => {
   }
 };
 
+const writeLedger = (ledger: THermesLedger): void =>
+  writeLedgerText(`${JSON.stringify(ledger, null, 2)}\n`);
+
 const clearPendingBackup = (ledger: THermesLedger): void => {
-  const {
-    pendingBackup: _backup,
-    pendingBackupState: _state,
-    ...restored
-  } = ledger;
+  const { pendingBackup: _backup, ...restored } = ledger;
   writeLedger(restored);
 };
 
@@ -149,15 +147,6 @@ const pendingProfileBackup = (ledger: THermesLedger | null): string | null => {
         clearPendingBackup(ledger);
         return null;
       }
-      if (
-        existsSync(dest) &&
-        (ledger.pendingBackupState === "copying" ||
-          ledger.pendingBackupState === "copied") &&
-        discardProfileCopy(backup, dest, ledger.pendingBackupState)
-      ) {
-        clearPendingBackup(ledger);
-        return null;
-      }
     }
   } else if (!existsSync(dest)) {
     // Older versions did not record a failed move in the ledger.
@@ -182,15 +171,8 @@ const pendingProfileBackup = (ledger: THermesLedger | null): string | null => {
     }
   }
   if (backup !== null) {
-    process.stderr.write(
-      ledger.pendingBackupState === "moved" ||
-        ledger.pendingBackupState === "moving"
-        ? movedProfileRecovery(backup, dest)
-        : `The Hermes profile has an unfinished uninstall at ${backup}.\n` +
-            (existsSync(dest)
-              ? `  Keep the live profile at ${dest}. Do not move or merge ${backup} into it. Save any files you need from the backup. Remove the backup before you retry.\n`
-              : `  Repair its .env entry. Move the preserved profile back to ${dest} before you retry. Do not merge it into another profile.\n`),
-    );
+    if (backup !== root) removeStaleEnvTemps(backup);
+    process.stderr.write(movedProfileRecovery(backup, dest));
   }
   return backup;
 };
@@ -608,15 +590,12 @@ const restoreEnvEntry = (envPath: string, saved: TEnvRestore): boolean => {
       back.isFile() &&
       !back.isSymbolicLink() &&
       readFileSync(envPath, "utf-8") === saved.body;
-    try {
-      chmodSync(envPath, saved.mode & 0o7777);
-    } catch {
-      // the entry is back — a missed mode bit never makes it "not restored"
-    }
+    chmodSync(envPath, saved.mode & 0o7777);
     return ok;
   } catch {
-    // A temp this call created must not be stranded inside the profile —
-    // the next run's `wx` create would collide with it.
+    return false;
+  } finally {
+    // Remove the restore temp. It can contain the saved key.
     if (tmp !== null) {
       try {
         rmSync(tmp, { force: true });
@@ -624,7 +603,6 @@ const restoreEnvEntry = (envPath: string, saved: TEnvRestore): boolean => {
         // The next uninstall must remove this temp before it moves the tree.
       }
     }
-    return false;
   }
 };
 
@@ -676,22 +654,20 @@ const redactProfileBackupKey = (backupDir: string): TRedactResult => {
     // Restore the `.env` entry first — it needs a writable dir, which the
     // dir-mode restore below can take away. A restore that cannot put the
     // saved entry verifiably back marks the copy "broken".
-    const restored =
+    let restored =
       !envMutated || (savedEnv !== null && restoreEnvEntry(envPath, savedEnv));
     if (dirMode !== null) {
       try {
         chmodSync(backupDir, dirMode);
       } catch {
-        // best effort — a leftover widened mode never keeps the secret
+        restored = false;
       }
     }
     return restored ? "restored" : "broken";
   };
   try {
-    // The backup dir may carry a read-only mode cloned from the profile —
-    // cpSync preserves directory modes, and a renamed dir keeps its own.
-    // Every write below (tmp + rename, rm) needs owner write+exec on the
-    // dir itself, so normalize it before the first mutation attempt.
+    // A rename keeps the profile mode.
+    // The writes below need owner write and execute access.
     try {
       const dirStat = statSync(backupDir);
       if ((dirStat.mode & 0o700) !== 0o700) {
@@ -767,91 +743,8 @@ const redactProfileBackupKey = (backupDir: string): TRedactResult => {
  */
 const MOVE_CONFLICT = "OPENLLM_MOVE_CONFLICT";
 
-// Restore missing entries. Keep the backup if any live entry differs.
-const restoreProfileCopy = (backup: string, dest: string): void => {
-  const source = lstatSync(backup);
-  let target: ReturnType<typeof lstatSync> | null = null;
-  try {
-    target = lstatSync(dest);
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-  }
-  if (source.isDirectory()) {
-    if (target === null) mkdirSync(dest, { mode: source.mode | 0o700 });
-    else if (!target.isDirectory()) throw new Error("Profile entry differs");
-    for (const name of readdirSync(backup)) {
-      restoreProfileCopy(join(backup, name), join(dest, name));
-    }
-    return;
-  }
-  if (target === null) {
-    if (source.isSymbolicLink()) {
-      cpSync(backup, dest, { verbatimSymlinks: true, errorOnExist: true });
-    } else if (source.isFile()) {
-      const suffix = ".openllm-restore.tmp";
-      const tmp = `${dest}${suffix}`;
-      // Do not use a temp name that belongs to the saved profile.
-      try {
-        lstatSync(`${backup}${suffix}`);
-        throw new Error("Profile restore temp name is occupied");
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-      }
-      try {
-        rmSync(tmp, { force: true });
-        cpSync(backup, tmp, { force: false, errorOnExist: true });
-        if (!readFileSync(backup).equals(readFileSync(tmp))) {
-          throw new Error("Profile restore temp differs");
-        }
-        renameSync(tmp, dest);
-      } finally {
-        rmSync(tmp, { force: true });
-      }
-    } else {
-      throw new Error("Unsupported profile entry");
-    }
-    target = lstatSync(dest);
-  }
-  if (
-    source.isSymbolicLink()
-      ? !target.isSymbolicLink() || readlinkSync(backup) !== readlinkSync(dest)
-      : !source.isFile() ||
-        !target.isFile() ||
-        !readFileSync(backup).equals(readFileSync(dest))
-  ) {
-    throw new Error("Profile entry differs");
-  }
-};
-
-// Remove the failed copy only after all saved entries match the live tree.
-const discardProfileCopy = (
-  backup: string,
-  dest: string,
-  state: "copying" | "copied",
-): boolean => {
-  try {
-    if (state === "copied") {
-      restoreProfileCopy(backup, dest);
-    }
-    redactProfileBackupKey(backup);
-    rmSync(backup, { recursive: true, force: true });
-    return true;
-  } catch {
-    return false;
-  }
-};
-
-/**
- * Move a profile tree `from` to `to`: a same-filesystem rename, with a
- * copy+remove fallback when the rename cannot run. The uninstall move and
- * its rollback run through this one helper so a restore puts back the same
- * shape the move found. The fallback never merges into an occupied `to`.
- */
-const moveProfileDir = (
-  from: string,
-  to: string,
-  onCopyState?: (state: "copying" | "copied") => void,
-): void => {
+// Move the profile with one rename. Keep the source if it fails.
+const moveProfileDir = (from: string, to: string): void => {
   mkdirSync(join(to, ".."), { recursive: true, mode: 0o700 });
   const refuseOccupied = (): void => {
     try {
@@ -867,26 +760,8 @@ const moveProfileDir = (
     throw conflict;
   };
   refuseOccupied();
-  try {
-    renameSync(from, to);
-  } catch {
-    refuseOccupied();
-    onCopyState?.("copying");
-    cpSync(from, to, { recursive: true, force: false, errorOnExist: true });
-    onCopyState?.("copied");
-    rmSync(from, { recursive: true, force: true });
-  }
+  renameSync(from, to);
 };
-
-/**
- * The `.env` path that still holds the key after a FAILED `uninstallHermes`
- * — the live profile's `.env` when the profile is in place (the move never
- * ran or was rolled back), else the preserved backup's `.env`. The command
- * layer reports exactly this path instead of inferring one from whatever
- * older backups happen to exist. Null when the last run did not fail.
- */
-let residuePath: string | null = null;
-export const hermesUninstallResiduePath = (): string | null => residuePath;
 
 /**
  * The profile `install` created is the STICKY one — it holds every Hermes
@@ -931,10 +806,8 @@ export const withHermesUninstallLock = async (
 };
 
 const uninstallHermesLocked = (): number => {
-  residuePath = null;
   const pending = pendingProfileBackup(readHermesLedger());
   if (pending !== null) {
-    residuePath = join(pending, ".env");
     return 1;
   }
   const ledger = readHermesLedger();
@@ -960,69 +833,27 @@ const uninstallHermesLocked = (): number => {
         // not empty or cannot be removed — a leftover dir is harmless
       }
     };
-    // Save the recovery path before the first move. Keep it until rollback
-    // succeeds or uninstall removes the ledger.
-    let moveState: THermesLedger = {
-      ...ledger,
-      pendingBackup: basename(backup),
-      pendingBackupState: "moving",
-    };
-    writeLedger(moveState);
+    const ledgerBefore = readFileSync(hermesLedgerPath(), "utf8");
     try {
-      removeStaleEnvTemps(dest);
-      moveProfileDir(dest, backup, (state): void => {
-        const next = { ...moveState, pendingBackupState: state };
-        writeLedger(next);
-        moveState = next;
-      });
+      moveProfileDir(dest, backup);
     } catch (error) {
-      if (
-        existsSync(dest) &&
-        (moveState.pendingBackupState === "copying" ||
-          moveState.pendingBackupState === "copied")
-      ) {
-        const discarded = discardProfileCopy(
-          backup,
-          dest,
-          moveState.pendingBackupState,
-        );
-        if (discarded) clearPendingBackup(ledger);
-        dropBackupsShell();
-        residuePath = join(discarded ? dest : backup, ".env");
-        process.stderr.write(
-          `Could not finish the Hermes profile backup. The live profile stays in place.\n` +
-            (discarded
-              ? "  The failed copy was removed. Retry the uninstall.\n"
-              : `  Could not remove the failed copy at ${backup}. Keep the live profile at ${dest}. Do not move or merge the copy into it.\n`),
-        );
-        return 1;
-      }
-      // A backup path that is already occupied belongs to a different run —
-      // never redact INTO it. Only a partial copy this move created gets its
-      // key stripped before the failure is reported.
-      const conflict = (error as NodeJS.ErrnoException).code === MOVE_CONFLICT;
-      const redacted =
-        conflict || redactProfileBackupKey(backup) === "redacted";
-      if (conflict || !existsSync(backup)) writeLedger(ledger);
       dropBackupsShell();
-      residuePath =
-        conflict || existsSync(join(dest, ".env"))
-          ? join(dest, ".env")
-          : join(backup, ".env");
+
+      const code = (error as NodeJS.ErrnoException).code ?? "UNKNOWN";
+      const action =
+        code === "EXDEV"
+          ? "backups/ is on another filesystem. Put backups/ on the profile filesystem and retry."
+          : code === "EBUSY" || code === "EACCES" || code === "EPERM"
+            ? "Close Hermes and retry. Check access to both paths if the error continues."
+            : "Check access to both paths and retry.";
       process.stderr.write(
-        `Could not move the Hermes profile to a backup — leaving ${dest} in place.\n` +
-          (conflict
-            ? `  ${backup} already exists from another run and was left untouched.\n`
-            : redacted
-              ? ""
-              : `  the partial backup at ${backup} may still contain OPENLLM_API_KEY — delete it by hand.\n`),
+        `Could not rename the Hermes profile from ${dest} to ${backup} (${code}). ${action}\n`,
       );
       return 1;
     }
     try {
-      writeLedger({ ...moveState, pendingBackupState: "moved" });
+      writeLedger({ ...ledger, pendingBackup: basename(backup) });
     } catch {
-      residuePath = join(backup, ".env");
       process.stderr.write(
         `Could not save the Hermes recovery record. The profile stays preserved at ${backup}.\n` +
           `  Restore write access to ${hermesLedgerPath()}. Move the preserved profile back to ${dest} before you retry. Do not merge it into another profile.\n`,
@@ -1035,7 +866,7 @@ const uninstallHermesLocked = (): number => {
         // The `.env` entry could not be put back — moving the copy over the
         // live path would silently damage the profile. Keep the preserved
         // tree parked and name where it sits.
-        residuePath = join(backup, ".env");
+
         process.stderr.write(
           existsSync(dest)
             ? movedProfileRecovery(backup, dest)
@@ -1051,14 +882,13 @@ const uninstallHermesLocked = (): number => {
       try {
         moveProfileDir(backup, dest);
       } catch {
-        residuePath = join(backup, ".env");
         process.stderr.write(movedProfileRecovery(backup, dest));
         return 1;
       }
       dropBackupsShell();
-      residuePath = join(dest, ".env");
+
       try {
-        writeLedger(ledger);
+        writeLedgerText(ledgerBefore);
       } catch {
         // The profile is back. The next locked operation can clear the record.
         process.stderr.write("Could not clear the Hermes recovery record.\n");
@@ -1085,7 +915,7 @@ const uninstallHermesLocked = (): number => {
 
 /**
  * Return the blocker type and path, or null.
- * Clear a failed copy before checking the live profile.
+ * Check for an unfinished move before checking the live profile.
  * Reject entries that cannot be read before daemon teardown.
  * Later write failures restore the profile in uninstallHermes.
  */
