@@ -498,6 +498,15 @@ const profileBackupPath = (profileName: string): string => {
 
 const KEY_LINE = /^\s*(export\s+)?OPENLLM_API_KEY\s*=/;
 
+// Remove env temp files from interrupted writes. Do not follow links.
+const removeStaleEnvTemps = (root: string): void => {
+  for (const entry of readdirSync(root, { withFileTypes: true })) {
+    const path = join(root, entry.name);
+    if (entry.isDirectory()) removeStaleEnvTemps(path);
+    else if (/^\.env\.[0-9]+\.tmp$/.test(entry.name)) rmSync(path);
+  }
+};
+
 /**
  * The `.env` entry's pre-redact state, captured before the first change. A
  * redact failure rolls the whole profile move back (LM-1), so the profile
@@ -600,7 +609,7 @@ const restoreEnvEntry = (envPath: string, saved: TEnvRestore): boolean => {
       try {
         rmSync(tmp, { force: true });
       } catch {
-        // best effort — a leftover temp is not the secret itself
+        // The next uninstall must remove this temp before it moves the tree.
       }
     }
     return false;
@@ -680,6 +689,7 @@ const redactProfileBackupKey = (backupDir: string): TRedactResult => {
     } catch {
       // cannot normalize — the writes below report their own failure
     }
+    removeStaleEnvTemps(backupDir);
     let stat: ReturnType<typeof lstatSync>;
     try {
       stat = lstatSync(envPath);
@@ -745,8 +755,63 @@ const redactProfileBackupKey = (backupDir: string): TRedactResult => {
  */
 const MOVE_CONFLICT = "OPENLLM_MOVE_CONFLICT";
 
-// Restore files that source removal deleted. Keep all existing live files.
-// Remove only the copy made by the failed move.
+// Restore missing entries. Keep the backup if any live entry differs.
+const restoreProfileCopy = (backup: string, dest: string): void => {
+  const source = lstatSync(backup);
+  let target: ReturnType<typeof lstatSync> | null = null;
+  try {
+    target = lstatSync(dest);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  }
+  if (source.isDirectory()) {
+    if (target === null) mkdirSync(dest, { mode: source.mode | 0o700 });
+    else if (!target.isDirectory()) throw new Error("Profile entry differs");
+    for (const name of readdirSync(backup)) {
+      restoreProfileCopy(join(backup, name), join(dest, name));
+    }
+    return;
+  }
+  if (target === null) {
+    if (source.isSymbolicLink()) {
+      cpSync(backup, dest, { verbatimSymlinks: true, errorOnExist: true });
+    } else if (source.isFile()) {
+      const suffix = ".openllm-restore.tmp";
+      const tmp = `${dest}${suffix}`;
+      // Do not use a temp name that belongs to the saved profile.
+      try {
+        lstatSync(`${backup}${suffix}`);
+        throw new Error("Profile restore temp name is occupied");
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      }
+      try {
+        rmSync(tmp, { force: true });
+        cpSync(backup, tmp, { force: false, errorOnExist: true });
+        if (!readFileSync(backup).equals(readFileSync(tmp))) {
+          throw new Error("Profile restore temp differs");
+        }
+        renameSync(tmp, dest);
+      } finally {
+        rmSync(tmp, { force: true });
+      }
+    } else {
+      throw new Error("Unsupported profile entry");
+    }
+    target = lstatSync(dest);
+  }
+  if (
+    source.isSymbolicLink()
+      ? !target.isSymbolicLink() || readlinkSync(backup) !== readlinkSync(dest)
+      : !source.isFile() ||
+        !target.isFile() ||
+        !readFileSync(backup).equals(readFileSync(dest))
+  ) {
+    throw new Error("Profile entry differs");
+  }
+};
+
+// Remove the failed copy only after all saved entries match the live tree.
 const discardProfileCopy = (
   backup: string,
   dest: string,
@@ -754,11 +819,7 @@ const discardProfileCopy = (
 ): boolean => {
   try {
     if (state === "copied") {
-      cpSync(backup, dest, {
-        recursive: true,
-        force: false,
-        errorOnExist: false,
-      });
+      restoreProfileCopy(backup, dest);
     }
     redactProfileBackupKey(backup);
     rmSync(backup, { recursive: true, force: true });
@@ -896,6 +957,7 @@ const uninstallHermesLocked = (): number => {
     };
     writeLedger(moveState);
     try {
+      removeStaleEnvTemps(dest);
       moveProfileDir(dest, backup, (state): void => {
         const next = { ...moveState, pendingBackupState: state };
         writeLedger(next);
