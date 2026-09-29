@@ -22,7 +22,11 @@
 
 import { existsSync, readdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
-import { readHermesLedger, uninstallHermes } from "./clients/hermes";
+import {
+  hermesUninstallResiduePath,
+  readHermesLedger,
+  uninstallHermes,
+} from "./clients/hermes";
 import { hermesProfileDir, hermesRoot } from "./clients/hermes-home";
 import { uninstallRaycast } from "./clients/raycast";
 import { removeCompletion } from "./completion";
@@ -44,23 +48,26 @@ const appliedAlwaysOnClients = (): string[] => {
 };
 
 /**
- * Where OPENLLM_API_KEY may still sit after a failed Hermes unwind — the
- * `.env` of the newest preserved backup when the profile moved and stayed
- * moved, or the live profile's `.env` when the move was rolled back. Falls
- * back to the backups root when neither resolves.
+ * Where OPENLLM_API_KEY may still sit after a failed Hermes unwind — exactly
+ * the `.env` path the failed run reported. When nothing was reported, fall
+ * back to the live profile's `.env` while the profile still stands (the move
+ * was rolled back), else the newest preserved backup's `.env`, else the
+ * backups root. Older backups are never a substitute for the real location.
  */
 const hermesKeyResiduePath = (): string => {
+  const reported = hermesUninstallResiduePath();
+  if (reported !== null) return reported;
   const backupsRoot = join(hermesRoot(), "backups");
   try {
     const ledger = readHermesLedger();
     if (ledger !== null) {
+      const profileDir = hermesProfileDir(ledger.profileName);
+      if (existsSync(profileDir)) return join(profileDir, ".env");
       const latest = readdirSync(backupsRoot)
         .filter((entry) => entry.startsWith(`${ledger.profileName}-`))
         .sort()
         .at(-1);
       if (latest !== undefined) return join(backupsRoot, latest, ".env");
-      const profileEnv = join(hermesProfileDir(ledger.profileName), ".env");
-      if (existsSync(profileEnv)) return profileEnv;
     }
   } catch {
     // fall through to the directory that holds the backups
