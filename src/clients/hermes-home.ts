@@ -23,9 +23,15 @@ export const hermesRoot = (): string =>
 
 // Both profile names share one ledger and one active pointer.
 // Use OpenLLM state for the lock. Do not create the Hermes home here.
-const profileLockPath = (): string => {
+const profileLockPath = (): string =>
+  join(openllmDir(), ".hermes-profile.lock.d");
+
+export const hermesProfileLockExists = (): boolean =>
+  existsSync(profileLockPath());
+
+const prepareProfileLock = (): string => {
   mkdirSync(openllmDir(), { recursive: true, mode: 0o700 });
-  return join(openllmDir(), ".hermes-profile.lock.d");
+  return profileLockPath();
 };
 
 const profileLockOptions = { waitMs: 5_000, reclaimMs: 30_000, pollMs: 50 };
@@ -44,7 +50,7 @@ const requireProfileLock = (
 export const acquireHermesProfileLock = async (): Promise<TDirLockRelease> =>
   requireProfileLock(
     await acquireDirLock(
-      profileLockPath(),
+      prepareProfileLock(),
       envDirLockCodec,
       profileLockOptions,
     ),
@@ -52,7 +58,11 @@ export const acquireHermesProfileLock = async (): Promise<TDirLockRelease> =>
 
 export const acquireHermesProfileLockSync = (): TDirLockRelease =>
   requireProfileLock(
-    acquireDirLockSync(profileLockPath(), envDirLockCodec, profileLockOptions),
+    acquireDirLockSync(
+      prepareProfileLock(),
+      envDirLockCodec,
+      profileLockOptions,
+    ),
   );
 
 /** Hermes profile ids: `default` or the same charset as `hermes profile create`. */

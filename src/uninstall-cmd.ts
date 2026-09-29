@@ -35,6 +35,7 @@ import {
 import {
   hermesLedgerPath,
   hermesProfileDir,
+  hermesProfileLockExists,
   hermesRoot,
 } from "./clients/hermes-home";
 import { uninstallRaycast } from "./clients/raycast";
@@ -188,7 +189,8 @@ export const runUninstall = async (
     );
     return 1;
   }
-  if (!existsSync(hermesLedgerPath())) {
+  // An install can hold the lock before it writes its first ledger.
+  if (!existsSync(hermesLedgerPath()) && !hermesProfileLockExists()) {
     return runUninstallLocked(args, () => 0, false);
   }
   const code = await withHermesUninstallLock(
