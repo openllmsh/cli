@@ -20,6 +20,7 @@ import {
   readdirSync,
   readFileSync,
   readlinkSync,
+  realpathSync,
   renameSync,
   rmdirSync,
   rmSync,
@@ -27,7 +28,7 @@ import {
   symlinkSync,
   writeFileSync,
 } from "node:fs";
-import { basename, join } from "node:path";
+import { basename, dirname, join, win32 } from "node:path";
 import { CLI_VERSION } from "../env";
 import { requireCliApiKey } from "../onboarding";
 import { contextStateDir, fetchTier, resolveGateway } from "./gateway";
@@ -743,6 +744,52 @@ const redactProfileBackupKey = (backupDir: string): TRedactResult => {
  */
 const MOVE_CONFLICT = "OPENLLM_MOVE_CONFLICT";
 
+const profileRenameError = (from: string, to: string, code: string): string => {
+  const action =
+    code === "EXDEV"
+      ? "backups/ is on another filesystem. Put backups/ on the profile filesystem and retry."
+      : code === "EBUSY" || code === "EACCES" || code === "EPERM"
+        ? "Close Hermes and retry. Check access to both paths if the error continues."
+        : "Check access to both paths and retry.";
+  return `Could not rename the Hermes profile from ${from} to ${to} (${code}). ${action}\n`;
+};
+
+// Check the destination filesystem before the daemon removes its state.
+const profileRenameBlocker = (dest: string, backups: string): boolean => {
+  try {
+    const profileStat = statSync(dest);
+    let ancestor = backups;
+    let ancestorStat: ReturnType<typeof statSync>;
+    for (;;) {
+      try {
+        ancestorStat = statSync(ancestor);
+        break;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+        const parent = dirname(ancestor);
+        if (parent === ancestor) throw error;
+        ancestor = parent;
+      }
+    }
+    const sameFilesystem =
+      process.platform === "win32"
+        ? win32.parse(realpathSync(dest)).root.toLowerCase() ===
+          win32.parse(realpathSync(ancestor)).root.toLowerCase()
+        : profileStat.dev === ancestorStat.dev;
+    if (sameFilesystem) return false;
+    process.stderr.write(profileRenameError(dest, backups, "EXDEV"));
+  } catch (error) {
+    process.stderr.write(
+      profileRenameError(
+        dest,
+        backups,
+        (error as NodeJS.ErrnoException).code ?? "UNKNOWN",
+      ),
+    );
+  }
+  return true;
+};
+
 // Move the profile with one rename. Keep the source if it fails.
 const moveProfileDir = (from: string, to: string): void => {
   mkdirSync(join(to, ".."), { recursive: true, mode: 0o700 });
@@ -840,15 +887,7 @@ const uninstallHermesLocked = (): number => {
       dropBackupsShell();
 
       const code = (error as NodeJS.ErrnoException).code ?? "UNKNOWN";
-      const action =
-        code === "EXDEV"
-          ? "backups/ is on another filesystem. Put backups/ on the profile filesystem and retry."
-          : code === "EBUSY" || code === "EACCES" || code === "EPERM"
-            ? "Close Hermes and retry. Check access to both paths if the error continues."
-            : "Check access to both paths and retry.";
-      process.stderr.write(
-        `Could not rename the Hermes profile from ${dest} to ${backup} (${code}). ${action}\n`,
-      );
+      process.stderr.write(profileRenameError(dest, backup, code));
       return 1;
     }
     try {
@@ -931,7 +970,7 @@ const uninstallHermesLocked = (): number => {
  * Later write failures restore the profile in uninstallHermes.
  */
 export const hermesUninstallBlocker = (): {
-  readonly kind: "pending-backup" | "unreadable-env";
+  readonly kind: "pending-backup" | "unreadable-env" | "rename-error";
   readonly path: string;
 } | null => {
   const ledger = readHermesLedger();
@@ -941,6 +980,9 @@ export const hermesUninstallBlocker = (): {
   if (ledger === null || !ledger.createdProfile) return null;
   const dest = hermesProfileDir(ledger.profileName);
   if (!existsSync(dest)) return null;
+  const backups = join(hermesRoot(), "backups");
+  if (profileRenameBlocker(dest, backups))
+    return { kind: "rename-error", path: backups };
   const envPath = join(dest, ".env");
   const blocker = { kind: "unreadable-env", path: envPath } as const;
   try {

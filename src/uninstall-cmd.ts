@@ -180,7 +180,7 @@ const runUninstallLocked = async (
   //    step and name the blocking path.
   const hermesBlocker = hermesUninstallBlocker();
   if (hermesBlocker !== null) {
-    if (hermesBlocker.kind === "pending-backup") return 1;
+    if (hermesBlocker.kind !== "unreadable-env") return 1;
     process.stderr.write(
       `Cannot uninstall safely — the Hermes profile entry ${hermesBlocker.path} cannot be inspected, so OPENLLM_API_KEY could not be verifiably removed from it.\n` +
         "  Resolve the Hermes profile error before you retry. Nothing was changed.\n",
