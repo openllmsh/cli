@@ -251,6 +251,27 @@ sha256_of() {
   fi
 }
 
+# Limit each output to 512 MiB. Release binaries are about 100 MiB.
+is_gzip_asset() {
+  LC_ALL=C head -c 2 "$1" | LC_ALL=C grep -q $'\x1f\x8b'
+}
+
+decompress_asset() {
+  local input="$1" output="$2" name="$3"
+  local max_bytes=536870912 status=0 size
+  gzip -dc "$input" | head -c "$max_bytes" > "$output" || status=$?
+  size="$(stat -c %s "$output" 2>/dev/null || stat -f %z "$output")" \
+    || die "could not measure the decompressed $name"
+  if [ "$size" -ge "$max_bytes" ]; then
+    rm -f "$output"
+    die "$name decompressed asset reaches the 512 MiB limit — refusing to install"
+  fi
+  if [ "$status" -ne 0 ]; then
+    rm -f "$output"
+    die "could not decompress $name: invalid gzip asset or output write failure"
+  fi
+}
+
 # >>> openllm-prerelease/v1 (identical block in both shell installers) >>>>>>>
 # Public-prerelease resolution. The manifest and the asset come from the SAME
 # tag on the component's own repository: the manifest is tagged source, the
@@ -1258,8 +1279,8 @@ else
     # The pinned digest is over the DECOMPRESSED binary. A published
     # prerelease asset is ALWAYS gzip — a plain or empty response is a bad
     # release, never a format to pass through.
-    if gzip -t "$DL" >/dev/null 2>&1; then
-      gzip -dc "$DL" > "$BIN" || die "could not decompress openllm"
+    if is_gzip_asset "$DL"; then
+      decompress_asset "$DL" "$BIN" openllm
     elif [ -n "$PRERELEASE_TAG" ]; then
       die "the $PRERELEASE_TAG asset is not gzip data — refusing to install"
     else
