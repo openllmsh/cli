@@ -9,10 +9,10 @@
  * embeds the Bun runtime. `--minify --bytecode` strips readable identifiers
  * + original source text. No `.ts` source ships.
  *
- * Targets: the release list (`CLI_RELEASE_TARGETS`) — darwin-{arm64,
- * x64-baseline}, linux-{x64-baseline,arm64}. win32-x64 is off for
- * 2.8.0-beta.1 but remains buildable: `--target(s) win32-x64` on a native
- * Windows host still works.
+ * Targets include macOS, Linux, and Windows.
+ * Windows targets require a native Windows host.
+ * Select each host partition with --targets for prerelease builds.
+ * Stable releases select the four non-Windows targets.
  * x64 uses the `baseline` (Nehalem) tier — no AVX/AVX2/FMA required.
  *
  * Usage:
@@ -212,6 +212,27 @@ const assertDarwinSafeBunRuntime = (
   }
 };
 
+/** Copy the native Windows output to the publisher input. */
+export const stageWindowsCliInput = (
+  outfile: string,
+  outDir: string,
+  target: string | null,
+  hostPlatform: NodeJS.Platform = process.platform,
+): void => {
+  if (
+    hostPlatform !== "win32" ||
+    target === null ||
+    !target.includes("windows")
+  )
+    return;
+  const raw = readFileSync(outfile);
+  const publisherInput = join(outDir, cliRawFilename("win32-x64"));
+  writeFileSync(publisherInput, raw);
+  if (!readFileSync(publisherInput).equals(raw)) {
+    throw new Error("Windows CLI staging changed the raw bytes");
+  }
+};
+
 const buildOne = async (
   target: string | null,
   cloudOrigin: string,
@@ -255,14 +276,7 @@ const buildOne = async (
     writeFileSync(`${staged}.gz`, gzipSync(readFileSync(staged), { level: 9 }));
     renameSync(staged, outfile);
     renameSync(`${staged}.gz`, `${outfile}.gz`);
-    if (process.platform === "win32" && target !== null && windowsBuild) {
-      const raw = readFileSync(outfile);
-      const publisherInput = `${OUT_DIR}/${cliRawFilename("win32-x64")}`;
-      writeFileSync(publisherInput, raw);
-      if (!readFileSync(publisherInput).equals(raw)) {
-        throw new Error("Windows CLI staging changed the raw bytes");
-      }
-    }
+    stageWindowsCliInput(outfile, OUT_DIR, target);
   } finally {
     rmSync(scratch, { recursive: true, force: true });
   }
