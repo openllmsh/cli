@@ -170,7 +170,10 @@ const pendingProfileBackup = (ledger: THermesLedger | null): string | null => {
       backup = root;
     } else {
       backup = join(root, name);
-      if (inspectProfilePath(backup) === false && liveExists) {
+      // A recorded backup that is gone leaves nothing to recover, whether or
+      // not the live profile exists: drop the record instead of blocking on
+      // a path that cannot be moved back.
+      if (inspectProfilePath(backup) === false) {
         clearPendingBackup(ledger);
         return null;
       }
@@ -833,7 +836,9 @@ const profileRenameBlocker = (dest: string, backups: string): boolean => {
     // Equal devices do not prove that rename works: Linux returns EXDEV
     // across bind mounts and btrfs subvolumes on one device. Rename an empty
     // probe directory from the profile into the destination and remove it.
-    const probe = mkdtempSync(join(dest, ".openllm-rename-probe-"));
+    // Probe from the profile's parent: the real move needs a writable parent,
+    // not a writable profile (a read-only profile still renames).
+    const probe = mkdtempSync(join(dirname(dest), ".openllm-rename-probe-"));
     const moved = join(ancestor, basename(probe));
     try {
       renameSync(probe, moved);
