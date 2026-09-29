@@ -395,12 +395,6 @@ env_lock_acquire() {
   fi
   [ -n "$helper" ] && [ -x "$helper" ] || { echo 'lock helper is missing or incompatible' >&2; return 74; }
   worker_pid="${BASHPID:-$$}"
-  case "$(uname -s 2>/dev/null)" in
-    MINGW*|MSYS*|CYGWIN*)
-      worker_pid="$(ps -l -p "$worker_pid" 2>/dev/null | awk -v wanted="$worker_pid" 'NR == 1 { for (i = 1; i <= NF; i++) { if ($i == "PID") pidColumn = i; if ($i == "WINPID") winColumn = i }; next } pidColumn > 0 && winColumn > 0 { shift = ($1 ~ /^[A-Z]$/ && pidColumn == 1) ? 1 : 0; if ($(pidColumn + shift) == wanted) { print $(winColumn + shift); exit } }')" || return 74
-      case "$worker_pid" in ''|0|*[!0-9]*) return 74 ;; esac
-      ;;
-  esac
   ENV_LOCK_CHANNEL="$(mktemp -d "${TMPDIR:-/tmp}/openllm-lock.XXXXXXXX")" || return 74
   chmod 700 "$ENV_LOCK_CHANNEL" || { rmdir "$ENV_LOCK_CHANNEL" 2>/dev/null || true; return 74; }
   "$helper" --internal-lock-control e "$target.lock.d" "$worker_pid" \

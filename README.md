@@ -206,6 +206,8 @@ Add `--env-file /absolute/path/to/.env` to select another env file.
 Add `--restore-dir /absolute/path/to/client-home` to select a client mirror.
 Add `--json` to get a structured report.
 Do not combine this command with `--fix` or AI diagnosis options.
+On Windows the command exits 0 with status `not-applicable`.
+It does not inspect or change any lock there.
 
 A legacy hold stays in place after its process exits.
 Only this explicit command clears the hold.
