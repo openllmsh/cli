@@ -387,16 +387,17 @@ ENV_LOCK_BINARY="${DEST:-}"
 # >>> openllm-env-lock/v3 >>>
 # The installed helper owns all lock metadata operations.
 env_lock_acquire() {
-  local target="$1" helper begin previous attempt code
+  local target="$1" helper begin previous attempt code worker_pid
   ENV_LOCK_DIR=""
   helper="${LOCKLAB_HELPER_BIN:-${OPENLLM_LOCK_HELPER:-}}"
   if [ -z "$helper" ]; then
     helper="${ENV_LOCK_BINARY:-}"
   fi
   [ -n "$helper" ] && [ -x "$helper" ] || { echo 'lock helper is missing or incompatible' >&2; return 74; }
+  worker_pid="${BASHPID:-$$}"
   ENV_LOCK_CHANNEL="$(mktemp -d "${TMPDIR:-/tmp}/openllm-lock.XXXXXXXX")" || return 74
   chmod 700 "$ENV_LOCK_CHANNEL" || { rmdir "$ENV_LOCK_CHANNEL" 2>/dev/null || true; return 74; }
-  "$helper" --internal-lock-control e "$target.lock.d" "${BASHPID:-$$}" \
+  "$helper" --internal-lock-control e "$target.lock.d" "$worker_pid" \
     "$ENV_LOCK_CHANNEL/request" "$ENV_LOCK_CHANNEL/response" </dev/null >/dev/null &
   ENV_LOCK_HELPER_PID=$!
   begin=$SECONDS
