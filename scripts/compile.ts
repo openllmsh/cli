@@ -35,9 +35,11 @@ import { gzipSync } from "node:zlib";
 import { $ } from "bun";
 import type { TCliTarget } from "../release-types";
 import {
+  BUN_TARGET_TO_CLI_TARGET,
   CLI_COMPILE_TARGET,
   CLI_RELEASE_TARGETS,
   CLI_TARGETS,
+  cliRawFilename,
 } from "../release-types";
 
 // Resolve paths from THIS script's location, not the cwd — works identically
@@ -135,14 +137,16 @@ const version =
     ? (argv[versionIdx + 1] ?? DEV_VERSION_SENTINEL)
     : DEV_VERSION_SENTINEL;
 
-const outfileFor = (target: string): string => {
-  const suffix = target.replace(/^bun-/, "");
-  return `${OUT_DIR}/openllm-${suffix}${target.includes("windows") ? ".exe" : ""}`;
+export const cliCompileFilename = (target: string): string => {
+  const key = BUN_TARGET_TO_CLI_TARGET[target];
+  if (key === undefined)
+    throw new Error(`compile target has no release key: ${target}`);
+  return key === "win32-x64"
+    ? "openllm-windows-x64-baseline.exe"
+    : cliRawFilename(key);
 };
 
-// The DEFAULT (no-args) build set is the release list — Windows is off for
-// 2.8.0-beta.1. `CLI_TARGETS` remains the accepted domain for explicit
-// `--target(s)` (win32-x64 still resolves, then the native-host guard applies).
+// The default build set contains every release target.
 const compileTargets = CLI_RELEASE_TARGETS.map(
   (target) => CLI_COMPILE_TARGET[target],
 );
@@ -221,7 +225,7 @@ const buildOne = async (
   const outfile =
     target === null
       ? `${OUT_DIR}/openllm${process.platform === "win32" ? ".exe" : ""}`
-      : outfileFor(target);
+      : `${OUT_DIR}/${cliCompileFilename(target)}`;
   const targetArgs = target === null ? [] : ["--target", target];
   const defines = compileDefineArgs(cloudOrigin, version);
   // Bun 1.3.14 Windows bytecode crashed at startup on the baseline test host,
@@ -251,6 +255,14 @@ const buildOne = async (
     writeFileSync(`${staged}.gz`, gzipSync(readFileSync(staged), { level: 9 }));
     renameSync(staged, outfile);
     renameSync(`${staged}.gz`, `${outfile}.gz`);
+    if (process.platform === "win32" && target !== null && windowsBuild) {
+      const raw = readFileSync(outfile);
+      const publisherInput = `${OUT_DIR}/${cliRawFilename("win32-x64")}`;
+      writeFileSync(publisherInput, raw);
+      if (!readFileSync(publisherInput).equals(raw)) {
+        throw new Error("Windows CLI staging changed the raw bytes");
+      }
+    }
   } finally {
     rmSync(scratch, { recursive: true, force: true });
   }

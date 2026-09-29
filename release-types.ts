@@ -21,16 +21,9 @@ export const CLI_TARGETS = [
 export type TCliTarget = (typeof CLI_TARGETS)[number];
 
 /**
- * The targets this release actually builds, hashes, and publishes — the ONE
- * switch every release/compile/hash/publish/manifest path iterates.
- * `CLI_TARGETS` stays the buildable superset so the Windows code still
- * typechecks, but Windows is off for 2.8.0-beta.1: add "win32-x64" back here
- * (or iterate CLI_TARGETS) to re-enable it.
+ * These targets are built and published for a release.
  */
-export const CLI_RELEASE_TARGETS = CLI_TARGETS.filter(
-  (target): target is Exclude<TCliTarget, "win32-x64"> =>
-    target !== "win32-x64",
-);
+export const CLI_RELEASE_TARGETS: readonly TCliTarget[] = CLI_TARGETS;
 
 /** Bun compiler spelling for each release target. */
 export const CLI_COMPILE_TARGET: Readonly<Record<TCliTarget, string>> = {
@@ -40,6 +33,23 @@ export const CLI_COMPILE_TARGET: Readonly<Record<TCliTarget, string>> = {
   "linux-arm64": "bun-linux-arm64",
   "win32-x64": "bun-windows-x64-baseline",
 };
+
+/** Reverse map: Bun target spelling → release key (for `--target` selection
+ *  and the compiler's outfile naming). */
+export const BUN_TARGET_TO_CLI_TARGET: Readonly<Record<string, TCliTarget>> =
+  Object.fromEntries(
+    (Object.entries(CLI_COMPILE_TARGET) as [TCliTarget, string][]).map(
+      ([key, bunTarget]) => [bunTarget, key],
+    ),
+  ) as Record<string, TCliTarget>;
+
+/** The publisher reads this raw file. Windows uses a copy of the PE file. */
+export const cliRawFilename = (target: TCliTarget): string =>
+  `openllm-${target}`;
+
+/** The gzip distribution asset name for a release key. */
+export const cliAssetFilename = (target: TCliTarget): string =>
+  `openllm-${target}.gz`;
 
 export type TCliRelease = {
   /** GitHub `owner/repo` the binaries are released to. */
