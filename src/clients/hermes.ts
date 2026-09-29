@@ -10,6 +10,7 @@
  */
 
 import { execFileSync } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import type { Dirent } from "node:fs";
 import {
   chmodSync,
@@ -100,14 +101,22 @@ export const readHermesLedger = (): THermesLedger | null => {
 const writeLedgerText = (content: string): void => {
   const path = hermesLedgerPath();
   mkdirSync(join(path, ".."), { recursive: true, mode: 0o700 });
-  const temp = `${path}.tmp`;
+  const temp = `${path}.${process.pid}-${randomUUID()}.tmp`;
+  let removeTemp = true;
   try {
-    writeFileSync(temp, content, {
-      mode: 0o600,
-    });
+    try {
+      writeFileSync(temp, content, {
+        mode: 0o600,
+        flag: "wx",
+      });
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "EEXIST")
+        removeTemp = false;
+      throw error;
+    }
     renameSync(temp, path);
   } finally {
-    rmSync(temp, { force: true });
+    if (removeTemp) rmSync(temp, { force: true });
   }
 };
 
