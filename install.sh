@@ -290,9 +290,12 @@ prerelease_manifest_digest() {
   url="$(prerelease_repo_url "$repo" manifest.ts)"
   # The trailing 'x' sentinel keeps command substitution from stripping the
   # manifest's final newlines, so the parser sees the exact served bytes.
-  body="$(curl "${PR_SCHEME[@]}" "${CURL_META[@]}" -fsSL "$url" 2>/dev/null || exit; printf x)" \
-    || die "could not fetch the $repo manifest for $PRERELEASE_TAG"
+  # Cap the pipe before Bash reads it. Older curl cannot cap chunked bodies.
+  body="$(curl "${PR_SCHEME[@]}" "${CURL_META[@]}" --max-filesize 65536 -fsSL "$url" 2>/dev/null | head -c 65537 || exit; printf x)" \
+    || die "could not fetch the $repo manifest for $PRERELEASE_TAG (manifest limit: 64 KiB)"
   body="${body%x}"
+  [ "$(printf %s "$body" | LC_ALL=C wc -c)" -le 65536 ] \
+    || die "manifest exceeds 64 KiB"
   # body_end tells the lexer whether the input ended in a newline — the
   # per-record buffer rebuild below hides one, which would let a `//` comment
   # cut off at EOF pass as terminated.
