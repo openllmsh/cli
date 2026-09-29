@@ -22,10 +22,10 @@ export const hermesRoot = (): string =>
     : join(userHome(), ".hermes");
 
 // Both profile names share one ledger and one active pointer.
-// Lock the home before reading either file or choosing a profile name.
+// Use OpenLLM state for the lock. Do not create the Hermes home here.
 const profileLockPath = (): string => {
-  mkdirSync(hermesRoot(), { recursive: true, mode: 0o700 });
-  return join(hermesRoot(), ".openllm-profile.lock.d");
+  mkdirSync(openllmDir(), { recursive: true, mode: 0o700 });
+  return join(openllmDir(), ".hermes-profile.lock.d");
 };
 
 const profileLockOptions = { waitMs: 5_000, reclaimMs: 30_000, pollMs: 50 };

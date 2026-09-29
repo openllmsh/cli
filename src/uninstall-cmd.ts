@@ -24,7 +24,7 @@
  * confirmation itself.
  */
 
-import { existsSync, readdirSync, rmSync } from "node:fs";
+import { existsSync, readdirSync, rmdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import {
   hermesUninstallBlocker,
@@ -32,7 +32,11 @@ import {
   readHermesLedger,
   withHermesUninstallLock,
 } from "./clients/hermes";
-import { hermesProfileDir, hermesRoot } from "./clients/hermes-home";
+import {
+  hermesLedgerPath,
+  hermesProfileDir,
+  hermesRoot,
+} from "./clients/hermes-home";
 import { uninstallRaycast } from "./clients/raycast";
 import { removeCompletion } from "./completion";
 import { findDaemonBinary, runManagedDaemonCommand } from "./daemon-delegation";
@@ -184,14 +188,27 @@ export const runUninstall = async (
     );
     return 1;
   }
-  return withHermesUninstallLock(
+  if (!existsSync(hermesLedgerPath())) {
+    return runUninstallLocked(args, () => 0, false);
+  }
+  const code = await withHermesUninstallLock(
     (uninstall): Promise<number> => runUninstallLocked(args, uninstall),
   );
+  if (code === 0) {
+    // The lock kept the state root open during cleanup.
+    try {
+      rmdirSync(openllmDir());
+    } catch {
+      // Keep the root if another entry remains.
+    }
+  }
+  return code;
 };
 
 const runUninstallLocked = async (
   args: readonly string[],
   uninstallHermes: () => number,
+  hasHermesLedger = true,
 ): Promise<number> => {
   const yes = args.includes("--yes") || args.includes("-y");
 
@@ -199,7 +216,7 @@ const runUninstallLocked = async (
   //    directory, an unreadable file) makes the unwind fail mid-run — AFTER
   //    daemon teardown already removed state. Refuse before ANY destructive
   //    step and name the blocking path.
-  const hermesBlocker = hermesUninstallBlocker();
+  const hermesBlocker = hasHermesLedger ? hermesUninstallBlocker() : null;
   if (hermesBlocker !== null) {
     process.stderr.write(
       `Cannot uninstall safely — the Hermes profile entry ${hermesBlocker} cannot be inspected, so OPENLLM_API_KEY could not be verifiably removed from it.\n` +
