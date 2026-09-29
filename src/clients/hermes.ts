@@ -524,8 +524,9 @@ const removeStaleEnvTemps = (root: string): string[] => {
   let entries: Dirent[];
   try {
     entries = readdirSync(root, { withFileTypes: true });
-  } catch {
-    return [];
+  } catch (error) {
+    // A folder that cannot be listed cannot prove that no temp is left.
+    return (error as NodeJS.ErrnoException).code === "ENOENT" ? [] : [root];
   }
   const left: string[] = [];
   for (const entry of entries) {
@@ -724,7 +725,7 @@ const redactProfileBackupKey = (backupDir: string): TRedactResult => {
       // A leftover temp may hold OPENLLM_API_KEY; finishing would keep it in
       // the backup. Undo the move and name it.
       process.stderr.write(
-        `Could not remove ${leftTemps.join(", ")}. It may contain OPENLLM_API_KEY. Remove it and retry.\n`,
+        `Could not check or remove ${leftTemps.join(", ")}. A leftover .env.openllm-<pid>.tmp may contain OPENLLM_API_KEY. Remove it and retry.\n`,
       );
       return fail();
     }
