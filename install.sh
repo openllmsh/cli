@@ -747,6 +747,9 @@ if [ -x "$DEST" ] && [ -z "$FROM_FILE" ]; then
 fi
 
 if [ "$SKIP" = "1" ]; then
+  if [ -n "$PRERELEASE_TAG" ]; then
+    probe_staged_version "$DEST" "$CLI_VERSION"
+  fi
   echo "  openllm is already up to date"
 else
   if [ -n "$FROM_FILE" ]; then
