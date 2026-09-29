@@ -6,6 +6,10 @@
  * enumerates the other's — so the two teardowns compose without cross-mapping.
  *
  * Order:
+ *   0. Hermes preflight — a `.env` entry the redactor cannot even inspect
+ *      (a directory, an unreadable file) would fail the unwind mid-run, AFTER
+ *      daemon teardown already destroyed state. Refuse before ANY destructive
+ *      step and name the blocking path (LM-1).
  *   1. delegate to `openllmd uninstall` — it prompts (confirm + keep-logins),
  *      stops/unregisters the service, and removes DAEMON-owned state, leaving
  *      the CLI's client ledgers in place. A nonzero exit (user aborted, or the
@@ -23,6 +27,7 @@
 import { existsSync, readdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import {
+  hermesUninstallBlocker,
   hermesUninstallResiduePath,
   readHermesLedger,
   uninstallHermes,
@@ -180,6 +185,20 @@ export const runUninstall = async (
     return 1;
   }
   const yes = args.includes("--yes") || args.includes("-y");
+
+  // 0. LM-1: a Hermes `.env` entry the redactor cannot even inspect (a
+  //    directory, an unreadable file) makes the unwind fail mid-run — AFTER
+  //    daemon teardown already removed state. Refuse before ANY destructive
+  //    step and name the blocking path.
+  const hermesBlocker = hermesUninstallBlocker();
+  if (hermesBlocker !== null) {
+    process.stderr.write(
+      `Cannot uninstall safely — the Hermes profile entry ${hermesBlocker} cannot be inspected, so OPENLLM_API_KEY could not be verifiably removed from it.\n` +
+        "  fix or remove that entry, then re-run the uninstall — nothing was changed.\n",
+    );
+    return 1;
+  }
+
   const daemon = findDaemonBinary();
 
   // 1. Delegate daemon teardown — the daemon owns the destructive confirmation

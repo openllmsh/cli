@@ -19,6 +19,7 @@ import {
   readFileSync,
   readlinkSync,
   renameSync,
+  rmdirSync,
   rmSync,
   statSync,
   symlinkSync,
@@ -395,14 +396,24 @@ type TEnvRestore =
 /**
  * Write `content` as a NEW private temp file next to `envPath`. Returns the
  * temp path, or null when the temp could not be created — nothing at
- * `envPath` is touched either way.
+ * `envPath` is touched either way. A failure AFTER create (ENOSPC, EIO)
+ * leaves our own partial file behind — drop it. A pre-existing name is a
+ * different file: `wx` fails with EEXIST before touching it, so it is left
+ * alone.
  */
 const writeEnvTmp = (envPath: string, content: string): string | null => {
   const tmp = `${envPath}.${process.pid}.tmp`;
   try {
     writeFileSync(tmp, content, { mode: 0o600, flag: "wx" });
     return tmp;
-  } catch {
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "EEXIST") {
+      try {
+        rmSync(tmp, { force: true });
+      } catch {
+        // best effort — a leftover temp is not the secret itself
+      }
+    }
     return null;
   }
 };
@@ -431,10 +442,13 @@ const writeRedactedEnv = (envPath: string, kept: string[]): boolean => {
 
 /**
  * Put a captured `.env` entry back: the same symlink, or a regular file
- * with the original bytes and mode. Best-effort — the caller still rolls
- * the profile move back even when a restore cannot run.
+ * with the original bytes and mode. Returns true only when the saved entry
+ * is verifiably back on disk — a restore that cannot complete makes the
+ * copy "broken": the caller keeps it parked in backups/ instead of moving a
+ * damaged profile over the live path.
  */
-const restoreEnvEntry = (envPath: string, saved: TEnvRestore): void => {
+const restoreEnvEntry = (envPath: string, saved: TEnvRestore): boolean => {
+  let tmp: string | null = null;
   try {
     if (saved.kind === "symlink") {
       try {
@@ -444,16 +458,49 @@ const restoreEnvEntry = (envPath: string, saved: TEnvRestore): void => {
         // the link create below reports its own failure
       }
       symlinkSync(saved.target, envPath);
-      return;
+      const link = lstatSync(envPath);
+      return link.isSymbolicLink() && readlinkSync(envPath) === saved.target;
     }
-    const tmp = writeEnvTmp(envPath, saved.body);
-    if (tmp === null) return;
+    tmp = writeEnvTmp(envPath, saved.body);
+    if (tmp === null) return false;
     renameSync(tmp, envPath);
-    chmodSync(envPath, saved.mode & 0o7777);
+    tmp = null;
+    // Verify while the fresh 0600 file is still readable — a saved mode
+    // like 0000 applied first would fail the check on a good restore.
+    const back = lstatSync(envPath);
+    const ok =
+      back.isFile() &&
+      !back.isSymbolicLink() &&
+      readFileSync(envPath, "utf-8") === saved.body;
+    try {
+      chmodSync(envPath, saved.mode & 0o7777);
+    } catch {
+      // the entry is back — a missed mode bit never makes it "not restored"
+    }
+    return ok;
   } catch {
-    // best effort — a restore failure never keeps the run from failing
+    // A temp this call created must not be stranded inside the profile —
+    // the next run's `wx` create would collide with it.
+    if (tmp !== null) {
+      try {
+        rmSync(tmp, { force: true });
+      } catch {
+        // best effort — a leftover temp is not the secret itself
+      }
+    }
+    return false;
   }
 };
+
+/**
+ * "redacted": the key is verifiably gone from the copy. "restored": a
+ * failure, but every change was undone — the copy matches what the run
+ * found, so the caller can move it back to the live path unchanged.
+ * "broken": a failure AND the `.env` entry could not be put back — the copy
+ * stays parked in backups/ and the run names where, rather than moving a
+ * damaged profile over the live path.
+ */
+type TRedactResult = "redacted" | "restored" | "broken";
 
 /**
  * FSS-19: a preserved profile must not keep a copy of the API key. Strip the
@@ -461,12 +508,13 @@ const restoreEnvEntry = (envPath: string, saved: TEnvRestore): void => {
  * are the user's own and stay). A .env symlink is never followed for writing:
  * the link's target is an external file that must not be modified, so the
  * link is dropped and replaced by a redacted regular file built from the
- * target's contents. Returns true only when the key is verifiably absent —
- * an unverifiable result makes the caller fail loudly, never silently retain.
- * Every change this function makes is undone before a false return, so the
- * caller's rollback puts back exactly what the redact found.
+ * target's contents. Returns "redacted" only when the key is verifiably
+ * absent — an unverifiable result makes the caller fail loudly, never
+ * silently retain. Every change this function makes is undone before a
+ * "restored" return, so the caller's rollback puts back exactly what the
+ * redact found.
  */
-const redactProfileBackupKey = (backupDir: string): boolean => {
+const redactProfileBackupKey = (backupDir: string): TRedactResult => {
   const envPath = join(backupDir, ".env");
   // Verified-absent: the path is gone, or it is a REGULAR non-symlink file
   // with no key line. Anything else fails the check loudly.
@@ -488,10 +536,12 @@ const redactProfileBackupKey = (backupDir: string): boolean => {
   let dirMode: number | null = null;
   let savedEnv: TEnvRestore | null = null;
   let envMutated = false;
-  const fail = (): boolean => {
+  const fail = (): TRedactResult => {
     // Restore the `.env` entry first — it needs a writable dir, which the
-    // dir-mode restore below can take away.
-    if (envMutated && savedEnv !== null) restoreEnvEntry(envPath, savedEnv);
+    // dir-mode restore below can take away. A restore that cannot put the
+    // saved entry verifiably back marks the copy "broken".
+    const restored =
+      !envMutated || (savedEnv !== null && restoreEnvEntry(envPath, savedEnv));
     if (dirMode !== null) {
       try {
         chmodSync(backupDir, dirMode);
@@ -499,7 +549,7 @@ const redactProfileBackupKey = (backupDir: string): boolean => {
         // best effort — a leftover widened mode never keeps the secret
       }
     }
-    return false;
+    return restored ? "restored" : "broken";
   };
   try {
     // The backup dir may carry a read-only mode cloned from the profile —
@@ -519,7 +569,7 @@ const redactProfileBackupKey = (backupDir: string): boolean => {
     try {
       stat = lstatSync(envPath);
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === "ENOENT") return true;
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return "redacted";
       return fail();
     }
     if (stat.isSymbolicLink()) {
@@ -529,7 +579,7 @@ const redactProfileBackupKey = (backupDir: string): boolean => {
       if (kept.every((line) => line.trim() === "")) {
         rmSync(envPath, { force: true });
         envMutated = true;
-        return verifiedAbsent() ? true : fail();
+        return verifiedAbsent() ? "redacted" : fail();
       }
       // Build the redacted replacement BEFORE dropping the link — when the
       // temp cannot be written the entry stays exactly as it was.
@@ -547,7 +597,7 @@ const redactProfileBackupKey = (backupDir: string): boolean => {
         }
         return fail();
       }
-      return verifiedAbsent() ? true : fail();
+      return verifiedAbsent() ? "redacted" : fail();
     }
     if (!stat.isFile()) {
       // A directory or other non-regular entry is not a backup env file.
@@ -560,29 +610,44 @@ const redactProfileBackupKey = (backupDir: string): boolean => {
     if (kept.every((line) => line.trim() === "")) {
       rmSync(envPath, { force: true });
       envMutated = true;
-      return verifiedAbsent() ? true : fail();
+      return verifiedAbsent() ? "redacted" : fail();
     }
     // A false return here means the checked file was never replaced — the
     // swap only runs after the redacted temp was written.
     if (!writeRedactedEnv(envPath, kept)) return fail();
     envMutated = true;
-    return verifiedAbsent() ? true : fail();
+    return verifiedAbsent() ? "redacted" : fail();
   } catch {
     return fail();
   }
 };
 
 /**
+ * `moveProfileDir` throws an error tagged with this code when `to` is already
+ * occupied. The occupant is a DIFFERENT tree — a concurrent `openllm hermes
+ * install` recreated the live profile, or another run took this backup name —
+ * so merging over it would silently drop its files.
+ */
+const MOVE_CONFLICT = "OPENLLM_MOVE_CONFLICT";
+
+/**
  * Move a profile tree `from` to `to`: a same-filesystem rename, with a
- * copy+remove fallback for the cross-device case. The uninstall move and
+ * copy+remove fallback when the rename cannot run. The uninstall move and
  * its rollback run through this one helper so a restore puts back the same
- * shape the move found.
+ * shape the move found. The fallback never merges into an occupied `to`.
  */
 const moveProfileDir = (from: string, to: string): void => {
   mkdirSync(join(to, ".."), { recursive: true, mode: 0o700 });
   try {
     renameSync(from, to);
   } catch {
+    if (existsSync(to)) {
+      const conflict = new Error(`destination exists: ${to}`) as Error & {
+        code?: string;
+      };
+      conflict.code = MOVE_CONFLICT;
+      throw conflict;
+    }
     cpSync(from, to, { recursive: true });
     rmSync(from, { recursive: true, force: true });
   }
@@ -620,31 +685,62 @@ export const uninstallHermes = (): number => {
   let backup: string | null = null;
   if (ledger.createdProfile && existsSync(dest)) {
     backup = profileBackupPath(ledger.profileName);
+    const backupsRoot = join(backup, "..");
+    const backupsExisted = existsSync(backupsRoot);
+    const dropBackupsShell = (): void => {
+      // A run that created `backups/` drops the empty shell again — the
+      // Hermes root returns to how the run found it.
+      if (backupsExisted) return;
+      try {
+        rmdirSync(backupsRoot);
+      } catch {
+        // not empty or cannot be removed — a leftover dir is harmless
+      }
+    };
     try {
       moveProfileDir(dest, backup);
-    } catch {
-      // The profile stays live at `dest`, but a partial backup may already
-      // hold a copied .env — redact whatever landed before reporting the
-      // failure so no copy of the key is left behind.
-      const redacted = redactProfileBackupKey(backup);
-      residuePath = existsSync(join(dest, ".env"))
-        ? join(dest, ".env")
-        : join(backup, ".env");
+    } catch (error) {
+      // A backup path that is already occupied belongs to a different run —
+      // never redact INTO it. Only a partial copy this move created gets its
+      // key stripped before the failure is reported.
+      const conflict = (error as NodeJS.ErrnoException).code === MOVE_CONFLICT;
+      const redacted =
+        conflict || redactProfileBackupKey(backup) === "redacted";
+      dropBackupsShell();
+      residuePath =
+        conflict || existsSync(join(dest, ".env"))
+          ? join(dest, ".env")
+          : join(backup, ".env");
       process.stderr.write(
         `Could not move the Hermes profile to a backup — leaving ${dest} in place.\n` +
-          (redacted
-            ? ""
-            : `  the partial backup at ${backup} may still contain OPENLLM_API_KEY — delete it by hand.\n`),
+          (conflict
+            ? `  ${backup} already exists from another run and was left untouched.\n`
+            : redacted
+              ? ""
+              : `  the partial backup at ${backup} may still contain OPENLLM_API_KEY — delete it by hand.\n`),
       );
       return 1;
     }
-    if (!redactProfileBackupKey(backup)) {
-      // The move is final only once the key is verifiably gone from the
-      // copy. Put the profile back so the ledger, the sticky pointer and
-      // the profile still agree, and the retry sees the same state the
-      // first run saw.
+    const redact = redactProfileBackupKey(backup);
+    if (redact !== "redacted") {
+      if (redact === "broken") {
+        // The `.env` entry could not be put back — moving the copy over the
+        // live path would silently damage the profile. Keep the preserved
+        // tree parked and name where it sits.
+        residuePath = join(backup, ".env");
+        process.stderr.write(
+          `Could not strip OPENLLM_API_KEY from ${join(backup, ".env")}, and the original .env could not be restored — the profile stays preserved at ${backup}.\n` +
+            "  fix or remove that entry, then move the profile back or re-run the uninstall.\n",
+        );
+        return 1;
+      }
+      // "restored" — the copy matches what the run found. The move is final
+      // only once the key is verifiably gone, so put the profile back: the
+      // ledger, the sticky pointer and the profile still agree, and the
+      // retry sees the same state the first run saw.
       try {
         moveProfileDir(backup, dest);
+        dropBackupsShell();
         residuePath = join(dest, ".env");
         process.stderr.write(
           `Could not strip OPENLLM_API_KEY from ${join(dest, ".env")} — the profile stays in place, unchanged and still wired.\n` +
@@ -673,6 +769,36 @@ export const uninstallHermes = (): number => {
         : ""),
   );
   return 0;
+};
+
+/**
+ * The `.env` path that would make the Hermes unwind fail BEFORE it starts,
+ * or null when the unwind can proceed. When the live profile carries an
+ * entry the redactor cannot even inspect — a directory, a fifo, an
+ * unreadable file — the run is guaranteed to fail, so `openllm uninstall`
+ * must stop before ANY destructive step (daemon teardown included) instead
+ * of unwinding halfway (LM-1). Read-only: nothing on disk changes.
+ * Write-side failures cannot be predicted here; they still roll back
+ * atomically inside `uninstallHermes`.
+ */
+export const hermesUninstallBlocker = (): string | null => {
+  const ledger = readHermesLedger();
+  if (ledger === null || !ledger.createdProfile) return null;
+  const dest = hermesProfileDir(ledger.profileName);
+  if (!existsSync(dest)) return null;
+  const envPath = join(dest, ".env");
+  try {
+    const stat = lstatSync(envPath);
+    if (!stat.isFile() && !stat.isSymbolicLink()) return envPath;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === "ENOENT" ? null : envPath;
+  }
+  try {
+    readFileSync(envPath, "utf-8");
+  } catch {
+    return envPath;
+  }
+  return null;
 };
 
 export const statusHermes = (): number => {
