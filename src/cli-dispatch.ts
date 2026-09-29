@@ -313,6 +313,21 @@ export const runCli = async (argv: readonly string[]): Promise<void> => {
     case "uninstall":
       return process.exit(await runUninstall(rest));
     case "doctor": {
+      if (rest.includes("--clear-legacy-locks")) {
+        const [{ runLegacyLockDoctor, stateLockParents }, env] =
+          await Promise.all([
+            import("../../tunnel/session/dir-lock-doctor"),
+            import("./env"),
+          ]);
+        return process.exit(
+          await runLegacyLockDoctor(
+            rest,
+            [env.sharedEnvFile()],
+            [],
+            stateLockParents(env.openllmDir()),
+          ),
+        );
+      }
       const verb = rest[0];
       if (verb !== undefined && isDoctorReportingVerb(verb)) {
         return process.exit(await runDoctorReportCommand(rest));
