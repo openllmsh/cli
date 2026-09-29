@@ -390,7 +390,7 @@ env_lock_acquire() {
   ENV_LOCK_DIR=""
   helper="${LOCKLAB_HELPER_BIN:-${OPENLLM_LOCK_HELPER:-}}"
   if [ -z "$helper" ]; then
-    if [ -n "${BIN_DIR:-}" ]; then helper="$BIN_DIR/openllmd"; else helper="${DEST:-}"; fi
+    helper="${DEST:-}"
   fi
   [ -n "$helper" ] && [ -x "$helper" ] || { echo 'lock helper is missing or incompatible' >&2; return 74; }
   ENV_LOCK_CHANNEL="$(mktemp -d "${TMPDIR:-/tmp}/openllm-lock.XXXXXXXX")" || return 74
