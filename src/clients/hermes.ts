@@ -205,8 +205,13 @@ const pendingProfileBackup = (ledger: THermesLedger | null): string | null => {
     }
   }
   if (backup !== null) {
-    if (backup !== root) removeStaleEnvTemps(backup);
+    const leftTemps = backup !== root ? removeStaleEnvTemps(backup) : [];
     process.stderr.write(movedProfileRecovery(backup, dest));
+    if (leftTemps.length > 0) {
+      process.stderr.write(
+        `  Also remove ${leftTemps.join(", ")}: it may contain OPENLLM_API_KEY.\n`,
+      );
+    }
   }
   return backup;
 };
@@ -615,13 +620,25 @@ const restoreEnvEntry = (envPath: string, saved: TEnvRestore): boolean => {
   let tmp: string | null = null;
   try {
     if (saved.kind === "symlink") {
+      // Build the link under a temp name, then rename it over `.env`: the
+      // redacted file stays until the link is in place, and a failure
+      // prints the target so the user can recreate the link.
+      const linkTmp = `${envPath}.openllm-${process.pid}.lnk`;
       try {
-        rmSync(envPath, { force: true });
-      } catch {
-        // nothing occupying the path, or the occupant cannot be removed —
-        // the link create below reports its own failure
+        rmSync(linkTmp, { force: true });
+        symlinkSync(saved.target, linkTmp);
+        renameSync(linkTmp, envPath);
+      } catch (error) {
+        try {
+          rmSync(linkTmp, { force: true });
+        } catch {
+          // a leftover link holds no secret
+        }
+        process.stderr.write(
+          `The original ${envPath} was a symbolic link to ${saved.target}. Recreate that link.\n`,
+        );
+        throw error;
       }
-      symlinkSync(saved.target, envPath);
       const link = lstatSync(envPath);
       return link.isSymbolicLink() && readlinkSync(envPath) === saved.target;
     }
@@ -728,7 +745,7 @@ const redactProfileBackupKey = (backupDir: string): TRedactResult => {
       // A leftover temp may hold OPENLLM_API_KEY; finishing would keep it in
       // the backup. Undo the move and name it.
       process.stderr.write(
-        `Could not check or remove ${leftTemps.join(", ")}. A leftover .env.openllm-<pid>.tmp may contain OPENLLM_API_KEY. Remove it and retry.\n`,
+        `Could not check or remove ${leftTemps.map((path) => basename(path)).join(", ")} in the Hermes profile folder. It may contain OPENLLM_API_KEY. Remove it and retry.\n`,
       );
       return fail();
     }
