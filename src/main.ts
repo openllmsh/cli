@@ -160,7 +160,10 @@ const runSelfTest = async (): Promise<void> => {
 
 const run = async (): Promise<void> => {
   if (first === "doctor" && argv.includes("--clear-legacy-locks")) {
-    const [{ runLegacyLockDoctor, stateLockParents }, env] = await Promise.all([
+    const [
+      { runLegacyLockDoctor, stateLockParents, clientRestoreLockDomains },
+      env,
+    ] = await Promise.all([
       import("../../tunnel/session/dir-lock-doctor"),
       import("./env"),
     ]);
@@ -168,7 +171,7 @@ const run = async (): Promise<void> => {
       await runLegacyLockDoctor(
         argv.slice(1),
         [env.sharedEnvFile()],
-        [],
+        clientRestoreLockDomains(env.userHome()),
         stateLockParents(env.openllmDir()),
       ),
     );

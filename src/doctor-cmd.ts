@@ -1162,14 +1162,17 @@ const copyToClipboard = (text: string): boolean => {
 
 export const runDoctor = async (args: readonly string[]): Promise<number> => {
   if (args.includes("--clear-legacy-locks")) {
-    const [{ runLegacyLockDoctor, stateLockParents }, env] = await Promise.all([
+    const [
+      { runLegacyLockDoctor, stateLockParents, clientRestoreLockDomains },
+      env,
+    ] = await Promise.all([
       import("../../tunnel/session/dir-lock-doctor"),
       import("./env"),
     ]);
     return runLegacyLockDoctor(
       args,
       [env.sharedEnvFile()],
-      [],
+      clientRestoreLockDomains(env.userHome()),
       stateLockParents(env.openllmDir()),
     );
   }
