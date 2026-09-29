@@ -32,12 +32,7 @@ import {
   readHermesLedger,
   withHermesUninstallLock,
 } from "./clients/hermes";
-import {
-  hermesLedgerPath,
-  hermesProfileDir,
-  hermesProfileLockExists,
-  hermesRoot,
-} from "./clients/hermes-home";
+import { hermesProfileDir, hermesRoot } from "./clients/hermes-home";
 import { uninstallRaycast } from "./clients/raycast";
 import { removeCompletion } from "./completion";
 import { findDaemonBinary, runManagedDaemonCommand } from "./daemon-delegation";
@@ -189,10 +184,7 @@ export const runUninstall = async (
     );
     return 1;
   }
-  // An install can hold the lock before it writes its first ledger.
-  if (!existsSync(hermesLedgerPath()) && !hermesProfileLockExists()) {
-    return runUninstallLocked(args, () => 0, false);
-  }
+  // Hold the lock before checking the ledger and through state removal.
   const code = await withHermesUninstallLock(
     (uninstall): Promise<number> => runUninstallLocked(args, uninstall),
   );
@@ -210,7 +202,6 @@ export const runUninstall = async (
 const runUninstallLocked = async (
   args: readonly string[],
   uninstallHermes: () => number,
-  hasHermesLedger = true,
 ): Promise<number> => {
   const yes = args.includes("--yes") || args.includes("-y");
 
@@ -218,10 +209,11 @@ const runUninstallLocked = async (
   //    directory, an unreadable file) makes the unwind fail mid-run — AFTER
   //    daemon teardown already removed state. Refuse before ANY destructive
   //    step and name the blocking path.
-  const hermesBlocker = hasHermesLedger ? hermesUninstallBlocker() : null;
+  const hermesBlocker = hermesUninstallBlocker();
   if (hermesBlocker !== null) {
+    if (hermesBlocker.kind === "pending-backup") return 1;
     process.stderr.write(
-      `Cannot uninstall safely — the Hermes profile entry ${hermesBlocker} cannot be inspected, so OPENLLM_API_KEY could not be verifiably removed from it.\n` +
+      `Cannot uninstall safely — the Hermes profile entry ${hermesBlocker.path} cannot be inspected, so OPENLLM_API_KEY could not be verifiably removed from it.\n` +
         "  Resolve the Hermes profile error before you retry. Nothing was changed.\n",
     );
     return 1;

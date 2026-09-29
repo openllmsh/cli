@@ -124,6 +124,10 @@ const isProfileBackupName = (name: string, profileName: string): boolean => {
   return name.startsWith(prefix) && /^[0-9]/.test(name.slice(prefix.length));
 };
 
+const movedProfileRecovery = (backup: string, dest: string): string =>
+  `The Hermes profile has an unfinished uninstall at ${backup}.\n` +
+  `  The backup at ${backup} is the original profile. The live path is ${dest}. Choose which profile to keep. Keep both trees until you decide. Do not merge them. Do not delete .env. Move the other tree to a separate safe path before you restore the chosen profile to ${dest} and retry.\n`;
+
 const pendingProfileBackup = (ledger: THermesLedger | null): string | null => {
   if (ledger === null || !ledger.createdProfile) return null;
   const root = join(hermesRoot(), "backups");
@@ -178,10 +182,13 @@ const pendingProfileBackup = (ledger: THermesLedger | null): string | null => {
   }
   if (backup !== null) {
     process.stderr.write(
-      `The Hermes profile has an unfinished uninstall at ${backup}.\n` +
-        (existsSync(dest)
-          ? `  Keep the live profile at ${dest}. Do not move or merge ${backup} into it. Save any files you need from the backup. Remove the backup before you retry.\n`
-          : `  Repair its .env entry. Move the preserved profile back to ${dest} before you retry. Do not merge it into another profile.\n`),
+      ledger.pendingBackupState === "moved" ||
+        ledger.pendingBackupState === "moving"
+        ? movedProfileRecovery(backup, dest)
+        : `The Hermes profile has an unfinished uninstall at ${backup}.\n` +
+            (existsSync(dest)
+              ? `  Keep the live profile at ${dest}. Do not move or merge ${backup} into it. Save any files you need from the backup. Remove the backup before you retry.\n`
+              : `  Repair its .env entry. Move the preserved profile back to ${dest} before you retry. Do not merge it into another profile.\n`),
     );
   }
   return backup;
@@ -956,8 +963,10 @@ const uninstallHermesLocked = (): number => {
         // tree parked and name where it sits.
         residuePath = join(backup, ".env");
         process.stderr.write(
-          `Could not strip OPENLLM_API_KEY from ${join(backup, ".env")}, and the original .env could not be restored — the profile stays preserved at ${backup}.\n` +
-            "  Repair that entry. Move the preserved profile back before you retry. Do not merge it into another profile.\n",
+          existsSync(dest)
+            ? movedProfileRecovery(backup, dest)
+            : `Could not strip OPENLLM_API_KEY from ${join(backup, ".env")}, and the original .env could not be restored — the profile stays preserved at ${backup}.\n` +
+                "  Repair that entry. Move the preserved profile back before you retry. Do not merge it into another profile.\n",
         );
         return 1;
       }
@@ -969,10 +978,7 @@ const uninstallHermesLocked = (): number => {
         moveProfileDir(backup, dest);
       } catch {
         residuePath = join(backup, ".env");
-        process.stderr.write(
-          `Could not strip OPENLLM_API_KEY from ${join(backup, ".env")}, and the profile could not be moved back — the profile stays preserved at ${backup}.\n` +
-            "  Repair that entry. Move the preserved profile back before you retry. Do not merge it into another profile.\n",
-        );
+        process.stderr.write(movedProfileRecovery(backup, dest));
         return 1;
       }
       dropBackupsShell();
@@ -1004,29 +1010,34 @@ const uninstallHermesLocked = (): number => {
 };
 
 /**
- * Return the .env path that blocks uninstall, or null.
+ * Return the blocker type and path, or null.
  * Clear a failed copy before checking the live profile.
  * Reject entries that cannot be read before daemon teardown.
  * Later write failures restore the profile in uninstallHermes.
  */
-export const hermesUninstallBlocker = (): string | null => {
+export const hermesUninstallBlocker = (): {
+  readonly kind: "pending-backup" | "unreadable-env";
+  readonly path: string;
+} | null => {
   const ledger = readHermesLedger();
   const pending = pendingProfileBackup(ledger);
-  if (pending !== null) return join(pending, ".env");
+  if (pending !== null)
+    return { kind: "pending-backup", path: join(pending, ".env") };
   if (ledger === null || !ledger.createdProfile) return null;
   const dest = hermesProfileDir(ledger.profileName);
   if (!existsSync(dest)) return null;
   const envPath = join(dest, ".env");
+  const blocker = { kind: "unreadable-env", path: envPath } as const;
   try {
     const stat = lstatSync(envPath);
-    if (!stat.isFile() && !stat.isSymbolicLink()) return envPath;
+    if (!stat.isFile() && !stat.isSymbolicLink()) return blocker;
   } catch (error) {
-    return (error as NodeJS.ErrnoException).code === "ENOENT" ? null : envPath;
+    return (error as NodeJS.ErrnoException).code === "ENOENT" ? null : blocker;
   }
   try {
     readFileSync(envPath, "utf-8");
   } catch {
-    return envPath;
+    return blocker;
   }
   return null;
 };

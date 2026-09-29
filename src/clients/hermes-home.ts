@@ -7,7 +7,10 @@
 
 import { existsSync, mkdirSync, readFileSync, realpathSync } from "node:fs";
 import { dirname, join } from "node:path";
-import type { TDirLockRelease } from "../../../tunnel/session/dir-lock";
+import type {
+  TDirLockOptions,
+  TDirLockRelease,
+} from "../../../tunnel/session/dir-lock";
 import {
   acquireDirLock,
   acquireDirLockSync,
@@ -26,15 +29,20 @@ export const hermesRoot = (): string =>
 const profileLockPath = (): string =>
   join(openllmDir(), ".hermes-profile.lock.d");
 
-export const hermesProfileLockExists = (): boolean =>
-  existsSync(profileLockPath());
-
 const prepareProfileLock = (): string => {
   mkdirSync(openllmDir(), { recursive: true, mode: 0o700 });
   return profileLockPath();
 };
 
-const profileLockOptions = { waitMs: 5_000, reclaimMs: 30_000, pollMs: 50 };
+const profileLockOptions: TDirLockOptions = {
+  waitMs: 5_000,
+  reclaimMs: 30_000,
+  pollMs: 50,
+  onStep: (step): void => {
+    // Product uninstall can remove the empty state root after lock release.
+    if (step === "before-mkdir") prepareProfileLock();
+  },
+};
 
 const requireProfileLock = (
   release: TDirLockRelease | null,
