@@ -512,8 +512,12 @@ const removeStaleEnvTemps = (root: string): void => {
     return;
   }
   for (const entry of entries) {
-    if (entry.isFile() && ENV_TMP_NAME.test(entry.name)) {
-      rmSync(join(root, entry.name), { force: true });
+    if (!ENV_TMP_NAME.test(entry.name)) continue;
+    try {
+      const path = join(root, entry.name);
+      if (lstatSync(path).isFile()) rmSync(path, { force: true });
+    } catch {
+      // Keep the entry if it cannot be inspected or removed.
     }
   }
 };
