@@ -656,6 +656,432 @@ if [ -n "$PRERELEASE_TAG" ]; then
   fi
 fi
 
+# Use a separate lock for binary replacement. Keep config lock state unchanged.
+# >>> openllm-binary-lock/v1 >>>
+BINARY_LOCK_STALE_SECS="${OPENLLM_BINARY_LOCK_STALE_SECS:-600}"
+BINARY_LOCK_WAIT_SECS="${OPENLLM_BINARY_LOCK_WAIT_SECS:-10}"
+BINARY_LOCK_ORPHAN_SECS="${OPENLLM_BINARY_LOCK_ORPHAN_SECS:-30}"
+[[ "$BINARY_LOCK_STALE_SECS" =~ ^[0-9]+$ ]] || BINARY_LOCK_STALE_SECS=0
+BINARY_LOCK_STALE_SECS=$((10#$BINARY_LOCK_STALE_SECS))
+[ "$BINARY_LOCK_STALE_SECS" -gt 0 ] || BINARY_LOCK_STALE_SECS=600
+[[ "$BINARY_LOCK_WAIT_SECS" =~ ^[0-9]+$ ]] || BINARY_LOCK_WAIT_SECS=0
+BINARY_LOCK_WAIT_SECS=$((10#$BINARY_LOCK_WAIT_SECS))
+[ "$BINARY_LOCK_WAIT_SECS" -gt 0 ] || BINARY_LOCK_WAIT_SECS=10
+[[ "$BINARY_LOCK_ORPHAN_SECS" =~ ^[0-9]+$ ]] || BINARY_LOCK_ORPHAN_SECS=0
+BINARY_LOCK_ORPHAN_SECS=$((10#$BINARY_LOCK_ORPHAN_SECS))
+[ "$BINARY_LOCK_ORPHAN_SECS" -gt 0 ] || BINARY_LOCK_ORPHAN_SECS=30
+BINARY_LOCK_DIR=""
+BINARY_LOCK_NONCE=""
+BINARY_LOCK_QSEQ=0
+BINARY_LOCK_OWNER_STATE="" BINARY_LOCK_OWNER_PID=""
+BINARY_LOCK_OWNER_START="" BINARY_LOCK_OWNER_NONCE=""
+
+binary_lock_pid_alive() {
+  [[ "$1" =~ ^[0-9]+$ ]] || return 1
+  local pid=$((10#$1)) stat state
+  if [ -r "/proc/$pid/stat" ]; then
+    stat="$(cat "/proc/$pid/stat" 2>/dev/null || true)"
+    stat="${stat##*) }"
+    read -r state _ <<< "$stat"
+    [ "$state" = "Z" ] && return 1
+  fi
+  [ "$pid" -gt 0 ] && kill -0 "$pid" 2>/dev/null
+}
+
+binary_lock_legacy_start_identity() {
+  local out
+  out="$(LC_ALL=C TZ=UTC ps -o lstart= -p "$1" 2>/dev/null)" || out=""
+  out="$(printf '%s' "$out" | tr -s '[:space:]' ' ')"
+  out="${out# }"
+  out="${out% }"
+  printf '%s' "$out"
+}
+
+binary_lock_is_boot_identity() {
+  local re='^boot:[0-9a-f-]{36}:[0-9]+$'
+  [[ "$1" =~ $re ]]
+}
+
+binary_lock_normalize_identity() {
+  local out
+  out="$(printf '%s' "$1" | tr -s '[:space:]' ' ')"
+  out="${out# }"
+  out="${out% }"
+  printf '%s' "$out"
+}
+
+binary_lock_start_identity() {
+  local pid="$1" boot stat rest ticks
+  if [ "$(uname -s 2>/dev/null)" = "Linux" ]; then
+    boot="$(cat /proc/sys/kernel/random/boot_id 2>/dev/null || true)"
+    boot="$(printf '%s' "$boot" | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]')"
+    local re='^[0-9a-f-]{36}$'
+    [[ "$boot" =~ $re ]] || return 0
+    stat="$(cat "/proc/$pid/stat" 2>/dev/null || true)"
+    [ -n "$stat" ] || return 0
+    rest="${stat##*) }"
+    [ "$rest" = "$stat" ] && rest="${stat:1}"
+    local -a f
+    read -r -a f <<< "$rest"
+    ticks="${f[19]:-}"
+    [[ "$ticks" =~ ^[0-9]+$ && "$ticks" =~ [1-9] ]] || return 0
+    printf 'boot:%s:%s' "$boot" "$((10#$ticks))"
+    return 0
+  fi
+  binary_lock_legacy_start_identity "$pid"
+}
+
+binary_lock_read_owner() {
+  local dir="$1" line rest
+  BINARY_LOCK_OWNER_STATE="unmarked"
+  BINARY_LOCK_OWNER_PID="" BINARY_LOCK_OWNER_START="" BINARY_LOCK_OWNER_NONCE=""
+  line="$(cat "$dir/owner" 2>/dev/null || true)"
+  line="${line#"${line%%[![:space:]]*}"}"
+  line="${line%"${line##*[![:space:]]}"}"
+  case "$line" in
+    kind=openllm-binary-lock/v1\ pid=*\ start=*\ nonce=*)
+      rest="${line#kind=openllm-binary-lock/v1 pid=}"
+      BINARY_LOCK_OWNER_PID="${rest%% *}"
+      BINARY_LOCK_OWNER_START="${rest#* start=}"
+      BINARY_LOCK_OWNER_START="${BINARY_LOCK_OWNER_START% nonce=*}"
+      BINARY_LOCK_OWNER_NONCE="${rest##* nonce=}"
+      if [[ "$BINARY_LOCK_OWNER_PID" =~ ^[0-9]+$ ]] \
+        && [ -n "$BINARY_LOCK_OWNER_START" ] \
+        && [[ "$BINARY_LOCK_OWNER_START" != *$'\n'* \
+          && "$BINARY_LOCK_OWNER_START" != *$'\r'* ]] \
+        && [[ "$BINARY_LOCK_OWNER_NONCE" =~ ^[0-9a-fA-F]+$ ]]; then
+        BINARY_LOCK_OWNER_PID=$((10#$BINARY_LOCK_OWNER_PID))
+        BINARY_LOCK_OWNER_STATE="marked"
+      fi
+      ;;
+  esac
+  if [ "$BINARY_LOCK_OWNER_STATE" != "marked" ]; then
+    BINARY_LOCK_OWNER_PID="" BINARY_LOCK_OWNER_START="" BINARY_LOCK_OWNER_NONCE=""
+    if [[ "$line" =~ (^|[[:space:]])pid=([0-9]+)([[:space:]]|$) ]]; then
+      BINARY_LOCK_OWNER_PID="${BASH_REMATCH[2]}"
+    elif [[ "$line" =~ ^([0-9]+)([[:space:]]|$) ]]; then
+      BINARY_LOCK_OWNER_PID="${BASH_REMATCH[1]}"
+    fi
+    if [ -n "$BINARY_LOCK_OWNER_PID" ]; then
+      BINARY_LOCK_OWNER_PID=$((10#$BINARY_LOCK_OWNER_PID))
+      [ "$BINARY_LOCK_OWNER_PID" -gt 0 ] || BINARY_LOCK_OWNER_PID=""
+    fi
+  fi
+}
+
+binary_lock_dir_age_secs() {
+  local mtime="${2:-}" now
+  [[ "$mtime" =~ ^[0-9]+$ ]] || \
+    mtime="$(stat -c %Y "$1" 2>/dev/null || stat -f %m "$1" 2>/dev/null || true)"
+  now="$(date +%s 2>/dev/null || true)"
+  if [[ "$mtime" =~ ^[0-9]+$ && "$now" =~ ^[0-9]+$ ]]; then
+    printf '%s\n' $((10#$now - 10#$mtime))
+  else
+    printf '%s\n' -1
+  fi
+}
+
+binary_lock_path_ino() {
+  stat -c %d:%i "$1" 2>/dev/null || stat -f %d:%i "$1" 2>/dev/null || true
+}
+
+binary_lock_is_stale_dir() {
+  local dir="$1" as_of="${2:-}" current bridged recorded age
+  binary_lock_read_owner "$dir"
+  age="$(binary_lock_dir_age_secs "$dir" "$as_of")"
+  if [ "$BINARY_LOCK_OWNER_STATE" = "marked" ]; then
+    binary_lock_pid_alive "$BINARY_LOCK_OWNER_PID" || return 0
+    recorded="$(binary_lock_normalize_identity "$BINARY_LOCK_OWNER_START")"
+    if [ "$recorded" = "-" ]; then
+      return 1
+    fi
+    current="$(binary_lock_start_identity "$BINARY_LOCK_OWNER_PID")"
+    if [ -z "$current" ]; then
+      if binary_lock_pid_alive "$BINARY_LOCK_OWNER_PID"; then return 1; else return 0; fi
+    fi
+    [ "$current" = "$recorded" ] && return 1
+    binary_lock_is_boot_identity "$current" || return 0
+    binary_lock_is_boot_identity "$recorded" && return 0
+    bridged="$(binary_lock_legacy_start_identity "$BINARY_LOCK_OWNER_PID")"
+    if [ -z "$bridged" ]; then
+      if binary_lock_pid_alive "$BINARY_LOCK_OWNER_PID"; then return 1; else return 0; fi
+    fi
+    if [ "$bridged" = "$recorded" ]; then return 1; else return 0; fi
+  fi
+  { [ "$age" -ge 0 ] && [ "$age" -ge "$BINARY_LOCK_ORPHAN_SECS" ]; } || return 1
+  if [[ "$BINARY_LOCK_OWNER_PID" =~ ^[0-9]+$ ]] && binary_lock_pid_alive "$BINARY_LOCK_OWNER_PID"; then
+    return 1
+  fi
+  return 0
+}
+
+binary_lock_steal() {
+  local lockdir="$1" stem="$2" marker q ino_before ino_after q_ino mtime before_owner after_owner
+  ino_before="$(binary_lock_path_ino "$lockdir")"
+  mtime="$(stat -c %Y "$lockdir" 2>/dev/null || stat -f %m "$lockdir" 2>/dev/null || true)"
+  [ -n "$ino_before" ] || return 0  # vanished — the outer acquire retries
+  before_owner="$(cat "$lockdir/owner" 2>/dev/null || true)"
+  marker="$lockdir/steal.$$.$BINARY_LOCK_NONCE"
+  [ "$(binary_lock_path_ino "$lockdir")" = "$ino_before" ] || return 0
+  if ! (set -C; : > "$marker") 2>/dev/null; then
+    if [ -f "$lockdir" ]; then
+      BINARY_LOCK_QSEQ=$((BINARY_LOCK_QSEQ + 1))
+      mv "$lockdir" "$stem.stale.$$.$BINARY_LOCK_NONCE.$BINARY_LOCK_QSEQ" \
+        2>/dev/null || true
+    fi
+    return 0
+  fi
+  ino_after="$(binary_lock_path_ino "$lockdir")"
+  after_owner="$(cat "$lockdir/owner" 2>/dev/null || true)"
+  if [ -n "$ino_after" ] && [ "$ino_after" = "$ino_before" ] \
+    && [ "$after_owner" = "$before_owner" ] \
+    && binary_lock_is_stale_dir "$lockdir" "$mtime"; then
+    BINARY_LOCK_QSEQ=$((BINARY_LOCK_QSEQ + 1))
+    q="$stem.stale.$$.$BINARY_LOCK_NONCE.$BINARY_LOCK_QSEQ"
+    if mv "$lockdir" "$q" 2>/dev/null; then
+      q_ino="$(binary_lock_path_ino "$q")"
+      if [ "$q_ino" != "$ino_before" ] \
+        || { [ -e "$q/owner" ] \
+          && [ "$(cat "$q/owner" 2>/dev/null || true)" != "$before_owner" ]; }; then
+        binary_lock_restore_dir "$q" "$lockdir"
+        rm -f "$marker" "$q/steal.$$.$BINARY_LOCK_NONCE" 2>/dev/null || true
+        return 0  # Retry acquisition. This steal did not claim the lock.
+      fi
+      return 0  # committed — the marker (and dir) are parked with it
+    fi
+  fi
+  rm -f "$marker" 2>/dev/null || true
+  return 0
+}
+
+binary_lock_sweep() {
+  local stem="$1" entry child age ok has_owner
+  for entry in "$stem".stale.* "$stem".rel.*; do
+    [ -d "$entry" ] || continue
+    age="$(binary_lock_dir_age_secs "$entry")"
+    { [ "$age" -ge 0 ] && [ "$age" -ge "$BINARY_LOCK_STALE_SECS" ]; } || continue
+    ok=1
+    has_owner=0
+    for child in "$entry"/*; do
+      [ -e "$child" ] || continue
+      case "${child##*/}" in
+        owner) has_owner=1 ;;
+        owner.tmp.*|steal.*) ;;
+        *) ok=0 ;;
+      esac
+    done
+    [ "$ok" = 1 ] || continue
+    if [ "$has_owner" = 1 ]; then
+      binary_lock_read_owner "$entry"
+      [ "$BINARY_LOCK_OWNER_STATE" = "marked" ] || continue
+    fi
+    for child in "$entry"/*; do rm -f "$child" 2>/dev/null || true; done
+    rmdir "$entry" 2>/dev/null || true
+  done
+  return 0
+}
+
+binary_lock_legacy_resolve() {
+  local q="$1" legacy="$2" moved rest age
+  moved=""
+  read -r moved rest < "$q" 2>/dev/null || moved=""
+  if [[ "$moved" =~ ^[0-9]+$ ]] && binary_lock_pid_alive "$moved"; then
+    age="$(binary_lock_dir_age_secs "$q")"
+    if [ "$age" -lt 0 ] || [ "$age" -lt "$BINARY_LOCK_ORPHAN_SECS" ]; then
+      if ln "$q" "$legacy" 2>/dev/null; then
+        rm -f "$q" 2>/dev/null || true
+      elif (set -C; : > "$legacy") 2>/dev/null; then
+        local l_sz q_sz
+        cat "$q" >> "$legacy" 2>/dev/null || true
+        l_sz="$(stat -c %s "$legacy" 2>/dev/null || stat -f %z "$legacy" 2>/dev/null || true)"
+        q_sz="$(stat -c %s "$q" 2>/dev/null || stat -f %z "$q" 2>/dev/null || true)"
+        if [ -n "$q_sz" ] && [ "$q_sz" = "$l_sz" ] \
+          && [ "$(cat "$legacy" 2>/dev/null)" = "$(cat "$q" 2>/dev/null)" ]; then
+          rm -f "$q" 2>/dev/null || true
+        else
+          rm -f "$legacy" 2>/dev/null || true
+        fi
+      elif [ -e "$legacy" ] || [ -L "$legacy" ]; then
+        rm -f "$q" 2>/dev/null || true
+      fi
+      return 0
+    fi
+  fi
+  rm -f "$q" 2>/dev/null || true
+  return 1
+}
+
+binary_lock_legacy_held() {
+  local legacy="$1" lpid rest q attempt=0 age
+  while [ -f "$legacy" ]; do
+    attempt=$((attempt + 1))
+    [ "$attempt" -gt 4 ] && return 0
+    lpid=""
+    read -r lpid rest < "$legacy" 2>/dev/null || lpid=""
+    if [[ "$lpid" =~ ^[0-9]+$ ]] && ! binary_lock_pid_alive "$lpid"; then
+      : # a proven-dead pid is reclaimed regardless of the lock's age
+    else
+      age="$(binary_lock_dir_age_secs "$legacy")"
+      if [ "$age" -lt 0 ] || [ "$age" -lt "$BINARY_LOCK_ORPHAN_SECS" ]; then
+        return 0
+      fi
+    fi
+    BINARY_LOCK_QSEQ=$((BINARY_LOCK_QSEQ + 1))
+    q="$legacy.stale.$$.$BINARY_LOCK_NONCE.$BINARY_LOCK_QSEQ"
+    mv "$legacy" "$q" 2>/dev/null || continue
+    binary_lock_legacy_resolve "$q" "$legacy" && return 0
+  done
+  return 1
+}
+
+binary_lock_publish_owner() {
+  local lockdir="$1" want_ino="${2:-}" start stolen same_gen marker now_ino
+  for marker in "$lockdir"/steal.*; do
+    [ -e "$marker" ] && return 1
+  done
+  start="$(binary_lock_start_identity "$$")"
+  if [ -z "$start" ]; then
+    if [ -n "$want_ino" ] \
+      && [ "$(binary_lock_path_ino "$lockdir")" = "$want_ino" ]; then
+      rmdir "$lockdir" 2>/dev/null || true
+    fi
+    return 1
+  fi
+  printf 'kind=openllm-binary-lock/v1 pid=%s start=%s nonce=%s\n' \
+    "$$" "$start" "$BINARY_LOCK_NONCE" > "$lockdir/owner.tmp.$$" 2>/dev/null \
+    || return 2
+  if ln "$lockdir/owner.tmp.$$" "$lockdir/owner" 2>/dev/null \
+    || (set -C; cat "$lockdir/owner.tmp.$$" > "$lockdir/owner") 2>/dev/null; then
+    rm -f "$lockdir/owner.tmp.$$" 2>/dev/null
+    stolen=1
+    same_gen=0
+    if [ -d "$lockdir" ]; then
+      now_ino="$(binary_lock_path_ino "$lockdir")"
+      if [ -z "$want_ino" ] \
+        || { [ -n "$now_ino" ] && [ "$now_ino" = "$want_ino" ]; }; then
+        same_gen=1
+        stolen=0
+        for marker in "$lockdir"/steal.*; do
+          if [ -e "$marker" ]; then stolen=1; break; fi
+        done
+      fi
+    fi
+    if [ "$stolen" = 1 ]; then
+      binary_lock_read_owner "$lockdir"
+      if [ "$BINARY_LOCK_OWNER_STATE" = "marked" ] \
+        && [ "$BINARY_LOCK_OWNER_NONCE" = "$BINARY_LOCK_NONCE" ]; then
+        rm -f "$lockdir/owner" 2>/dev/null
+      fi
+      [ "$same_gen" = 1 ] && rmdir "$lockdir" 2>/dev/null || true
+      return 1
+    fi
+    binary_lock_read_owner "$lockdir"
+    [ "$BINARY_LOCK_OWNER_STATE" = "marked" ] \
+      && [ "$BINARY_LOCK_OWNER_NONCE" = "$BINARY_LOCK_NONCE" ]
+    return
+  fi
+  rm -f "$lockdir/owner.tmp.$$" 2>/dev/null
+  return 1
+}
+
+binary_lock_acquire() {
+  local envfile="$1" stem lockdir deadline attempts pub_rc ino
+  stem="$envfile.lock"
+  lockdir="$stem.d"
+  deadline=$((SECONDS + BINARY_LOCK_WAIT_SECS))
+  BINARY_LOCK_NONCE="$(printf '%x%x%x' "$$" "$RANDOM" "$(date +%s 2>/dev/null || echo 0)")"
+  attempts=0
+  binary_lock_sweep "$stem"
+  while [ "$SECONDS" -lt "$deadline" ]; do
+    if ! binary_lock_legacy_held "$stem"; then
+      if mkdir "$lockdir" 2>/dev/null; then
+        ino="$(binary_lock_path_ino "$lockdir")"
+        if [ -z "$ino" ]; then
+          rmdir "$lockdir" 2>/dev/null || true
+          continue
+        fi
+        binary_lock_publish_owner "$lockdir" "$ino"
+        pub_rc=$?
+        if [ "$pub_rc" = 0 ]; then
+          BINARY_LOCK_DIR="$lockdir"
+          return 0
+        elif [ "$pub_rc" = 2 ]; then
+          if [ -n "$ino" ] && [ "$(binary_lock_path_ino "$lockdir")" = "$ino" ]; then
+            rm -f "$lockdir/owner.tmp.$$" 2>/dev/null
+            rmdir "$lockdir" 2>/dev/null || true
+          fi
+          return 1
+        fi
+      fi
+      attempts=$((attempts + 1))
+      [ $((attempts % 25)) -eq 0 ] && binary_lock_sweep "$stem"
+      if binary_lock_is_stale_dir "$lockdir"; then
+        binary_lock_steal "$lockdir" "$stem"
+      fi
+    fi
+    sleep 0.01 2>/dev/null || sleep 1
+  done
+  return 1
+}
+
+binary_lock_restore_dir() {
+  local rel="$1" lockdir="$2" child base dst ok=1 l_sz q_sz
+  set --
+  mkdir "$lockdir" 2>/dev/null || return 0
+  for child in "$rel"/*; do
+    [ -f "$child" ] || continue
+    base="${child##*/}"
+    dst="$lockdir/$base"
+    if (set -C; : > "$dst") 2>/dev/null; then
+      cat "$child" >> "$dst" 2>/dev/null || true
+      l_sz="$(stat -c %s "$dst" 2>/dev/null || stat -f %z "$dst" 2>/dev/null || true)"
+      q_sz="$(stat -c %s "$child" 2>/dev/null || stat -f %z "$child" 2>/dev/null || true)"
+      if [ -n "$q_sz" ] && [ "$q_sz" = "$l_sz" ] \
+        && [ "$(cat "$child" 2>/dev/null)" = "$(cat "$dst" 2>/dev/null)" ]; then
+        set -- "$@" "$base"
+        continue
+      fi
+      rm -f "$dst" 2>/dev/null || true
+    fi
+    ok=0
+    break
+  done
+  if [ "$ok" = 1 ]; then
+    command -v sync >/dev/null 2>&1 && sync 2>/dev/null || true
+  else
+    for base in "$@"; do rm -f "$lockdir/$base" 2>/dev/null || true; done
+    rmdir "$lockdir" 2>/dev/null || true
+    return 0
+  fi
+  for base in "$@"; do rm -f "$rel/$base" 2>/dev/null || true; done
+  rmdir "$rel" 2>/dev/null || true
+  return 0
+}
+
+binary_lock_release() {
+  local lockdir="${BINARY_LOCK_DIR:-}" stem rel
+  [ -n "$lockdir" ] || return 0
+  BINARY_LOCK_DIR=""
+  stem="${lockdir%.d}"
+  rel="$stem.rel.$$.$BINARY_LOCK_NONCE"
+  binary_lock_read_owner "$lockdir"
+  if [ "$BINARY_LOCK_OWNER_STATE" = "marked" ] \
+    && [ "$BINARY_LOCK_OWNER_NONCE" = "$BINARY_LOCK_NONCE" ]; then
+    if mv "$lockdir" "$rel" 2>/dev/null; then
+      binary_lock_read_owner "$rel"
+      if [ "$BINARY_LOCK_OWNER_STATE" = "marked" ] && [ "$BINARY_LOCK_OWNER_NONCE" = "$BINARY_LOCK_NONCE" ]; then
+        local child
+        for child in "$rel"/*; do rm -f "$child" 2>/dev/null || true; done
+        rmdir "$rel" 2>/dev/null || true
+      else
+        binary_lock_restore_dir "$rel" "$lockdir"
+      fi
+    fi
+  fi
+  return 0
+}
+# <<< openllm-binary-lock/v1 <<<
+
 # Keep the caller's traps while the binary transaction owns the install lock.
 install_lock_acquire() {
   local saved_exit
@@ -669,7 +1095,7 @@ install_lock_acquire() {
     # Bash supplies this quoted command. It does not come from a manifest.
     eval "INSTALL_SAVED_EXIT=$saved_exit"
   fi
-  env_lock_acquire "$OPENLLM_DIR/install" \
+  binary_lock_acquire "$OPENLLM_DIR/install" \
     || die "could not acquire install lock: $OPENLLM_DIR/install.lock.d"
   trap 'install_lock_exit $?' EXIT
   trap 'exit 130' INT
@@ -680,7 +1106,7 @@ install_lock_exit() {
   local status="$1"
   trap - EXIT
   if [ -n "$INSTALL_ROLLBACK" ]; then "$INSTALL_ROLLBACK"; fi
-  env_lock_release
+  binary_lock_release
   # Supply the original exit status to the caller's saved EXIT command.
   (exit "$status") && :
   eval "$INSTALL_SAVED_EXIT"
@@ -688,15 +1114,13 @@ install_lock_exit() {
 }
 
 install_lock_release() {
-  env_lock_release
+  binary_lock_release
   trap - EXIT INT TERM
   eval "$INSTALL_SAVED_TRAPS"
 }
 
-# Call this after the shared lock functions are defined.
-install_cli_binary() {
-  mkdir -p "$BIN_DIR"
-  install_lock_acquire
+mkdir -p "$BIN_DIR"
+install_lock_acquire
 
 CLI_VERSION=""
 PRE_PUBLISHED=""
@@ -877,7 +1301,6 @@ else
 fi
 
 install_lock_release
-}
 
 # Record the gateway origin (and a key, when supplied) in the SHARED config file
 # the daemon also boots from. Match its exclusive .lock + atomic rename protocol,
@@ -1568,8 +1991,6 @@ env_lock_release() {
   return 0
 }
 # <<< openllm-env-lock/v1 <<<
-
-install_cli_binary
 
 # The env write runs in a subshell so the lock traps and private umask stay
 # scoped — and every fallible step is guarded explicitly (`|| die`): a
