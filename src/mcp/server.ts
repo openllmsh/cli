@@ -17,6 +17,11 @@ import {
   isClaudeContextGroupTool,
 } from "./claude-context";
 import {
+  handleLocalAuthTool,
+  isLocalAuthTool,
+  localAuthToolDefs,
+} from "./local-auth";
+import {
   MODELS_TOOL_NAME,
   prioritizeSubscriptionModels,
 } from "./openllm/model-priority";
@@ -57,7 +62,9 @@ export const createMcpServer = ({
     gatewayApiKey: config.apiKey,
   };
   const tools = [
-    ...(groups.includes("openllm") ? openllmToolDefs : []),
+    ...(groups.includes("openllm")
+      ? [...openllmToolDefs, ...localAuthToolDefs]
+      : []),
     ...(groups.includes("openllm-context") ? claudeContextGroupToolDefs : []),
     ...(groups.includes("openllm-memory") ? supermemoryToolDefs : []),
   ];
@@ -72,6 +79,7 @@ export const createMcpServer = ({
       name,
       {
         description: tool.description,
+        ...("annotations" in tool ? { annotations: tool.annotations } : {}),
         inputSchema: fromJsonSchema<Record<string, unknown>>(inputSchema),
       },
       async (args): Promise<TToolResult> => {
@@ -84,6 +92,8 @@ export const createMcpServer = ({
         if (groups.includes("openllm-memory") && isSupermemoryTool(name)) {
           return handleSupermemoryTool(name, args, supermemoryConfig);
         }
+        if (groups.includes("openllm") && isLocalAuthTool(name))
+          return handleLocalAuthTool(name, args);
         if (groups.includes("openllm") && isMcpListedTool(name)) {
           if (name === TRANSCRIPTION_TOOL_NAME)
             return transcribeAudio(args, config);

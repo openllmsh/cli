@@ -11,6 +11,8 @@
  * too. The generators also escape defensively, but keep the source clean.
  */
 
+import { AUTH_COMMANDS } from "./generated/local-auth";
+
 export type TCommand = {
   readonly name: string;
   readonly args?: string;
@@ -38,6 +40,11 @@ export const EXEC_VERBS: Record<TExecGroup, readonly string[]> = {
 export type TFlag = { readonly name: string; readonly description: string };
 
 export const COMMANDS = [
+  {
+    name: "auth",
+    args: `<${AUTH_COMMANDS.map((item) => item.name).join("|")}>`,
+    description: "Manage provider authentication on this machine",
+  },
   {
     name: "claude",
     args: "[...args]",
@@ -226,6 +233,7 @@ export type TAutoUpdateAction = (typeof AUTO_UPDATE_ACTIONS)[number];
 export const COMMAND_ARGS: Readonly<
   Partial<Record<TCommandName, readonly string[]>>
 > = {
+  auth: AUTH_COMMANDS.map((item) => item.name),
   completion: [...COMPLETION_SHELLS, "install"],
   "auto-update": [...AUTO_UPDATE_ACTIONS],
   mcp: ["--only", ...MCP_ONLY_GROUPS],

@@ -9,8 +9,8 @@
 >     have their config written, and Raycast (the one always-on client) gets an
 >     explicit, reversible in-place apply;
 >  2. serves ONE MCP server exposing the MCP-relevant subset of the native
->     gateway API (inference + read-only ops; §MCP) plus the openllm-context
->     and openllm-memory tool groups.
+>     gateway API (inference + read-only ops; §MCP), local daemon auth commands,
+>     and the openllm-context and openllm-memory tool groups.
 >
 > Installed by [`packages/cli/install.sh`](install.sh) (or by the daemon's
 > installer, which installs both binaries), self-updating against the gateway's
@@ -91,12 +91,35 @@ packages/cli/
 | `openllm self-update` | converge to the gateway's pinned release |
 | `openllm sessions [list\|attach\|kill]` | list, attach to, or kill durable local sessions (`attach` requires an id) |
 | `openllm status` | mirror of `openllmd status` — delegates to the managed daemon binary |
+| `openllm auth <providers\|status\|usage\|refresh\|login\|submit-code\|cancel\|logout> …` | local provider auth, delegated to the running daemon through `openllmd`; `--json` for agents, runtime provider/method discovery |
 | `openllm version` | print this CLI version only (`openllm vX.Y.Z`); `-v`/`--version` are the same. Combined daemon diagnostics stay on `status`/`doctor` |
 
 Config: `OPENLLM_CLOUD_ORIGIN` / `OPENLLM_API_KEY` env (the same contract the
 MCP mapping + hooks carry), falling back to the SHARED `~/.openllm/.env` (the
 same file the daemon boots from — one pairing covers every tool), falling back
 to the compile-time cloud-origin bake.
+
+### Local provider authentication
+
+`openllm auth` mirrors `openllmd auth`; the running daemon, not the short-lived
+CLI subprocess, owns login state and provider processes. The same command
+contract supplies machine-readable CLI arguments and local MCP tools. Provider
+names and supported login methods are discovered from the live daemon rather
+than duplicated in MCP. `--method browser|device` selects a supported method
+for this invocation; it does not change the dashboard's device designation.
+
+The adapter uses the daemon's owner-only local capability, loopback Host
+validation and Origin rejection. Gateway pairing still uses the API key;
+neither provider login nor local control asks for the recovery phrase. Status
+and cached usage are observational; `refresh` is an explicit action. Pending
+login is not connected. Flow inspection/code submission/cancellation preserve
+flow identity, and single-use code input travels through stdin, not argv.
+
+Local auth MCP tools register only in the CLI's stdio server (`openllm` group),
+not the shared cloud tool definitions consumed by browser chat. They invoke the
+same command adapter and never reinterpret local control as a cloud API call.
+The public `/llms.txt` guide documents this onboarding path and points agents
+to runtime discovery rather than maintaining another provider capability table.
 
 ### Automatic context hooks
 
@@ -212,6 +235,9 @@ COMMITTED artifacts into `src/sdk/generated/`:
   (method, path, params, body-presence). Deterministically sorted.
 - `subscription-providers.ts` — the protocol-owned subscription provider slugs
   used by MCP discovery, generated without adding a runtime workspace dependency.
+- `src/generated/local-auth.ts` — the dependency-free protocol auth command
+  contract, copied by the same generator for CLI/MCP parsing and help. Both the
+  working-tree drift test and the push-time committed-tree guard cover it.
 
 `src/mcp/openllm/tools.ts` derives one tool def per row and exports two
 surfaces: `openllmToolDefsAll` (**every** operation — the browser chat and the
