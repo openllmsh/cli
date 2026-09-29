@@ -517,22 +517,29 @@ const ENV_TMP_NAME = /^\.env\.openllm-[0-9]+\.tmp$/;
 // Remove env temp files that an interrupted write of ours left next to the
 // profile's `.env`. Only the profile root is checked (we write nowhere else),
 // only regular files with our exact name, and a listing error changes nothing.
-const removeStaleEnvTemps = (root: string): void => {
+const removeStaleEnvTemps = (root: string): string[] => {
+  // Returns the matching temps that are still present, so a caller that is
+  // about to finish can refuse while a secret-bearing temp remains.
   let entries: Dirent[];
   try {
     entries = readdirSync(root, { withFileTypes: true });
   } catch {
-    return;
+    return [];
   }
+  const left: string[] = [];
   for (const entry of entries) {
     if (!ENV_TMP_NAME.test(entry.name)) continue;
+    const path = join(root, entry.name);
     try {
-      const path = join(root, entry.name);
-      if (lstatSync(path).isFile()) rmSync(path, { force: true });
-    } catch {
-      // Keep the entry if it cannot be inspected or removed.
+      // Only regular files are ours; a directory with this name is left alone.
+      if (!lstatSync(path).isFile()) continue;
+      rmSync(path, { force: true });
+      if (existsSync(path)) left.push(path);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") left.push(path);
     }
   }
+  return left;
 };
 
 /**
@@ -711,7 +718,15 @@ const redactProfileBackupKey = (backupDir: string): TRedactResult => {
     } catch {
       // cannot normalize — the writes below report their own failure
     }
-    removeStaleEnvTemps(backupDir);
+    const leftTemps = removeStaleEnvTemps(backupDir);
+    if (leftTemps.length > 0) {
+      // A leftover temp may hold OPENLLM_API_KEY; finishing would keep it in
+      // the backup. Undo the move and name it.
+      process.stderr.write(
+        `Could not remove ${leftTemps.join(", ")}. It may contain OPENLLM_API_KEY. Remove it and retry.\n`,
+      );
+      return fail();
+    }
     let stat: ReturnType<typeof lstatSync>;
     try {
       stat = lstatSync(envPath);
