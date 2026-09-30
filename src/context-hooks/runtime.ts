@@ -36,6 +36,7 @@ const repository = (cwd: string): string | null => {
       stdout: "pipe",
       stderr: "ignore",
       timeout: 3_000,
+      windowsHide: true,
     });
     return result.exitCode === 0 ? result.stdout.toString().trim() : null;
   };

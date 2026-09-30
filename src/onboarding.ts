@@ -18,6 +18,7 @@ import {
   acquireDirLockSync,
   envDirLockCodec,
 } from "../../tunnel/session/dir-lock";
+import { LegacyLockError } from "../../tunnel/session/dir-lock-control";
 import type {
   TProcessIdentity,
   TProcessStartIdentityReader,
@@ -103,13 +104,23 @@ export const restoreEchoOnSignal = (
 };
 
 const readHiddenLine = (): string | null => {
+  // Windows has no /dev/tty or stty. Do not run a POSIX input helper.
+  if (process.platform === "win32") return null;
   let fd: number | null = null;
   try {
     fd = openSync("/dev/tty", "r+");
-    if (spawnSync("stty", ["-echo"], { stdio: [fd, fd, fd] }).status !== 0)
+    if (
+      spawnSync("stty", ["-echo"], {
+        stdio: [fd, fd, fd],
+        windowsHide: true,
+      }).status !== 0
+    )
       return null;
     const restore = (): void => {
-      spawnSync("stty", ["echo"], { stdio: [fd, fd, fd] });
+      spawnSync("stty", ["echo"], {
+        stdio: [fd, fd, fd],
+        windowsHide: true,
+      });
     };
     const cleanupSignals = restoreEchoOnSignal(restore);
     try {
@@ -616,12 +627,20 @@ const withEnvFileLock = (
   const release = acquireDirLockSync(lockDir, envDirLockCodec, {
     waitMs: waitMs ?? envLockWaitMs(),
     reclaimMs: envLockStaleMs(),
+    ownerlessMs: envLockOrphanMs(),
     pollMs: 10,
     inode: envLockDirIno,
-    startIdentity: envLockStartIdentity,
+    startIdentity:
+      process.platform === "win32"
+        ? envLockStartIdentity
+        : envLockStartIdentityProbe,
+    ownerStartIdentity: envLockStartIdentity,
     legacyStartIdentity: envLockLegacyStartIdentityProbe,
     isStale: envLockDirIsStale,
-    legacyHeld: (): boolean => envLockLegacyHeld(stem, nonce),
+    legacyHeld:
+      process.platform === "win32"
+        ? (): boolean => envLockLegacyHeld(stem, nonce)
+        : undefined,
     onStep: (step, path): void => {
       if (step === "before-publish") envLockPublishGapForTests?.(path);
       if (step === "after-steal-marker") envLockStealGapForTests?.(path);
@@ -697,7 +716,8 @@ const updateEnvFile = (key: string): boolean => {
         }
       }
     });
-  } catch {
+  } catch (error) {
+    if (error instanceof LegacyLockError) throw error;
     return false;
   }
 };

@@ -95,6 +95,12 @@ const guardExit = (
  * `process.exit`.
  */
 export const runUpdate = async (): Promise<number> => {
+  if (process.platform === "win32") {
+    process.stderr.write(
+      "[update] Use the Windows installer to update this installation. The shell installer is POSIX-only.\n",
+    );
+    return 1;
+  }
   const { gatewayUrl } = cliConfig();
   if (!isSecureOrigin(gatewayUrl)) {
     process.stderr.write(
@@ -147,6 +153,7 @@ export const runUpdate = async (): Promise<number> => {
       stdin: "ignore",
       stdout: "pipe",
       stderr: "inherit",
+      windowsHide: true,
       env: process.env,
     },
   );
@@ -154,6 +161,7 @@ export const runUpdate = async (): Promise<number> => {
     stdin: curl.stdout,
     stdout: "inherit",
     stderr: "inherit",
+    windowsHide: true,
     env: {
       ...process.env,
       // Preserve HOME, proxy vars, and OPENLLM_DAEMON_* selectors by inheriting

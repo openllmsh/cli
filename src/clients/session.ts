@@ -1,3 +1,4 @@
+import { v3DirLockCodec } from "../../../tunnel/session/dir-lock-v3";
 /**
  * The IO half of session mode: materialize a launch plan into an ephemeral run
  * dir and exec the real client.
@@ -1111,27 +1112,30 @@ type TRestoreLockOwner = {
   readonly nonce: string | null;
 };
 
-export const restoreDirLockCodec: TDirLockCodec = {
-  kind: RESTORE_LOCK_KIND,
-  ownerFile: RESTORE_LOCK_OWNER_NAME,
-  readOwner: (dir: string): TDirLockOwner | null => {
-    const owner = readRestoreLockOwner(dir);
-    if (owner === null) return null;
-    return {
-      kind: RESTORE_LOCK_KIND,
-      pid: owner.pid,
-      start: owner.start ?? "",
-      nonce: owner.nonce ?? "",
-    };
-  },
-  serializeOwner: (owner: TDirLockOwner): string =>
-    `${JSON.stringify({
-      kind: RESTORE_LOCK_KIND,
-      pid: owner.pid,
-      start: owner.start,
-      nonce: owner.nonce,
-    })}\n`,
-};
+export const restoreDirLockCodec: TDirLockCodec =
+  process.platform !== "win32"
+    ? v3DirLockCodec("r")
+    : {
+        kind: RESTORE_LOCK_KIND,
+        ownerFile: RESTORE_LOCK_OWNER_NAME,
+        readOwner: (dir: string): TDirLockOwner | null => {
+          const owner = readRestoreLockOwner(dir);
+          if (owner === null) return null;
+          return {
+            kind: RESTORE_LOCK_KIND,
+            pid: owner.pid,
+            start: owner.start ?? "",
+            nonce: owner.nonce ?? "",
+          };
+        },
+        serializeOwner: (owner: TDirLockOwner): string =>
+          `${JSON.stringify({
+            kind: RESTORE_LOCK_KIND,
+            pid: owner.pid,
+            start: owner.start,
+            nonce: owner.nonce,
+          })}\n`,
+      };
 
 const readRestoreLockOwner = (lockPath: string): TRestoreLockOwner | null => {
   try {
@@ -1676,9 +1680,9 @@ const acquireRestoreLock = async (
   realDir: string,
 ): Promise<(() => void) | null> => {
   const lockPath = join(realDir, RESTORE_LOCK_NAME);
-  gcRestoreLockQuarantine(realDir);
-  const deadline = Date.now() + restoreLockWaitMs();
-  const remaining = (): number => Math.max(0, deadline - Date.now());
+  if (process.platform === "win32") gcRestoreLockQuarantine(realDir);
+  const deadline = performance.now() + restoreLockWaitMs();
+  const remaining = (): number => Math.max(0, deadline - performance.now());
   const lockOptions: TDirLockOptions = {
     waitMs: restoreLockWaitMs(),
     reclaimMs: restoreOwnerlessReclaimMs(),
@@ -1695,22 +1699,15 @@ const acquireRestoreLock = async (
         ? boundedLegacyProcessStartIdentity(pid, budget)
         : undefined;
     },
-    legacyHeld: (limit): boolean => {
+    legacyHeld: (): boolean => {
       try {
         if (lstatSync(lockPath).isDirectory()) return false;
       } catch {
         return false;
       }
-      const diagnosis = restoreLockDiagnosis(
-        lockPath,
-        Math.max(0, limit - Date.now()),
-      );
+      const diagnosis = restoreLockDiagnosis(lockPath, remaining());
       if (diagnosis.verdict === "stale") {
-        stealRestoreLock(
-          lockPath,
-          Math.max(0, limit - Date.now()),
-          diagnosis.ino,
-        );
+        stealRestoreLock(lockPath, remaining(), diagnosis.ino);
       }
       return existsSync(lockPath);
     },
@@ -2554,6 +2551,7 @@ export const execClient = (
     const options: SpawnOptions = {
       ...(batch ? { windowsVerbatimArguments: true } : {}),
       stdio: "inherit",
+      windowsHide: true,
       env: mergeSessionEnv(process.env, env, unsetEnv),
     };
     const child =
