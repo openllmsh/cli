@@ -283,6 +283,12 @@ export const runCli = async (argv: readonly string[]): Promise<void> => {
       return process.exit(
         await runManagedDaemonCommand(cmd as TDaemonLifecycleCommand),
       );
+    case "auth": {
+      const { authHelp } = await import("./generated/local-auth");
+      if (rest.length === 0 || wantsHelp(rest))
+        return usage(authHelp("openllm"), 0);
+      return process.exit(await runManagedDaemonCommand("auth", rest));
+    }
     case "status":
       if (wantsHelp(rest)) return usage(STATUS_USAGE, 0);
       if (rest.length > 0) return usage(STATUS_USAGE, 2);
