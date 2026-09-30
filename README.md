@@ -42,6 +42,25 @@ Supported targets are **macOS and Linux, arm64 and x64**. Release binaries do no
 require Bun or Node.js to run; the vendor clients have their own requirements.
 The installer verifies downloaded binaries against their published SHA-256.
 
+### Preview install
+
+The current preview is `v2.8.0-beta.3`. The installer script at the tag
+installs only that tag:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/openllmsh/daemon/v2.8.0-beta.3/install.sh | bash
+```
+
+That installs the daemon and the CLI in one run. For the CLI alone, use this
+repository's script at the tag:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/openllmsh/cli/v2.8.0-beta.3/install.sh | bash
+```
+
+The preview also ships a `win32-x64` build (unsigned; no PTY). Do not use
+`openllm update` to move a stable install to the preview.
+
 You can install before obtaining an API key. In an interactive terminal, the
 installer starts credential setup; if setup could not run, continue with:
 
