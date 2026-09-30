@@ -61,6 +61,7 @@ const CLI_STATE_ENTRIES: readonly string[] = [
   "backups", // config backups
   "installed", // install markers
   "setup", // setup overlay cache
+  "cache", // model-availability preflight cache (clients/provider-preflight.ts)
 ];
 const CLI_BINARIES: readonly string[] = ["openllm", "openllmc"];
 

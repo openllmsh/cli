@@ -17,7 +17,7 @@ export { daemonPort };
 /** How long to wait for the local daemon's /status before falling back. */
 const PROBE_TIMEOUT_MS = 400;
 /** Catalog fetches are best-effort; a slow gateway must not stall a launch. */
-const CATALOG_TIMEOUT_MS = 8_000;
+export const CATALOG_TIMEOUT_MS = 8_000;
 
 export type TGateway = {
   /** Base origin the client should talk to (no trailing slash, no `/v1`). */

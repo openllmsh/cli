@@ -51,6 +51,7 @@ import { overlayVars } from "./launch";
 import type { TJsonObject } from "./merge";
 import { deepMerge, parseYaml, serializeYaml, substitute } from "./merge";
 import { OVERLAYS } from "./overlays";
+import { requireProviderRouting } from "./provider-preflight";
 import type { TClientFlags } from "./registry";
 import { CLIENTS } from "./registry";
 import {
@@ -392,6 +393,7 @@ const applyHermesLocked = async (
     remote: opts?.remote,
     config: credential.config,
   });
+  if (!(await requireProviderRouting(gateway))) return { code: 1 };
   const ledger = readHermesLedger();
   const sticky = readActiveProfile();
   const previousProfile =
@@ -1261,6 +1263,7 @@ export const runHermesCommand = async (
       remote: clientFlags.remote,
       config: credential.config,
     });
+    if (!(await requireProviderRouting(gateway))) return 1;
     const dangerous =
       clientFlags.dangerous === true &&
       CLIENTS.hermes.dangerousFlag !== undefined
