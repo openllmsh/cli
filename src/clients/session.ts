@@ -1699,22 +1699,15 @@ const acquireRestoreLock = async (
         ? boundedLegacyProcessStartIdentity(pid, budget)
         : undefined;
     },
-    legacyHeld: (limit): boolean => {
+    legacyHeld: (): boolean => {
       try {
         if (lstatSync(lockPath).isDirectory()) return false;
       } catch {
         return false;
       }
-      const diagnosis = restoreLockDiagnosis(
-        lockPath,
-        Math.max(0, limit - performance.now()),
-      );
+      const diagnosis = restoreLockDiagnosis(lockPath, remaining());
       if (diagnosis.verdict === "stale") {
-        stealRestoreLock(
-          lockPath,
-          Math.max(0, limit - performance.now()),
-          diagnosis.ino,
-        );
+        stealRestoreLock(lockPath, remaining(), diagnosis.ino);
       }
       return existsSync(lockPath);
     },
