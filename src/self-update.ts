@@ -95,6 +95,7 @@ export const hardenCliBinary = (
     Bun.spawnSync(["xattr", "-dr", "com.apple.quarantine", path], {
       stdout: "ignore",
       stderr: "ignore",
+      windowsHide: true,
     });
   } catch {
     // No quarantine attribute or xattr unavailable.
@@ -103,6 +104,7 @@ export const hardenCliBinary = (
     const verification = Bun.spawnSync(["codesign", "--verify", path], {
       stdout: "ignore",
       stderr: "ignore",
+      windowsHide: true,
     });
     if (verification.exitCode === 0) return;
   } catch {
@@ -112,6 +114,7 @@ export const hardenCliBinary = (
     Bun.spawnSync(["codesign", "--force", "--sign", "-", path], {
       stdout: "ignore",
       stderr: "ignore",
+      windowsHide: true,
     });
   } catch {
     // Best effort, matching daemon self-update hardening behavior.
@@ -351,6 +354,7 @@ export const probeCliVerdict = (
     proc = spawn([path, flag], {
       stdout: "pipe",
       stderr: "pipe",
+      windowsHide: true,
       timeout: HEALTH_PROBE_TIMEOUT_MS,
       maxBuffer: HEALTH_PROBE_MAX_BYTES,
       // FSS-05: a missing/unwritable TMPDIR must not break the probe — use

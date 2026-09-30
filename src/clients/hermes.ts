@@ -347,6 +347,7 @@ const restartRootGateway = (bin: string | null): void => {
     execFileSync(bin, ["gateway", "restart"], {
       stdio: "ignore",
       timeout: 15_000,
+      windowsHide: true,
       env: { ...process.env, HERMES_HOME: hermesRoot() },
     });
   } catch {

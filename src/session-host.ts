@@ -839,6 +839,7 @@ export const spawnSessionHost = (args: {
     const proc = Bun.spawn(command, {
       detached: true,
       stdio: ["ignore", "ignore", "ignore"],
+      windowsHide: true,
       env: {
         ...process.env,
         ...(reapWithHarness

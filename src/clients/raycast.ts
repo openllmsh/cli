@@ -146,6 +146,7 @@ export const readDefaultsArray = (key: string): TDefaultsArrayRead => {
     const plist = execFileSync("defaults", ["export", DOMAIN, "-"], {
       encoding: "utf-8",
       stdio: ["ignore", "pipe", "ignore"],
+      windowsHide: true,
     });
     const json = execFileSync(
       "plutil",
@@ -154,6 +155,7 @@ export const readDefaultsArray = (key: string): TDefaultsArrayRead => {
         encoding: "utf-8",
         input: plist,
         stdio: ["pipe", "pipe", "pipe"],
+        windowsHide: true,
       },
     );
     const parsed: unknown = JSON.parse(json);
@@ -173,6 +175,7 @@ const writeDefaultsArray = (key: string, values: readonly string[]): void => {
   // exact `defaults write <domain> <key> -array` that writes an empty array.
   execFileSync("defaults", ["write", DOMAIN, key, "-array", ...values], {
     stdio: "ignore",
+    windowsHide: true,
   });
 };
 

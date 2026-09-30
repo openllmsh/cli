@@ -87,6 +87,7 @@ const probeDaemonVersion = async (binary: string): Promise<string | null> => {
       stdin: "ignore",
       stdout: "pipe",
       stderr: "ignore",
+      windowsHide: true,
     });
     const stdout = proc.stdout;
     if (stdout === undefined || typeof stdout === "number") return null;
@@ -194,6 +195,7 @@ export const runManagedDaemonCommand = async (
       stdin: "inherit",
       stdout: "inherit",
       stderr: "inherit",
+      windowsHide: true,
       env: { ...process.env, ...extraEnv },
     });
     return await proc.exited;

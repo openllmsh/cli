@@ -162,7 +162,7 @@ export const convertAudioToWav = async (
           "wav",
           output,
         ],
-        { shell: false, stdio: ["pipe", "ignore", "pipe"] },
+        { shell: false, stdio: ["pipe", "ignore", "pipe"], windowsHide: true },
       );
       let failure: string | undefined;
       let stderrBytes = 0;

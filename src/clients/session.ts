@@ -2551,6 +2551,7 @@ export const execClient = (
     const options: SpawnOptions = {
       ...(batch ? { windowsVerbatimArguments: true } : {}),
       stdio: "inherit",
+      windowsHide: true,
       env: mergeSessionEnv(process.env, env, unsetEnv),
     };
     const child =

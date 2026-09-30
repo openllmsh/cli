@@ -104,13 +104,23 @@ export const restoreEchoOnSignal = (
 };
 
 const readHiddenLine = (): string | null => {
+  // Windows has no /dev/tty or stty. Do not run a POSIX input helper.
+  if (process.platform === "win32") return null;
   let fd: number | null = null;
   try {
     fd = openSync("/dev/tty", "r+");
-    if (spawnSync("stty", ["-echo"], { stdio: [fd, fd, fd] }).status !== 0)
+    if (
+      spawnSync("stty", ["-echo"], {
+        stdio: [fd, fd, fd],
+        windowsHide: true,
+      }).status !== 0
+    )
       return null;
     const restore = (): void => {
-      spawnSync("stty", ["echo"], { stdio: [fd, fd, fd] });
+      spawnSync("stty", ["echo"], {
+        stdio: [fd, fd, fd],
+        windowsHide: true,
+      });
     };
     const cleanupSignals = restoreEchoOnSignal(restore);
     try {

@@ -21,7 +21,12 @@ export const memoryProject = (cwd: string, override?: string): string => {
     const root = execFileSync(
       "git",
       ["-C", cwd, "rev-parse", "--show-toplevel"],
-      { encoding: "utf8", timeout: 2000, stdio: ["ignore", "pipe", "ignore"] },
+      {
+        encoding: "utf8",
+        timeout: 2000,
+        stdio: ["ignore", "pipe", "ignore"],
+        windowsHide: true,
+      },
     ).trim();
     const project = slugify(basename(root));
     if (project) return project;

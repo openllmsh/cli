@@ -696,6 +696,7 @@ const runWithTimeout = async (
       stdout: "pipe",
       stderr: "pipe",
       detached: true,
+      windowsHide: true,
     });
 
     const stdoutStream = proc.stdout;
@@ -912,6 +913,7 @@ const collectRecentDaemonLogs = async (): Promise<string> => {
         stdout: "pipe",
         stderr: "pipe",
         detached: true,
+        windowsHide: true,
       },
     );
 
@@ -1080,6 +1082,7 @@ export const aiDiagnosis = async (
         stdout: "pipe",
         stderr: "pipe",
         detached: true,
+        windowsHide: true,
       },
     );
 
@@ -1139,18 +1142,21 @@ export const aiDiagnosis = async (
 
 const copyToClipboard = (text: string): boolean => {
   const tools: ReadonlyArray<readonly string[]> =
-    process.platform === "darwin"
-      ? [["pbcopy"]]
-      : [
-          ["wl-copy"],
-          ["xclip", "-selection", "clipboard"],
-          ["xsel", "--clipboard", "--input"],
-        ];
+    process.platform === "win32"
+      ? [["clip.exe"]]
+      : process.platform === "darwin"
+        ? [["pbcopy"]]
+        : [
+            ["wl-copy"],
+            ["xclip", "-selection", "clipboard"],
+            ["xsel", "--clipboard", "--input"],
+          ];
   for (const argv of tools) {
     try {
       const result = spawnSync(argv[0], argv.slice(1), {
         input: text,
         stdio: ["pipe", "ignore", "ignore"],
+        windowsHide: true,
       });
       if (result.status === 0) return true;
     } catch {
