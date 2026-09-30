@@ -107,7 +107,7 @@ rm -f ~/.openllm/bin/openllmd ~/.openllm/bin/openllm
 curl -fsSL https://www.openllm.sh/install | bash
 ```
 
-For a CLI-only preview install, remove the CLI binary and reinstall it:
+If you installed only the CLI preview, use these commands:
 
 ```sh
 rm -f ~/.openllm/bin/openllm
