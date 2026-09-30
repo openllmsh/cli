@@ -47,21 +47,76 @@ The installer verifies downloaded binaries against their published SHA-256.
 ### Preview install
 
 The current preview is `v2.8.0-beta.3`. The installer script at the tag
-installs only that tag:
+installs only that tag. The preview also ships a `win32-x64` build
+(unsigned; no PTY). Do not use `openllm update` to move a stable install
+to the preview.
 
-```sh
-curl -fsSL https://raw.githubusercontent.com/openllmsh/daemon/v2.8.0-beta.3/install.sh | bash
-```
+#### Install the preview on macOS or Linux
 
-That installs the daemon and the CLI in one run. For the CLI alone, use this
-repository's script at the tag:
+1. Install the daemon and the CLI:
+
+   ```sh
+   curl -fsSL https://raw.githubusercontent.com/openllmsh/daemon/v2.8.0-beta.3/install.sh | bash
+   ```
+
+2. Check the version:
+
+   ```sh
+   openllm version
+   ```
+
+3. If credential setup did not run, start it:
+
+   ```sh
+   openllm start
+   ```
+
+For the CLI alone, use this repository's script at the tag:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/openllmsh/cli/v2.8.0-beta.3/install.sh | bash
 ```
 
-The preview also ships a `win32-x64` build (unsigned; no PTY). Do not use
-`openllm update` to move a stable install to the preview.
+Or download the daemon script and name the tag yourself:
+`bash install.sh --prerelease v2.8.0-beta.3`.
+
+#### Install the preview on Windows (unsigned)
+
+PowerShell:
+
+```powershell
+iex (irm https://raw.githubusercontent.com/openllmsh/daemon/v2.8.0-beta.3/install.ps1)
+```
+
+Command Prompt (CMD):
+
+```bat
+curl.exe -fsSLo install.cmd https://raw.githubusercontent.com/openllmsh/daemon/v2.8.0-beta.3/install.cmd
+install.cmd
+```
+
+The CMD commands download `install.cmd` from the release tag and run it.
+
+#### Go back to stable
+
+On macOS and Linux:
+
+```sh
+openllm stop
+rm -f ~/.openllm/bin/openllmd ~/.openllm/bin/openllm
+curl -fsSL https://www.openllm.sh/install | bash
+```
+
+For a CLI-only preview install, remove the CLI binary and reinstall it:
+
+```sh
+rm -f ~/.openllm/bin/openllm
+curl -fsSL https://raw.githubusercontent.com/openllmsh/cli/main/install.sh | bash
+```
+
+The `rm` step removes only the preview binaries. Your settings in
+`~/.openllm/.env` stay. Windows has no stable release. Stable releases
+support macOS and Linux only.
 
 You can install before you have an API key. On macOS and Linux, the full
 installer starts credential setup in an interactive terminal.
@@ -176,7 +231,8 @@ availability is not a live reachability or remaining-quota check.
 Bun is required **for building**, not for running release binaries. Clone the
 public mirror rather than treating a source-package dependency as the installer.
 `main` tracks stable releases; to build a prerelease, check out its `v...` tag
-(or the rolling `prerelease` branch) before installing dependencies:
+or its own bare-version branch (for example `v2.8.0-beta.3` or
+`2.8.0-beta.3`) before installing dependencies:
 
 ```sh
 git clone https://github.com/openllmsh/cli
