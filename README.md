@@ -10,7 +10,7 @@
 <p align="center">
   <a href="./LICENSE"><img alt="License: BUSL-1.1" src="https://img.shields.io/badge/license-BUSL--1.1-blue.svg"></a>
   <img alt="source-available" src="https://img.shields.io/badge/source-available-informational.svg">
-  <img alt="targets" src="https://img.shields.io/badge/targets-darwin%20%C2%B7%20linux%20(arm64%2Fx64)-lightgrey.svg">
+  <img alt="stable targets" src="https://img.shields.io/badge/stable_targets-darwin%20%C2%B7%20linux%20(arm64%2Fx64)-lightgrey.svg">
 </p>
 
 ---
@@ -38,7 +38,9 @@ openllm version
 openllm status
 ```
 
-Supported targets are **macOS and Linux, arm64 and x64**. Release binaries do not
+Stable releases support **macOS and Linux, arm64 and x64**.
+Prereleases add an unsigned `win32-x64` build.
+Release binaries do not
 require Bun or Node.js to run; the vendor clients have their own requirements.
 The installer verifies downloaded binaries against their published SHA-256.
 
@@ -176,8 +178,12 @@ cd cli
 bun install
 bun run compile:host       # → dist/openllm (this machine's target)
 ./dist/openllm version     # v0.0.0-dev
-bun run compile            # all 4 targets: darwin/linux × arm64/x64 (+ .gz)
+bun run compile            # build the default targets for this host
 ```
+
+The default build selects the four POSIX targets on Linux and macOS.
+On Windows, it also selects `win32-x64`.
+Windows targets require a native Windows host.
 
 Source builds carry the `0.0.0-dev` sentinel, rather than a pinned release
 version. Run the binary directly or point your MCP client's `openllm` server

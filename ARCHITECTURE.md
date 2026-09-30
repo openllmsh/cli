@@ -33,7 +33,7 @@ packages/cli/
 ├── release-types.ts      # CLI_TARGETS (SSOT of buildable targets) + TCliRelease
 ├── index.ts              # barrel: manifest + release-types only (gateway reads the pin)
 ├── scripts/
-│   ├── compile.ts        # bun --compile --minify --bytecode ×4 targets + gzip sidecars
+│   ├── compile.ts        # Host-selected targets + gzip assets
 │   └── generate-sdk.ts   # MONOREPO-ONLY: HttpApi → committed SDK artifacts
 └── src/
     ├── main.ts           # compile entry: self-version (`--version`/`-v`/`version`) then lazy dispatch
@@ -289,9 +289,10 @@ Everything follows `packages/daemon` exactly — see
 
 - ONE version identity: the manifest tag. `package.json` stays `0.0.0-dev`
   (the sentinel dev guards key on — a source build never self-updates).
-- 4 targets (`CLI_TARGETS`), compiled in parallel, gzipped release assets
-  `openllm-<target>.gz` on `openllmsh/cli`; the manifest pins the
-  sha256 of the DECOMPRESSED binary.
+- `CLI_TARGETS` contains five buildable targets. `cliReleaseTargets` selects
+  5 targets for prereleases; 4 POSIX targets for stable releases.
+  The gzipped release assets are `openllm-<target>.gz` on `openllmsh/cli`.
+  The manifest pins the SHA-256 of the decompressed binary.
 - Change-gated on `CLI_BINARY_SOURCES`: `cli/src`, embedded `cli/setup`, the
   public-mirror `cli/install.sh` (not compiled, but released at the pinned tag),
   `release-types.ts`, `package.json`, `scripts/compile.ts` (bake flags,
