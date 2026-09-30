@@ -165,7 +165,12 @@ export const findCompatibleDaemonBinary = async (): Promise<string | null> => {
  * preserves its stdout, stderr, and exit status for the CLI caller.
  */
 export const runManagedDaemonCommand = async (
-  command: TDaemonLifecycleCommand | "auto-update" | "uninstall" | "status",
+  command:
+    | TDaemonLifecycleCommand
+    | "auto-update"
+    | "uninstall"
+    | "status"
+    | "auth",
   args: readonly string[] = [],
   extraEnv: Readonly<Record<string, string>> = {},
 ): Promise<number> => {
