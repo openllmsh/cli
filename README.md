@@ -15,6 +15,12 @@
 
 ---
 
+> [!WARNING]
+> **Beta software.** OpenLLM 2.8.0-beta.3 is a prerelease. It can contain bugs.
+> Its behavior can change before the stable 2.8.0 release. The Windows build is
+> not signed. For production use, install the stable release with the stable
+> installer in this README.
+
 Run your AI clients through OpenLLM with **`openllm <client>`**. The CLI also
 manages the local daemon and serves one MCP server with:
 
