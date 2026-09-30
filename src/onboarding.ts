@@ -18,6 +18,7 @@ import {
   acquireDirLockSync,
   envDirLockCodec,
 } from "../../tunnel/session/dir-lock";
+import { LegacyLockError } from "../../tunnel/session/dir-lock-control";
 import type {
   TProcessIdentity,
   TProcessStartIdentityReader,
@@ -616,12 +617,20 @@ const withEnvFileLock = (
   const release = acquireDirLockSync(lockDir, envDirLockCodec, {
     waitMs: waitMs ?? envLockWaitMs(),
     reclaimMs: envLockStaleMs(),
+    ownerlessMs: envLockOrphanMs(),
     pollMs: 10,
     inode: envLockDirIno,
-    startIdentity: envLockStartIdentity,
+    startIdentity:
+      process.platform === "win32"
+        ? envLockStartIdentity
+        : envLockStartIdentityProbe,
+    ownerStartIdentity: envLockStartIdentity,
     legacyStartIdentity: envLockLegacyStartIdentityProbe,
     isStale: envLockDirIsStale,
-    legacyHeld: (): boolean => envLockLegacyHeld(stem, nonce),
+    legacyHeld:
+      process.platform === "win32"
+        ? (): boolean => envLockLegacyHeld(stem, nonce)
+        : undefined,
     onStep: (step, path): void => {
       if (step === "before-publish") envLockPublishGapForTests?.(path);
       if (step === "after-steal-marker") envLockStealGapForTests?.(path);
@@ -697,7 +706,8 @@ const updateEnvFile = (key: string): boolean => {
         }
       }
     });
-  } catch {
+  } catch (error) {
+    if (error instanceof LegacyLockError) throw error;
     return false;
   }
 };

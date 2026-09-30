@@ -196,3 +196,33 @@ they do not eliminate the need to trust the release source and publisher.
 > **Read-only mirror.** Regenerated from the OpenLLM monorepo each release.
 > PRs welcome — ingested upstream with your authorship preserved. BUSL
 > contributions require the CLA (the bot will prompt you).
+
+### Clear locks from an older release
+
+Stop older installers and their workers before you clear their locks.
+Run `openllm doctor --clear-legacy-locks` or
+`openllmd doctor --clear-legacy-locks`.
+Add `--env-file /absolute/path/to/.env` to select another env file.
+Add `--restore-dir /absolute/path/to/client-home` to select a client mirror.
+Add `--json` to get a structured report.
+Do not combine this command with `--fix` or AI diagnosis options.
+On Windows the command exits 0 with status `not-applicable`.
+It does not inspect or change any lock there.
+
+A legacy hold stays in place after its process exits.
+Only this explicit command clears the hold.
+The command checks processes before it removes exact lock records.
+It does not remove env values, binaries, backups, or session data.
+It does not stop processes.
+A refusal names the process or record that needs attention.
+Exit code 73 means that clearance was refused.
+Exit code 74 means that clearance is incomplete.
+
+A piped or renamed worker can lack enough data for the process detector.
+Ensure that all older installers and their workers have finished.
+The command does not infer worker completion from the outer shell's death.
+
+A new launch marker needs a separate recovery path.
+Stop all older installers and their workers.
+Then rerun the installer with `--lock-participants=new-only`.
+The legacy doctor command does not remove new launch markers.

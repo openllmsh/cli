@@ -159,6 +159,29 @@ const runSelfTest = async (): Promise<void> => {
 };
 
 const run = async (): Promise<void> => {
+  if (first === "doctor" && argv.includes("--clear-legacy-locks")) {
+    const [
+      { runLegacyLockDoctor, stateLockParents, clientRestoreLockDomains },
+      env,
+    ] = await Promise.all([
+      import("../../tunnel/session/dir-lock-doctor"),
+      import("./env"),
+    ]);
+    process.exit(
+      await runLegacyLockDoctor(
+        argv.slice(1),
+        [env.sharedEnvFile()],
+        clientRestoreLockDomains(env.userHome()),
+        stateLockParents(env.openllmDir()),
+      ),
+    );
+  }
+  if (first === "--internal-lock-control")
+    process.exit(
+      await (
+        await import("../../tunnel/session/lock-command")
+      ).runInternalLockControl(argv.slice(1)),
+    );
   // Inside run(), not a module-level `await`: the release compile uses
   // --bytecode, which emits CommonJS where top-level await is a syntax error.
   // runSelfTest always exits (printSelfVersion / exit 1).
@@ -190,5 +213,12 @@ run().catch((err) => {
   process.stderr.write(
     `[openllm] fatal: ${err instanceof Error ? err.message : String(err)}\n`,
   );
-  process.exit(1);
+  process.exit(
+    err &&
+      typeof err === "object" &&
+      "code" in err &&
+      err.code === "LEGACY_LOCK_HELD"
+      ? 73
+      : 1,
+  );
 });
