@@ -94,6 +94,19 @@ packages/cli/
 | `openllm auth <providers\|status\|usage\|refresh\|login\|submit-code\|cancel\|logout> …` | local provider auth, delegated to the running daemon through `openllmd`; `--json` for agents, runtime provider/method discovery |
 | `openllm version` | print this CLI version only (`openllm vX.Y.Z`); `-v`/`--version` are the same. Combined daemon diagnostics stay on `status`/`doctor` |
 
+**Launch setup guard:** session clients, Hermes sticky launch/install, and Raycast
+apply share `clients/provider-preflight.ts`. On a cache miss it reads the resolved
+gateway's `GET /v1/models` (the daemon forwards this to the cloud), not local auth
+status. A valid empty model list stops before launch/config writes and prints
+`<configured cloud origin>/providers`; fleet-backed, BYOK, and custom models use
+the same account-owned catalog with no second routing policy in the CLI. Positive
+results are cached for five minutes under `~/.openllm/cache/provider-routing/`,
+keyed by a SHA-256 hash of cloud origin + API key; only a timestamp is stored.
+Empty/error results are never cached. HTTP 401/403 stops with an access error;
+unknown/network/malformed responses warn and preserve best-effort launch behavior.
+This is a setup guard, not a live fleet-health or quota guarantee. Help, auth,
+status, uninstall and existing-session management do not run the guard.
+
 Config: `OPENLLM_CLOUD_ORIGIN` / `OPENLLM_API_KEY` env (the same contract the
 MCP mapping + hooks carry), falling back to the SHARED `~/.openllm/.env` (the
 same file the daemon boots from — one pairing covers every tool), falling back

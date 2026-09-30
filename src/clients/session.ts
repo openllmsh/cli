@@ -42,6 +42,7 @@ import { hermesBundledTuiDir, hermesProfileConfigPath } from "./hermes-home";
 import { HOOK_SCRIPTS } from "./hooks";
 import { buildLaunchPlan, type TLaunchPlan } from "./launch";
 import { buildLiveJson, writeLiveJson } from "./live";
+import { requireProviderRouting } from "./provider-preflight";
 import type { TClient, TClientFlags, TDaemonCli } from "./registry";
 import {
   buildSessionChoices,
@@ -454,6 +455,7 @@ export const runSessionClient = async (
     remote: flags.remote,
     config: credential.config,
   });
+  if (!(await requireProviderRouting(gateway))) return 1;
 
   const forwarded = forwardedVendorArgs(userArgs);
   // Durable local sessions do not need a running daemon. An explicit cloud

@@ -32,6 +32,7 @@ import { requireCliApiKey } from "../onboarding";
 import { contextStateDir, fetchModelCatalog, resolveGateway } from "./gateway";
 import { removeRegion, substitute, upsertRegion } from "./merge";
 import { OVERLAYS } from "./overlays";
+import { requireProviderRouting } from "./provider-preflight";
 import type { TClientFlags } from "./registry";
 
 const REGION_BEGIN = "# >>> openllm (managed) >>>";
@@ -161,6 +162,7 @@ export const applyRaycast = async (opts?: {
     remote: opts?.remote,
     config: credential.config,
   });
+  if (!(await requireProviderRouting(gateway))) return 1;
   const catalog = await fetchModelCatalog(gateway, "raycast");
   const models = catalog ?? FALLBACK_MODELS;
   const block = substitute(
