@@ -63,17 +63,23 @@ curl -fsSL https://raw.githubusercontent.com/openllmsh/cli/v2.8.0-beta.3/install
 The preview also ships a `win32-x64` build (unsigned; no PTY). Do not use
 `openllm update` to move a stable install to the preview.
 
-You can install before obtaining an API key. In an interactive terminal, the
-installer starts credential setup; if setup could not run, continue with:
+You can install before you have an API key. On macOS and Linux, the full
+installer starts credential setup in an interactive terminal.
+If setup did not run on these platforms, continue with:
 
 ```sh
 openllm start
 ```
 
-This guides you to the gateway's sign-in page and accepts your `sk-llm-...` key.
-For a non-interactive install, supply `OPENLLM_API_KEY` to the installer process.
-Use `OPENLLM_CLOUD_ORIGIN` as well when installing against a different gateway.
-Configuration is shared with the daemon in `~/.openllm/.env`.
+On macOS and Linux, this command opens the sign-in flow and accepts your
+`sk-llm-...` key. For a non-interactive install on these platforms, supply
+`OPENLLM_API_KEY` to the installer process. Set `OPENLLM_CLOUD_ORIGIN` as well
+to select a different gateway. The CLI and daemon share `~/.openllm/.env`.
+
+On Windows, the beta.3 installer installs the binaries, alias and user PATH.
+Native Windows credential entry is not available in this build.
+The installer reports incomplete startup; it does not start the daemon.
+The installer defers credential setup even in an interactive terminal.
 
 > If `openllm` is not on PATH after installation, run
 > `~/.openllm/bin/openllm setup`, then open a new terminal. Sandboxed dashboard
@@ -120,7 +126,7 @@ Every command accepts `-h` / `--help`.
 | Command | What |
 | --- | --- |
 | `openllm <client> [...args]` | Run Claude Code, Codex, Grok Build, Hermes, OpenCode, or configure Raycast |
-| `openllm start` / `stop` / `restart` / `status` | Manage the local daemon; start/restart guide credential setup when needed |
+| `openllm start` / `stop` / `restart` / `status` | Manage the local daemon; on macOS and Linux, start/restart guide credential setup when needed |
 | `openllm update` | Update the full product using the configured gateway's installer |
 | `openllm self-update` | Update **only the CLI binary** to the gateway's pinned release |
 | `openllm auto-update <on\|off\|status>` | Control daemon automatic updates |
