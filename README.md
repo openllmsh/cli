@@ -94,6 +94,9 @@ PowerShell:
 iex (irm https://raw.githubusercontent.com/openllmsh/daemon/v2.8.0-beta.4/install.ps1)
 ```
 
+If PowerShell cannot find `openllm` after the install, open a new PowerShell
+window. A window that was open before the install does not get the new PATH.
+
 Command Prompt (CMD):
 
 ```bat
@@ -108,10 +111,14 @@ The CMD commands download `install.cmd` from the release tag and run it.
 On macOS and Linux:
 
 ```sh
-openllm stop
+~/.openllm/bin/openllmd stop
 rm -f ~/.openllm/bin/openllmd ~/.openllm/bin/openllm
 curl -fsSL https://www.openllm.sh/install | bash
 ```
+
+The first command uses the full path. If the preview install did not
+finish, `openllm` is not on your PATH. If `~/.openllm/bin/openllmd` does
+not exist, no preview daemon is installed; skip that command.
 
 If you installed only the CLI preview, use these commands:
 
