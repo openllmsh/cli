@@ -1120,6 +1120,12 @@ private_dir() {
   if [ "$repair" = "1" ] && [ -d "$d" ] && [ ! -L "$d" ] && [ -O "$d" ]; then
     was="$(ls -ld "$d" 2>/dev/null | cut -c1-10)"
     if [ "$was" != "drwx------" ]; then
+      # A shared dir may have had foreign entries planted while it was
+      # group/other-writable. Refuse to seal them inside private state.
+      foreign="$(find "$d" -xdev ! -user "$(id -u)" -print 2>/dev/null | head -n 1)"
+      if [ -n "$foreign" ]; then
+        die "refusing to tighten $d: $foreign is owned by another user; remove it, then re-run"
+      fi
       chmod 700 "$d" || die "could not secure directory: $d"
       echo "  note: tightened $d from ${was#d} to 0700 (OpenLLM keeps its state private)" >&2
     fi
