@@ -26575,6 +26575,61 @@
                           "title": "lessThanOrEqualTo(1000000000)",
                           "minimum": 0,
                           "maximum": 1000000000
+                        },
+                        "store_operation": {
+                          "type": "string",
+                          "enum": [
+                            "create",
+                            "settings",
+                            "unlock",
+                            "install",
+                            "restore",
+                            "grant",
+                            "recreate"
+                          ]
+                        },
+                        "store_stage": {
+                          "type": "string",
+                          "enum": [
+                            "staging",
+                            "final",
+                            "recovery"
+                          ]
+                        },
+                        "store_result": {
+                          "type": "string",
+                          "enum": [
+                            "succeeded",
+                            "failed",
+                            "timed_out",
+                            "aborted",
+                            "peer_won",
+                            "skipped"
+                          ]
+                        },
+                        "store_exit_code": {
+                          "type": "integer",
+                          "description": "a number less than or equal to 255",
+                          "title": "lessThanOrEqualTo(255)",
+                          "minimum": 0,
+                          "maximum": 255
+                        },
+                        "store_classifier": {
+                          "type": "string",
+                          "enum": [
+                            "auth_failed",
+                            "invalid_keychain",
+                            "passphrase_refused"
+                          ]
+                        },
+                        "recovery_created": {
+                          "type": "boolean"
+                        },
+                        "recovery_unlocked": {
+                          "type": "boolean"
+                        },
+                        "recovery_replaced": {
+                          "type": "boolean"
                         }
                       },
                       "additionalProperties": false
