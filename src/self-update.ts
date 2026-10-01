@@ -11,7 +11,6 @@
  *   - `0.0.0-dev` source builds never self-update (dev guard).
  */
 
-import { dlopen, FFIType } from "bun:ffi";
 import { createHash, randomBytes } from "node:crypto";
 import * as fs from "node:fs";
 import { basename, dirname, join } from "node:path";
@@ -21,6 +20,7 @@ import {
   evaluateUpdatePolicy,
   mayReplaceProductVersion,
 } from "@openllmsh/protocol/update-policy";
+import { libcVariadic } from "../../tunnel/session/libc-variadic";
 import {
   processIdentityStatus,
   processStartIdentity,
@@ -721,8 +721,8 @@ export const acquireCliStateLock = (opts?: {
   let swept = false;
   for (;;) {
     try {
-      fs.mkdirSync(daemonStateDir(), { recursive: true });
-      fs.mkdirSync(lockDir);
+      fs.mkdirSync(daemonStateDir(), { recursive: true, mode: 0o700 });
+      fs.mkdirSync(lockDir, { mode: 0o700 });
       try {
         fs.writeFileSync(
           join(lockDir, STATE_LOCK_OWNER_FILE),
@@ -821,7 +821,7 @@ const mutateDaemonState = (fn: (s: TJsonObject) => TJsonObject): boolean => {
         typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)
           ? (parsed as TJsonObject)
           : {};
-      fs.mkdirSync(dirname(path), { recursive: true });
+      fs.mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
       fs.writeFileSync(tmp, JSON.stringify(fn(base)), { mode: 0o600 });
       fsyncFileSync(tmp);
       fs.renameSync(tmp, path);
@@ -1068,15 +1068,11 @@ let cachedDarwinFullSync: TDarwinFullSync | null | undefined;
 const loadDarwinFullSync = (): TDarwinFullSync | null => {
   if (cachedDarwinFullSync !== undefined) return cachedDarwinFullSync;
   try {
-    const lib = dlopen("/usr/lib/libSystem.B.dylib", {
-      fcntl: {
-        // fcntl is variadic; F_FULLFSYNC ignores the third argument.
-        args: [FFIType.i32, FFIType.i32, FFIType.i32],
-        returns: FFIType.i32,
-      },
-    });
-    const fcntl = lib.symbols.fcntl;
-    cachedDarwinFullSync = (fd) => fcntl(fd, DARWIN_F_FULLFSYNC, 0);
+    // fcntl is variadic; the libc-variadic shim declares the real prototype
+    // so the ABI cannot drop or misplace the argument. F_FULLFSYNC ignores
+    // the third argument.
+    const libc = libcVariadic();
+    cachedDarwinFullSync = (fd) => libc.libcFcntl(fd, DARWIN_F_FULLFSYNC, 0n);
   } catch {
     cachedDarwinFullSync = null;
   }

@@ -1107,6 +1107,20 @@ binary_lock_release() {
 }
 # <<< openllm-binary-lock/v1 <<<
 
+# Installer-owned directories are private state. A permissive caller umask
+# (or a group-writable ~/.openllm left by an older build) would otherwise make
+# the lock parent writable by another user, which the lock protocol refuses.
+# Create under a private umask; with repair=1 (the default) also chmod a
+# directory the invoking user owns — never a symlink or a foreign directory.
+private_dir() {
+  local d="$1" repair="${2:-1}"
+  [ -d "$d" ] || (umask 077 && mkdir -p "$d") \
+    || die "could not create directory: $d"
+  if [ "$repair" = "1" ] && [ -d "$d" ] && [ ! -L "$d" ] && [ -O "$d" ]; then
+    chmod 700 "$d" || die "could not secure directory: $d"
+  fi
+}
+
 # Keep the caller's traps while the binary transaction owns the install lock.
 install_lock_acquire() {
   local saved_exit
@@ -1144,7 +1158,8 @@ install_lock_release() {
   eval "$INSTALL_SAVED_TRAPS"
 }
 
-mkdir -p "$BIN_DIR"
+private_dir "$OPENLLM_DIR"
+private_dir "$BIN_DIR"
 install_lock_acquire
 
 CLI_VERSION=""
@@ -1190,7 +1205,8 @@ elif [ -z "$FROM_FILE" ]; then
   assert_no_downgrade "$BIN_DIR/openllmc" "$CLI_VERSION"
 fi
 
-mkdir -p "$BIN_DIR"
+private_dir "$OPENLLM_DIR"
+private_dir "$BIN_DIR"
 
 if [ -n "$PRERELEASE_TAG" ]; then
   URL="$(prerelease_asset_url openllmsh/cli "openllm-$TARGET.gz")"
