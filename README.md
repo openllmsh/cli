@@ -16,7 +16,7 @@
 ---
 
 > [!WARNING]
-> **Beta software.** OpenLLM 2.8.0-beta.3 is a prerelease. It can contain bugs.
+> **Beta software.** OpenLLM 2.8.0-beta.4 is a prerelease. It can contain bugs.
 > Its behavior can change before the stable 2.8.0 release. The Windows build is
 > not signed. For production use, install the stable release with the stable
 > installer in this README.
@@ -52,7 +52,7 @@ The installer verifies downloaded binaries against their published SHA-256.
 
 ### Preview install
 
-The current preview is `v2.8.0-beta.3`. The installer script at the tag
+The current preview is `v2.8.0-beta.4`. The installer script at the tag
 installs only that tag. The preview also ships a `win32-x64` build
 (unsigned; no PTY). Do not use `openllm update` to move a stable install
 to the preview.
@@ -62,7 +62,7 @@ to the preview.
 1. Install the daemon and the CLI:
 
    ```sh
-   curl -fsSL https://raw.githubusercontent.com/openllmsh/daemon/v2.8.0-beta.3/install.sh | bash
+   curl -fsSL https://raw.githubusercontent.com/openllmsh/daemon/v2.8.0-beta.4/install.sh | bash
    ```
 
 2. Check the version:
@@ -80,24 +80,24 @@ to the preview.
 For the CLI alone, use this repository's script at the tag:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/openllmsh/cli/v2.8.0-beta.3/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/openllmsh/cli/v2.8.0-beta.4/install.sh | bash
 ```
 
 Or download the daemon script and name the tag yourself:
-`bash install.sh --prerelease v2.8.0-beta.3`.
+`bash install.sh --prerelease v2.8.0-beta.4`.
 
 #### Install the preview on Windows (unsigned)
 
 PowerShell:
 
 ```powershell
-iex (irm https://raw.githubusercontent.com/openllmsh/daemon/v2.8.0-beta.3/install.ps1)
+iex (irm https://raw.githubusercontent.com/openllmsh/daemon/v2.8.0-beta.4/install.ps1)
 ```
 
 Command Prompt (CMD):
 
 ```bat
-curl.exe -fsSLo install.cmd https://raw.githubusercontent.com/openllmsh/daemon/v2.8.0-beta.3/install.cmd
+curl.exe -fsSLo install.cmd https://raw.githubusercontent.com/openllmsh/daemon/v2.8.0-beta.4/install.cmd
 install.cmd
 ```
 
@@ -137,7 +137,7 @@ On macOS and Linux, this command opens the sign-in flow and accepts your
 `OPENLLM_API_KEY` to the installer process. Set `OPENLLM_CLOUD_ORIGIN` as well
 to select a different gateway. The CLI and daemon share `~/.openllm/.env`.
 
-On Windows, the beta.3 installer installs the binaries, alias and user PATH.
+On Windows, the beta.4 installer installs the binaries, alias and user PATH.
 Native Windows credential entry is not available in this build.
 The installer reports incomplete startup; it does not start the daemon.
 The installer defers credential setup even in an interactive terminal.
@@ -237,8 +237,8 @@ availability is not a live reachability or remaining-quota check.
 Bun is required **for building**, not for running release binaries. Clone the
 public mirror rather than treating a source-package dependency as the installer.
 `main` tracks stable releases; to build a prerelease, check out its `v...` tag
-or its own bare-version branch (for example `v2.8.0-beta.3` or
-`2.8.0-beta.3`) before installing dependencies:
+or its own bare-version branch (for example `v2.8.0-beta.4` or
+`2.8.0-beta.4`) before installing dependencies:
 
 ```sh
 git clone https://github.com/openllmsh/cli
