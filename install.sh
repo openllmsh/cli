@@ -40,7 +40,7 @@ FROM_SHA=""
 # Publish-time tag binding: the release pipeline stamps the ONE literal below
 # into the published copy of this script before it serves a prerelease tag.
 # It is a fixed per-invocation assignment, NOT an environment default.
-OPENLLM_PRERELEASE_TAG=''
+OPENLLM_PRERELEASE_TAG='v2.8.0-beta.3'
 PRERELEASE_OPT=""
 PRERELEASE_SEEN=0
 LOCAL_FILE_SEEN=0
