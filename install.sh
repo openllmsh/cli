@@ -1122,7 +1122,7 @@ private_dir() {
     if [ "$was" != "drwx------" ]; then
       # A shared dir may have had foreign entries planted while it was
       # group/other-writable. Refuse to seal them inside private state.
-      foreign="$(find "$d" -xdev ! -user "$(id -u)" -print 2>/dev/null | head -n 1)"
+      foreign="$(find "$d" -xdev ! -user "$(id -u)" -print -quit 2>/dev/null || true)"
       if [ -n "$foreign" ]; then
         die "refusing to tighten $d: $foreign is owned by another user; remove it, then re-run"
       fi
