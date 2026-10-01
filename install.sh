@@ -1112,12 +1112,17 @@ binary_lock_release() {
 # the lock parent writable by another user, which the lock protocol refuses.
 # Create under a private umask; with repair=1 (the default) also chmod a
 # directory the invoking user owns — never a symlink or a foreign directory.
+# A tightened dir is reported with one "note: tightened" line on stderr.
 private_dir() {
-  local d="$1" repair="${2:-1}"
+  local d="$1" repair="${2:-1}" was
   [ -d "$d" ] || (umask 077 && mkdir -p "$d") \
     || die "could not create directory: $d"
   if [ "$repair" = "1" ] && [ -d "$d" ] && [ ! -L "$d" ] && [ -O "$d" ]; then
-    chmod 700 "$d" || die "could not secure directory: $d"
+    was="$(ls -ld "$d" 2>/dev/null | cut -c1-10)"
+    if [ "$was" != "drwx------" ]; then
+      chmod 700 "$d" || die "could not secure directory: $d"
+      echo "  note: tightened $d from ${was#d} to 0700 (OpenLLM keeps its state private)" >&2
+    fi
   fi
 }
 
