@@ -10,7 +10,16 @@
  * completion <shell>)`) so they always reflect the installed binary; fish
  * writes a static file into its completions dir.
  */
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  mkdirSync,
+  readFileSync,
+  realpathSync,
+  renameSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import { basename, dirname, join } from "node:path";
 import type { TCompletionShell } from "./commands";
 import {
@@ -225,7 +234,26 @@ const refreshRcLine = (file: string, line: string): void => {
   const updated = `${withoutOwnedLines}${separator}${line}\n`;
   if (updated === existing) return;
   mkdirSync(dirname(file), { recursive: true });
-  writeFileSync(file, updated);
+  // Atomic replace so an interrupted write never truncates the user's rc.
+  // Resolve a symlinked rc (dotfile managers) and replace its TARGET, so the
+  // link survives; keep the existing mode.
+  let target = file;
+  let mode = 0o644;
+  try {
+    target = realpathSync(file);
+    mode = statSync(target).mode & 0o777;
+  } catch {
+    // rc does not exist yet — create it at `file` with the default mode.
+  }
+  const temp = `${target}.openllm-${process.pid}.tmp`;
+  try {
+    writeFileSync(temp, updated, { mode, flag: "wx" });
+    chmodSync(temp, mode);
+    renameSync(temp, target);
+  } catch (error) {
+    rmSync(temp, { force: true });
+    throw error;
+  }
 };
 
 /**
