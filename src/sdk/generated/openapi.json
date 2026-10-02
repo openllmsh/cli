@@ -70,6 +70,64 @@
                           "display_name": {
                             "type": "string"
                           },
+                          "settings": {
+                            "type": "object",
+                            "required": [],
+                            "properties": {
+                              "service_tier": {
+                                "type": "object",
+                                "required": [
+                                  "label",
+                                  "description",
+                                  "options"
+                                ],
+                                "properties": {
+                                  "label": {
+                                    "type": "string"
+                                  },
+                                  "description": {
+                                    "type": "string"
+                                  },
+                                  "options": {
+                                    "type": "array",
+                                    "items": {
+                                      "type": "object",
+                                      "required": [
+                                        "value",
+                                        "label"
+                                      ],
+                                      "properties": {
+                                        "value": {
+                                          "type": "string",
+                                          "enum": [
+                                            "auto",
+                                            "default",
+                                            "flex",
+                                            "priority"
+                                          ]
+                                        },
+                                        "label": {
+                                          "type": "string"
+                                        }
+                                      },
+                                      "additionalProperties": false
+                                    }
+                                  },
+                                  "default": {
+                                    "type": "string",
+                                    "enum": [
+                                      "auto",
+                                      "default",
+                                      "flex",
+                                      "priority"
+                                    ]
+                                  }
+                                },
+                                "additionalProperties": false
+                              }
+                            },
+                            "additionalProperties": false
+                          },
                           "capabilities": {
                             "type": "array",
                             "items": {
@@ -7108,6 +7166,10 @@
                   "model": {
                     "type": "string"
                   },
+                  "service_tier": {
+                    "$id": "/schemas/unknown",
+                    "title": "unknown"
+                  },
                   "input": {
                     "anyOf": [
                       {
@@ -10369,6 +10431,27 @@
                           "type": "object",
                           "required": [],
                           "properties": {
+                            "model_settings": {
+                              "type": "object",
+                              "required": [],
+                              "properties": {},
+                              "additionalProperties": {
+                                "type": "object",
+                                "required": [],
+                                "properties": {
+                                  "service_tier": {
+                                    "type": "string",
+                                    "enum": [
+                                      "auto",
+                                      "default",
+                                      "flex",
+                                      "priority"
+                                    ]
+                                  }
+                                },
+                                "additionalProperties": false
+                              }
+                            },
                             "search_provider": {
                               "type": "string"
                             },
@@ -23642,6 +23725,64 @@
                           "capabilities"
                         ],
                         "properties": {
+                          "settings": {
+                            "type": "object",
+                            "required": [],
+                            "properties": {
+                              "service_tier": {
+                                "type": "object",
+                                "required": [
+                                  "label",
+                                  "description",
+                                  "options"
+                                ],
+                                "properties": {
+                                  "label": {
+                                    "type": "string"
+                                  },
+                                  "description": {
+                                    "type": "string"
+                                  },
+                                  "options": {
+                                    "type": "array",
+                                    "items": {
+                                      "type": "object",
+                                      "required": [
+                                        "value",
+                                        "label"
+                                      ],
+                                      "properties": {
+                                        "value": {
+                                          "type": "string",
+                                          "enum": [
+                                            "auto",
+                                            "default",
+                                            "flex",
+                                            "priority"
+                                          ]
+                                        },
+                                        "label": {
+                                          "type": "string"
+                                        }
+                                      },
+                                      "additionalProperties": false
+                                    }
+                                  },
+                                  "default": {
+                                    "type": "string",
+                                    "enum": [
+                                      "auto",
+                                      "default",
+                                      "flex",
+                                      "priority"
+                                    ]
+                                  }
+                                },
+                                "additionalProperties": false
+                              }
+                            },
+                            "additionalProperties": false
+                          },
                           "id": {
                             "type": "string"
                           },
@@ -24342,6 +24483,27 @@
                     "type": "object",
                     "required": [],
                     "properties": {
+                      "model_settings": {
+                        "type": "object",
+                        "required": [],
+                        "properties": {},
+                        "additionalProperties": {
+                          "type": "object",
+                          "required": [],
+                          "properties": {
+                            "service_tier": {
+                              "type": "string",
+                              "enum": [
+                                "auto",
+                                "default",
+                                "flex",
+                                "priority"
+                              ]
+                            }
+                          },
+                          "additionalProperties": false
+                        }
+                      },
                       "search_provider": {
                         "type": "string"
                       },
