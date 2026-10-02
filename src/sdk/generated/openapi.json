@@ -121,6 +121,9 @@
                                       "flex",
                                       "priority"
                                     ]
+                                  },
+                                  "inherit_to_successors": {
+                                    "type": "boolean"
                                   }
                                 },
                                 "additionalProperties": false
@@ -23827,6 +23830,9 @@
                                       "flex",
                                       "priority"
                                     ]
+                                  },
+                                  "inherit_to_successors": {
+                                    "type": "boolean"
                                   }
                                 },
                                 "additionalProperties": false
