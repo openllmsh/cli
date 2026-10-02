@@ -21177,6 +21177,8 @@
                     "total_requests",
                     "total_tokens_in",
                     "total_tokens_out",
+                    "total_cached_tokens",
+                    "total_cache_creation_tokens",
                     "total_cost_usd",
                     "total_api_equivalent_cost_usd",
                     "by_model",
@@ -21190,6 +21192,12 @@
                       "type": "number"
                     },
                     "total_tokens_out": {
+                      "type": "number"
+                    },
+                    "total_cached_tokens": {
+                      "type": "number"
+                    },
+                    "total_cache_creation_tokens": {
                       "type": "number"
                     },
                     "total_cost_usd": {
