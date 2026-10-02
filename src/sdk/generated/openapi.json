@@ -124,6 +124,51 @@
                                   }
                                 },
                                 "additionalProperties": false
+                              },
+                              "input_token_limit": {
+                                "type": "object",
+                                "required": [
+                                  "label",
+                                  "description",
+                                  "options"
+                                ],
+                                "properties": {
+                                  "label": {
+                                    "type": "string"
+                                  },
+                                  "description": {
+                                    "type": "string"
+                                  },
+                                  "options": {
+                                    "type": "array",
+                                    "items": {
+                                      "type": "object",
+                                      "required": [
+                                        "value",
+                                        "label"
+                                      ],
+                                      "properties": {
+                                        "value": {
+                                          "type": "integer",
+                                          "description": "a positive number",
+                                          "title": "positive",
+                                          "exclusiveMinimum": 0
+                                        },
+                                        "label": {
+                                          "type": "string"
+                                        }
+                                      },
+                                      "additionalProperties": false
+                                    }
+                                  },
+                                  "reported": {
+                                    "type": "integer",
+                                    "description": "a positive number",
+                                    "title": "positive",
+                                    "exclusiveMinimum": 0
+                                  }
+                                },
+                                "additionalProperties": false
                               }
                             },
                             "additionalProperties": false
@@ -10447,6 +10492,12 @@
                                       "flex",
                                       "priority"
                                     ]
+                                  },
+                                  "input_token_limit": {
+                                    "type": "integer",
+                                    "description": "a positive number",
+                                    "title": "positive",
+                                    "exclusiveMinimum": 0
                                   }
                                 },
                                 "additionalProperties": false
@@ -23779,6 +23830,51 @@
                                   }
                                 },
                                 "additionalProperties": false
+                              },
+                              "input_token_limit": {
+                                "type": "object",
+                                "required": [
+                                  "label",
+                                  "description",
+                                  "options"
+                                ],
+                                "properties": {
+                                  "label": {
+                                    "type": "string"
+                                  },
+                                  "description": {
+                                    "type": "string"
+                                  },
+                                  "options": {
+                                    "type": "array",
+                                    "items": {
+                                      "type": "object",
+                                      "required": [
+                                        "value",
+                                        "label"
+                                      ],
+                                      "properties": {
+                                        "value": {
+                                          "type": "integer",
+                                          "description": "a positive number",
+                                          "title": "positive",
+                                          "exclusiveMinimum": 0
+                                        },
+                                        "label": {
+                                          "type": "string"
+                                        }
+                                      },
+                                      "additionalProperties": false
+                                    }
+                                  },
+                                  "reported": {
+                                    "type": "integer",
+                                    "description": "a positive number",
+                                    "title": "positive",
+                                    "exclusiveMinimum": 0
+                                  }
+                                },
+                                "additionalProperties": false
                               }
                             },
                             "additionalProperties": false
@@ -24017,8 +24113,14 @@
                             },
                             "additionalProperties": false
                           },
-                          "prefer_catalog_window": {
-                            "type": "boolean"
+                          "alternative_input_limits": {
+                            "type": "array",
+                            "items": {
+                              "type": "integer",
+                              "description": "a positive number",
+                              "title": "positive",
+                              "exclusiveMinimum": 0
+                            }
                           },
                           "strip_subagent_isolation": {
                             "type": "boolean"
@@ -24499,6 +24601,12 @@
                                 "flex",
                                 "priority"
                               ]
+                            },
+                            "input_token_limit": {
+                              "type": "integer",
+                              "description": "a positive number",
+                              "title": "positive",
+                              "exclusiveMinimum": 0
                             }
                           },
                           "additionalProperties": false
