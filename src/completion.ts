@@ -10,13 +10,7 @@
  * completion <shell>)`) so they always reflect the installed binary; fish
  * writes a static file into its completions dir.
  */
-import {
-  appendFileSync,
-  mkdirSync,
-  readFileSync,
-  rmSync,
-  writeFileSync,
-} from "node:fs";
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import type { TCompletionShell } from "./commands";
 import {
@@ -151,6 +145,11 @@ ${verbCases}
       fi ;;
   esac
 }
+# Plain zsh may not have initialized completion yet. Keep an existing compsys.
+if (( ! $+functions[compdef] )); then
+  autoload -Uz compinit
+  compinit -D
+fi
 compdef _openllm openllm ollm
 `;
 };
@@ -203,18 +202,30 @@ const detectShell = (): TCompletionShell | null => {
   return isShell(sh) ? sh : null;
 };
 
-/** Append a line to a file once (idempotent on an exact marker substring).
- *  Throws on fs errors — the caller decides how to surface them. */
-const appendOnce = (file: string, line: string, marker: string): boolean => {
+/** Refresh our owned line at the end of the rc: a later `compinit -C` reloads
+ *  its dump and discards dynamically registered completions. Preserve every
+ *  other line; repeated installation is a no-op once the line is last. */
+const refreshRcLine = (file: string, line: string): void => {
+  let existing = "";
   try {
-    const existing = readFileSync(file, "utf-8");
-    if (existing.includes(marker)) return false;
-  } catch {
-    // file may not exist yet — created by appendFileSync below
+    existing = readFileSync(file, "utf-8");
+  } catch (error) {
+    if (
+      !(error instanceof Error && "code" in error && error.code === "ENOENT")
+    ) {
+      throw error;
+    }
   }
+  const withoutOwnedLines = existing
+    .split("\n")
+    .filter((entry) => !entry.trimEnd().endsWith(RC_MARKER))
+    .join("\n");
+  const separator =
+    withoutOwnedLines === "" || withoutOwnedLines.endsWith("\n") ? "" : "\n";
+  const updated = `${withoutOwnedLines}${separator}${line}\n`;
+  if (updated === existing) return;
   mkdirSync(dirname(file), { recursive: true });
-  appendFileSync(file, `\n${line}\n`);
-  return true;
+  writeFileSync(file, updated);
 };
 
 /**
@@ -236,10 +247,9 @@ export const installCompletion = (): string | null => {
       return file;
     }
     const rc = join(userHome(), shell === "zsh" ? ".zshrc" : ".bashrc");
-    appendOnce(
+    refreshRcLine(
       rc,
       `command -v openllm >/dev/null && source <(openllm completion ${shell})  ${RC_MARKER}`,
-      RC_MARKER,
     );
     return rc;
   } catch {
