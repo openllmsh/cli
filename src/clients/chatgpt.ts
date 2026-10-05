@@ -169,12 +169,29 @@ const alert = (title: string, message: string): void => {
   );
 };
 
-/** The shim ChatGPT runs as its app-server. Carries no secret. */
+/**
+ * The shim ChatGPT runs in place of its embedded codex. Carries no secret.
+ *
+ * Position matters: ChatGPT starts its main backend as
+ * `codex -c … app-server … -c plugins.…`, and codex lets a subcommand's own
+ * `-c` list REPLACE the top-level one — so overrides placed before
+ * `app-server` were silently dropped and the UI fell back to the built-in
+ * GPT models. For `app-server` we therefore append ours LAST (later `-c`
+ * wins); every other invocation (exec-server, …) keeps them first.
+ */
 export const renderCodexShim = (
   codexPath: string,
   overrideArgs: readonly string[],
-): string =>
-  `#!/bin/sh\nexec ${[codexPath, ...overrideArgs].map(shellQuote).join(" ")} "$@"\n`;
+): string => {
+  const bin = shellQuote(codexPath);
+  const ours = overrideArgs.map(shellQuote).join(" ");
+  return `#!/bin/sh
+case " $* " in
+  *" app-server "*) exec ${bin} "$@" ${ours} ;;
+  *) exec ${bin} ${ours} "$@" ;;
+esac
+`;
+};
 
 /**
  * `open(1)` argv for a fresh ChatGPT process wired to the shim. Pure, for tests.
