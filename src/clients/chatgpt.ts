@@ -477,6 +477,12 @@ export const launchChatgpt = async (opts?: {
     ...args,
     "-c",
     `mcp_servers.openllm.cwd=${JSON.stringify(openllmDir())}`,
+    // Keep the app's ChatGPT sign-in visible: with a custom provider the
+    // backend reports no auth, and the app hides the mic (dictation is gated
+    // on authMethod === "chatgpt"). Inference still authenticates with
+    // `env_key` (the OpenLLM key) — verified the ChatGPT token isn't sent.
+    "-c",
+    "model_providers.openllm.requires_openai_auth=true",
     ...hookArgs,
     ...trustArgs,
   ];
