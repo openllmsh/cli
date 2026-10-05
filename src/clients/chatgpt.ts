@@ -340,8 +340,17 @@ export const launchChatgpt = async (opts?: {
     },
     catalog !== null,
   );
+  // Codex spawns stdio MCP servers in the THREAD's project folder; a project
+  // whose folder was moved/deleted fails the spawn ("No such file or
+  // directory") and the OpenLLM tools silently vanish. Pin a folder we own so
+  // the server starts for every thread, whatever its project.
+  const mcpArgs = [
+    ...args,
+    "-c",
+    `mcp_servers.openllm.cwd=${JSON.stringify(openllmDir())}`,
+  ];
   const shim = chatgptShimPath();
-  writeFileSync(shim, renderCodexShim(codex, args), {
+  writeFileSync(shim, renderCodexShim(codex, mcpArgs), {
     mode: 0o755,
   });
 
