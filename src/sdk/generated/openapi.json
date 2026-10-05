@@ -26906,6 +26906,32 @@
                             "passphrase_refused"
                           ]
                         },
+                        "login_failure_code": {
+                          "type": "string",
+                          "enum": [
+                            "not_installed",
+                            "spawn_denied",
+                            "prompt_timeout",
+                            "cli_crash",
+                            "poll_expired",
+                            "relay_disconnected",
+                            "user_cancelled"
+                          ]
+                        },
+                        "failure_signature": {
+                          "type": "string",
+                          "enum": [
+                            "mise_permission_denied",
+                            "mise_error",
+                            "permission_denied",
+                            "sandbox_denied",
+                            "not_found",
+                            "network",
+                            "manager_unresolved",
+                            "no_output",
+                            "unclassified"
+                          ]
+                        },
                         "recovery_created": {
                           "type": "boolean"
                         },
