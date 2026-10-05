@@ -89,9 +89,22 @@ export const chatgptAppPath = (): string => {
     : "/Applications/ChatGPT.app";
 };
 
-/** The codex binary ChatGPT.app embeds — what the shim forwards to. */
-export const chatgptCodexPath = (): string =>
-  join(chatgptAppPath(), "Contents", "Resources", "codex");
+/**
+ * Where ChatGPT.app has shipped its embedded codex, newest layout first:
+ * `Resources/codex-cli/bin/codex` (26.9xx+), `Resources/codex` (≤26.8xx).
+ */
+const CODEX_CANDIDATES = [["codex-cli", "bin", "codex"], ["codex"]] as const;
+
+/** The codex binary ChatGPT.app embeds — what the shim forwards to. Null when
+ *  no known layout matches (an app update moved it again). */
+export const chatgptCodexPath = (): string | null => {
+  const resources = join(chatgptAppPath(), "Contents", "Resources");
+  for (const segments of CODEX_CANDIDATES) {
+    const path = join(resources, ...segments);
+    if (existsSync(path)) return path;
+  }
+  return null;
+};
 
 export type TChatgptLedger = {
   readonly version: 1;
@@ -266,10 +279,18 @@ export const launchChatgpt = async (opts?: {
     process.stderr.write("openllm chatgpt is macOS-only.\n");
     return 1;
   }
-  if (!existsSync(chatgptCodexPath())) {
+  if (!existsSync(chatgptAppPath())) {
     alert(
       "ChatGPT not found",
       `Install ChatGPT from ${DOWNLOAD_URL}, then open OpenLLM ChatGPT again.`,
+    );
+    return 1;
+  }
+  const codex = chatgptCodexPath();
+  if (codex === null) {
+    alert(
+      "Unsupported ChatGPT version",
+      "This ChatGPT build moved its embedded codex. Update OpenLLM (openllm update), then try again.",
     );
     return 1;
   }
@@ -303,7 +324,7 @@ export const launchChatgpt = async (opts?: {
     catalog !== null,
   );
   const shim = chatgptShimPath();
-  writeFileSync(shim, renderCodexShim(chatgptCodexPath(), args), {
+  writeFileSync(shim, renderCodexShim(codex, args), {
     mode: 0o755,
   });
 
