@@ -10,7 +10,7 @@
  *      stops/unregisters the service, and removes DAEMON-owned state, leaving
  *      the CLI's client ledgers in place. A nonzero exit (user aborted, or the
  *      daemon failed) stops the whole uninstall before any CLI change.
- *   2. reverse always-on client wiring (Raycast region; Hermes sticky profile) —
+ *   2. reverse always-on client wiring (Raycast region; ChatGPT launcher; Hermes sticky profile) —
  *      still readable because the daemon left `clients/*.json` untouched.
  *   3. drop the openllm/ollm PATH symlinks, the managed rc block, and completion.
  *   4. remove CLI-owned state, then the shared `~/.openllm` root if it is now
@@ -22,8 +22,11 @@
 
 import { existsSync, readdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
+import {
+  isAlwaysOnClientId,
+  uninstallAlwaysOnClient,
+} from "./clients/always-on";
 import { uninstallHermes } from "./clients/hermes";
-import { uninstallRaycast } from "./clients/raycast";
 import { removeCompletion } from "./completion";
 import { findDaemonBinary, runManagedDaemonCommand } from "./daemon-delegation";
 import { openllmDir } from "./env";
@@ -70,7 +73,8 @@ const UNINSTALL_USAGE = `usage: openllm uninstall [--yes] [--keep-logins|--remov
 Uninstall OpenLLM from this machine. Delegates daemon teardown to \`openllmd
 uninstall\` (which stops the service and removes daemon state, asking whether to
 keep your subscription logins), then removes the CLI: reverse any always-on
-client wiring (Raycast providers region; Hermes sticky openllm profile), drop
+client wiring (Raycast providers region; OpenLLM ChatGPT launcher; Hermes
+sticky openllm profile), drop
 the openllm/ollm PATH symlinks, strip the managed shell-rc block and completion,
 and delete CLI state under ~/.openllm.
 
@@ -177,9 +181,9 @@ export const runUninstall = async (
 
   // 2. Always-on clients FIRST — while the ledgers and this binary still exist.
   for (const client of appliedAlwaysOnClients()) {
-    if (client === "raycast") {
-      process.stdout.write("Reversing Raycast wiring...\n");
-      uninstallRaycast();
+    if (isAlwaysOnClientId(client)) {
+      process.stdout.write(`Reversing ${client} wiring...\n`);
+      uninstallAlwaysOnClient(client);
     }
     if (client === "hermes") {
       process.stdout.write("Reversing Hermes profile wiring...\n");

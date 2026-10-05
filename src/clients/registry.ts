@@ -18,12 +18,15 @@
  *               per-invocation overlay hook (Raycast). `openllm <client>`
  *               applies the overlay to the host config IN PLACE and
  *               `openllm <client> uninstall` reverses exactly that, tracked by
- *               an ownership ledger under ~/.openllm/clients/.
+ *               an ownership ledger under ~/.openllm/clients/. The ChatGPT
+ *               Mac app is always-on too, but writes no vendor config: it
+ *               installs a launcher .app that starts ChatGPT wired to us.
  */
 
 export const CLIENT_IDS = [
   "claude",
   "codex",
+  "chatgpt",
   "grok",
   "hermes",
   "opencode",
@@ -167,6 +170,17 @@ export const CLIENTS: Readonly<Record<TClientId, TClient>> = {
     catalogSlug: "opencode",
     note: "your ~/.config/opencode config is never modified",
   },
+  chatgpt: {
+    id: "chatgpt",
+    name: "ChatGPT",
+    mode: "always-on",
+    bin: "",
+    binPaths: [],
+    installHint: "https://chatgpt.com/download",
+    catalogSlug: "codex",
+    os: ["darwin"],
+    note: "installs an OpenLLM ChatGPT launcher in /Applications; ~/.codex is never modified",
+  },
   raycast: {
     id: "raycast",
     name: "Raycast",
@@ -179,6 +193,10 @@ export const CLIENTS: Readonly<Record<TClientId, TClient>> = {
     note: "Raycast runs continuously, so this applies to its config once",
   },
 } as const;
+
+/** Always-on client ids — a test pins this to `mode === "always-on"`. */
+export const ALWAYS_ON_CLIENT_IDS = ["chatgpt", "raycast"] as const;
+export type TAlwaysOnClientId = (typeof ALWAYS_ON_CLIENT_IDS)[number];
 
 export const isClientId = (value: string): value is TClientId =>
   (CLIENT_IDS as readonly string[]).includes(value);

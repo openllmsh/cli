@@ -285,19 +285,35 @@ const planClaude = (inputs: TLaunchInputs): TLaunchPlan => {
 };
 
 /**
+ * The Codex overlay as `-c key=value` argv pairs. Shared by the session `codex`
+ * client and the ChatGPT Mac app's app-server shim (`clients/chatgpt.ts`), which
+ * runs the same embedded codex binary — one overlay, two delivery paths.
+ * `hasCatalog` false drops `model_catalog_json` so we never point at a missing
+ * file.
+ */
+export const codexOverrideArgs = (
+  vars: Readonly<Record<string, string>>,
+  hasCatalog: boolean,
+): readonly string[] => {
+  const overrides = Bun.TOML.parse(
+    substitute(OVERLAYS.codex.overrides, vars),
+  ) as TJsonObject;
+  if (!hasCatalog) delete overrides.model_catalog_json;
+  return tomlLeaves(overrides).flatMap((pair) => ["-c", pair]);
+};
+
+/**
  * Codex — every overlay leaf becomes a `-c key=value` override layered on the
  * user's own `config.toml` (Codex's documented mechanism). The provider's key is
  * named via `env_key`, not inlined, so it never reaches argv.
  */
 const planCodex = (inputs: TLaunchInputs): TLaunchPlan => {
-  const vars = overlayVars(inputs);
-  const overrides = Bun.TOML.parse(
-    substitute(OVERLAYS.codex.overrides, vars),
-  ) as TJsonObject;
   const files: Record<string, string> = {};
   if (inputs.catalog !== undefined) files["models.json"] = inputs.catalog;
-  else delete overrides.model_catalog_json; // no catalog → don't point at a missing file
-  const args = tomlLeaves(overrides).flatMap((pair) => ["-c", pair]);
+  const args = codexOverrideArgs(
+    overlayVars(inputs),
+    inputs.catalog !== undefined,
+  );
   return {
     files,
     args,

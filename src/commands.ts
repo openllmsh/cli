@@ -56,6 +56,11 @@ export const COMMANDS = [
     description: "Run Codex through OpenLLM",
   },
   {
+    name: "chatgpt",
+    args: "[uninstall|status]",
+    description: "Install the OpenLLM ChatGPT Mac-app launcher, or remove it",
+  },
+  {
     name: "grok",
     args: "[...args]",
     description: "Run Grok Build through OpenLLM",
@@ -239,6 +244,7 @@ export const COMMAND_ARGS: Readonly<
   mcp: ["--only", ...MCP_ONLY_GROUPS],
   api: ["--spec"],
   raycast: ["uninstall", "status"],
+  chatgpt: ["uninstall", "status"],
   hermes: ["install", "uninstall", "status", "--no-persist"],
   sessions: ["list", "attach", "kill"],
   doctor: [
@@ -314,7 +320,9 @@ Running a client
   \`openllm claude --resume\` behaves exactly like \`claude --resume\`.
   Your client's own config is never modified. Raycast is the exception: it
   runs continuously, so \`openllm raycast\` applies to its config and
-  \`openllm raycast uninstall\` removes it again.
+  \`openllm raycast uninstall\` removes it again. \`openllm chatgpt\` installs
+  an "OpenLLM ChatGPT" launcher app instead; \`openllm chatgpt uninstall\`
+  removes it.
 
 Exec groups
 ${EXEC_GROUPS.map((g) => `  openllm exec ${g} <${EXEC_VERBS[g].join("|")}>`).join("\n")}

@@ -44,7 +44,7 @@ user's home directory by a setup script.
 ```
 setup/
 ├── claude/     settings.json · mcp.json · guidance.md
-├── codex/      overrides.toml
+├── codex/      overrides.toml      (also reused by the ChatGPT Mac app's app-server shim)
 ├── grok/       config.toml · mcp.toml · hooks.json · guidance.md
 ├── hermes/     openllm.yaml · guidance.md   (session overlay + optional sticky profile)
 ├── opencode/   opencode.json

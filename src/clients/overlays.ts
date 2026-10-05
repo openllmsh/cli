@@ -58,6 +58,9 @@ export const OVERLAYS = {
     guidance: claudeGuidance,
   },
   codex: { overrides: codexOverrides },
+  // ChatGPT.app runs the same embedded codex binary, so its app-server shim
+  // reuses the Codex overlay verbatim (`codexOverrideArgs`) — one source.
+  chatgpt: { overrides: codexOverrides },
   grok: {
     config: grokConfig,
     mcp: grokMcp,

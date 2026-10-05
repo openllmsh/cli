@@ -6,8 +6,9 @@
 >
 >  1. runs each supported client through OpenLLM (`openllm <client>`), applying
 >     its embedded `setup/<client>/` overlay at RUN time — session clients never
->     have their config written, and Raycast (the one always-on client) gets an
->     explicit, reversible in-place apply;
+>     have their config written; the always-on clients are Raycast (an
+>     explicit, reversible in-place apply) and the ChatGPT Mac app (a launcher
+>     `.app` in `/Applications` — no vendor config is written);
 >  2. serves ONE MCP server exposing the MCP-relevant subset of the native
 >     gateway API (inference + read-only ops; §MCP), local daemon auth commands,
 >     and the openllm-context and openllm-memory tool groups.
@@ -48,7 +49,10 @@ packages/cli/
     │   ├── session-picker.ts # pure, unit-tested session-choice logic
     │   ├── attach.ts     #   terminal/pipe attach to a durable session host
     │   ├── live.ts       #   live-process registry for direct client launches
+    │   ├── always-on.ts  #   always-on command/uninstall dispatch by client id
     │   ├── raycast.ts    #   the always-on apply/uninstall/status
+    │   ├── chatgpt.ts    #   ChatGPT Mac app: launcher install, app-server shim, uninstall
+    │   ├── mac-launcher.ts # logic-free /Applications launcher .app builder
     │   ├── gateway.ts    #   per-launch local-vs-cloud resolution
     │   └── hooks.ts      #   embedded hook scripts
     ├── session-host.ts   # durable session-host discovery and spawning
@@ -79,6 +83,7 @@ packages/cli/
 | --- | --- |
 | `openllm <claude\|codex\|grok\|opencode> [...args]` | run that client through OpenLLM — args forwarded VERBATIM, config never written |
 | `openllm raycast [uninstall\|status]` | the always-on client: apply in place, or reverse exactly what apply wrote |
+| `openllm [-r] chatgpt [uninstall\|status]` | install `/Applications/OpenLLM ChatGPT.app`, whose only logic is `exec openllm chatgpt launch`. `launch` (hidden) rewrites `~/.openllm/clients/chatgpt/codex-shim` — the app's embedded `codex` plus the Codex overlay as `-c` overrides (`codexOverrideArgs`, shared with session `codex`) — then reopens ChatGPT with `CODEX_CLI_PATH` at the shim. Real `~/.codex` (chats, auth) is never written. Design: `docs/audit/2026-08-23-cowork-codex-mac-app-setups.md` §9 |
 | `openllm uninstall [--yes]` | remove the CLI (reverses always-on wiring first) |
 | `openllm doctor [--fix]` | report/clean leftovers from the old install model |
 | `openllm mcp [--only <group>]` | the unified MCP server over stdio (groups: `openllm`, `openllm-context`, `openllm-memory`; default all — `--only` is debug) |
@@ -94,8 +99,8 @@ packages/cli/
 | `openllm auth <providers\|status\|usage\|refresh\|login\|submit-code\|cancel\|logout> …` | local provider auth, delegated to the running daemon through `openllmd`; `--json` for agents, runtime provider/method discovery |
 | `openllm version` | print this CLI version only (`openllm vX.Y.Z`); `-v`/`--version` are the same. Combined daemon diagnostics stay on `status`/`doctor` |
 
-**Launch setup guard:** session clients, Hermes sticky launch/install, and Raycast
-apply share `clients/provider-preflight.ts`. On a cache miss it reads the resolved
+**Launch setup guard:** session clients, Hermes sticky launch/install, Raycast
+apply, and the ChatGPT launcher install share `clients/provider-preflight.ts`. On a cache miss it reads the resolved
 gateway's `GET /v1/models` (the daemon forwards this to the cloud), not local auth
 status. A valid empty model list stops before launch/config writes and prints
 `<configured cloud origin>/providers`; fleet-backed, BYOK, and custom models use

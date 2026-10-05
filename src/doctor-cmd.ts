@@ -23,7 +23,13 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import {
+  CHATGPT_LAUNCHER_BUNDLE_ID,
+  chatgptLauncherPath,
+  chatgptLedgerPath,
+} from "./clients/chatgpt";
 import { daemonPort } from "./clients/gateway";
+import { bundleIdOf, uninstallMacLauncher } from "./clients/mac-launcher";
 import { removeRegion } from "./clients/merge";
 import { padRight } from "./commands";
 import { managedDaemonBinary } from "./daemon-delegation";
@@ -1212,6 +1218,24 @@ export const runDoctor = async (args: readonly string[]): Promise<number> => {
       continue;
     }
     tryRemove(item, () => writeFileSync(path, next));
+  }
+
+  // An OpenLLM ChatGPT launcher whose ledger is gone (e.g. ~/.openllm/clients
+  // was wiped) — `openllm chatgpt uninstall` would still remove it, but nothing
+  // else would ever tell the user it's there.
+  const launcher = chatgptLauncherPath();
+  if (
+    !existsSync(chatgptLedgerPath()) &&
+    bundleIdOf(launcher) === CHATGPT_LAUNCHER_BUNDLE_ID
+  ) {
+    const item = `${launcher} (orphaned OpenLLM ChatGPT launcher)`;
+    if (fix) {
+      tryRemove(item, () =>
+        uninstallMacLauncher(launcher, CHATGPT_LAUNCHER_BUNDLE_ID),
+      );
+    } else {
+      found.push(item);
+    }
   }
 
   const legacyBin = legacyBinary();

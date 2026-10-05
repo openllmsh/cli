@@ -4,8 +4,8 @@
  */
 
 import { CLI_VERSION, printSelfVersion } from "./cli-version";
+import { isAlwaysOnClientId, runAlwaysOnCommand } from "./clients/always-on";
 import { runHermesCommand } from "./clients/hermes";
-import { runRaycastCommand } from "./clients/raycast";
 import { CLIENTS, isClientId, parseClientFlags } from "./clients/registry";
 import { runSessionClient } from "./clients/session";
 import type { TExecGroup } from "./commands";
@@ -190,8 +190,10 @@ export const runCli = async (argv: readonly string[]): Promise<void> => {
     if (client.id === "hermes") {
       return process.exit(await runHermesCommand(rest, clientFlags));
     }
-    if (client.mode === "always-on") {
-      return process.exit(await runRaycastCommand(rest, clientFlags));
+    if (isAlwaysOnClientId(client.id)) {
+      return process.exit(
+        await runAlwaysOnCommand(client.id, rest, clientFlags),
+      );
     }
     // ONLY a LEADING -h/--help is ours; anywhere else it belongs to the client
     // (`openllm claude --resume -h` must reach the client). `--` forwards it.
