@@ -86,7 +86,8 @@ ${hasIcon ? `  <key>CFBundleIconFile</key>\n  <string>${ICON_FILE}</string>\n` :
 
 /**
  * The launcher's executable. GUI apps have no `PATH` and nobody sees stderr,
- * so a missing CLI binary surfaces as a dialog rather than a silent no-op.
+ * so a missing CLI binary or a failed launch surfaces as a dialog rather than
+ * a silent no-op. Not `exec`: we need the exit status to report it.
  */
 export const launcherScript = (command: readonly string[]): string => {
   const bin = command[0] ?? "";
@@ -95,7 +96,12 @@ if [ ! -x ${shellQuote(bin)} ]; then
   /usr/bin/osascript -e 'display alert "OpenLLM CLI not found" message "Reinstall it with: curl -fsSL https://openllm.sh/install | bash"' >/dev/null 2>&1
   exit 1
 fi
-exec ${command.map(shellQuote).join(" ")}
+${command.map(shellQuote).join(" ")} >/dev/null 2>&1
+status=$?
+if [ "$status" -ne 0 ]; then
+  /usr/bin/osascript -e "display alert \\"OpenLLM could not start\\" message \\"Exit $status. Run this in Terminal for details: openllm ${command.slice(1).join(" ").replaceAll('"', "")}\\"" >/dev/null 2>&1
+fi
+exit "$status"
 `;
 };
 

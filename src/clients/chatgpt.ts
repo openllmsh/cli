@@ -29,7 +29,7 @@ import {
   rmSync,
   writeFileSync,
 } from "node:fs";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { CLI_VERSION, cliBinPath, openllmDir } from "../env";
 import { requireCliApiKey } from "../onboarding";
 import {
@@ -127,9 +127,18 @@ const launchEnabled = (): boolean =>
   process.platform === "darwin" &&
   process.env.OPENLLM_MAC_APPS_NO_LAUNCH !== "1";
 
+/**
+ * The binary the launcher (and the shim's MCP entry) runs: the compiled
+ * `openllm` that is executing right now, so a launcher installed by a dev or
+ * side-by-side build runs THAT build rather than an older installed one that
+ * may not know `chatgpt`. Under `bun src/main.ts` execPath is bun itself, so
+ * fall back to the installed CLI.
+ */
 const openllmBinPath = (): string => {
   const override = process.env.OPENLLM_BIN_OVERRIDE;
   if (override !== undefined && override.length > 0) return override;
+  const self = basename(process.execPath);
+  if (self === "openllm" || self === "ollm") return process.execPath;
   return existsSync(cliBinPath()) ? cliBinPath() : process.execPath;
 };
 
