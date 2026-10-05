@@ -302,7 +302,7 @@ export const chatgptHookArgs = (bin: string): readonly string[] => {
     substitute(OVERLAYS.chatgpt.hooks, { OPENLLM_BIN: bin }),
   ) as TJsonObject;
   return tomlLeaves({
-    features: { codex_hooks: true },
+    features: { hooks: true },
     hooks: doc.hooks,
   }).flatMap((pair) => ["-c", pair]);
 };
