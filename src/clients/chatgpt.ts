@@ -41,6 +41,7 @@ import {
 import { codexOverrideArgs, mcpArgsJson } from "./launch";
 import {
   appIconPath,
+  bundleIdOf,
   installMacLauncher,
   macLauncherPath,
   shellQuote,
@@ -243,6 +244,16 @@ export const installChatgpt = async (opts?: {
 
   const remote = opts?.remote === true;
   const launcher = chatgptLauncherPath();
+  // Re-running is a clean reinstall: drop the previous launcher (wherever the
+  // ledger put it) and the stale shim/catalog, so a changed CLI path, gateway
+  // choice, or app layout never lingers. `launch` rebuilds the shim per click.
+  const previous = readLedger();
+  const reinstall =
+    previous !== null || bundleIdOf(launcher) === CHATGPT_LAUNCHER_BUNDLE_ID;
+  if (previous !== null && previous.launcher_path !== launcher) {
+    uninstallMacLauncher(previous.launcher_path, CHATGPT_LAUNCHER_BUNDLE_ID);
+  }
+  rmSync(chatgptStateDir(), { recursive: true, force: true });
   const result = installMacLauncher(launcher, {
     displayName: "OpenLLM ChatGPT",
     bundleId: CHATGPT_LAUNCHER_BUNDLE_ID,
@@ -263,7 +274,7 @@ export const installChatgpt = async (opts?: {
     remote,
   });
   process.stdout.write(
-    `✓ Installed ${launcher}\n` +
+    `✓ ${reinstall ? "Reinstalled" : "Installed"} ${launcher}\n` +
       `  gateway: ${remote ? "cloud" : "local daemon (cloud fallback)"}\n` +
       '  Open "OpenLLM ChatGPT" from Spotlight or Launchpad to use ChatGPT through OpenLLM.\n' +
       "  Remove with: openllm chatgpt uninstall\n",
