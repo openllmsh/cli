@@ -244,7 +244,12 @@ export const COMMAND_ARGS: Readonly<
   mcp: ["--only", ...MCP_ONLY_GROUPS],
   api: ["--spec"],
   raycast: ["uninstall", "status"],
-  chatgpt: ["uninstall", "status"],
+  chatgpt: [
+    "uninstall",
+    "status",
+    "--with-chatgpt-auth",
+    "--without-chatgpt-auth",
+  ],
   hermes: ["install", "uninstall", "status", "--no-persist"],
   sessions: ["list", "attach", "kill"],
   doctor: [

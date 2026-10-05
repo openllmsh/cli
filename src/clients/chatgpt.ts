@@ -59,7 +59,7 @@ const LAUNCHER_APP_NAME = "OpenLLM ChatGPT.app";
 const LAUNCHER_EXEC = "OpenLLMChatGPT";
 const DOWNLOAD_URL = "https://chatgpt.com/download";
 
-const USAGE = `usage: openllm [-r] chatgpt [uninstall|status]
+const USAGE = `usage: openllm [-r] chatgpt [--with-chatgpt-auth|--without-chatgpt-auth] [uninstall|status]
 
 Installs "OpenLLM ChatGPT" in /Applications. Open it instead of ChatGPT to run
 the ChatGPT Mac app through OpenLLM — your chats and ~/.codex stay as they are.
@@ -68,6 +68,10 @@ the ChatGPT Mac app through OpenLLM — your chats and ~/.codex stay as they are
   openllm -r chatgpt           launcher uses the CLOUD gateway instead of the daemon
   openllm chatgpt uninstall    remove the launcher and everything it wrote
   openllm chatgpt status       report whether the launcher is installed
+
+  --with-chatgpt-auth          keep the app's ChatGPT sign-in (dictation, connectors)
+  --without-chatgpt-auth       OpenLLM only — the app runs with no ChatGPT account
+  Without either flag, install asks (or keeps your previous choice).
 
 macOS only. Requires /Applications/ChatGPT.app (${DOWNLOAD_URL}).
 `;
@@ -115,6 +119,9 @@ export type TChatgptLedger = {
   readonly launcher_path: string;
   /** `-r` at install time — the launcher passes it on every launch. */
   readonly remote: boolean;
+  /** Keep the app's ChatGPT sign-in visible (see CHATGPT_AUTH_CHOICES).
+   *  Absent on ledgers written before the choice existed → true. */
+  readonly chatgpt_auth?: boolean;
 };
 
 const readLedger = (): TChatgptLedger | null => {
@@ -235,9 +242,58 @@ const quitChatgpt = (): void => {
   while (chatgptRunning() && Date.now() < deadline) sleepMs(200);
 };
 
+/**
+ * The two ways OpenLLM ChatGPT can run. Inference goes through OpenLLM either
+ * way (with the OpenLLM key); this only decides whether the app also keeps the
+ * user's ChatGPT sign-in for the features that talk to chatgpt.com directly.
+ */
+export const CHATGPT_AUTH_CHOICES = `How should OpenLLM ChatGPT handle your ChatGPT account?
+
+  1) With ChatGPT sign-in (recommended)
+     Your models still run through OpenLLM. The app keeps your ChatGPT
+     account for the features that only work against chatgpt.com:
+       + dictation (mic button), ChatGPT connectors/apps, Work mode
+       - those features use your ChatGPT account and plan, not OpenLLM
+
+  2) Without ChatGPT sign-in (OpenLLM only)
+     The app runs with no ChatGPT account at all; nothing goes to
+     chatgpt.com on your behalf.
+       - disables: the mic button (dictation), ChatGPT connectors/apps,
+         Work mode and anything else that needs a ChatGPT login
+`;
+
+/** Ask once on a terminal; null when there is none (or no answer). */
+const promptChatgptAuth = (): boolean | null => {
+  if (process.stdin.isTTY !== true || process.stdout.isTTY !== true) {
+    return null;
+  }
+  process.stdout.write(CHATGPT_AUTH_CHOICES);
+  for (;;) {
+    const answer = prompt("\nChoose 1 or 2 [1]:");
+    if (answer === null) return null;
+    const trimmed = answer.trim();
+    if (trimmed === "" || trimmed === "1") return true;
+    if (trimmed === "2") return false;
+    process.stdout.write("Please enter 1 or 2.\n");
+  }
+};
+
+/** Flag → previous choice → interactive prompt → default (with sign-in). */
+export const resolveChatgptAuth = (
+  args: readonly string[],
+  previous: boolean | undefined,
+  ask: () => boolean | null = promptChatgptAuth,
+): boolean => {
+  if (args.includes("--with-chatgpt-auth")) return true;
+  if (args.includes("--without-chatgpt-auth")) return false;
+  if (previous !== undefined) return previous;
+  return ask() ?? true;
+};
+
 /** Install / refresh the launcher. Does not start ChatGPT. */
 export const installChatgpt = async (opts?: {
   readonly remote?: boolean;
+  readonly args?: readonly string[];
 }): Promise<number> => {
   if (!macOk()) {
     process.stderr.write("openllm chatgpt is macOS-only.\n");
@@ -262,6 +318,10 @@ export const installChatgpt = async (opts?: {
   if (!(await requireProviderRouting(gateway))) return 1;
 
   const remote = opts?.remote === true;
+  const chatgptAuth = resolveChatgptAuth(
+    opts?.args ?? [],
+    readLedger()?.chatgpt_auth,
+  );
   const launcher = chatgptLauncherPath();
   const result = installMacLauncher(launcher, {
     displayName: "OpenLLM ChatGPT",
@@ -281,10 +341,13 @@ export const installChatgpt = async (opts?: {
     cli_version: CLI_VERSION,
     launcher_path: launcher,
     remote,
+    chatgpt_auth: chatgptAuth,
   });
   process.stdout.write(
     `✓ Installed ${launcher}\n` +
       `  gateway: ${remote ? "cloud" : "local daemon (cloud fallback)"}\n` +
+      `  ChatGPT sign-in: ${chatgptAuth ? "kept (dictation, connectors work)" : "off (OpenLLM only; no dictation/connectors)"}\n` +
+      "  Change it with: openllm chatgpt --with-chatgpt-auth | --without-chatgpt-auth\n" +
       '  Open "OpenLLM ChatGPT" from Spotlight or Launchpad to use ChatGPT through OpenLLM.\n' +
       "  Remove with: openllm chatgpt uninstall\n",
   );
@@ -477,12 +540,13 @@ export const launchChatgpt = async (opts?: {
     ...args,
     "-c",
     `mcp_servers.openllm.cwd=${JSON.stringify(openllmDir())}`,
-    // Keep the app's ChatGPT sign-in visible: with a custom provider the
-    // backend reports no auth, and the app hides the mic (dictation is gated
-    // on authMethod === "chatgpt"). Inference still authenticates with
-    // `env_key` (the OpenLLM key) — verified the ChatGPT token isn't sent.
-    "-c",
-    "model_providers.openllm.requires_openai_auth=true",
+    // When chosen, keep the app's ChatGPT sign-in visible: with a custom
+    // provider the backend reports no auth and the app hides the mic
+    // (dictation is gated on authMethod === "chatgpt"). Inference still
+    // authenticates with `env_key` — verified the ChatGPT token isn't sent.
+    ...((readLedger()?.chatgpt_auth ?? true)
+      ? ["-c", "model_providers.openllm.requires_openai_auth=true"]
+      : []),
     ...hookArgs,
     ...trustArgs,
   ];
@@ -532,6 +596,7 @@ export const statusChatgpt = (): number => {
       app_installed: existsSync(chatgptAppPath()),
       launcher_installed: launcherInstalled,
       remote: ledger?.remote ?? null,
+      chatgpt_auth: ledger === null ? null : (ledger.chatgpt_auth ?? true),
       cli_version: ledger?.cli_version ?? null,
       stale_ledger: ledger !== null && !launcherInstalled,
     })}\n`,
@@ -549,8 +614,11 @@ export const runChatgptCommand = async (
     );
     return 2;
   }
-  const verb = args[0];
-  if (verb === undefined) return installChatgpt({ remote: flags?.remote });
+  const authFlags = ["--with-chatgpt-auth", "--without-chatgpt-auth"];
+  const verb = args.find((a) => !authFlags.includes(a));
+  if (verb === undefined) {
+    return installChatgpt({ remote: flags?.remote, args });
+  }
   if (verb === "launch") return launchChatgpt({ remote: flags?.remote });
   if (verb === "uninstall") return uninstallChatgpt();
   if (verb === "status") return statusChatgpt();
