@@ -30,7 +30,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { basename, join } from "node:path";
-import { CLI_VERSION, cliBinPath, openllmDir } from "../env";
+import { CLI_VERSION, cliBinPath, openllmDir, userHome } from "../env";
 import { requireCliApiKey } from "../onboarding";
 import {
   contextStateDir,
@@ -46,6 +46,9 @@ import {
   shellQuote,
   uninstallMacLauncher,
 } from "./mac-launcher";
+import type { TJsonObject } from "./merge";
+import { substitute, tomlLeaves, tomlValue } from "./merge";
+import { OVERLAYS } from "./overlays";
 import { requireProviderRouting } from "./provider-preflight";
 import type { TClientFlags } from "./registry";
 import { CLIENTS } from "./registry";
@@ -288,6 +291,129 @@ export const installChatgpt = async (opts?: {
   return 0;
 };
 
+/**
+ * The OpenLLM hooks (same set as Claude Code: context indexing, grep nudge,
+ * reindex-on-edit, memory recall/extract) as Codex `-c` session flags. Codex
+ * reads `hooks.<Event>` from any config layer, so nothing is written to
+ * `~/.codex`.
+ */
+export const chatgptHookArgs = (bin: string): readonly string[] => {
+  const doc = JSON.parse(
+    substitute(OVERLAYS.chatgpt.hooks, { OPENLLM_BIN: bin }),
+  ) as TJsonObject;
+  return tomlLeaves({
+    features: { codex_hooks: true },
+    hooks: doc.hooks,
+  }).flatMap((pair) => ["-c", pair]);
+};
+
+/** The user's own hook approvals, read-only, so our `hooks.state` override
+ *  (a whole-table replace) never revokes them. */
+const userHookState = (): TJsonObject => {
+  try {
+    const doc = Bun.TOML.parse(
+      readFileSync(join(userHome(), ".codex", "config.toml"), "utf-8"),
+    ) as TJsonObject;
+    const hooks = doc.hooks as TJsonObject | undefined;
+    const state = hooks?.state;
+    return typeof state === "object" && state !== null && !Array.isArray(state)
+      ? (state as TJsonObject)
+      : {};
+  } catch {
+    return {};
+  }
+};
+
+const TRUST_PROBE_TIMEOUT_MS = 10_000;
+
+/**
+ * Pre-approve our hooks without touching `~/.codex`: Codex only runs a hook
+ * whose `hooks.state.<key>.trusted_hash` matches, and it accepts that table as
+ * a session flag when passed as ONE inline value (the key contains dots). The
+ * hash is Codex's own — ask the embedded codex via `hooks/list` rather than
+ * re-deriving it. Fails open to no trust args: hooks then wait for the user's
+ * one-time approval in the app.
+ */
+export const chatgptHookTrustArgs = async (
+  codex: string,
+  hookArgs: readonly string[],
+): Promise<readonly string[]> => {
+  if (process.env.OPENLLM_MAC_APPS_NO_TRUST_PROBE === "1") return [];
+  const state: TJsonObject = { ...userHookState() };
+  try {
+    const child = Bun.spawn([codex, ...hookArgs, "app-server"], {
+      stdin: "pipe",
+      stdout: "pipe",
+      stderr: "ignore",
+      cwd: openllmDir(),
+    });
+    const send = (msg: unknown): void => {
+      child.stdin.write(`${JSON.stringify(msg)}\n`);
+    };
+    send({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "initialize",
+      params: { clientInfo: { name: "openllm", version: CLI_VERSION } },
+    });
+    send({ jsonrpc: "2.0", method: "initialized" });
+    send({
+      jsonrpc: "2.0",
+      id: 2,
+      method: "hooks/list",
+      params: { cwds: [openllmDir()] },
+    });
+    const reader = child.stdout.getReader();
+    const decoder = new TextDecoder();
+    let buffered = "";
+    const deadline = Date.now() + TRUST_PROBE_TIMEOUT_MS;
+    try {
+      while (Date.now() < deadline) {
+        const next = await Promise.race([
+          reader.read(),
+          Bun.sleep(deadline - Date.now()).then(() => null),
+        ]);
+        if (next === null || next.done) break;
+        buffered += decoder.decode(next.value, { stream: true });
+        const lines = buffered.split("\n");
+        buffered = lines.pop() ?? "";
+        const reply = lines
+          .map((line) => {
+            try {
+              return JSON.parse(line) as { id?: unknown; result?: unknown };
+            } catch {
+              return null;
+            }
+          })
+          .find((msg) => msg?.id === 2);
+        if (reply === undefined || reply === null) continue;
+        const data = (reply.result as { data?: unknown } | undefined)?.data;
+        for (const entry of Array.isArray(data) ? data : []) {
+          for (const hook of ((entry as { hooks?: unknown }).hooks as
+            | { key?: unknown; source?: unknown; currentHash?: unknown }[]
+            | undefined) ?? []) {
+            if (
+              hook.source === "sessionFlags" &&
+              typeof hook.key === "string" &&
+              typeof hook.currentHash === "string"
+            ) {
+              state[hook.key] = { trusted_hash: hook.currentHash };
+            }
+          }
+        }
+        break;
+      }
+    } finally {
+      child.kill();
+    }
+  } catch {
+    return [];
+  }
+  return Object.keys(state).length === 0
+    ? []
+    : ["-c", `hooks.state=${tomlValue(state)}`];
+};
+
 /** What the launcher runs: refresh the shim, then (re)start ChatGPT on it. */
 export const launchChatgpt = async (opts?: {
   readonly remote?: boolean;
@@ -344,10 +470,15 @@ export const launchChatgpt = async (opts?: {
   // whose folder was moved/deleted fails the spawn ("No such file or
   // directory") and the OpenLLM tools silently vanish. Pin a folder we own so
   // the server starts for every thread, whatever its project.
+  const bin = openllmBinPath();
+  const hookArgs = chatgptHookArgs(bin);
+  const trustArgs = await chatgptHookTrustArgs(codex, hookArgs);
   const mcpArgs = [
     ...args,
     "-c",
     `mcp_servers.openllm.cwd=${JSON.stringify(openllmDir())}`,
+    ...hookArgs,
+    ...trustArgs,
   ];
   const shim = chatgptShimPath();
   writeFileSync(shim, renderCodexShim(codex, mcpArgs), {

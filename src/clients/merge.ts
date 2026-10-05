@@ -121,8 +121,8 @@ export const parseJsonLoose = (text: string): TJsonObject | null => {
   }
 };
 
-/** Render a scalar as a TOML value. */
-const tomlValue = (value: unknown): string => {
+/** Render a value as a TOML value (objects → inline tables). */
+export const tomlValue = (value: unknown): string => {
   if (typeof value === "string") return JSON.stringify(value);
   if (typeof value === "number" || typeof value === "boolean")
     return String(value);

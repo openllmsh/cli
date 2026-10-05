@@ -9,6 +9,7 @@
  * See `packages/cli/setup/README.md` for the authoring rules.
  */
 
+import chatgptHooks from "../../setup/chatgpt/hooks.json" with { type: "text" };
 import claudeGuidance from "../../setup/claude/guidance.md" with {
   type: "text",
 };
@@ -60,7 +61,7 @@ export const OVERLAYS = {
   codex: { overrides: codexOverrides },
   // ChatGPT.app runs the same embedded codex binary, so its app-server shim
   // reuses the Codex overlay verbatim (`codexOverrideArgs`) — one source.
-  chatgpt: { overrides: codexOverrides },
+  chatgpt: { overrides: codexOverrides, hooks: asText(chatgptHooks) },
   grok: {
     config: grokConfig,
     mcp: grokMcp,
