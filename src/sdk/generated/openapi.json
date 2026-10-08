@@ -26788,6 +26788,12 @@
                             },
                             "root_exited": {
                               "type": "boolean"
+                            },
+                            "cli_is_script": {
+                              "type": "boolean"
+                            },
+                            "interpreter_resolved": {
+                              "type": "boolean"
                             }
                           },
                           "additionalProperties": false
@@ -26856,6 +26862,7 @@
                             "keychain_unavailable",
                             "store_unreadable",
                             "cli_unavailable",
+                            "cli_runtime_missing",
                             "credential_absent"
                           ]
                         },
