@@ -180,6 +180,18 @@ export const API_OPERATIONS: readonly TApiOperation[] = [
     "hasBody": true
   },
   {
+    "id": "gravity.appOpen",
+    "method": "post",
+    "path": "/gravity/app-open",
+    "summary": "",
+    "tags": [
+      "gravity"
+    ],
+    "pathParams": [],
+    "queryParams": [],
+    "hasBody": true
+  },
+  {
     "id": "health.ping",
     "method": "get",
     "path": "/health",
