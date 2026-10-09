@@ -27050,6 +27050,7 @@
                             "start",
                             "child_wait",
                             "child",
+                            "prompt",
                             "prep_wait",
                             "prep",
                             "verify_wait",
