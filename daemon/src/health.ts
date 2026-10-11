@@ -26,7 +26,13 @@ import { hasIdentityConflict } from "./identity-state";
 import type { TSandboxState } from "./sandbox/landlock";
 
 export type TDaemonHealth = {
+  /** The RUNNING daemon's version (the code in this process). */
   readonly version: string;
+  /** The version of the installed binary on disk (`~/.openllm/bin/openllm`),
+   *  or null while it hasn't been probed. Ahead of `version` after a swap whose
+   *  daemon code is unchanged — the daemon keeps running until its next
+   *  restart. */
+  readonly installed_version: string | null;
   readonly port: number;
   /** The per-child OS-sandbox posture from the boot capability probe
    *  (`sandboxState()`): "enforced" = risky children are wrapped. */
@@ -62,6 +68,7 @@ export type TDaemonHealth = {
  */
 export const buildHealth = (deps: {
   readonly version: string;
+  readonly installedVersion: string | null;
   readonly port: number;
   readonly sandbox: TSandboxState;
   readonly cloudState: TCloudState;
@@ -72,6 +79,7 @@ export const buildHealth = (deps: {
   readonly now: number;
 }): TDaemonHealth => ({
   version: deps.version,
+  installed_version: deps.installedVersion,
   port: deps.port,
   sandbox: deps.sandbox,
   cloud_state: deps.cloudState,

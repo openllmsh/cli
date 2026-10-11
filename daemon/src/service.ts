@@ -718,6 +718,14 @@ export const formatStatus = (fields: TStatusFields): string => {
     readonly value: string;
   }> = [
     {
+      label: "running",
+      value: fields.health !== null ? `v${fields.health.version}` : unknown,
+    },
+    {
+      label: "installed",
+      value: `v${fields.health?.installed_version ?? fields.version}`,
+    },
+    {
       label: "service",
       value: fields.registered ? "registered" : "not registered",
     },
@@ -774,12 +782,13 @@ export const formatStatus = (fields: TStatusFields): string => {
   // disk can be newer: a swap whose daemon code is unchanged does not restart
   // the daemon, so say so instead of reporting the file as if it were running.
   const running = fields.health?.version;
+  const installed = fields.health?.installed_version ?? fields.version;
   const header =
     running === undefined
       ? `openllmd v${fields.version} (installed; daemon not responding)`
-      : running === fields.version
+      : running === installed
         ? `openllmd v${running}`
-        : `openllmd v${running} running · v${fields.version} installed (daemon code unchanged — applies on next restart)`;
+        : `openllmd v${running} running · v${installed} installed (daemon code unchanged — applies on next restart)`;
   return [
     header,
     ...rows.map((row) => `${padStatusLabel(row.label, width)}${row.value}`),

@@ -777,6 +777,7 @@ const computeStatusFreshInner = async (
   }
   return {
     daemon_version: DAEMON_VERSION,
+    installed_version: getCliState().version ?? null,
     key_configured: hasApiKey(),
     auto_update: autoUpdateEnabled(),
     pty_sessions: ptySessionsEnabled(),

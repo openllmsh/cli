@@ -54,7 +54,7 @@ import {
 import { corsHeaders, isPreflight, preflightResponse } from "./cors";
 import { isSurvivableTransportError } from "./crash-policy";
 import { requireServiceApiKey } from "./credential-gate";
-import { refreshCliState } from "./device-state";
+import { getCliState, refreshCliState } from "./device-state";
 import {
   handleDoctorLocal,
   initDoctorCursorAtTail,
@@ -466,6 +466,7 @@ export const main = async (): Promise<void> => {
           headers.set("content-type", "application/json");
           const health = buildHealth({
             version: DAEMON_VERSION,
+            installedVersion: getCliState().version ?? null,
             port,
             sandbox: sandboxState(),
             cloudState: getCloudState(),
