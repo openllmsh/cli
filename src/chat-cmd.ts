@@ -7,10 +7,14 @@
  * can be piped or captured by scripts; diagnostics go to stderr.
  */
 
+import { CLI_VERSION } from "./cli-version";
 import { resolveGateway } from "./clients/gateway";
 import { requireCliApiKey } from "./onboarding";
 
 export const DEFAULT_CHAT_MODEL = "ultra";
+
+/** Identifies one-shot `-p` traffic in gateway logs and key activity. */
+export const PROMPT_USER_AGENT = `OpenLLM/${CLI_VERSION}`;
 
 export const CHAT_USAGE = `usage: openllm -p <prompt> [-m <model>] [-s <system>]
 
@@ -153,6 +157,7 @@ export const runChat = async (args: readonly string[]): Promise<number> => {
       headers: {
         authorization: `Bearer ${gateway.apiKey}`,
         "content-type": "application/json",
+        "user-agent": PROMPT_USER_AGENT,
       },
       body: JSON.stringify({
         model: parsed.model,
