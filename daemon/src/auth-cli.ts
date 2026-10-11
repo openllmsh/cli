@@ -48,7 +48,7 @@ export const callLocalAuth = async (
         body: {
           error: "upgrade_required",
           message:
-            "Running daemon does not support auth. Upgrade both OpenLLM binaries and restart the daemon.",
+            "Running daemon does not support auth. Upgrade OpenLLM and restart the daemon.",
         },
       };
     if (response.status === 403)
@@ -71,7 +71,7 @@ export const callLocalAuth = async (
         ok: false,
         body: {
           error: "version_mismatch",
-          message: "Upgrade both OpenLLM binaries and restart the daemon.",
+          message: "Upgrade OpenLLM and restart the daemon.",
         },
       };
     return { ok: response.ok, body: value as Record<string, unknown> };

@@ -63,7 +63,7 @@ const main = async (): Promise<void> => {
     );
   }
 
-  const installer = join(DIST_DIR, `openllmd-${target}.install.sh`);
+  const installer = join(DIST_DIR, `openllm-${target}.install.sh`);
   if (!existsSync(installer)) {
     throw new Error(
       `no installer for ${target} at ${installer}\nBuild it first: bun run daemon:dist`,

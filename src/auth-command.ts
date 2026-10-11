@@ -77,7 +77,7 @@ export const runAuthCommand = async (
       body: {
         error: "auth_command_unavailable",
         message:
-          "Upgrade both OpenLLM binaries and start the daemon. Check auth status before retrying a mutation; no cloud fallback was attempted.",
+          "Upgrade OpenLLM and start the daemon. Check auth status before retrying a mutation; no cloud fallback was attempted.",
       },
     };
   } finally {
