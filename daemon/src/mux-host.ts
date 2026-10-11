@@ -635,7 +635,19 @@ export const acceptChannel = (frame: {
     // inbound sink onto the EXISTING channel (its attached session streams
     // survive untouched; PTY hosts are durable and never respawned here) and
     // re-ack so the peer's open settles. The rebind re-evaluates the seed gate.
-    existing.seedGated = seedGateOf(frame);
+    // A grant-less consumer must not inherit a gated channel's live PTY
+    // session streams: refuse the downgrade, leave the incumbent alone.
+    const gated = seedGateOf(frame);
+    if (existing.seedGated && !gated) {
+      send({
+        type: "channel_open_ack",
+        channel_id: frame.channel_id,
+        ok: false,
+        error: "unauthorized",
+      });
+      return;
+    }
+    existing.seedGated = gated;
     bindSink(existing);
     touchChannel(existing);
     logInfo("mux-host", "channel_open rebind", {
