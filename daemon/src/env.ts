@@ -74,6 +74,12 @@ import { dirname, isAbsolute, join } from "node:path";
 import { parseOpenllmDaemonPort } from "@openllmsh/protocol";
 // NOTE: logger.ts imports `stateDir` from this module — a benign cycle, since
 // both sides only dereference the other's exports lazily inside functions.
+import {
+  DEFAULT_DAEMON_PORT,
+  DEV_CLOUD_ORIGIN,
+  DEV_DEFAULT_DAEMON_PORT,
+  isOpenllmDevMode,
+} from "../../src/runtime-contracts";
 import { logWarn, safeDiagnosticMessage } from "./logger";
 
 export type TDaemonEnv = {
@@ -134,7 +140,7 @@ const compiledCloudOrigin = (): string => {
  * real one from the dashboard's Providers tab (same as production), which
  * also exercises that flow during development. Never set in production.
  */
-export const isDevMode = (): boolean => process.env.OPENLLM_DAEMON_DEV === "1";
+export const isDevMode = (): boolean => isOpenllmDevMode();
 
 /**
  * Dev-mode `.dev.env` loading is special: when `OPENLLM_DAEMON_DEV=1`, existing
@@ -163,11 +169,6 @@ function shouldWriteEnvVar(key: string, devMode: boolean): boolean {
   if (!devMode) return process.env[key] === undefined;
   return true;
 }
-
-// Dev-only fallback for the cloud origin — points at the local Next
-// server. (The dashboard origin falls back through `cloudOrigin`, and the
-// API key is intentionally absent — set it from the UI like a real user.)
-const DEV_CLOUD_ORIGIN = "http://127.0.0.1:3000";
 
 /**
  * Root for the daemon's local state (`.env`, the isolated vendor CLIs
@@ -491,12 +492,7 @@ export const writeEnvFileVars = (
   }
 };
 
-/** The default loopback port for the daemon's `/v1/*` + `/whoami` surface. */
-export const DEFAULT_DAEMON_PORT = 8787;
-
-/** Dev-mode default port — distinct from prod so a source-run dev daemon can
- *  coexist with the installed daemon on `8787`. */
-export const DEV_DEFAULT_DAEMON_PORT = 8788;
+export { DEFAULT_DAEMON_PORT, DEV_DEFAULT_DAEMON_PORT };
 
 /**
  * The loopback port the daemon listens on (`OPENLLM_DAEMON_PORT`, default

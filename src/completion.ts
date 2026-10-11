@@ -116,9 +116,9 @@ const zshScript = (): string => {
   ).join("\n");
   const clientFlagPattern = CLIENT_FLAGS.map((f) => f.name).join("|");
   // Hand-rolled over `_arguments -C '1:command:->cmd'`: our own flags sit
-  // BEFORE the client name (`openllm -d -r claude …`), so word 1 is not
+  // BEFORE the client name (`openllm -d claude …`), so word 1 is not
   // necessarily the command. Skip the leading flags, then dispatch on the
-  // first non-flag word — otherwise completion dies after `-d`/`-r`.
+  // first non-flag word — otherwise completion dies after `-d`.
   return `# openllm zsh completion
 _openllm() {
   local -a _cmds

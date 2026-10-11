@@ -191,7 +191,6 @@ export type THermesApplyResult = {
 };
 
 export const applyHermes = async (opts?: {
-  readonly remote?: boolean;
   readonly restartGateway?: boolean;
 }): Promise<THermesApplyResult> => {
   const credential = requireCliApiKey("human");
@@ -200,7 +199,6 @@ export const applyHermes = async (opts?: {
     return { code: 1 };
   }
   const gateway = await resolveGateway({
-    remote: opts?.remote,
     config: credential.config,
   });
   if (!(await requireProviderRouting(gateway))) return { code: 1 };
@@ -367,7 +365,7 @@ export const runHermesCommand = async (
     return 0;
   }
   if (verb === "install") {
-    const applied = await applyHermes({ remote: flags?.remote });
+    const applied = await applyHermes();
     return applied.code;
   }
   if (verb === "uninstall") return uninstallHermes();
@@ -392,7 +390,6 @@ export const runHermesCommand = async (
       return 1;
     }
     const gateway = await resolveGateway({
-      remote: clientFlags.remote,
       config: credential.config,
     });
     if (!(await requireProviderRouting(gateway))) return 1;
@@ -420,7 +417,6 @@ export const runHermesCommand = async (
 
 const parseEmptyFlags = (): TClientFlags => ({
   dangerous: false,
-  remote: false,
   fresh: false,
   bare: false,
   attach: null,

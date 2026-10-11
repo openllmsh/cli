@@ -14,7 +14,7 @@ import {
 } from "node:fs";
 import { dirname, join } from "node:path";
 import type { TCliConfig } from "./env";
-import { cliConfig, sharedEnvFile } from "./env";
+import { cliConfig, cliEnvFile } from "./env";
 import type {
   TCredentialGateMode,
   TCredentialGateTerminal,
@@ -149,7 +149,8 @@ const waitForEnvUpdateLock = (): void => {
  * A killed writer leaves a stale regular file that is recovered after 30 seconds.
  */
 const updateEnvFile = (key: string): boolean => {
-  const target = sharedEnvFile();
+  // Dev launches write `.dev.env`, never the prod `.env` (dev daemon parity).
+  const target = cliEnvFile();
   const lock = `${target}.lock`;
   let locked = false;
   try {

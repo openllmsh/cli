@@ -8,9 +8,11 @@
  * Resolution order per value:
  *
  *   1. process env — `OPENLLM_CLOUD_ORIGIN` / `OPENLLM_API_KEY`
- *   2. `~/.openllm/.env` (KEY=VALUE lines — the shared file; the same
- *      OPENLLM_* keys the daemon reads/writes)
- *   3. the compile-time cloud-origin default (`--define` bake) for the URL
+ *   2. the environment's file — `~/.openllm/.env`, or `~/.openllm/.dev.env`
+ *      in dev mode (`OPENLLM_DAEMON_DEV=1`, the daemon's own signal); a dev
+ *      launch falls back to `.env` for the API key only, like the dev daemon
+ *   3. the default origin: the local Next server in dev, else the
+ *      compile-time cloud-origin default (`--define` bake)
  *
  * The version identity is baked at compile (`__OPENLLM_CLI_VERSION__`);
  * source runs carry the `0.0.0-dev` sentinel the dev guards key on.
@@ -21,6 +23,7 @@
 import * as fs from "node:fs";
 import { homedir } from "node:os";
 import { isAbsolute, join } from "node:path";
+import { DEV_CLOUD_ORIGIN, isOpenllmDevMode } from "./runtime-contracts";
 
 export { CLI_VERSION } from "./cli-version";
 
@@ -81,6 +84,19 @@ export const sharedEnvFile = (): string => {
     ? override
     : join(openllmDir(), ".env");
 };
+
+/**
+ * The file THIS launch's environment reads: `.dev.env` in dev mode, else the
+ * shared `.env` (an absolute `OPENLLM_DAEMON_ENV_FILE` overrides both). Same
+ * split the daemon makes (`envFilePath`), so a dev CLI and a dev daemon agree
+ * on the port and origin.
+ */
+export const cliEnvFile = (): string => {
+  const override = process.env.OPENLLM_DAEMON_ENV_FILE;
+  if (override !== undefined && override.length > 0 && isAbsolute(override))
+    return override;
+  return join(openllmDir(), isOpenllmDevMode() ? ".dev.env" : ".env");
+};
 export const cliBinPath = (): string => join(openllmDir(), "bin", "openllm");
 
 /** Parse a KEY=VALUE env file (comments + blank lines ignored). */
@@ -104,9 +120,10 @@ const parseEnvFile = (path: string): Record<string, string> => {
   return out;
 };
 
-/** The shared file's values (read-only). */
+/** This environment's file values (read-only): `.dev.env` in dev, `.env`
+ *  otherwise. */
 export const sharedFileConfig = (): Record<string, string> =>
-  parseEnvFile(sharedEnvFile());
+  parseEnvFile(cliEnvFile());
 
 export type TCliConfig = {
   readonly gatewayUrl: string;
@@ -117,11 +134,16 @@ export type TCliConfig = {
 
 export const cliConfig = (): TCliConfig => {
   const file = sharedFileConfig();
+  const dev = isOpenllmDevMode();
   const gatewayUrl = (
     process.env.OPENLLM_CLOUD_ORIGIN ??
     file.OPENLLM_CLOUD_ORIGIN ??
-    CLOUD_ORIGIN_DEFAULT
+    (dev ? DEV_CLOUD_ORIGIN : CLOUD_ORIGIN_DEFAULT)
   ).replace(/\/+$/, "");
-  const apiKey = process.env.OPENLLM_API_KEY ?? file.OPENLLM_API_KEY ?? "";
+  const apiKey =
+    process.env.OPENLLM_API_KEY ??
+    file.OPENLLM_API_KEY ??
+    (dev ? parseEnvFile(sharedEnvFile()).OPENLLM_API_KEY : undefined) ??
+    "";
   return { gatewayUrl, apiKey };
 };

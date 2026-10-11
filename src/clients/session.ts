@@ -206,7 +206,6 @@ export const brokerEligible = (args: {
     args.deviceSessionId.trim().length > 0
   )
     return false;
-  if (args.flags.remote) return false;
   // A bare launch is an internal one-shot (doctor's summarizer): the durable
   // session host and attach discovery know nothing of `bare`, so brokering it
   // would start Claude with the normal MCP overlay. Direct launch only.
@@ -450,15 +449,13 @@ export const runSessionClient = async (
     return 1;
   }
   const gateway = await resolveGateway({
-    remote: flags.remote,
     config: credential.config,
   });
   if (!(await requireProviderRouting(gateway))) return 1;
 
   const forwarded = forwardedVendorArgs(userArgs);
-  // Durable local sessions do not need a running daemon. An explicit cloud
-  // selection still means direct launch, preserving the existing `-r` and
-  // OPENLLM_GATEWAY=cloud semantics.
+  // Durable local sessions do not need a running daemon. A forced
+  // OPENLLM_GATEWAY=cloud still means direct launch.
   if (
     process.env.OPENLLM_GATEWAY !== "cloud" &&
     brokerEligible({

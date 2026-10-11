@@ -148,22 +148,21 @@ OR from the browser — they are offered before a new one starts. Attaching join
 the LIVE session alongside any other viewer; it is not a vendor \`--resume\`.
 List them any time with \`openllm sessions list\`.
 `;
-  return `usage: openllm [-d] [-r] ${sessionFlags}${id} [...args]
+  return `usage: openllm [-d] ${sessionFlags}${id} [...args]
 
 Runs ${client.name} through OpenLLM. EVERY argument after \`${id}\` is forwarded
 to ${client.bin} verbatim, so \`openllm ${id} <args>\` behaves exactly like
-\`${client.bin} <args>\` — including \`-d\`/\`-r\` if ${client.bin} defines them.
+\`${client.bin} <args>\` — including \`-d\` if ${client.bin} defines it.
 
 ${client.note}
 
 openllm's own flags go BEFORE the client name:
-${dangerous}  openllm -r ${id}    route the session via the cloud gateway
-
+${dangerous}
 ${sessionSelection}
 
-The session points at your local daemon by default, so subscription models
-serve locally with no cloud round trip. \`-r\` points it at the cloud origin,
-which tunnels subscription hops to one of your online devices.
+The gateway is chosen automatically: your local daemon if it answers (no cloud
+round trip), else the cloud origin, which tunnels subscription hops to one of
+your online devices. Both come from ~/.openllm/.env (.dev.env in dev).
 
   openllm ${id} -- --help   # \`--\` also works, though nothing after the
                           # client name is ever read by openllm
@@ -173,8 +172,8 @@ which tunnels subscription hops to one of your online devices.
 export const runCli = async (argv: readonly string[]): Promise<void> => {
   // OUR client flags sit BEFORE the subcommand (`openllm -d -r claude …`), so
   // they're stripped here — everything after the client name belongs to the
-  // client. See `parseClientFlags` for why position matters (`-d`/`-r` collide
-  // with claude's --debug/--resume and grok's --resume).
+  // client. See `parseClientFlags` for why position matters (`-d` collides
+  // with claude's --debug).
   const clientFlags = parseClientFlags([...argv]);
   const cmd = clientFlags.rest[0];
   if (clientFlags.sessionSelectionError !== undefined) {

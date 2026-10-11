@@ -160,7 +160,6 @@ export type TCommandName = (typeof COMMANDS)[number]["name"];
  */
 export const CLIENT_FLAGS: readonly TFlag[] = [
   { name: "-d", description: "Skip every approval prompt in the client" },
-  { name: "-r", description: "Route the session via the cloud gateway" },
 ] as const;
 
 export const FLAGS: readonly TFlag[] = [
@@ -308,7 +307,7 @@ export const helpText = (version: string): string => {
   return `openllm v${version}  —  the OpenLLM CLI (also ollm)
 
 Usage
-  openllm [-d] [-r] <command> [...]
+  openllm [-d] <command> [...]
 
 Commands
 ${commandRows}
@@ -316,9 +315,12 @@ ${commandRows}
 Client flags  (before the client name — everything after it is the client's)
 ${clientFlagRows}
 
-  Examples:  openllm -d claude    openllm -r codex    openllm -dr grok
-  They sit before the name on purpose: -d/-r are also claude --debug/--resume,
-  so \`openllm claude -r\` passes -r straight through to claude.
+  Examples:  openllm -d claude    openllm -d grok
+  They sit before the name on purpose: -d is also claude --debug, so
+  \`openllm claude -d\` passes -d straight through to claude.
+  The gateway is automatic: the local daemon if it answers, else the cloud
+  origin (from ~/.openllm/.env, or .dev.env in dev), which tunnels
+  subscription models to one of your online devices.
 
 Running a client
   Every argument after the client name is forwarded verbatim, so

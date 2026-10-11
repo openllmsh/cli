@@ -35,6 +35,21 @@ export const isUsableOpenllmApiKey = (
   value !== null && value !== undefined && isOpenllmApiKeySyntax(value.trim());
 
 /** Parse a daemon port from an env-file compatible scalar. */
+/** The default loopback port for the daemon's `/v1/*` + `/whoami` surface. */
+export const DEFAULT_DAEMON_PORT = 8787;
+
+/** Dev-mode default port — distinct from prod so a source-run dev daemon can
+ *  coexist with the installed daemon on `8787`. */
+export const DEV_DEFAULT_DAEMON_PORT = 8788;
+
+/** Dev-mode cloud origin fallback — the local Next server. */
+export const DEV_CLOUD_ORIGIN = "http://127.0.0.1:3000";
+
+/** Dev mode (`OPENLLM_DAEMON_DEV=1`): `~/.openllm/.dev.env`, port 8788 and the
+ *  local Next origin, for the daemon and every CLI client alike. */
+export const isOpenllmDevMode = (): boolean =>
+  process.env.OPENLLM_DAEMON_DEV === "1";
+
 export const parseOpenllmDaemonPort = (
   raw: string,
   fallback: number,

@@ -211,12 +211,13 @@ export const isAlwaysOnVerb = (value: string): value is TAlwaysOnVerb =>
 /**
  * OpenLLM-level flags, which sit BEFORE the client name:
  *
- *   openllm -d -r claude --resume
- *           ^^^^^ ours    ^^^^^^^^ the client's, untouched
+ *   openllm -d claude --resume
+ *           ^^ ours  ^^^^^^^^ the client's, untouched
  *
- * Position is load-bearing, not stylistic. `-d` and `-r` are already taken by
- * the clients themselves — claude has `-d`=--debug and `-r`=--resume, grok has
- * `-r`=--resume — so consuming them AFTER the client name would silently steal
+ * Position is load-bearing, not stylistic. `-d` is already taken by the
+ * clients themselves — claude has `-d`=--debug (and `-r`=--resume, which is
+ * why a leading `-r` is refused rather than silently ignored) — so consuming
+ * them AFTER the client name would silently steal
  * a flag the user meant for the client. Putting them where openllm's own flags
  * live means everything after the client name is unambiguously the client's,
  * now and as clients add flags.
@@ -224,9 +225,6 @@ export const isAlwaysOnVerb = (value: string): value is TAlwaysOnVerb =>
 export type TClientFlags = {
   /** `-d` — translate to the client's own skip-all-approvals flag. */
   readonly dangerous: boolean;
-  /** `-r` — point the session at the CLOUD gateway instead of this machine's
-   *  daemon, so subscription hops take the cloud's relay-tunnel path. */
-  readonly remote: boolean;
   /** `--new` — always start a fresh session; never offer to attach to one
    *  already running on this machine. */
   readonly fresh: boolean;
@@ -256,7 +254,6 @@ export type TClientFlags = {
  */
 export const parseClientFlags = (args: readonly string[]): TClientFlags => {
   let dangerous = false;
-  let remote = false;
   let fresh = false;
   let bare = false;
   let attach: string | null = null;
@@ -268,12 +265,22 @@ export const parseClientFlags = (args: readonly string[]): TClientFlags => {
       dangerous = true;
       continue;
     }
-    if (arg === "-r") {
-      remote = true;
+    // `-r` (route via cloud) is gone: the gateway is chosen automatically
+    // (local daemon if it answers, else the cloud origin, which tunnels to
+    // a device). Refuse it loudly rather than hand it to the client as if it
+    // were the client's own `-r`.
+    // Exception: launchers installed before the removal bake
+    // `openllm -r chatgpt launch`; accept and ignore it there so they keep
+    // working until the next `openllm chatgpt` rewrites them.
+    if (arg === "-r" && args[i + 1] === "chatgpt" && args[i + 2] === "launch")
       continue;
+    if (arg === "-r" || (/^-[dr]+$/.test(arg) && arg.includes("r"))) {
+      sessionSelectionError =
+        "-r was removed — the gateway is chosen automatically (local daemon if running, else the cloud)";
+      break;
     }
     // Long-form on purpose: `-n`/`-a` would be plausible client flags, and
-    // these live in the same position as `-d`/`-r`, so a collision would be
+    // these live in the same position as `-d`, so a collision would be
     // silent. Session selection is rare enough that spelling it out is fine.
     if (arg === "--bare") {
       bare = true;
@@ -304,17 +311,15 @@ export const parseClientFlags = (args: readonly string[]): TClientFlags => {
       attach = "";
       continue;
     }
-    // Combined short form (`-dr`), since these are ours and take no values.
-    if (/^-[dr]+$/.test(arg)) {
-      dangerous = dangerous || arg.includes("d");
-      remote = remote || arg.includes("r");
+    // Combined short form (`-dd`), since these are ours and take no values.
+    if (/^-d+$/.test(arg)) {
+      dangerous = true;
       continue;
     }
     break; // the client name (or an unknown flag) — everything from here is not ours
   }
   return {
     dangerous,
-    remote,
     fresh,
     bare,
     attach,

@@ -11,22 +11,33 @@
 
 import type { TCliConfig } from "../env";
 import { cliConfig, openllmDir, sharedFileConfig } from "../env";
-import { parseOpenllmDaemonPort } from "../runtime-contracts";
+import {
+  DEFAULT_DAEMON_PORT,
+  DEV_DEFAULT_DAEMON_PORT,
+  isOpenllmDevMode,
+  parseOpenllmDaemonPort,
+} from "../runtime-contracts";
 
-/** How long to wait for the local daemon's /status before falling back. */
-const PROBE_TIMEOUT_MS = 400;
+/**
+ * How long to wait for the local daemon's /status before falling back. A
+ * stopped daemon refuses the loopback connect instantly; this bounds only a
+ * wedged one, so a launch never hangs on the check.
+ */
+const PROBE_TIMEOUT_MS = 250;
 /** Catalog fetches are best-effort; a slow gateway must not stall a launch. */
 export const CATALOG_TIMEOUT_MS = 8_000;
 
-const DEFAULT_DAEMON_PORT = 8787;
-
-/** Load daemon configuration from env + shared file, defaulting to 8787. */
+/** The daemon port: process env → this environment's file (`.dev.env` in
+ *  dev, `.env` otherwise) → 8788 in dev / 8787 otherwise. */
 export const daemonPort = (): number => {
+  const fallback = isOpenllmDevMode()
+    ? DEV_DEFAULT_DAEMON_PORT
+    : DEFAULT_DAEMON_PORT;
   const raw =
     process.env.OPENLLM_DAEMON_PORT ??
     sharedFileConfig().OPENLLM_DAEMON_PORT ??
-    String(DEFAULT_DAEMON_PORT);
-  return parseOpenllmDaemonPort(raw, DEFAULT_DAEMON_PORT);
+    String(fallback);
+  return parseOpenllmDaemonPort(raw, fallback);
 };
 
 export type TGateway = {
@@ -40,8 +51,23 @@ export type TGateway = {
   readonly local: boolean;
 };
 
-/** Is a local daemon reachable right now? */
-const daemonReachable = async (port: number): Promise<boolean> => {
+/** One probe per process: a launch that resolves the gateway twice
+ *  (chatgpt/hermes) must not pay for a second check. */
+const probes = new Map<number, Promise<boolean>>();
+
+/** Is a local daemon reachable right now? (memoised per port per process) */
+export const daemonReachable = (port: number): Promise<boolean> => {
+  const cached = probes.get(port);
+  if (cached !== undefined) return cached;
+  const probe = probeDaemon(port);
+  probes.set(port, probe);
+  return probe;
+};
+
+/** Test seam: forget memoised probes. */
+export const resetDaemonProbeForTest = (): void => probes.clear();
+
+const probeDaemon = async (port: number): Promise<boolean> => {
   try {
     const res = await fetch(`http://127.0.0.1:${port}/status`, {
       signal: AbortSignal.timeout(PROBE_TIMEOUT_MS),
@@ -55,22 +81,17 @@ const daemonReachable = async (port: number): Promise<boolean> => {
 /**
  * Resolve the base URL this launch hands the client.
  *
- * LOCAL BY DEFAULT: the client points at this machine's daemon
- * (`http://127.0.0.1:<port>`), so subscription models serve locally with no
- * cloud round trip. `-r` (`remote: true`) points it at the cloud origin
- * instead, where the cloud tunnels subscription hops over the relay to an
- * online device that serves them.
- *
- * The local default is still PROBED: if no daemon answers, a local base URL
- * would hand the client an address nothing is listening on, so we fall back to
- * the cloud rather than launching something guaranteed to fail. `-r` skips the
- * probe entirely (it isn't asking about local).
+ * AUTOMATIC: a fast probe of this machine's daemon on the environment's
+ * `OPENLLM_DAEMON_PORT`. Answering → `http://127.0.0.1:<port>`, so
+ * subscription models serve locally with no cloud round trip. Not answering →
+ * the environment's `OPENLLM_CLOUD_ORIGIN`, where origin tunnels subscription
+ * hops over the relay to an online device that serves them — so the cloud is
+ * a complete answer, not a degraded one, and no flag is needed to choose it.
  *
  * `OPENLLM_GATEWAY=local|cloud` forces the choice for scripting and tests and
- * outranks the probe; an explicit `-r` outranks both.
+ * outranks the probe.
  */
 export const resolveGateway = async (opts?: {
-  readonly remote?: boolean;
   /** Credential-gate result for this launch; keeps the validated snapshot and
    * avoids a second configuration-file read after interactive setup. */
   readonly config?: TCliConfig;
@@ -84,7 +105,6 @@ export const resolveGateway = async (opts?: {
     cloudOrigin: gatewayUrl,
     local: false,
   };
-  if (opts?.remote === true) return cloud;
   const forced = process.env.OPENLLM_GATEWAY;
   if (forced === "cloud") return cloud;
   if (forced === "local") {

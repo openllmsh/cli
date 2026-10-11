@@ -59,13 +59,12 @@ const LAUNCHER_APP_NAME = "OpenLLM ChatGPT.app";
 const LAUNCHER_EXEC = "OpenLLMChatGPT";
 const DOWNLOAD_URL = "https://chatgpt.com/download";
 
-const USAGE = `usage: openllm [-r] chatgpt [--with-chatgpt-auth|--without-chatgpt-auth] [uninstall|status]
+const USAGE = `usage: openllm chatgpt [--with-chatgpt-auth|--without-chatgpt-auth] [uninstall|status]
 
 Installs "OpenLLM ChatGPT" in /Applications. Open it instead of ChatGPT to run
 the ChatGPT Mac app through OpenLLM — your chats and ~/.codex stay as they are.
 
   openllm chatgpt              install / refresh the launcher
-  openllm -r chatgpt           launcher uses the CLOUD gateway instead of the daemon
   openllm chatgpt uninstall    remove the launcher and everything it wrote
   openllm chatgpt status       report whether the launcher is installed
 
@@ -117,8 +116,9 @@ export type TChatgptLedger = {
   readonly version: 1;
   readonly cli_version: string;
   readonly launcher_path: string;
-  /** `-r` at install time — the launcher passes it on every launch. */
-  readonly remote: boolean;
+  /** Legacy: `-r` at install time. The gateway is now chosen per launch;
+   *  kept optional so older ledgers still read. */
+  readonly remote?: boolean;
   /** Keep the app's ChatGPT sign-in visible (see CHATGPT_AUTH_CHOICES).
    *  Absent on ledgers written before the choice existed → true. */
   readonly chatgpt_auth?: boolean;
@@ -292,7 +292,6 @@ export const resolveChatgptAuth = (
 
 /** Install / refresh the launcher. Does not start ChatGPT. */
 export const installChatgpt = async (opts?: {
-  readonly remote?: boolean;
   readonly args?: readonly string[];
 }): Promise<number> => {
   if (!macOk()) {
@@ -312,12 +311,10 @@ export const installChatgpt = async (opts?: {
     return 1;
   }
   const gateway = await resolveGateway({
-    remote: opts?.remote,
     config: credential.config,
   });
   if (!(await requireProviderRouting(gateway))) return 1;
 
-  const remote = opts?.remote === true;
   const chatgptAuth = resolveChatgptAuth(
     opts?.args ?? [],
     readLedger()?.chatgpt_auth,
@@ -327,7 +324,7 @@ export const installChatgpt = async (opts?: {
     displayName: "OpenLLM ChatGPT",
     bundleId: CHATGPT_LAUNCHER_BUNDLE_ID,
     executableName: LAUNCHER_EXEC,
-    command: [openllmBinPath(), ...(remote ? ["-r"] : []), "chatgpt", "launch"],
+    command: [openllmBinPath(), "chatgpt", "launch"],
     iconPath: appIconPath(chatgptAppPath()),
   });
   if (result === "foreign") {
@@ -340,12 +337,11 @@ export const installChatgpt = async (opts?: {
     version: 1,
     cli_version: CLI_VERSION,
     launcher_path: launcher,
-    remote,
     chatgpt_auth: chatgptAuth,
   });
   process.stdout.write(
     `✓ Installed ${launcher}\n` +
-      `  gateway: ${remote ? "cloud" : "local daemon (cloud fallback)"}\n` +
+      "  gateway: chosen at each launch (local daemon if running, else the cloud)\n" +
       `  ChatGPT sign-in: ${chatgptAuth ? "kept (dictation, connectors work)" : "off (OpenLLM only; no dictation/connectors)"}\n` +
       "  Change it with: openllm chatgpt --with-chatgpt-auth | --without-chatgpt-auth\n" +
       '  Open "OpenLLM ChatGPT" from Spotlight or Launchpad to use ChatGPT through OpenLLM.\n' +
@@ -478,9 +474,7 @@ export const chatgptHookTrustArgs = async (
 };
 
 /** What the launcher runs: refresh the shim, then (re)start ChatGPT on it. */
-export const launchChatgpt = async (opts?: {
-  readonly remote?: boolean;
-}): Promise<number> => {
+export const launchChatgpt = async (): Promise<number> => {
   if (!macOk()) {
     process.stderr.write("openllm chatgpt is macOS-only.\n");
     return 1;
@@ -506,7 +500,6 @@ export const launchChatgpt = async (opts?: {
     return 1;
   }
   const gateway = await resolveGateway({
-    remote: opts?.remote,
     config: credential.config,
   });
   const [catalog, tier] = await Promise.all([
@@ -617,9 +610,9 @@ export const runChatgptCommand = async (
   const authFlags = ["--with-chatgpt-auth", "--without-chatgpt-auth"];
   const verb = args.find((a) => !authFlags.includes(a));
   if (verb === undefined) {
-    return installChatgpt({ remote: flags?.remote, args });
+    return installChatgpt({ args });
   }
-  if (verb === "launch") return launchChatgpt({ remote: flags?.remote });
+  if (verb === "launch") return launchChatgpt();
   if (verb === "uninstall") return uninstallChatgpt();
   if (verb === "status") return statusChatgpt();
   if (verb === "-h" || verb === "--help") {

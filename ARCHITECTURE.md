@@ -67,7 +67,7 @@ packages/cli/
     │   ├── raycast.ts    #   the always-on apply/uninstall/status
     │   ├── chatgpt.ts    #   ChatGPT Mac app: launcher install, app-server shim, uninstall
     │   ├── mac-launcher.ts # logic-free /Applications launcher .app builder
-    │   ├── gateway.ts    #   per-launch local-vs-cloud resolution
+    │   ├── gateway.ts    #   per-launch local-vs-cloud resolution (fast /status probe on the env file's OPENLLM_DAEMON_PORT, else OPENLLM_CLOUD_ORIGIN; .dev.env in dev; no -r flag)
     │   └── hooks.ts      #   embedded hook scripts
     ├── session-host.ts   # durable session-host discovery and spawning
     ├── sessions-cmd.ts   # `sessions list|attach|kill` management command
@@ -97,7 +97,7 @@ packages/cli/
 | --- | --- |
 | `openllm <claude\|codex\|grok\|opencode> [...args]` | run that client through OpenLLM — args forwarded VERBATIM, config never written |
 | `openllm raycast [uninstall\|status]` | the always-on client: apply in place, or reverse exactly what apply wrote |
-| `openllm [-r] chatgpt [uninstall\|status]` | install `/Applications/OpenLLM ChatGPT.app`, whose only logic is `exec openllm chatgpt launch`. `launch` (hidden) rewrites `~/.openllm/clients/chatgpt/codex-shim` — the app's embedded `codex` plus the Codex overlay as `-c` overrides (`codexOverrideArgs`, shared with session `codex`) — then reopens ChatGPT with `CODEX_CLI_PATH` at the shim. Real `~/.codex` (chats, auth) is never written. Design: `docs/audit/2026-08-23-cowork-codex-mac-app-setups.md` §9 |
+| `openllm chatgpt [uninstall\|status]` | install `/Applications/OpenLLM ChatGPT.app`, whose only logic is `exec openllm chatgpt launch`. `launch` (hidden) rewrites `~/.openllm/clients/chatgpt/codex-shim` — the app's embedded `codex` plus the Codex overlay as `-c` overrides (`codexOverrideArgs`, shared with session `codex`) — then reopens ChatGPT with `CODEX_CLI_PATH` at the shim. Real `~/.codex` (chats, auth) is never written. Design: `docs/audit/2026-08-23-cowork-codex-mac-app-setups.md` §9 |
 | `openllm uninstall [--yes]` | remove the CLI (reverses always-on wiring first) |
 | `openllm doctor [--fix]` | report/clean leftovers from the old install model |
 | `openllm mcp [--only <group>]` | the unified MCP server over stdio (groups: `openllm`, `openllm-context`, `openllm-memory`; default all — `--only` is debug) |
@@ -250,7 +250,7 @@ reflexive Enter would silently drop the user into another project's tree.
 argument (`openllm claude --resume x`) also skips it — those describe a NEW
 invocation that an already-running process can never receive. The prompt is
 skipped entirely for any invocation `brokerEligible` already rejects
-(non-TTY, `-r`, print mode, and — critically — inside a device session, where
+(non-TTY, `OPENLLM_GATEWAY=cloud`, print mode, and — critically — inside a device session, where
 `OPENLLM_DEVICE_SESSION_ID` prevents a session from offering itself). Picker
 logic lives in `clients/session-picker.ts` (pure, unit-tested);
 `clients/session.ts` owns the terminal read.

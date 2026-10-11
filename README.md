@@ -89,8 +89,11 @@ Arguments after the client name are passed through, for example
 Raycast applies persistent configuration; `openllm raycast uninstall` removes it.
 Hermes manages a named profile; see `openllm hermes --help` for profile controls.
 
-`openllm -r codex` forces the cloud route for that session. OpenLLM flags go
-**before** the client name; flags after it belong to the client.
+The gateway is automatic: the local daemon if it answers on
+`OPENLLM_DAEMON_PORT`, else `OPENLLM_CLOUD_ORIGIN` (both from `~/.openllm/.env`,
+or `.dev.env` in dev), which tunnels subscription models to one of your online
+devices. OpenLLM flags go **before** the client name; flags after it belong to
+the client.
 
 ## Commands
 

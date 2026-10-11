@@ -141,14 +141,12 @@ const isDarwin = (): boolean => process.platform === "darwin";
 /**
  * Apply — idempotent. Returns a process exit code.
  *
- * `remote` (`-r`) picks which base URL gets BAKED into `providers.yaml`: the
- * local daemon (default) or the cloud origin. Unlike a session client this
- * choice persists until the next apply, because Raycast reads the file rather
- * than being relaunched — so re-run `openllm -r raycast` to switch it.
+ * Raycast reads `providers.yaml` rather than being relaunched, so the
+ * automatically chosen base URL (local daemon if it answers, else the cloud
+ * origin) is BAKED until the next apply — re-run `openllm raycast` after
+ * starting or stopping the daemon to re-pick it.
  */
-export const applyRaycast = async (opts?: {
-  readonly remote?: boolean;
-}): Promise<number> => {
+export const applyRaycast = async (): Promise<number> => {
   if (!isDarwin()) {
     process.stderr.write("openllm raycast is macOS-only.\n");
     return 1;
@@ -158,10 +156,7 @@ export const applyRaycast = async (opts?: {
     process.stderr.write(credential.message);
     return 1;
   }
-  const gateway = await resolveGateway({
-    remote: opts?.remote,
-    config: credential.config,
-  });
+  const gateway = await resolveGateway({ config: credential.config });
   if (!(await requireProviderRouting(gateway))) return 1;
   const catalog = await fetchModelCatalog(gateway, "raycast");
   const models = catalog ?? FALLBACK_MODELS;
@@ -345,13 +340,12 @@ export const statusRaycast = (): number => {
   return 0;
 };
 
-const RAYCAST_USAGE = `usage: openllm [-r] raycast [uninstall|status]
+const RAYCAST_USAGE = `usage: openllm raycast [uninstall|status]
 
 Raycast runs continuously and has no per-launch config hook, so OpenLLM is
 applied to its config once:
 
   openllm raycast              apply / refresh (idempotent)
-  openllm -r raycast           apply, baking the CLOUD gateway base URL
   openllm raycast uninstall    remove exactly what apply wrote
   openllm raycast status       report whether OpenLLM is wired in
 
@@ -377,7 +371,7 @@ export const runRaycastCommand = async (
     return 2;
   }
   const verb = args[0];
-  if (verb === undefined) return applyRaycast({ remote: flags?.remote });
+  if (verb === undefined) return applyRaycast();
   if (verb === "uninstall") return uninstallRaycast();
   if (verb === "status") return statusRaycast();
   if (verb === "-h" || verb === "--help") {
