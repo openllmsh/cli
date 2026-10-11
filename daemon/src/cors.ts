@@ -112,7 +112,7 @@ export const corsHeaders = (req: Request): Record<string, string> => ({
   "access-control-allow-origin": allowOrigin(req),
   "access-control-allow-methods": "GET, POST, OPTIONS",
   "access-control-allow-headers": `content-type, authorization, ${TOOL_SESSION_HEADER}`,
-  "access-control-expose-headers": `x-openllm-media-id, x-openllm-media-url, x-openllm-resolved-model, x-openllm-chain, ${MEDIA_ERROR_RESPONSE_HEADER}, ${MEDIA_PERSISTENCE_RESPONSE_HEADER}, ${TOOL_SESSION_HEADER}`,
+  "access-control-expose-headers": `x-openllm-media-id, x-openllm-media-url, x-openllm-resolved-model, x-openllm-attempted-fallbacks, x-openllm-chain, ${MEDIA_ERROR_RESPONSE_HEADER}, ${MEDIA_PERSISTENCE_RESPONSE_HEADER}, ${TOOL_SESSION_HEADER}`,
   "access-control-allow-private-network": "true",
   vary: "origin",
 });

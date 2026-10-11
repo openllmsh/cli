@@ -43,9 +43,11 @@ const PROMPT_FLAGS: readonly string[] = [
   "-s",
   "--system",
   "--no-stream",
+  "--json",
+  "--output-format",
 ];
 const isPromptFlag = (s: string): boolean =>
-  PROMPT_FLAGS.includes(s) || /^--(prompt|model|system)=/.test(s);
+  PROMPT_FLAGS.includes(s) || /^--(prompt|model|system|output-format)=/.test(s);
 
 const isExecGroup = (s: string): s is TExecGroup =>
   (EXEC_GROUPS as readonly string[]).includes(s);

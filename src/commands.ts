@@ -170,6 +170,10 @@ export const CLIENT_FLAGS: readonly TFlag[] = [
 export const FLAGS: readonly TFlag[] = [
   { name: "-p", description: "One-shot prompt, reply on stdout" },
   { name: "-m", description: "Model for -p (default ultra)" },
+  {
+    name: "--json",
+    description: "-p output as one JSON result (usage, model)",
+  },
   { name: "-h", description: "Show help" },
   { name: "--help", description: "Show help" },
   { name: "-v", description: "Print this CLI version" },

@@ -2683,14 +2683,33 @@ const walkPlan = async (
     }
     reportHopFailure(hop, reason, status, cooldownReason);
   };
-  const withHopTrailHeaders = (resp: Response): Response => {
-    if (attempted.length === 0 && hopTrail.length === 0) return resp;
+  // `winner` is the hop that produced a SUCCESS response: it is reported as
+  // `x-openllm-resolved-model: <provider>/<model>` + the fallback count, the
+  // same observability headers the cloud sets. A forwarded cloud hop already
+  // carries the cloud's own (more precise) value, which is kept.
+  const withHopTrailHeaders = (resp: Response, winner?: THop): Response => {
+    const won = winner !== undefined && resp.status < 400;
+    if (attempted.length === 0 && hopTrail.length === 0 && !won) return resp;
     const headers = passthroughHeaders(resp);
     if (attempted.length > 0) {
       headers.set("x-openllm-chain", attempted.join(","));
     }
     if (hopTrail.length > 0) {
       headers.set("x-openllm-hop-failures", formatHopFailuresHeader(hopTrail));
+    }
+    if (won) {
+      if (!headers.has("x-openllm-resolved-model")) {
+        headers.set(
+          "x-openllm-resolved-model",
+          `${winner.provider}/${winner.providerModelId}`,
+        );
+      }
+      if (attempted.length > 1) {
+        headers.set(
+          "x-openllm-attempted-fallbacks",
+          String(attempted.length - 1),
+        );
+      }
     }
     return new Response(resp.body, { status: resp.status, headers });
   };
@@ -2712,7 +2731,7 @@ const walkPlan = async (
     if (served.servedLocally && served.response.status < 400) {
       clearHopCooldown(hop.provider, hop.modelId);
     }
-    return withHopTrailHeaders(served.response);
+    return withHopTrailHeaders(served.response, hop);
   };
   // Context skips preserve priority without permanently excluding a model:
   // once ordinary candidates are exhausted, retry the skipped candidates once
@@ -3369,6 +3388,7 @@ const walkPlan = async (
         status: resp.status,
         headers: passthroughHeaders(resp),
       }),
+      hop,
     );
   }
   // ── Recovery pass ─────────────────────────────────────────────────────
