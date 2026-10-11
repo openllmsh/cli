@@ -18,7 +18,7 @@ import { DeviceSessionCli, SESSION_ID_PATTERN } from "@openllmsh/protocol";
 import { decodeJsonPayload, encodeJsonPayload } from "@openllmsh/tunnel/codec";
 import { Schema as S } from "effect";
 import { daemonSelfInvocation } from "../child-supervisor/self-exec";
-import { resolveOpenllmCli } from "../cli-self-update";
+import { resolveOpenllmCli } from "../cli-path";
 import { spawnCommand } from "../command";
 import type { TDeadlineBudget } from "../deadline-budget";
 import {

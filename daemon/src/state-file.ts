@@ -71,8 +71,7 @@ export type TDaemonState = {
 /**
  * Don't retry the SAME target version within this window after a swap that
  * didn't converge (a mis-published release) — bounds restart/download loops.
- * Single source for both convergers (was duplicated in `self-update.ts` and
- * `cli-self-update.ts`).
+ * Used by the single-binary updater (`updater.ts`).
  */
 export const UPDATE_ATTEMPT_COOLDOWN_MS = 60 * 60 * 1000;
 

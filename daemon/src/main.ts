@@ -18,7 +18,8 @@
  * forward API-key hops in a mixed chain to the cloud `/v1/*` surface.
  *
  * This file is compiled into a source-free standalone binary with
- * `bun build --compile --minify --bytecode` (see scripts/compile.ts).
+ * `bun build --compile --minify --bytecode` (see
+ * `packages/cli/scripts/compile.ts`; the CLI entry routes `openllm daemon` here).
  */
 
 // MUST be the entrypoint's FIRST import. `@peculiar/x509` (pulled in by
@@ -44,13 +45,7 @@ import {
   sweepStaleChildrenOnBoot,
 } from "./child-supervisor";
 import { runCli } from "./cli";
-import { maybeUpdateCli } from "./cli-self-update";
-import {
-  getCloudState,
-  latestCliVersion,
-  latestVersion,
-  refreshBootstrap,
-} from "./config";
+import { getCloudState, latestCliVersion, refreshBootstrap } from "./config";
 import {
   pushStatusIfChanged,
   startControlChannel,
@@ -88,13 +83,10 @@ import {
 } from "./realtime-handler";
 import { probeSandboxCapability } from "./sandbox/exec";
 import { recordSandboxState, sandboxState } from "./sandbox/landlock";
-import {
-  beginRequest,
-  endRequest,
-  maybeSelfUpdate,
-  trackBodyDone,
-} from "./self-update";
+import { beginRequest, endRequest, trackBodyDone } from "./self-update";
+import { migrateLegacyInstall } from "./service";
 import { reconcileSessionHostsAtBoot } from "./session-host";
+import { convergeBinary, watchBinary } from "./updater";
 import { enableUsagePersistence } from "./usage-cache";
 import { DAEMON_VERSION } from "./version";
 
@@ -127,6 +119,10 @@ export const main = async (): Promise<void> => {
   // Runs before the sandbox so it can't be tripped by an FS-confinement bug,
   // and before the (costly) sandbox/FFI work it's meant to stop repeating.
   guardCrashLoop();
+
+  // Converge a pre-merge two-binary install (real `openllmd` file, units that
+  // exec bare `openllmd`) onto the single `openllm daemon` binary.
+  migrateLegacyInstall();
 
   // RTC native-crash breaker (right after the crash-loop guard, before the
   // costly sandbox/FFI work). If this host has died to a Bun/werift native fault
@@ -287,10 +283,9 @@ export const main = async (): Promise<void> => {
         // `.catch` each: a rejected converge here is fire-and-forget, so without
         // it a non-transient throw becomes an unhandledRejection and (pre-C1)
         // took the daemon down.
-        void maybeSelfUpdate(latestVersion()).catch((err) =>
-          logError("main", err),
-        );
-        void maybeUpdateCli(latestCliVersion()).catch((err) =>
+        // Also notices a binary someone else swapped (the CLI's launch check)
+        // and restarts only if the daemon half changed.
+        void convergeBinary(latestCliVersion()).catch((err) =>
           logError("main", err),
         );
       } catch (err) {
@@ -307,20 +302,15 @@ export const main = async (): Promise<void> => {
   const startBootstrapLoop = (): void => {
     void refreshBootstrap()
       .then(() => {
-        // Converge to the cloud's published daemon version (no-op from source /
-        // when already current). Fire-and-forget: it self-guards and, when it
-        // updates, swaps the binary + exits once `/v1` is idle so the supervisor
-        // relaunches. `.catch` so a rejected converge can't escape this `.then`
-        // as an unhandledRejection.
-        void maybeSelfUpdate(latestVersion()).catch((err) =>
+        // Converge the single binary to the cloud's pinned release (no-op
+        // from source / when already current). It restarts the daemon only
+        // when the daemon half changed, and only once `/v1` is idle.
+        // `.catch` so a rejected converge can't escape this `.then` as an
+        // unhandledRejection.
+        void convergeBinary(latestCliVersion()).catch((err) =>
           logError("main", err),
         );
-        // Converge the installed openllm CLI too — same toggle, same tick. Daemon
-        // first: if the daemon swaps + exits mid-flight, the relaunch's boot call
-        // finishes the CLI converge within seconds.
-        void maybeUpdateCli(latestCliVersion()).catch((err) =>
-          logError("main", err),
-        );
+        watchBinary();
         runCloudReadyWork();
       })
       .catch((err) => logError("main", err))

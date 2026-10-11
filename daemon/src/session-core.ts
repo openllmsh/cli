@@ -20,8 +20,8 @@ import {
 } from "@openllmsh/protocol";
 import { decodeJsonPayload, encodeJsonPayload } from "@openllmsh/tunnel/codec";
 import { Terminal } from "@xterm/headless";
+import { resolveOpenllmCli } from "./cli-path";
 import { sessionEnv } from "./cli-paths";
-import { resolveOpenllmCli } from "./cli-self-update";
 import { spawnEnv } from "./delegation/spawn";
 import { loadEnvFile } from "./env";
 import {

@@ -1,12 +1,12 @@
 #!/usr/bin/env bun
 
 /**
- * Compile the CLI into source-free standalone binaries — the `openllm`
- * twin of `packages/cli/daemon/scripts/compile.ts`.
+ * Compile the single `openllm` binary — the CLI and the daemon half
+ * (`openllm daemon`) — into source-free standalone executables.
  *
  * `bun build --compile` inlines the runtime deps (the MCP SDK, cheerio,
- * turndown, the committed generated SDK) into a single executable that
- * embeds the Bun runtime. `--minify --bytecode` strips readable identifiers
+ * turndown, the committed generated SDK, and the daemon's protocol/wire/tunnel
+ * + RTC stack) into a single executable that embeds the Bun runtime once. `--minify --bytecode` strips readable identifiers
  * + original source text. No `.ts` source ships.
  *
  * Targets (no Windows): darwin-{arm64,x64-baseline}, linux-{x64-baseline,arm64}.
@@ -22,10 +22,11 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { gzipSync } from "node:zlib";
 import { $ } from "bun";
+import { daemonFingerprint } from "./daemon-fingerprint";
 
 // Resolve paths from THIS script's location, not the cwd — works identically
 // from the monorepo (`packages/cli/scripts`) and the flattened `cli`
-// mirror (`cli/scripts`). Same pattern as the daemon's compile script.
+// mirror (`cli/scripts`).
 const PKG_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const ENTRY = join(PKG_ROOT, "src", "main.ts");
 const OUT_DIR = join(PKG_ROOT, "dist");
@@ -45,14 +46,25 @@ export const compileNodeEnv = (
 ): "development" | "production" =>
   version === DEV_VERSION_SENTINEL ? "development" : "production";
 
+/**
+ * `--define` tokens shared by `buildOne` and the compiled-binary tests. One
+ * release tag versions both halves; `daemonFingerprint` identifies the daemon
+ * half's code so a swapped binary restarts the daemon only when it changed
+ * (see `scripts/daemon-fingerprint.ts`). Omitted → the dev sentinel.
+ */
 export const compileDefineArgs = (
   cloudOrigin: string,
   version: string,
+  daemonFingerprint: string = DEV_VERSION_SENTINEL,
 ): readonly string[] => [
   "--define",
   `__OPENLLM_CLOUD_ORIGIN_DEFAULT__=${JSON.stringify(cloudOrigin)}`,
   "--define",
   `__OPENLLM_CLI_VERSION__=${JSON.stringify(version)}`,
+  "--define",
+  `__OPENLLM_DAEMON_VERSION__=${JSON.stringify(version)}`,
+  "--define",
+  `__OPENLLM_DAEMON_FINGERPRINT__=${JSON.stringify(daemonFingerprint)}`,
   "--define",
   `process.env.NODE_ENV=${JSON.stringify(compileNodeEnv(version))}`,
 ];
@@ -64,8 +76,11 @@ export const COMPILE_BUN_FLAGS = [
   "--bytecode",
 ] as const;
 
-// OpenLLM's own Vercel preview deployments — the same anchor as the daemon's
-// compile script (`packages/cli/daemon/scripts/compile.ts`); keep in sync.
+// OpenLLM's own Vercel preview deployments, anchored to the `openllm` project +
+// `quantide` team — the hostname-level twin of `PREVIEW_ORIGIN` in
+// `packages/cli/daemon/src/cors.ts` (keep the two in sync). A bare
+// `.endsWith(".vercel.app")` would let a poisoned build env bake ANY stranger's
+// `*.vercel.app` origin into shipped binaries.
 export const OPENLLM_PREVIEW_HOST =
   /^openllm-[a-z0-9-]+-quantide\.vercel\.app$/;
 
@@ -76,9 +91,27 @@ export const isAllowedCloudHost = (host: string): boolean =>
   host.endsWith(".openllm.sh") ||
   OPENLLM_PREVIEW_HOST.test(host);
 
-/** Validate the cloud origin BEFORE baking it into every shipped binary via
- *  `--define` — fail closed on a non-allow-listed host (see the daemon's
- *  compile script for the audit rationale). */
+/**
+ * Validate the cloud origin BEFORE baking it into every shipped binary via
+ * `--define`. An unvalidated value (audit §3 / §4b N1) lets a poisoned build
+ * env point every CLI and daemon at a rogue origin, and an empty string is
+ * silently accepted. So we fail closed:
+ *
+ * - empty / missing  → the public default (`https://www.openllm.sh`).
+ * - the default      → accepted verbatim.
+ * - `https://` with a hostname that is `openllm.sh`, a `*.openllm.sh`
+ *   subdomain (e.g. `dev.openllm.sh` staging), or an OpenLLM-owned
+ *   `openllm-<...>-quantide.vercel.app` preview → accepted (the documented
+ *   dev/preview/self-host workflow; `dist.ts` bakes whatever
+ *   `OPENLLM_CLOUD_ORIGIN` is set when packaging a self-host build).
+ * - `http://` ONLY for `localhost` / `127.0.0.1` (local dev).
+ * - anything else (a remote non-allow-listed host, or a non-http(s) scheme) →
+ *   THROW, failing the compile.
+ *
+ * NOTE: this guards the COMPILE-TIME bake only. The runtime still lets the
+ * `OPENLLM_CLOUD_ORIGIN` env var win (`packages/cli/daemon/src/env.ts`), so dev /
+ * preview binaries are normally re-pointed at runtime, not via the bake.
+ */
 const resolveCloudOrigin = (): string => {
   const raw = process.env.OPENLLM_CLOUD_ORIGIN;
   if (raw === undefined || raw.length === 0) return DEFAULT_CLOUD_ORIGIN;
@@ -133,10 +166,11 @@ const outfileFor = (target: string): string => {
 const buildOne = async (
   target: string | null,
   cloudOrigin: string,
+  fingerprint: string,
 ): Promise<string> => {
   const outfile = target === null ? `${OUT_DIR}/openllm` : outfileFor(target);
   const targetArgs = target === null ? [] : ["--target", target];
-  const defines = compileDefineArgs(cloudOrigin, version);
+  const defines = compileDefineArgs(cloudOrigin, version, fingerprint);
   await $`bun build ${ENTRY} \
     ${COMPILE_BUN_FLAGS} \
     ${defines} \
@@ -152,9 +186,10 @@ const buildOne = async (
 
 const main = async (): Promise<void> => {
   const cloudOrigin = resolveCloudOrigin();
+  const fingerprint = await daemonFingerprint();
   await $`mkdir -p ${OUT_DIR}`;
   if (hostOnly) {
-    const out = await buildOne(null, cloudOrigin);
+    const out = await buildOne(null, cloudOrigin, fingerprint);
     console.log(`built host binary → ${out}`);
     return;
   }
@@ -162,7 +197,7 @@ const main = async (): Promise<void> => {
   const t0 = Date.now();
   await Promise.all(
     TARGETS.map(async (target) => {
-      const out = await buildOne(target, cloudOrigin);
+      const out = await buildOne(target, cloudOrigin, fingerprint);
       console.log(`built ${target} → ${out}`);
     }),
   );

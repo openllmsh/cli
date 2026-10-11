@@ -17,7 +17,7 @@
 
 import type { TDaemonCliState } from "@openllmsh/protocol";
 import { binarySignature } from "./bin-signature";
-import { resolveOpenllmCli } from "./cli-self-update";
+import { resolveOpenllmCli } from "./cli-path";
 import { cliVersion } from "./delegation/util";
 import { logDebug } from "./logger";
 

@@ -59,98 +59,120 @@ export const isSecureOrigin = (raw: string): boolean => {
   }
 };
 
-export const runSelfUpdate = async (): Promise<void> => {
+/** Outcome of one convergence: `updated`/`current` succeed; `skipped` is a
+ *  benign no-op (dev build, nothing published); `failed` is an error. */
+export type TSelfUpdateResult = "updated" | "current" | "skipped" | "failed";
+
+/**
+ * Converge the running binary to the gateway's pinned release. `quiet` (the
+ * background launch check) prints nothing; the explicit `openllm self-update`
+ * reports each step. Never exits the process — the caller decides.
+ */
+export const convergeSelf = async (
+  opts: { readonly quiet?: boolean } = {},
+): Promise<TSelfUpdateResult> => {
+  const say = (line: string): void => {
+    if (opts.quiet !== true) process.stderr.write(`${line}\n`);
+  };
   if (CLI_VERSION === "0.0.0-dev") {
-    process.stderr.write(
-      "[self-update] dev build (0.0.0-dev) never self-updates\n",
-    );
-    process.exit(0);
+    say("[self-update] dev build (0.0.0-dev) never self-updates");
+    return "skipped";
   }
   const { gatewayUrl } = cliConfig();
   if (!isSecureOrigin(gatewayUrl)) {
-    process.stderr.write(
-      `[self-update] refusing to update over an insecure origin (${gatewayUrl}) — use https:// (http:// is allowed only for localhost)\n`,
+    say(
+      `[self-update] refusing to update over an insecure origin (${gatewayUrl}) — use https:// (http:// is allowed only for localhost)`,
     );
-    process.exit(1);
+    return "failed";
   }
+  try {
+    const vRes = await fetch(`${gatewayUrl}/api/cli/version`, {
+      signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+    });
+    if (!vRes.ok) {
+      say(`[self-update] version check failed: HTTP ${vRes.status}`);
+      return "failed";
+    }
+    const payload = (await vRes.json().catch(() => null)) as {
+      latest_version?: unknown;
+    } | null;
+    if (payload === null || typeof payload.latest_version !== "string") {
+      say(
+        "[self-update] malformed version response (no latest_version string)",
+      );
+      return "failed";
+    }
+    const latest = payload.latest_version.replace(/^v/, "");
+    if (latest.length === 0) {
+      say("[self-update] no CLI release published yet");
+      return "skipped";
+    }
+    if (latest === CLI_VERSION) return "current";
 
-  const vRes = await fetch(`${gatewayUrl}/api/cli/version`, {
-    signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
-  });
-  if (!vRes.ok) {
-    process.stderr.write(
-      `[self-update] version check failed: HTTP ${vRes.status}\n`,
+    const target = targetSuffix();
+    if (target === null) {
+      // No prebuilt binary for this arch — point at the source repo, whose
+      // README documents building the host binary (`bun run compile:host`).
+      say(
+        `[self-update] unsupported host ${process.platform}/${process.arch} — no prebuilt openllm for this arch.\n` +
+          `  Build from source: https://github.com/${CLI_RELEASE.repo}#build-from-source`,
+      );
+      return "failed";
+    }
+    say(`[self-update] v${CLI_VERSION} → v${latest} (${target})`);
+
+    const shaRes = await fetch(
+      `${gatewayUrl}/api/cli/binary/${target}.sha256`,
+      {
+        signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+      },
     );
-    process.exit(1);
-  }
-  const payload = (await vRes.json().catch(() => null)) as {
-    latest_version?: unknown;
-  } | null;
-  if (payload === null || typeof payload.latest_version !== "string") {
-    process.stderr.write(
-      "[self-update] malformed version response (no latest_version string)\n",
+    if (!shaRes.ok) {
+      say(`[self-update] checksum fetch failed: ${shaRes.status}`);
+      return "failed";
+    }
+    const expected = (await shaRes.text()).trim().split(/\s+/)[0];
+
+    const binRes = await fetch(`${gatewayUrl}/api/cli/binary/${target}`, {
+      signal: AbortSignal.timeout(120_000),
+    });
+    if (!binRes.ok) {
+      say(`[self-update] download failed: ${binRes.status}`);
+      return "failed";
+    }
+    let bytes = Buffer.from(await binRes.arrayBuffer());
+    if (bytes.subarray(0, 2).equals(GZIP_MAGIC)) bytes = gunzipSync(bytes);
+
+    const actual = createHash("sha256").update(bytes).digest("hex");
+    if (actual !== expected) {
+      say(
+        `[self-update] checksum mismatch (expected ${expected?.slice(0, 12)}…, got ${actual.slice(0, 12)}…) — aborting`,
+      );
+      return "failed";
+    }
+
+    // Atomic same-directory swap: write next to the running binary, chmod,
+    // rename over. The running process keeps its inode; the next invocation
+    // picks up the new binary. A running daemon notices the new file and
+    // restarts only if its own half changed (`daemon/src/updater.ts`).
+    const self = process.execPath;
+    const staging = join(dirname(self), `.openllm.next-${process.pid}`);
+    fs.writeFileSync(staging, bytes, { mode: 0o755 });
+    fs.renameSync(staging, self);
+    return "updated";
+  } catch (err) {
+    say(
+      `[self-update] failed: ${err instanceof Error ? err.message : String(err)}`,
     );
-    process.exit(1);
+    return "failed";
   }
-  const latest = payload.latest_version.replace(/^v/, "");
-  if (latest.length === 0) {
-    process.stderr.write("[self-update] no CLI release published yet\n");
-    process.exit(1);
-  }
-  if (latest === CLI_VERSION) {
+};
+
+/** `openllm self-update` — the explicit, reporting form. */
+export const runSelfUpdate = async (): Promise<void> => {
+  const result = await convergeSelf();
+  if (result === "updated") process.stdout.write("openllm updated\n");
+  if (result === "current")
     process.stdout.write(`openllm v${CLI_VERSION} is up to date\n`);
-    process.exit(0);
-  }
-
-  const target = targetSuffix();
-  if (target === null) {
-    // No prebuilt binary for this arch — point at the source repo, whose
-    // README documents building the host binary (`bun run compile:host`).
-    process.stderr.write(
-      `[self-update] unsupported host ${process.platform}/${process.arch} — no prebuilt openllm for this arch.\n` +
-        `  Build from source: https://github.com/${CLI_RELEASE.repo}#build-from-source\n`,
-    );
-    process.exit(1);
-  }
-  process.stderr.write(
-    `[self-update] v${CLI_VERSION} → v${latest} (${target})\n`,
-  );
-
-  const shaRes = await fetch(`${gatewayUrl}/api/cli/binary/${target}.sha256`, {
-    signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
-  });
-  if (!shaRes.ok) {
-    process.stderr.write(
-      `[self-update] checksum fetch failed: ${shaRes.status}\n`,
-    );
-    process.exit(1);
-  }
-  const expected = (await shaRes.text()).trim().split(/\s+/)[0];
-
-  const binRes = await fetch(`${gatewayUrl}/api/cli/binary/${target}`, {
-    signal: AbortSignal.timeout(120_000),
-  });
-  if (!binRes.ok) {
-    process.stderr.write(`[self-update] download failed: ${binRes.status}\n`);
-    process.exit(1);
-  }
-  let bytes = Buffer.from(await binRes.arrayBuffer());
-  if (bytes.subarray(0, 2).equals(GZIP_MAGIC)) bytes = gunzipSync(bytes);
-
-  const actual = createHash("sha256").update(bytes).digest("hex");
-  if (actual !== expected) {
-    process.stderr.write(
-      `[self-update] checksum mismatch (expected ${expected.slice(0, 12)}…, got ${actual.slice(0, 12)}…) — aborting\n`,
-    );
-    process.exit(1);
-  }
-
-  // Atomic same-directory swap: write next to the running binary, chmod,
-  // rename over. The running process keeps its inode; the next invocation
-  // picks up the new binary.
-  const self = process.execPath;
-  const staging = join(dirname(self), `.openllm.next-${process.pid}`);
-  fs.writeFileSync(staging, bytes, { mode: 0o755 });
-  fs.renameSync(staging, self);
-  process.stdout.write(`openllm updated to v${latest}\n`);
+  process.exit(result === "failed" ? 1 : 0);
 };

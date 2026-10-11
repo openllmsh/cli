@@ -7,11 +7,11 @@
 
 import { lstat, readFile, realpath, rm } from "node:fs/promises";
 import { isAbsolute, join, resolve, sep } from "node:path";
+import type { TInspectedImageMime } from "@openllmsh/wire/lib/canonical/image-signature";
 import {
   IMAGE_INSPECT_MAX_BYTES,
   inspectImageBytes,
 } from "@openllmsh/wire/lib/canonical/image-signature";
-import type { TInspectedImageMime } from "@openllmsh/wire/lib/canonical/image-signature";
 
 export type TCursorNativeImageAsset = {
   readonly bytes: Uint8Array;
@@ -45,7 +45,11 @@ const pushPath = (out: string[], value: unknown): void => {
   if (path !== null && path.length > 0) out.push(path);
 };
 
-const walkUnknownForPaths = (value: unknown, out: string[], depth: number): void => {
+const walkUnknownForPaths = (
+  value: unknown,
+  out: string[],
+  depth: number,
+): void => {
   if (depth > 6 || value === null || value === undefined) return;
   if (typeof value === "string") {
     if (
@@ -74,10 +78,12 @@ const walkUnknownForPaths = (value: unknown, out: string[], depth: number): void
   ]) {
     pushPath(out, o[key]);
   }
-  if (o.locations !== undefined) walkUnknownForPaths(o.locations, out, depth + 1);
+  if (o.locations !== undefined)
+    walkUnknownForPaths(o.locations, out, depth + 1);
   if (o.content !== undefined) walkUnknownForPaths(o.content, out, depth + 1);
   if (o.rawInput !== undefined) walkUnknownForPaths(o.rawInput, out, depth + 1);
-  if (o.rawOutput !== undefined) walkUnknownForPaths(o.rawOutput, out, depth + 1);
+  if (o.rawOutput !== undefined)
+    walkUnknownForPaths(o.rawOutput, out, depth + 1);
 };
 
 /** Collect candidate filesystem paths from one ACP update / notification. */

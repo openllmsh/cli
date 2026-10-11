@@ -15,12 +15,11 @@ import type {
   TLocalCliSession,
 } from "@openllmsh/protocol";
 import { autoUpdateEnabled, setAutoUpdate } from "./auto-update-pref";
-import { maybeUpdateCli } from "./cli-self-update";
 import {
   daemonCommandScheduler,
   schedulerProviderSlugs,
 } from "./command-scheduler";
-import { latestCliVersion, latestVersion, refreshBootstrap } from "./config";
+import { latestCliVersion, refreshBootstrap } from "./config";
 import { getDelegate } from "./delegation";
 import {
   loginSlot,
@@ -35,7 +34,6 @@ import { maybeReportModels, resetModelReportThrottle } from "./model-report";
 import { withoutCommandReplayContext } from "./op-context";
 import { clearPendingAuth } from "./pending-auth";
 import { clearPlanCache } from "./plan-cache";
-import { maybeSelfUpdate } from "./self-update";
 import { deviceSessionsForList } from "./session-host";
 import {
   clearProviderSignedOut,
@@ -43,6 +41,7 @@ import {
   markProviderSignedOut,
   refreshUsage,
 } from "./status";
+import { convergeBinary } from "./updater";
 import { invalidateUsage } from "./usage-cache";
 
 /** Short TTL so picker double-fetch / remounts do not re-scan vendor stores. */
@@ -469,19 +468,15 @@ export const runCommandInner = async (
       // tick WHEN auto-update is opted in). This is an EXPLICIT user request, so
       // it passes `force` to converge regardless of the opt-in preference.
       // Refresh the bootstrap first so a release published since the last tick is
-      // seen — otherwise a forced check would read a stale `latestVersion()`.
-      // Terminal ack is sent before reexec: `maybeSelfUpdate` can `process.exit`
+      // seen — otherwise a forced check would read a stale `latestCliVersion()`.
+      // Terminal ack is sent before reexec: `convergeBinary` can `process.exit`
       // after a successful swap. The apply lane holds the lease across that
       // after-ack flush (not released just because we return here).
       case "update": {
         await refreshBootstrap();
-        await maybeUpdateCli(latestCliVersion(), {
-          force: true,
-          reprobeUnknown: true,
-        });
-        const latest = latestVersion();
+        const latest = latestCliVersion();
         opts?.registerAfterAck?.(async () => {
-          await maybeSelfUpdate(latest, { force: true, applyHeld: true });
+          await convergeBinary(latest, { force: true, applyHeld: true });
         });
         return { id: cmd.id, status: "done", result: { checking: true } };
       }
@@ -512,11 +507,10 @@ export const runCommandInner = async (
         if (enabled) {
           void withoutCommandReplayContext(async () => {
             await refreshBootstrap();
-            await maybeUpdateCli(latestCliVersion());
-            // Apply lease is taken inside maybeSelfUpdate only if a daemon
-            // swap will actually run — bootstrap/CLI catch-up must not fence
-            // auth for the whole background window.
-            await maybeSelfUpdate(latestVersion());
+            // The apply lease is taken inside convergeBinary only if a daemon
+            // restart will actually run — catch-up must not fence auth for
+            // the whole background window.
+            await convergeBinary(latestCliVersion());
           }).catch((err) =>
             withoutCommandReplayContext(() => logError("control-relay", err)),
           );

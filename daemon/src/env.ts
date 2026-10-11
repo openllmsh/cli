@@ -109,7 +109,7 @@ export const daemonApiKeyId = (): string | null => {
 
 /**
  * Compile-time default for the cloud origin, injected by
- * scripts/compile.ts via `--define __OPENLLM_CLOUD_ORIGIN_DEFAULT__`.
+ * `packages/cli/scripts/compile.ts` via `--define __OPENLLM_CLOUD_ORIGIN_DEFAULT__`.
  * Declared as a global (NOT `process.env`) so the bundler replaces the
  * identifier without clobbering the runtime `process.env` read below —
  * the env var must still win for local testing. Falls back to the public

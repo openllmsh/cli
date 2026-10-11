@@ -18,7 +18,8 @@ export const LEGACY_DAEMON_NAME = "openllmd";
 
 /**
  * The args to hand the daemon, or null when the argv is a CLI command.
- *  - invoked as `openllmd …` → all args (legacy busybox name)
+ *  - invoked as `openllmd …` → all args (legacy busybox name; a leading
+ *    `daemon` token is tolerated)
  *  - `openllm daemon …`      → the args after `daemon` (bare → boot)
  *  - an internal re-exec flag → the argv unchanged
  */
@@ -26,8 +27,9 @@ export const daemonArgs = (
   invokedAs: string,
   argv: readonly string[],
 ): readonly string[] | null => {
-  if (invokedAs === LEGACY_DAEMON_NAME) return argv;
   const first = argv[0];
+  if (invokedAs === LEGACY_DAEMON_NAME)
+    return first === "daemon" ? argv.slice(1) : argv;
   if (first === "daemon") return argv.slice(1);
   if (first !== undefined && INTERNAL_DAEMON_FLAGS.has(first)) return argv;
   return null;

@@ -38,12 +38,12 @@ import {
 } from "./service";
 import { runSessionHostProcess } from "./session-host-proc";
 import { runUninstall } from "./uninstall";
-import { DAEMON_VERSION } from "./version";
+import { DAEMON_FINGERPRINT, DAEMON_VERSION } from "./version";
 
 const HELP = `openllmd v${DAEMON_VERSION}  —  OpenLLM local daemon
 
 Usage
-  openllmd [command]
+  openllm daemon [command]      (also: openllmd [command])
 
 Commands
 ${formatHelpRows([
@@ -222,6 +222,13 @@ export const runCli = (args: readonly string[] = userArgs()): boolean => {
       )
       .catch(() => process.exit(1));
     return true;
+  }
+
+  // The updater's daemon-change probe: print this binary's daemon fingerprint.
+  // Matched before the flag scans so it never boots or loads config.
+  if (args[0] === "--fingerprint") {
+    process.stdout.write(`${DAEMON_FINGERPRINT}\n`);
+    process.exit(0);
   }
 
   if (args.includes("-h") || args.includes("--help") || args[0] === "help") {

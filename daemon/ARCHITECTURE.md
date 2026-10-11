@@ -1,8 +1,10 @@
 # `packages/cli/daemon` Architecture
 
-> The headless **local daemon** — a source-free compiled binary (coreless:
-> built from `@openllmsh/wire` + `@openllmsh/protocol` + `@openllmsh/tunnel`, NOT
-> `@openllm/core`) that
+> The headless **local daemon** — the daemon half (`openllm daemon`) of the
+> single source-free compiled `openllm` binary (coreless: built from
+> `@openllmsh/wire` + `@openllmsh/protocol` + `@openllmsh/tunnel`, NOT
+> `@openllm/core`). A plain folder of `packages/cli` — its dependencies are
+> declared in `packages/cli/package.json` — that
 > runs the **subscription** data plane on the user's
 > machine. It delegates to the official vendor CLIs' own credentials +
 > identity (never minting, storing, or forging a subscription token),
@@ -104,22 +106,21 @@ cloud at runtime** (not compiled in) to keep the closure clean.
 ```
 daemon/
   index.ts                  re-exports
-  scripts/compile.ts        bun build --compile --minify --bytecode (4 targets; NODE_ENV bake)
-  scripts/verify.ts         download each published binary → sha256 → assert == manifest.ts pin (bun run verify)
-  scripts/dist.ts           compile + emit a self-contained installer per target (daemon:dist)
-  scripts/dist-install.ts   run an emitted installer by target on this host (daemon:dist:install)
+  (build, verify, dist and installer scripts live in ../scripts — one binary)
   src/
-    main.ts                 boot: runCli() dispatch, else refresh bootstrap → Bun.serve(127.0.0.1)
-    cli.ts                  `openllmd <cmd>` dispatch (start/stop/status/restart/skill/plugin/setup/auto-update/uninstall/set-token/completion/help)
-    auto-update-pref.ts     self-update opt-out flag in the shared .env (`OPENLLM_DAEMON_AUTO_UPDATE`, default ON; legacy `~/.openllm/auto-update` file migrated in); gates self-update.ts + reported on DaemonStatus.auto_update
+    main.ts                 runDaemon(args): runCli() dispatch, else migrate a legacy install → refresh bootstrap → Bun.serve(127.0.0.1)
+    cli.ts                  `openllm daemon <cmd>` dispatch (also reached as `openllmd <cmd>`) (start/stop/status/restart/skill/plugin/setup/auto-update/uninstall/set-token/completion/help)
+    auto-update-pref.ts     auto-update opt-out flag in the shared .env (`OPENLLM_DAEMON_AUTO_UPDATE`, default ON; legacy `~/.openllm/auto-update` file migrated in); gates updater.ts AND the CLI's launch check; reported on DaemonStatus.auto_update
     cli-version-cache.ts    stamp-keyed `--version` cache: durable successes (schema v2), process-local misses, optional `reprobe` (not `force`); v1 persisted nulls dropped on load
-    cli-self-update.ts      converge installed `openllm`; `reprobeUnknown` is explicit-update only (one recovery probe)
+    updater.ts              the single-binary updater: converge ~/.openllm/bin/openllm, then restart ONLY if the new file's daemon fingerprint differs, and only once idle
+    self-update.ts          shared plumbing: in-flight /v1 tracking + waitUntilIdle, host target, verified fetches, the apply lease
+    cli-path.ts             where the daemon finds the `openllm` CLI it spawns (dev override → managed install)
     integrations.ts         shared executor: fetch a gateway install.sh (mode=install|uninstall|state) → verify SHA-256 (fail-closed) → bash. Behind the CLI verbs + the relay's install/uninstall_integration kinds
     device-state.ts         manifest-driven probe: run each integration's `install.sh?mode=state` (`{"installed":bool,…}`) → cached DaemonStatus.integrations (stateful dashboard buttons)
     service.ts              self-managed launch agent / systemd unit (start = self-restore; stop = disable; serviceUninstall = stop + delete registration)
-    uninstall.ts            `openllmd uninstall` — confirm → stop+unregister → strip completion + owned PATH symlink → delete all state (credentials)
+    uninstall.ts            `openllm daemon uninstall` — confirm → stop+unregister → strip completion + owned PATH symlink → delete all state (credentials)
     completion.ts           bash/zsh/fish shell completion (emit + `completion install` / `uninstallCompletion`)
-    harden-binary.ts        macOS dequarantine + ad-hoc sign (shared by service + self-update)
+    harden-binary.ts        macOS dequarantine + ad-hoc sign (shared by service + updater)
     sandbox/
       working-set.ts        the daemon's filesystem allow-list — ONE source consumed by every sandbox backend
       landlock.ts           cross-platform applyDaemonSandbox() dispatcher + the Linux Landlock backend (bun:ffi, inherited by children)
@@ -141,7 +142,7 @@ daemon/
     client-encode.ts        client-wire encoders + the SHARED DELIVERY TAIL both execution methods
                             end in (deliverChunkStream: tee → meter → encode + heartbeat;
                             deliverJsonResponse; sseResponseForClient for pre-metered turns)
-    auth-cli.ts             openllmd auth command adapter; protected local calls, JSON/human output
+    auth-cli.ts             `openllm daemon auth` command adapter; protected local calls, JSON/human output
     local-auth.ts           /local/auth — runtime discovery, local flow handles, existing scheduled handlers
     local-http.ts           shared CLI-only loopback authorization and bounded request parsing
     scheduled-command.ts    shared scheduler admission for relay and local commands
@@ -774,7 +775,8 @@ for the supervisor to restart clean.
 
 ### Durable device-session host
 
-A local session is a detached `openllmd __session-host` sibling process, not a
+A local session is a detached `openllm __session-host` sibling process (this
+same binary), not a
 child of the daemon. It owns one vendor-cli PTY, scrollback, multi-attach fan-out,
 and the 15-second idle-reap poll. Its private registry is
 `~/.openllm/sessions/<id>/`: `meta.json` records the host pid and session
@@ -845,7 +847,7 @@ by path:
   reject browser Origin, and authenticate an owner-only per-boot capability.
   These are not cloud-forwarded endpoints or dashboard CORS mutations.
 
-`openllmd auth` invokes the running daemon; `openllm auth` is a thin mirror,
+`openllm daemon auth` invokes the running daemon; `openllm auth` is a thin mirror,
 with local stdio MCP tools layered on the same command contract. The daemon
 registry supplies provider names and available primary/alternate login methods.
 Login, code submission, cancellation, logout and explicit refresh reuse
@@ -955,7 +957,7 @@ Two orthogonal hardenings from
   UNCONFINED (device-session PTYs must run the user's real CLI over their real
   files), and each risky child argv is wrapped by
   `sandboxSpawnArgs()` (`sandbox/exec.ts`) into the
-  `openllmd --sandbox-exec -- <argv…>` self-re-exec shim, which applies
+  `openllm --sandbox-exec -- <argv…>` self-re-exec shim, which applies
   `applyDaemonSandbox({ force: true })` to itself before running the child
   (inheritance across `execve` does the rest). Wrapped: delegation capture /
   login / keychain spawns, the `open`/`xdg-open` browser launch, and the
@@ -1299,75 +1301,99 @@ isolated run-view to whatever the user-run installer lands.
 
 ## Build + distribution
 
-`scripts/compile.ts` → `bun build --compile --minify --bytecode
---target=bun-<os>-<arch>` for darwin-{arm64,x64} + linux-{x64,arm64} (no
-Windows). Compile-time defaults are injected via `--define` GLOBALS
-(`__OPENLLM_CLOUD_ORIGIN_DEFAULT__`, `__OPENLLM_DAEMON_VERSION__`) — those
-are NOT `process.env.*`, so the runtime env read still wins for cloud origin.
-`process.env.NODE_ENV` is the exception: Bun inlines it from the compile
-host unless `--define` bakes it. A release/`daemon:dist` version bakes
+There is ONE binary. `packages/cli/scripts/compile.ts` → `bun build --compile
+--minify --bytecode --target=bun-<os>-<arch>` for darwin-{arm64,x64} +
+linux-{x64,arm64} (no Windows), entry `packages/cli/src/main.ts`, which routes
+daemon argv here. Compile-time defaults are injected via `--define` GLOBALS
+(`__OPENLLM_CLOUD_ORIGIN_DEFAULT__`, `__OPENLLM_DAEMON_VERSION__` — the same
+release tag as the CLI — and `__OPENLLM_DAEMON_FINGERPRINT__`) — those are NOT
+`process.env.*`, so the runtime env read still wins for cloud origin.
+`process.env.NODE_ENV` is the exception: Bun inlines it from the compile host
+unless `--define` bakes it. A release/`daemon:dist` version bakes
 `"production"`; the `0.0.0-dev` sentinel (`compile:host`, `dev:dist`) bakes
 `"development"` so local compiled binaries keep the source `NODE_ENV ===
-"development"` gate. Distribution is
-the `packages/setup/daemon` install target (`includeBundle:false`,
-`requires_key:false` so the installer runs with a plain `curl … | bash` —
-no key piped in): `install.sh` downloads the binary from
-`/api/daemon/binary/<target>` and verifies it against the published
-`.sha256` (a checksum sidecar, not a detached signature), symlinks it onto
-`PATH` as `openllmd`, writes the shared config file `~/.openllm/.env`
-(`0600`) with `OPENLLM_CLOUD_ORIGIN` + `OPENLLM_DAEMON_PORT` +
-`OPENLLM_API_KEY` (the daemon mints `OPENLLM_DEVICE_ID` into the same file
-on first boot; legacy standalone `api-key` / `device-id` files from older
-installs are migrated into the env file and removed), then hands off to
-`openllmd start`. That one file is what both the installed service
-(systemd `EnvironmentFile=` / the macOS launch agent's
-`OPENLLM_DAEMON_ENV_FILE`) and `bun dev:daemon` boot from.
+"development"` gate.
 
-**Anyone can verify a published binary.** `scripts/verify.ts` (`bun run
-verify`) downloads each published `openllmd-<target>.gz` straight from the
-GitHub Release named in `manifest.ts`, decompresses it, sha256's the
-decompressed bytes (what runs), and asserts the digest equals the pin
-committed in `manifest.ts` — exiting non-zero on any mismatch. `--host` /
-`--target` narrow the set; `--file <path>` / `--installed` hash a local
-binary instead of downloading. This is the same digest `install.sh` and
-`src/self-update.ts` enforce on download, surfaced as a standalone
-source-repo check so the source-available mirror's users can independently
-confirm the served artifact matches what the source pins. It is NOT a
-reproducible-build check: `--compile --bytecode` is not byte-deterministic,
-so a fresh local build won't hash-match — the trust anchor is the committed
+`DAEMON_FINGERPRINT` (`packages/cli/scripts/daemon-fingerprint.ts`) is a
+sha-256 over every module `src/main.ts` reaches as the bundler resolves it —
+daemon source, the trio, npm modules. It is the daemon's code identity: after
+the binary is swapped, `updater.ts` runs `openllm daemon --fingerprint` on the
+NEW file and restarts only when it differs. It must never cover
+`packages/cli/manifest.ts` (that pin changes every release); the fingerprint
+script refuses to build if the daemon imports it.
+
+Distribution is `packages/cli/install.sh` (`curl … | bash`): it reads
+`/api/install`, downloads the binary from `/api/cli/binary/<target>`, verifies
+it against the published `.sha256` (a checksum sidecar, not a detached
+signature), installs it as `~/.openllm/bin/openllm` with `openllmd` as a
+symlink to it, writes the shared config file `~/.openllm/.env` (`0600`) with
+`OPENLLM_CLOUD_ORIGIN` + `OPENLLM_DAEMON_PORT` + `OPENLLM_API_KEY` (the daemon
+mints `OPENLLM_DEVICE_ID` into the same file on first boot; legacy standalone
+`api-key` / `device-id` files from older installs are migrated into the env
+file and removed), then hands off to `openllm daemon start`. That one file is
+what both the installed service (systemd `EnvironmentFile=` / the macOS launch
+agent's `OPENLLM_DAEMON_ENV_FILE`) and `bun dev:daemon` boot from.
+
+**Updates and the restart rule.** One file, two triggers (see
+`packages/cli/ARCHITECTURE.md` §5): the CLI converges it at launch (throttled,
+detached) and `updater.ts` converges it on each bootstrap tick, plus a 30 s
+stat watch notices a file someone else swapped. The daemon restarts only when
+the new file's daemon fingerprint differs from its own, and only once idle —
+no in-flight `/v1` request (`waitUntilIdle`), and the apply lease free (no
+login flow); a busy daemon defers and retries on the next check. A CLI-only
+release never bounces the daemon.
+
+**Upgrading a pre-merge install.** An old two-binary daemon still self-updates
+through `/api/daemon/binary/<target>`, which now serves the single binary. It
+renames the new bytes over `bin/openllmd` and restarts into them; the binary
+routes an `openllmd`-named run to its daemon half, and the first boot runs
+`migrateLegacyInstall` (`src/service.ts`): move the regular `bin/openllmd` file
+over `bin/openllm` (the running process keeps its inode), leave `openllmd` as a
+symlink, and rewrite a registered launch agent / systemd unit that still execs
+bare `openllmd` to exec `openllm daemon`. Idempotent and best-effort; launchd
+and systemd read the rewritten file on the next (re)start.
+
+**Anyone can verify a published binary.** `packages/cli/scripts/verify.ts`
+(`bun run verify`) downloads each published `openllm-<target>.gz` straight
+from the GitHub Release named in `packages/cli/manifest.ts`, decompresses it,
+sha256's the decompressed bytes (what runs), and asserts the digest equals the
+committed pin — exiting non-zero on any mismatch. It is NOT a
+reproducible-build check: `--compile --bytecode` is not byte-deterministic, so
+a fresh local build won't hash-match — the trust anchor is the committed
 manifest plus the published asset, not two identical builds.
 
 **The binary supervises itself.** Service registration is NOT open-coded in
-`install.sh` — it lives in `src/service.ts`, exposed as the `openllmd
-start|stop|status|restart` CLI (`src/cli.ts`), so the installer and a user
-run the exact same code path. `start` writes + enables the launch agent
-(`KeepAlive`+`RunAtLoad`) / systemd unit (`Restart=always` + boot start +
-linger) in **full self-restore mode** and (re)starts it; `stop` stops it
-AND disables all self-restore (launchd `bootout`+`disable`, systemd
-`disable --now`) so it stays down until the next `start`. The service runs
-`process.execPath`, so a from-source run (`0.0.0-dev`) is refused — only the
-compiled binary registers. `openllmd uninstall [--yes]` is the full inverse
-of install (`src/uninstall.ts`): after a typed-`yes` confirmation (warning it
-deletes credentials), it stops + **unregisters** the service (deletes the
-plist / unit, not just `stop`'s disable), strips shell completion, removes the
-owned `PATH` symlink, and deletes the entire state dir — leaving the machine
-clean. It only ever removes a symlink resolving to our own `bin/openllmd` and
-files under the state dir, never an unrelated `openllmd`. `openllmd completion
-<bash|zsh|fish|install>` emits/installs shell completion for every subcommand.
-The CLI surface is defined once in `src/commands.ts` (consumed by both
-`cli.ts`'s help and `completion.ts`). See
+`install.sh` — it lives in `src/service.ts`, exposed as `openllm daemon
+start|stop|status|restart` (`src/cli.ts`; the top-level `openllm start|stop|…`
+mirror the same commands), so the installer and a user run the exact same code
+path. `start` writes + enables the launch agent (`KeepAlive`+`RunAtLoad`) /
+systemd unit (`Restart=always` + boot start + linger) — both exec
+`~/.openllm/bin/openllm daemon` — in **full self-restore mode** and (re)starts
+it; `stop` stops it AND disables all self-restore (launchd
+`bootout`+`disable`, systemd `disable --now`) so it stays down until the next
+`start`. A from-source run (`0.0.0-dev`) is refused — only the compiled binary
+registers. `openllm daemon uninstall [--yes]` is the full inverse of install
+(`src/uninstall.ts`): after a typed-`yes` confirmation (warning it deletes
+credentials), it stops + **unregisters** the service (deletes the plist /
+unit, not just `stop`'s disable), strips shell completion, removes the owned
+`PATH` symlink, and deletes the entire state dir — leaving the machine clean.
+It only ever removes a symlink resolving to our own binary and files under the
+state dir. `openllm daemon completion <bash|zsh|fish|install>` emits/installs
+shell completion for every subcommand. The CLI surface is defined once in
+`src/commands.ts` (consumed by both `cli.ts`'s help and `completion.ts`). See
 [`daemon-self-managing-cli.md`](../../docs/proposals/daemon-self-managing-cli.md).
 
-**Local install without a release.** `scripts/dist.ts` (`bun run daemon:dist`)
-compiles all four targets and emits a self-contained installer per target —
-the real `packages/setup/daemon/install.sh` embedded verbatim with the
-locally-built binary appended, so the produced `openllmd-<target>.install.sh`
-replicates the exact production install flow offline. `scripts/dist-install.ts`
-(`bun run daemon:dist:install -- <target>`, default: this host) runs the
-emitted installer without copying a dist path. Credentials use the same
-OpenLLM-prefixed env as the real install — `OPENLLM_CLOUD_ORIGIN` +
-`OPENLLM_API_KEY` — and an existing `~/.openllm/.env` is reused when
-present (a re-run re-pairs in place; the minted `OPENLLM_DEVICE_ID` is kept).
+**Local install without a release.** `packages/cli/scripts/dist.ts` (`bun run
+daemon:dist`) compiles all four targets and emits a self-contained installer
+per target — the real `packages/cli/install.sh` embedded verbatim with the
+locally-built binary appended, so the produced `openllm-<target>.install.sh`
+replicates the exact production install flow offline.
+`packages/cli/scripts/dist-install.ts` (`bun run daemon:dist:install --
+<target>`, default: this host) runs the emitted installer without copying a
+dist path. Credentials use the same OpenLLM-prefixed env as the real install —
+`OPENLLM_CLOUD_ORIGIN` + `OPENLLM_API_KEY` — and an existing `~/.openllm/.env`
+is reused when present (a re-run re-pairs in place; the minted
+`OPENLLM_DEVICE_ID` is kept).
 
 ## Layering rules
 

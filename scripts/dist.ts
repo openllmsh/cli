@@ -1,15 +1,15 @@
 #!/usr/bin/env bun
 
 /**
- * `bun run daemon:dist` — build the daemon for every target and emit a
- * SELF-CONTAINED installer per target: the real setup installer
- * (`packages/registry/setup/daemon/install.sh`) embedded VERBATIM, with the
- * locally-built, gzipped binary appended (base64). Copy ONE file to any machine
+ * `bun run daemon:dist` — build the single `openllm` binary for every target
+ * and emit a SELF-CONTAINED installer per target: the real installer
+ * (`packages/cli/install.sh`) embedded VERBATIM, with the locally-built,
+ * gzipped binary appended (base64). Copy ONE file to any machine
  * of that os/arch and run it to replicate the real app install flow offline —
  * no gateway, no network for the binary. A tiny `curl` shim in the wrapper
  * feeds the embedded binary + its sha256 to the unchanged download+verify step,
  * so EVERY other install.sh step (checksum, install, the .env write, codesign,
- * `openllmd start`, completion) runs exactly as in production.
+ * `openllm daemon start`, completion) runs exactly as in production.
  *
  * Build only — it NEVER installs. The native build is the existing
  * `compile.ts` (so this stays in lockstep with how releases are built).
@@ -23,12 +23,12 @@
  * install + the shared .env; both are reused from an existing ~/.openllm/.env
  * when present, so a re-run needs neither):
  *   OPENLLM_CLOUD_ORIGIN=https://your-cloud OPENLLM_API_KEY=sk-llm-... \
- *     bash packages/cli/daemon/dist/openllmd-<target>.install.sh
+ *     bash packages/cli/dist/openllm-<target>.install.sh
  *
  * Note: `compile.ts` bakes `0.0.0-dev` when given no `--version`, and
- * `openllmd start` REFUSES a dev build (service.ts) — so this always stamps a
+ * `openllm daemon start` REFUSES a dev build (service.ts) — so this always stamps a
  * real version (default: the root package.json version) or the embedded
- * installer's `openllmd start` step would abort. A real version also bakes
+ * installer's `openllm daemon start` step would abort. A real version also bakes
  * `NODE_ENV=production` (the published-binary define); `compile:host` /
  * `dev:dist` keep `0.0.0-dev` and therefore `NODE_ENV=development`. Because
  * that version is the APP's (not the cloud's published daemon version), the
@@ -42,18 +42,12 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { $ } from "bun";
 
-const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url)); // packages/cli/daemon/scripts
-const REPO_ROOT = resolve(SCRIPT_DIR, "..", "..", "..", "..");
-const DIST_DIR = join(REPO_ROOT, "packages", "cli", "daemon", "dist");
+const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url)); // packages/cli/scripts
+const PKG_ROOT = resolve(SCRIPT_DIR, "..");
+const REPO_ROOT = resolve(PKG_ROOT, "..", "..");
+const DIST_DIR = join(PKG_ROOT, "dist");
 const COMPILE_SCRIPT = join(SCRIPT_DIR, "compile.ts");
-const INSTALL_SH = join(
-  REPO_ROOT,
-  "packages",
-  "registry",
-  "setup",
-  "daemon",
-  "install.sh",
-);
+const INSTALL_SH = join(PKG_ROOT, "install.sh");
 const TEMPLATE = join(SCRIPT_DIR, "dist-installer-template.sh");
 
 const ALL_TARGETS = [
@@ -88,7 +82,7 @@ const main = async (): Promise<void> => {
   const version = flagValue("--version") ?? rootPkgVersion();
   if (version === "0.0.0-dev") {
     throw new Error(
-      "refusing to build with version 0.0.0-dev — `openllmd start` rejects a dev build, so the installer would abort. Pass a real --version.",
+      "refusing to build with version 0.0.0-dev — `openllm daemon start` rejects a dev build, so the installer would abort. Pass a real --version.",
     );
   }
   const onlyTarget = flagValue("--target");
@@ -103,7 +97,7 @@ const main = async (): Promise<void> => {
 
   // Native build via the existing compile script (always all four targets in
   // parallel — compile.ts has no per-target selection; we just wrap a subset).
-  console.log(`Building daemon binaries (version ${version})…`);
+  console.log(`Building openllm binaries (version ${version})…`);
   await $`bun ${COMPILE_SCRIPT} --version ${version}`.cwd(REPO_ROOT);
 
   const template = readFileSync(TEMPLATE, "utf-8");
@@ -115,7 +109,7 @@ const main = async (): Promise<void> => {
   const cloud = cloudDefault();
 
   for (const target of wrapTargets) {
-    const rawPath = join(DIST_DIR, `openllmd-${target}`);
+    const rawPath = join(DIST_DIR, `openllm-${target}`);
     const gzPath = `${rawPath}.gz`;
     if (!existsSync(rawPath) || !existsSync(gzPath)) {
       throw new Error(`compile did not produce ${rawPath}(.gz)`);
@@ -139,7 +133,7 @@ const main = async (): Promise<void> => {
       .replaceAll("__CLOUD_DEFAULT__", cloud)
       .replaceAll("__SHA__", sha);
 
-    const out = join(DIST_DIR, `openllmd-${target}.install.sh`);
+    const out = join(DIST_DIR, `openllm-${target}.install.sh`);
     writeFileSync(out, script);
     chmodSync(out, 0o755);
     const mb = (Buffer.byteLength(script) / 1024 / 1024).toFixed(1);
@@ -150,7 +144,7 @@ const main = async (): Promise<void> => {
     `\nEmitted ${wrapTargets.length} self-contained installer(s) → ${DIST_DIR}`,
   );
   console.log(
-    "Run on a target machine (reuses ~/.openllm/.env when present):\n  OPENLLM_CLOUD_ORIGIN=https://your-cloud OPENLLM_API_KEY=sk-llm-... \\\n    bash openllmd-<target>.install.sh",
+    "Run on a target machine (reuses ~/.openllm/.env when present):\n  OPENLLM_CLOUD_ORIGIN=https://your-cloud OPENLLM_API_KEY=sk-llm-... \\\n    bash openllm-<target>.install.sh",
   );
 };
 

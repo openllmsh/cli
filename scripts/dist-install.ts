@@ -18,8 +18,7 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
-const REPO_ROOT = resolve(SCRIPT_DIR, "..", "..", "..", "..");
-const DIST_DIR = join(REPO_ROOT, "packages", "cli", "daemon", "dist");
+const DIST_DIR = join(resolve(SCRIPT_DIR, ".."), "dist");
 
 const ALL_TARGETS = [
   "darwin-arm64",

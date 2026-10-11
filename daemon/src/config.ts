@@ -244,10 +244,10 @@ export const latestVersion = (): string | null =>
   snapshot.latest_version ?? null;
 
 /**
- * The `openllm` CLI version the cloud currently publishes (bare semver),
- * from the last bootstrap. Null when unpublished or the cloud is too old to
- * advertise it. The CLI converger compares it to the installed binary's
- * version. See `cli-self-update.ts`.
+ * The release the cloud currently pins for the single `openllm` binary (bare
+ * semver), from the last bootstrap. Null when unpublished or the cloud is too
+ * old to advertise it. The updater converges the binary to it. See
+ * `updater.ts`.
  */
 export const latestCliVersion = (): string | null =>
   snapshot.latest_cli_version ?? null;

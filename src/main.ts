@@ -35,11 +35,20 @@ const run = async (): Promise<void> => {
   if (first === "--version" || first === "-v" || first === "version") {
     printSelfVersion();
   }
+  // The detached launch-check child: converge quietly, then exit.
+  if (first === "__self-update") {
+    const { convergeSelf } = await import("./self-update");
+    await convergeSelf({ quiet: true });
+    process.exit(0);
+  }
   // Per-prompt hooks should not initialize the vendor clients or MCP server.
   if (first === "exec" && argv[1] === "memory") {
     const { runMemoryHookCommand } = await import("./memory-hooks/command");
     process.exit(await runMemoryHookCommand(argv.slice(2)));
   }
+  // Throttled, detached — the command below never waits on it.
+  const { maybeLaunchUpdateCheck } = await import("./launch-update");
+  maybeLaunchUpdateCheck(first);
   const { runCli } = await import("./cli-dispatch");
   await runCli(argv);
 };

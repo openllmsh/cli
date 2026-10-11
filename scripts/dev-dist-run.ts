@@ -10,13 +10,13 @@
  * Steps:
  *   1. `compile.ts --host` → a `0.0.0-dev` host binary, baking the dev
  *      cloud origin (OPENLLM_CLOUD_ORIGIN, default http://127.0.0.1:3000).
- *   2. exec the binary bare (→ `main()`, not `openllmd start` which refuses
- *      a dev build) with:
+ *   2. exec `openllm daemon` (→ `main()`, not `daemon start` which refuses a
+ *      dev build) with:
  *        OPENLLM_DAEMON_DEV=1     → port 8788 + ~/.openllm/.dev.env
  *        OPENLLM_DAEMON_SANDBOX=1 → opt the OS sandbox on for the dev build
  *
  * Restarting the `daemon` process in the dev footer re-runs this (rebuild
- * + relaunch). Standalone: `bun packages/cli/daemon/scripts/dev-dist-run.ts`.
+ * + relaunch). Standalone: `bun packages/cli/scripts/dev-dist-run.ts`.
  */
 
 import { spawn, spawnSync } from "node:child_process";
@@ -26,7 +26,7 @@ import { fileURLToPath } from "node:url";
 
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
 const PKG_ROOT = resolve(SCRIPT_DIR, "..");
-const BINARY = join(PKG_ROOT, "dist", "openllmd");
+const BINARY = join(PKG_ROOT, "dist", "openllm");
 const COMPILE = join(SCRIPT_DIR, "compile.ts");
 
 const cloudOrigin = process.env.OPENLLM_CLOUD_ORIGIN ?? "http://127.0.0.1:3000";
@@ -43,7 +43,7 @@ if (!existsSync(BINARY)) {
 }
 
 console.log("[dev:dist] launching sandboxed dev daemon on :8788…");
-const child = spawn(BINARY, [], {
+const child = spawn(BINARY, ["daemon"], {
   stdio: "inherit",
   env: {
     ...process.env,

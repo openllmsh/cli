@@ -157,7 +157,9 @@ export const resetStoreIdentityEpochsForTests = (): void => {
   storeIdentityEpochs.clear();
 };
 
-export const createPassiveObservationCache = <T>(): TPassiveObservationCache<T> => {
+export const createPassiveObservationCache = <
+  T,
+>(): TPassiveObservationCache<T> => {
   let generation = 0;
   let entry: { readonly fingerprint: string; readonly value: T } | null = null;
   return {

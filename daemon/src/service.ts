@@ -23,7 +23,17 @@
  * `bun run daemon:dist:install`).
  */
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  statSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { homedir } from "node:os";
 import { isAbsolute, join } from "node:path";
 import { setAutoUpdate } from "./auto-update-pref";
@@ -51,6 +61,95 @@ const plistPath = (): string =>
   join(homedir(), "Library", "LaunchAgents", `${LABEL}.plist`);
 const unitDir = (): string => join(homedir(), ".config", "systemd", "user");
 const unitPath = (): string => join(unitDir(), "openllmd.service");
+
+/** The installer-owned single binary — both CLI and daemon (`openllm daemon`). */
+const managedBinPath = (): string => join(stateDir(), "bin", "openllm");
+/** The pre-merge daemon name, kept as a symlink to `openllm`. */
+const legacyBinPath = (): string => join(stateDir(), "bin", "openllmd");
+
+/** What the service execs: the managed binary when installed (so a run via the
+ *  legacy `openllmd` symlink still registers the canonical path), else the
+ *  running compiled binary. */
+const serviceBinPath = (): string =>
+  existsSync(managedBinPath()) ? managedBinPath() : process.execPath;
+
+/** Whether two paths name the same file (device + inode), following symlinks.
+ *  Compares identity, not path strings — `/tmp` vs `/private/tmp`, a symlinked
+ *  state dir, or a relative `execPath` must not change the answer. */
+const sameFile = (a: string, b: string): boolean => {
+  try {
+    const x = statSync(a);
+    const y = statSync(b);
+    return x.dev === y.dev && x.ino === y.ino;
+  } catch {
+    return false;
+  }
+};
+
+/**
+ * Converge a pre-merge install onto the single binary. Called on every
+ * compiled boot; idempotent and best-effort (a failure leaves the old layout,
+ * which still works through the `openllmd` name).
+ *
+ *  - An old daemon self-updates by renaming the new bytes over `bin/openllmd`
+ *    (a regular file) and restarting into them. When `bin/openllmd` IS the
+ *    file this process is running (same inode), move it over `bin/openllm` —
+ *    the running process keeps its inode — and leave `openllmd` as a symlink
+ *    so old units, scripts and CLIs keep working. Any other regular
+ *    `openllmd` (a pre-merge daemon this process is not) is left untouched:
+ *    nothing is ever deleted here.
+ *  - A registered unit that execs our bare `openllmd` is rewritten to
+ *    `openllm daemon`. No reload or restart: this process IS the new code, and
+ *    launchd/systemd read the file on the next (re)start (systemd gets a
+ *    `daemon-reload` so it does not warn about the stale unit).
+ */
+export const migrateLegacyInstall = (
+  opts: {
+    readonly execPath?: string;
+    readonly compiled?: boolean;
+    readonly unitFile?: string;
+  } = {},
+): void => {
+  if (!(opts.compiled ?? DAEMON_VERSION !== "0.0.0-dev")) return;
+  const execPath = opts.execPath ?? process.execPath;
+  const legacy = legacyBinPath();
+  const managed = managedBinPath();
+  try {
+    if (
+      existsSync(legacy) &&
+      !lstatSync(legacy).isSymbolicLink() &&
+      sameFile(legacy, execPath)
+    ) {
+      // rename() is atomic: `openllm` flips from the old CLI to the merged
+      // binary in one step, and `openllmd` is gone only until the symlink below.
+      renameSync(legacy, managed);
+      symlinkSync("openllm", legacy);
+    }
+  } catch {
+    // best-effort — the legacy name keeps working as a regular file too
+  }
+  if (!existsSync(managed)) return;
+  try {
+    const unit = opts.unitFile ?? (isMac ? plistPath() : unitPath());
+    if (!existsSync(unit)) return;
+    const current = readFileSync(unit, "utf8");
+    // Only a unit that execs OUR legacy binary is ours to rewrite. The unit
+    // path comes from the real home directory while the binary path comes from
+    // the state dir, so a run with a custom state dir must never repoint the
+    // user's real service at it.
+    if (!current.includes(legacy)) return;
+    if (isMac) {
+      if (!current.includes("<string>daemon</string>"))
+        writeFileSync(unit, renderPlist(managed));
+    } else if (!/^ExecStart=.* daemon$/m.test(current)) {
+      writeFileSync(unit, renderUnit(managed));
+      if (opts.unitFile === undefined)
+        tryRun("systemctl", ["--user", "daemon-reload"]);
+    }
+  } catch {
+    // best-effort
+  }
+};
 
 const uid = (): number => (process.getuid ? process.getuid() : 0);
 const guiDomain = (): string => `gui/${uid()}`;
@@ -193,7 +292,7 @@ export const renderPlist = (binPath: string): string => {
 <plist version="1.0">
 <dict>
   <key>Label</key><string>${LABEL}</string>
-  <key>ProgramArguments</key><array><string>${binPath}</string></array>
+  <key>ProgramArguments</key><array><string>${binPath}</string><string>daemon</string></array>
   <key>EnvironmentVariables</key><dict>
     <key>OPENLLM_DAEMON_ENV_FILE</key><string>${serviceEnvFilePath()}</string>
   </dict>
@@ -264,13 +363,13 @@ Wants=network-online.target
 # real loop runs at ~30s/boot, so 20 starts in 5 min only triggers after minutes
 # of genuine thrashing → systemd parks the unit "failed" and stops. The app-side
 # crash-loop guard (boot-guard.ts) is the cross-platform backstop (+ the only one
-# on macOS). Recover from a parked unit with \`openllmd restart\`.
+# on macOS). Recover from a parked unit with \`openllm daemon restart\`.
 StartLimitIntervalSec=300
 StartLimitBurst=20
 
 [Service]
 EnvironmentFile=${serviceEnvFilePath()}
-ExecStart=${binPath}
+ExecStart=${binPath} daemon
 ${renderUnitRestart(systemdMajor())}${renderUnitLogging(systemdMajor())}${renderUnitHardening()}
 [Install]
 WantedBy=default.target
@@ -509,7 +608,7 @@ const startServiceAfterCredentialGate = (
 ): boolean => {
   if (!hasCredentialProof(gate)) return false;
   if (DAEMON_VERSION === "0.0.0-dev") rejectSourceServiceRegistration();
-  const binPath = process.execPath;
+  const binPath = serviceBinPath();
   writeEnvFileIfNeeded();
   // An explicit OPENLLM_DAEMON_AUTO_UPDATE at registration is persisted to
   // the env file BEFORE the service first boots — so a `daemon:dist` install that

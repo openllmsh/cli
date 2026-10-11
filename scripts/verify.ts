@@ -1,8 +1,8 @@
 #!/usr/bin/env bun
 
 /**
- * Verify published CLI binaries against the committed checksum manifest —
- * the `openllm` twin of `packages/cli/daemon/scripts/verify.ts`.
+ * Verify published `openllm` binaries (CLI + daemon half) against the
+ * committed checksum manifest.
  *
  * The CLI ships as a compiled binary, so end users don't run this `.ts`
  * source — they run an artifact the cloud serves, which redirects to the
