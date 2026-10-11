@@ -46,6 +46,11 @@ export const COMMANDS = [
     description: "Manage provider authentication on this machine",
   },
   {
+    name: "login",
+    args: "[--key <key>]",
+    description: "Save or replace your OpenLLM API key",
+  },
+  {
     name: "claude",
     args: "[...args]",
     description: "Run Claude Code through OpenLLM",
@@ -163,6 +168,8 @@ export const CLIENT_FLAGS: readonly TFlag[] = [
 ] as const;
 
 export const FLAGS: readonly TFlag[] = [
+  { name: "-p", description: "One-shot prompt, reply on stdout" },
+  { name: "-m", description: "Model for -p (default ultra)" },
   { name: "-h", description: "Show help" },
   { name: "--help", description: "Show help" },
   { name: "-v", description: "Print this CLI version" },
@@ -238,6 +245,7 @@ export const COMMAND_ARGS: Readonly<
   Partial<Record<TCommandName, readonly string[]>>
 > = {
   auth: AUTH_COMMANDS.map((item) => item.name),
+  login: ["--key"],
   completion: [...COMPLETION_SHELLS, "install"],
   "auto-update": [...AUTO_UPDATE_ACTIONS],
   mcp: ["--only", ...MCP_ONLY_GROUPS],

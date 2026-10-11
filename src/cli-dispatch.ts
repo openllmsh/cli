@@ -35,6 +35,18 @@ import { runUpdate } from "./update-cmd";
 
 const HELP = helpText(CLI_VERSION);
 
+const PROMPT_FLAGS: readonly string[] = [
+  "-p",
+  "--prompt",
+  "-m",
+  "--model",
+  "-s",
+  "--system",
+  "--no-stream",
+];
+const isPromptFlag = (s: string): boolean =>
+  PROMPT_FLAGS.includes(s) || /^--(prompt|model|system)=/.test(s);
+
 const isExecGroup = (s: string): s is TExecGroup =>
   (EXEC_GROUPS as readonly string[]).includes(s);
 
@@ -202,6 +214,13 @@ export const runCli = async (argv: readonly string[]): Promise<void> => {
     return process.exit(await runSessionClient(client, rest, clientFlags));
   }
 
+  // One-shot inference: `openllm -p <prompt> [-m <model>]` (flags in any order).
+  if (cmd !== undefined && isPromptFlag(cmd)) {
+    const { CHAT_USAGE, runChat } = await import("./chat-cmd");
+    if (wantsHelp(clientFlags.rest)) return usage(CHAT_USAGE, 0);
+    return process.exit(await runChat(clientFlags.rest));
+  }
+
   switch (cmd) {
     case "mcp": {
       if (wantsHelp(rest)) return usage(MCP_USAGE, 0);
@@ -269,6 +288,11 @@ export const runCli = async (argv: readonly string[]): Promise<void> => {
         process.exit(0);
       }
       return usage(API_USAGE, 2);
+    }
+    case "login": {
+      const { LOGIN_USAGE, runLogin } = await import("./login-cmd");
+      if (wantsHelp(rest)) return usage(LOGIN_USAGE, 0);
+      return process.exit(await runLogin(rest));
     }
     case "setup":
       if (wantsHelp(rest)) return usage(SETUP_USAGE, 0);

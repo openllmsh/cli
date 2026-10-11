@@ -118,7 +118,7 @@ const readHiddenLine = (): string | null => {
   }
 };
 
-const defaultTerminal: TCredentialGateTerminal = {
+export const defaultTerminal: TCredentialGateTerminal = {
   isInteractive: (): boolean =>
     process.stdin.isTTY === true && process.stderr.isTTY === true,
   promptForKey: (): string | null => {
@@ -148,7 +148,7 @@ const waitForEnvUpdateLock = (): void => {
  * Serialize read-modify-rename updates with the daemon-compatible file lock.
  * A killed writer leaves a stale regular file that is recovered after 30 seconds.
  */
-const updateEnvFile = (key: string): boolean => {
+export const saveApiKey = (key: string): boolean => {
   // Dev launches write `.dev.env`, never the prod `.env` (dev daemon parity).
   const target = cliEnvFile();
   const lock = `${target}.lock`;
@@ -278,7 +278,7 @@ export const requireCliApiKey = (
       continue;
     }
     const key = pasted.trim();
-    if (!updateEnvFile(key))
+    if (!saveApiKey(key))
       return { ok: false, message: "[openllm] Could not save the API key.\n" };
     process.env.OPENLLM_API_KEY = key;
     terminal.write("API key saved.\n");
