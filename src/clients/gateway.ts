@@ -51,15 +51,18 @@ export type TGateway = {
   readonly local: boolean;
 };
 
-/** One probe per process: a launch that resolves the gateway twice
- *  (chatgpt/hermes) must not pay for a second check. */
+/** Probes in flight, per port: concurrent resolutions share ONE probe, but a
+ *  settled result is never reused — a later call re-checks, so a daemon that
+ *  starts or stops mid-process is seen. */
 const probes = new Map<number, Promise<boolean>>();
 
-/** Is a local daemon reachable right now? (memoised per port per process) */
+/** Is a local daemon reachable right now? */
 export const daemonReachable = (port: number): Promise<boolean> => {
-  const cached = probes.get(port);
-  if (cached !== undefined) return cached;
-  const probe = probeDaemon(port);
+  const inFlight = probes.get(port);
+  if (inFlight !== undefined) return inFlight;
+  const probe = probeDaemon(port).finally(() => {
+    if (probes.get(port) === probe) probes.delete(port);
+  });
   probes.set(port, probe);
   return probe;
 };

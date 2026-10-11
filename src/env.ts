@@ -140,10 +140,19 @@ export const cliConfig = (): TCliConfig => {
     file.OPENLLM_CLOUD_ORIGIN ??
     (dev ? DEV_CLOUD_ORIGIN : CLOUD_ORIGIN_DEFAULT)
   ).replace(/\/+$/, "");
+  // A blank `OPENLLM_API_KEY=` line is "no key", so it must not block the
+  // dev fallback to the prod `.env` (read directly — never the overridden
+  // file again).
+  const fileKey =
+    file.OPENLLM_API_KEY !== undefined && file.OPENLLM_API_KEY.length > 0
+      ? file.OPENLLM_API_KEY
+      : undefined;
   const apiKey =
     process.env.OPENLLM_API_KEY ??
-    file.OPENLLM_API_KEY ??
-    (dev ? parseEnvFile(sharedEnvFile()).OPENLLM_API_KEY : undefined) ??
+    fileKey ??
+    (dev
+      ? parseEnvFile(join(openllmDir(), ".env")).OPENLLM_API_KEY
+      : undefined) ??
     "";
   return { gatewayUrl, apiKey };
 };
