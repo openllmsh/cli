@@ -160,7 +160,7 @@ type TAcpErrorKind = "rpc" | "timeout" | "transport";
 
 /** Typed ACP request failure so setup declines can tell an explicit
  *  authenticate rejection from a timeout/crash/transport drop. */
-class AcpRpcError extends Error {
+export class AcpRpcError extends Error {
   readonly method: string;
   readonly kind: TAcpErrorKind;
   readonly rpcCode: number | undefined;
@@ -388,13 +388,30 @@ export const createAcpTurnState = (params: {
   };
 };
 
+/** Which ACP agent an {@link AcpClient} spawns. Defaults to `cursor-agent acp`. */
+export type TAcpClientSpawn = {
+  /** Full argv (binary first). */
+  readonly argv: ReadonlyArray<string>;
+  /** Human label used in error messages (`cursor-agent acp`, …). */
+  readonly label: string;
+  /** Run unconfined (`sandboxSpawnArgs` probe flag). */
+  readonly probe: boolean;
+  /** Non-JSON stdout lines (agents may print sign-in prompts there). */
+  readonly onNonJsonLine?: (line: string) => void;
+  /** When set, `env` is the FINAL child env (already scrubbed) — it is not
+   *  re-merged onto `process.env` via `cleanNativeSpawnEnv`. */
+  readonly exactEnv?: boolean;
+  /** Child cwd override (default `spawnCwd(env)`). */
+  readonly cwd?: string;
+};
+
 /**
- * Minimal hand-rolled JSON-RPC 2.0 client over one `cursor-agent acp` child:
+ * Minimal hand-rolled JSON-RPC 2.0 client over one ACP agent child:
  * id counter, pending map, notification handler. One child per use — the
  * caller kills it via `dispose()` when the turn (or the model-list probe)
  * completes. No dependency — ~80 lines beats shipping a protocol package.
  */
-class AcpClient {
+export class AcpClient {
   private nextId: TJsonRpcId = 1;
   private readonly pending = new Map<
     TJsonRpcId,
@@ -408,6 +425,8 @@ class AcpClient {
   private readonly stdin: { write: (s: string) => void; flush?: () => void };
   private disposed = false;
   private cancelTimer: ReturnType<typeof setTimeout> | undefined;
+  private readonly label: string;
+  private readonly onNonJsonLine: ((line: string) => void) | undefined;
   readonly rpcCounts: Record<string, number> = {};
 
   constructor(
@@ -420,19 +439,25 @@ class AcpClient {
       method: string,
       params: unknown,
     ) => unknown = () => null,
+    spawn?: TAcpClientSpawn,
   ) {
     // The ACP bridge reads cursor's isolated macOS keychain credential;
     // securityd denies a Seatbelt-confined caller, so it runs unconfined on
     // macOS (confined on Linux) — `sandbox/policy.ts`.
+    const argv = spawn?.argv ?? [bin, "acp"];
+    this.label = spawn?.label ?? "cursor-agent acp";
+    this.onNonJsonLine = spawn?.onNonJsonLine;
     this.proc = Bun.spawn(
-      sandboxSpawnArgs([bin, "acp"], { probe: unwrapKeychainSpawn("cursor") }),
+      sandboxSpawnArgs(argv, {
+        probe: spawn?.probe ?? unwrapKeychainSpawn("cursor"),
+      }),
       {
         stdin: "pipe",
         stdout: "pipe",
         // Native stderr is not a safe diagnostic channel (may contain secrets).
         stderr: "ignore",
-        cwd: spawnCwd(env),
-        env: cleanNativeSpawnEnv(env),
+        cwd: spawn?.cwd ?? spawnCwd(env),
+        env: spawn?.exactEnv === true ? env : cleanNativeSpawnEnv(env),
       },
     );
     this.stdin = this.proc.stdin as unknown as {
@@ -440,12 +465,12 @@ class AcpClient {
       flush?: () => void;
     };
     void this.pump(this.proc.stdout as ReadableStream<Uint8Array>).then(
-      () => this.failAllPending("cursor-agent acp stdout closed"),
-      () => this.failAllPending("cursor-agent acp stdout failed"),
+      () => this.failAllPending(`${this.label} stdout closed`),
+      () => this.failAllPending(`${this.label} stdout failed`),
     );
     void this.proc.exited.then(() => {
       clearTimeout(this.cancelTimer);
-      this.failAllPending("cursor-agent acp exited");
+      this.failAllPending(`${this.label} exited`);
     });
   }
 
@@ -463,7 +488,7 @@ class AcpClient {
             new AcpRpcError({
               method,
               kind: "timeout",
-              message: `cursor-agent acp ${method} timed out`,
+              message: `${this.label} ${method} timed out`,
             }),
           );
         }
@@ -515,7 +540,7 @@ class AcpClient {
     if (this.disposed) return;
     this.disposed = true;
     clearTimeout(this.cancelTimer);
-    this.failAllPending("cursor-agent acp disposed");
+    this.failAllPending(`${this.label} disposed`);
     try {
       this.proc.kill("SIGTERM");
     } catch {
@@ -537,7 +562,7 @@ class AcpClient {
   }
 
   private send(message: Record<string, unknown>): void {
-    if (this.disposed) throw new Error("cursor-agent acp not running");
+    if (this.disposed) throw new Error(`${this.label} not running`);
     this.stdin.write(`${JSON.stringify(message)}\n`);
     this.stdin.flush?.();
   }
@@ -553,9 +578,11 @@ class AcpClient {
       for (;;) {
         const newline = buffer.indexOf("\n");
         if (newline < 0) break;
-        const message = parseAcpLine(buffer.slice(0, newline));
+        const line = buffer.slice(0, newline);
+        const message = parseAcpLine(line);
         buffer = buffer.slice(newline + 1);
         if (message !== null) this.route(message);
+        else if (line.trim().length > 0) this.onNonJsonLine?.(line);
       }
     }
   }
@@ -574,7 +601,7 @@ class AcpClient {
           new AcpRpcError({
             method: entry.method,
             kind: "rpc",
-            message: message.error.message ?? "cursor-agent acp error",
+            message: message.error.message ?? `${this.label} error`,
             ...(typeof message.error.code === "number"
               ? { rpcCode: message.error.code }
               : {}),

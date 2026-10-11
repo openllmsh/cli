@@ -52,6 +52,7 @@ import {
   resolveExecutionSelection,
 } from "../execution-registry";
 import { logDebug, logWarn, safeDiagnosticMessage } from "../logger";
+import { runAntigravityNative } from "./antigravity-acp";
 import {
   bridgeRequestCaptureReadiness,
   shouldActivateBridgeRequestCapture,
@@ -234,6 +235,7 @@ const resumeStats: Record<TNativeRuntimeProvider, TResumeStats> = {
   chatgpt: { firstTurn: 0, resumeHit: 0, resumeMiss: 0, captureCold: 0 },
   cursor: { firstTurn: 0, resumeHit: 0, resumeMiss: 0, captureCold: 0 },
   muse: { firstTurn: 0, resumeHit: 0, resumeMiss: 0, captureCold: 0 },
+  antigravity: { firstTurn: 0, resumeHit: 0, resumeMiss: 0, captureCold: 0 },
 };
 
 /** Snapshot the resume-correlation counters (introspection / tests). */
@@ -245,6 +247,7 @@ export const nativeResumeStats = (): Record<
   chatgpt: { ...resumeStats.chatgpt },
   cursor: { ...resumeStats.cursor },
   muse: { ...resumeStats.muse },
+  antigravity: { ...resumeStats.antigravity },
 });
 
 /** Reset the counters (tests). */
@@ -268,6 +271,12 @@ export const resetNativeResumeStats = (): void => {
     captureCold: 0,
   };
   resumeStats.muse = {
+    firstTurn: 0,
+    resumeHit: 0,
+    resumeMiss: 0,
+    captureCold: 0,
+  };
+  resumeStats.antigravity = {
     firstTurn: 0,
     resumeHit: 0,
     resumeMiss: 0,
@@ -612,6 +621,25 @@ export const tryServeNativeRuntime = async (
       };
     }
     return serveCursorHop(params, overrides);
+  }
+  if (params.provider === "antigravity") {
+    // antigravity is BRIDGE-ONLY over ACP. It serves tools (loopback MCP) and
+    // images, but has no channel for sampling / structured-output controls:
+    // decline rather than silently serving at the agent's defaults.
+    if (
+      (typeof params.canonical.n === "number" && params.canonical.n > 1) ||
+      params.canonical.logprobs === true
+    ) {
+      return {
+        declined:
+          "antigravity ACP can't honor n>1 or logprobs (single un-scored message per turn)",
+      };
+    }
+    const unsupported = unsupportedNativeControl(params.canonical);
+    if (unsupported !== null) {
+      return { declined: `antigravity ACP can't honor ${unsupported}` };
+    }
+    return serveAntigravityHop(params, overrides);
   }
   if (params.provider === "muse") {
     // muse is BRIDGE-ONLY. Decline controls the native runtime cannot honor
@@ -1345,6 +1373,89 @@ const serveCursorHop = async (
         : "native runtime stream failed after output began";
     if (captureActive) return declinedOutcome(reason, undefined, "accepted");
     return errorJson(502, reason);
+  }
+  settle(canonical);
+  return deliverJsonResponse(
+    canonical,
+    params.surface,
+    clientWire,
+    undefined,
+    params.stripSubagentIsolation,
+  );
+};
+
+/**
+ * Antigravity serve path — cold ACP session per request through Google's
+ * `agy_acp_server`. The conversation is flattened by `cursorRequestOf` (same
+ * ACP prompt shape); client tools ride the loopback MCP server.
+ */
+const serveAntigravityHop = async (
+  params: TNativeServeParams,
+  overrides?: TNativeServeOverrides,
+): Promise<TNativeServeOutcome> => {
+  const explicitDispatch = resolveExplicitDispatch(
+    "antigravity",
+    params.executionSelection,
+    { hasClientTools: hasClientTools(params.canonical) },
+  );
+  if (explicitDispatch !== null && !explicitDispatch.ok) {
+    return { declined: explicitDispatch.declined };
+  }
+  const req = cursorRequestOf(params.canonical);
+  if (req.promptText.length === 0 && req.images.length === 0) {
+    return { declined: "no user turn to answer" };
+  }
+  const run = await runAntigravityNative({
+    bin: overrides?.bin ?? cliBin("antigravity"),
+    env: overrides?.env ?? cliEnv("antigravity"),
+    providerModelId: params.providerModelId,
+    systemText: req.systemText,
+    userText: req.promptText,
+    images: req.images,
+    tools: req.tools,
+    signal: params.signal,
+  });
+  if (run.kind === "declined") {
+    return declinedOutcome(run.reason, run.cooldownReason);
+  }
+  const settle = (
+    resp: Awaited<ReturnType<typeof accumulateChunksToResponse>>,
+  ): void => {
+    params.record(tokensFromResponse(resp), "success");
+  };
+  const fail = (err: unknown): void => {
+    if (params.signal.aborted || isClientHangUp(err)) return;
+    const usage = partialUsageFrom(err);
+    params.record(
+      usage === null ? ZERO_TOKENS : tokensFromResponse({ usage }),
+      "error",
+    );
+  };
+  const clientWire = clientWireOf(params.surface);
+  if (params.wantsStream) {
+    return deliverChunkStream(run.chunks, {
+      surface: params.surface,
+      clientWire,
+      providerModelId: params.providerModelId,
+      onResponse: settle,
+      onError: fail,
+      stripSubagentIsolation: params.stripSubagentIsolation,
+    });
+  }
+  let canonical: Awaited<ReturnType<typeof accumulateChunksToResponse>>;
+  try {
+    canonical = await accumulateChunksToResponse(
+      run.chunks,
+      params.providerModelId,
+    );
+  } catch (err) {
+    fail(err);
+    return errorJson(
+      502,
+      partialUsageFrom(err) === null
+        ? "native runtime stream ended before output"
+        : "native runtime stream failed after output began",
+    );
   }
   settle(canonical);
   return deliverJsonResponse(

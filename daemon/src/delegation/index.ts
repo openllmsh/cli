@@ -1,4 +1,5 @@
 import type { TSubscriptionProviderSlug } from "@openllmsh/protocol";
+import { antigravityDelegate } from "./antigravity";
 import { chatgptDelegate } from "./chatgpt";
 import { claudeCodeDelegate } from "./claude-code";
 import { cursorDelegate } from "./cursor";
@@ -21,6 +22,7 @@ export const DELEGATES: Readonly<Record<string, TProviderDelegate>> = {
   grok: grokDelegate,
   cursor: cursorDelegate,
   muse: museDelegate,
+  antigravity: antigravityDelegate,
 };
 
 export const isSubscriptionSlug = (

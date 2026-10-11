@@ -108,6 +108,13 @@ export const cursorExecutionIdentity = (
   capture: captureActive,
 });
 
+/** Today's Antigravity dispatch — bridge-only, one ACP engine, no capture. */
+export const antigravityExecutionIdentity = (): TExecutionIdentity => ({
+  provider: "antigravity",
+  variant: "acp",
+  capture: false,
+});
+
 /** Today's Muse dispatch — bridge-only, one MSP engine. */
 export const museExecutionIdentity = (
   captureActive: boolean,

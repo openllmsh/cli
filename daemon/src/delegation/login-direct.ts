@@ -466,6 +466,7 @@ const LIFECYCLE_PROVIDERS = [
   "grok",
   "cursor",
   "muse",
+  "antigravity",
 ] as const satisfies ReadonlyArray<TSubscriptionProviderSlug>;
 
 const lifecycleProviderOf = (

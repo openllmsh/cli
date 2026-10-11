@@ -48,7 +48,8 @@ export type TNativeRuntimeProvider =
   | "claude_code"
   | "chatgpt"
   | "cursor"
-  | "muse";
+  | "muse"
+  | "antigravity";
 
 /** Pre-commit budget shared by BOTH native bridges: how long a runtime may
  *  stay silent (spawn/handshake + thread start + first model output) before
@@ -66,6 +67,9 @@ const NATIVE_PROVIDERS: ReadonlySet<string> = new Set([
   // muse is BRIDGE-ONLY: official `muse serve` / SDK is the sole inference
   // transport (see native-runtime/muse-runtime.ts).
   "muse",
+  // antigravity is BRIDGE-ONLY: Google's `agy_acp_server` ACP agent is the
+  // sole inference transport (see native-runtime/antigravity-acp.ts).
+  "antigravity",
 ]);
 
 /** Whether a plan hop's provider is served exclusively by a native runtime. */

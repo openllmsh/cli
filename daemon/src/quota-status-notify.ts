@@ -36,7 +36,8 @@ const isSubscriptionProviderSlug = (
   slug === "kimi_code" ||
   slug === "grok" ||
   slug === "cursor" ||
-  slug === "muse";
+  slug === "muse" ||
+  slug === "antigravity";
 
 const farthestFiniteReset = (
   windows: ReadonlyArray<TProviderUsageWindow>,

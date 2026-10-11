@@ -82,6 +82,10 @@ export const SUB_METHOD_CAPABILITIES: Readonly<
   // settings.endpoint_transport plaintext redirect (Keychain-free durable
   // auth proven 2026-09-27). No handrolled Meta Model API path.
   muse: { methods: ["bridge", "bridge-capture"] },
+  // Google Antigravity: the official `agy_acp_server` ACP agent is the ONLY
+  // transport (native-runtime/antigravity-acp.ts) — bridge-only, and no
+  // capture variant until a request-capture path is proven.
+  antigravity: { methods: ["bridge"] },
 };
 
 /**

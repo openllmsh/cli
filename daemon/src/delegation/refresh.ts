@@ -220,6 +220,7 @@ const SETTLED_BY_PROVIDER: Record<
   grok: safeDiagnosticMessage`Credential refresh settled for grok.`,
   cursor: safeDiagnosticMessage`Credential refresh settled for cursor.`,
   muse: safeDiagnosticMessage`Credential refresh settled for muse.`,
+  antigravity: safeDiagnosticMessage`Credential refresh settled for antigravity.`,
 };
 
 const SETTLED_BY_PROVIDER_CALLER: Record<
@@ -261,6 +262,12 @@ const SETTLED_BY_PROVIDER_CALLER: Record<
     usage: safeDiagnosticMessage`Credential refresh settled for muse (usage).`,
     models: safeDiagnosticMessage`Credential refresh settled for muse (models).`,
     login: safeDiagnosticMessage`Credential refresh settled for muse (login).`,
+  },
+  antigravity: {
+    upstream: safeDiagnosticMessage`Credential refresh settled for antigravity (upstream).`,
+    usage: safeDiagnosticMessage`Credential refresh settled for antigravity (usage).`,
+    models: safeDiagnosticMessage`Credential refresh settled for antigravity (models).`,
+    login: safeDiagnosticMessage`Credential refresh settled for antigravity (login).`,
   },
 };
 

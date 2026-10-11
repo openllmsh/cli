@@ -56,11 +56,20 @@ const MUSE_READY: TBridgeCaptureReadiness = {
     "Muse settings.endpoint_transport capture serve-wired (durable cliEnv→cleanMuseSpawnEnv→overlay, Keychain-free; POST /responses → api.meta.ai/v1; Responses SSE decode). Multi-turn tool/reasoning history refuses until MSP inject exists; cold+seed only",
 };
 
+const ANTIGRAVITY_UNCHANGED: TBridgeCaptureReadiness = {
+  provider: "antigravity",
+  ready: false,
+  mode: "unchanged_bridge",
+  reason:
+    "Antigravity serves through the plain ACP bridge only; no request-capture path is proven for agy_acp_server",
+};
+
 const READINESS: Record<TNativeRuntimeProvider, TBridgeCaptureReadiness> = {
   claude_code: CLAUDE_READY,
   chatgpt: CODEX_READY,
   cursor: CURSOR_READY,
   muse: MUSE_READY,
+  antigravity: ANTIGRAVITY_UNCHANGED,
 };
 
 export const bridgeRequestCaptureReadiness = (
@@ -82,4 +91,5 @@ export const bridgeRequestCaptureReadinessTable =
     CODEX_READY,
     CURSOR_READY,
     MUSE_READY,
+    ANTIGRAVITY_UNCHANGED,
   ];

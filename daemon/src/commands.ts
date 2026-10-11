@@ -74,6 +74,7 @@ export const PROVIDERS = [
   "grok",
   "cursor",
   "muse",
+  "antigravity",
 ] as const;
 
 /** Argument choices for the `auto-update` and `sessions` subcommands. */

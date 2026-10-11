@@ -23,6 +23,11 @@ import {
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import type { TSubscriptionProviderSlug } from "@openllmsh/protocol";
+import {
+  ANTIGRAVITY_HARNESS,
+  ANTIGRAVITY_INSTALL_MARKER,
+  antigravityManagedExecutable,
+} from "./antigravity-layout";
 import { stateDir } from "./env";
 import { resolveOnPath } from "./path-utils";
 import { daemonTempDir } from "./sandbox/working-set";
@@ -52,6 +57,13 @@ type TCliSpec = {
   readonly configDir: (isolatedHome: string) => string;
   /** Isolated spawn env (HOME + TMPDIR + provider knobs). Lazy. */
   readonly env: (ctx: TCliEnvCtx) => Record<string, string>;
+  /**
+   * Version read from install metadata beside the RESOLVED binary, instead of
+   * spawning `--version`. For agents whose every launch is expensive
+   * (Antigravity's PyInstaller bundle unpacks ~1 GB per start). `null` means
+   * installed / version unknown. Absent = spawn the `--version` probe.
+   */
+  readonly installedVersion?: (resolvedBin: string) => string | null;
 };
 
 /**
@@ -107,6 +119,42 @@ export const resolveMuseNativeBinaryBesideLauncher = (
 const museHostCandidates = (home: string): string[] => [
   join(home, ".local", "bin", "muse"),
 ];
+
+/** The harness beside the RESOLVED agent binary (the managed `current` dir
+ *  unless a PATH install resolves elsewhere). */
+const antigravityHarnessPath = (): string => {
+  for (const candidate of hostCliCandidates("antigravity")) {
+    try {
+      return join(dirname(realpathSync(candidate)), ANTIGRAVITY_HARNESS);
+    } catch {
+      // candidate absent — try the next
+    }
+  }
+  return join(
+    dirname(antigravityManagedExecutable(homedir())),
+    ANTIGRAVITY_HARNESS,
+  );
+};
+
+/** `{"version":"x.y.z",…}` from the installer's completion marker. */
+const readAntigravityInstalledVersion = (
+  resolvedBin: string,
+): string | null => {
+  try {
+    const raw = readFileSync(
+      join(dirname(resolvedBin), ANTIGRAVITY_INSTALL_MARKER),
+      "utf8",
+    );
+    const parsed: unknown = JSON.parse(raw);
+    if (parsed === null || typeof parsed !== "object") return null;
+    const version = (parsed as { readonly version?: unknown }).version;
+    return typeof version === "string" && /^\d+\.\d+\.\d+$/.test(version)
+      ? version
+      : null;
+  } catch {
+    return null;
+  }
+};
 
 const SPECS: Readonly<Record<TCliProvider, TCliSpec>> = {
   // `claude install` (run by claude.ai/install.sh under our HOME) places
@@ -255,6 +303,33 @@ const SPECS: Readonly<Record<TCliProvider, TCliSpec>> = {
       MUSE_LOGIN: "0",
     }),
   },
+  // Google Antigravity — Google's official ACP agent `agy_acp_server`. No
+  // vendor install script exists; install.sh fetches the latest release (resolved
+  // from the ACP registry) into `~/.openllm/vendor/antigravity/current/`
+  // (`antigravity-layout.ts`). The agent needs its `localharness_external`
+  // sibling, passed explicitly via ANTIGRAVITY_HARNESS_PATH because the
+  // isolated path is a symlink and the agent must not guess its own dir.
+  //
+  // Profile: GEMINI_HOME is pinned inside the isolated home with file storage
+  // forced, so the agent's Google sign-in token
+  // (`<GEMINI_HOME>/antigravity-acp/acp_token.json`, never read by the daemon)
+  // can never touch the user's own `~/.gemini` or the OS keychain.
+  antigravity: {
+    binRel: "bin/agy_acp_server",
+    cmd: "agy_acp_server",
+    hostCandidates: (home) => [antigravityManagedExecutable(home)],
+    configDir: (home) => join(home, ".gemini"),
+    env: ({ home, config, tmp }) => ({
+      HOME: home,
+      // PyInstaller unpacks the bundle under TMPDIR on every launch; keep it
+      // inside the daemon-owned, sandbox-granted temp dir.
+      TMPDIR: tmp,
+      GEMINI_HOME: config,
+      AGY_ACP_FORCE_FILE_STORAGE: "1",
+      ANTIGRAVITY_HARNESS_PATH: antigravityHarnessPath(),
+    }),
+    installedVersion: readAntigravityInstalledVersion,
+  },
 };
 
 /** The closed runtime list of CLI providers — derived from `SPECS` keys so it
@@ -274,6 +349,13 @@ export const cliHome = (provider: TCliProvider, home?: string): string =>
 /** Absolute path to the installed isolated binary. */
 export const cliBin = (provider: TCliProvider, home?: string): string =>
   join(cliRoot(provider, home), SPECS[provider].binRel);
+
+/** Version from install metadata, or `undefined` when the provider has none
+ *  (callers then spawn the normal `--version` probe). */
+export const cliInstalledVersion = (
+  provider: TCliProvider,
+  resolvedBin: string,
+): string | null | undefined => SPECS[provider].installedVersion?.(resolvedBin);
 
 /** Shell command name for a provider CLI (`codex`, `claude`, `cursor-agent`, …). */
 export const cliCommand = (provider: TCliProvider): string =>

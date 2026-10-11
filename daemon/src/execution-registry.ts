@@ -82,6 +82,13 @@ export const PROVIDER_EXECUTION_REGISTRY: readonly TProviderExecutionRegistratio
       captureVariants: ["msp"],
     },
     {
+      provider: "antigravity",
+      defaultSelection: executionSelectionBridge("acp", false),
+      legacyBridgeVariant: "acp",
+      variants: ["acp"],
+      captureVariants: [],
+    },
+    {
       provider: "kimi_code",
       defaultSelection: executionSelectionHandrolled(),
       variants: ["handrolled"],
