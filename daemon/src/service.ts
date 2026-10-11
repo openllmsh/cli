@@ -770,8 +770,18 @@ export const formatStatus = (fields: TStatusFields): string => {
     },
   ];
   const width = Math.max(...rows.map((row) => row.label.length)) + 1;
+  // The header is the RUNNING daemon's version (its live /status). The file on
+  // disk can be newer: a swap whose daemon code is unchanged does not restart
+  // the daemon, so say so instead of reporting the file as if it were running.
+  const running = fields.health?.version;
+  const header =
+    running === undefined
+      ? `openllmd v${fields.version} (installed; daemon not responding)`
+      : running === fields.version
+        ? `openllmd v${running}`
+        : `openllmd v${running} running · v${fields.version} installed (daemon code unchanged — applies on next restart)`;
   return [
-    `openllmd v${fields.version}`,
+    header,
     ...rows.map((row) => `${padStatusLabel(row.label, width)}${row.value}`),
     "",
   ].join("\n");
