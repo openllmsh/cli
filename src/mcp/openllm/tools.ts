@@ -20,7 +20,7 @@ import generatedSpec from "../../sdk/generated/openapi.json";
 import type { TApiOperation } from "../../sdk/generated/operations";
 import { API_OPERATIONS } from "../../sdk/generated/operations";
 import { SUBSCRIPTION_PROVIDER_SLUGS } from "../../sdk/generated/subscription-providers";
-import type { TToolResult, TToolResultContent } from "../types";
+import type { TToolResult } from "../types";
 import { MODELS_TOOL_NAME } from "./model-priority";
 
 const schemaObject = (value: unknown): Record<string, unknown> | undefined =>
@@ -74,7 +74,6 @@ export const toolNameFor = (op: TApiOperation): string =>
   `api_${op.id.replace(/[^a-zA-Z0-9_-]+/g, "_")}`;
 
 const MUTATING = new Set(["post", "put", "patch", "delete"]);
-const MEDIA_FETCH_TIMEOUT_MS = 30_000;
 const REQUEST_TIMEOUT_MS = 120_000;
 
 /** The media tools whose `model` is OPTIONAL — the one table. Consumers ask
@@ -267,13 +266,6 @@ const textResult = (text: string, isError = false): TToolResult => ({
   ...(isError ? { isError: true } : {}),
 });
 
-const base64FromBytes = (bytes: ArrayBuffer): string => {
-  const byteString = Array.from(new Uint8Array(bytes), (byte) =>
-    String.fromCharCode(byte),
-  ).join("");
-  return btoa(byteString);
-};
-
 const resolveRawOperationUrl = (
   config: { readonly baseUrl: string },
   op: TApiOperation,
@@ -331,60 +323,6 @@ const responseErrorResult = async (res: Response): Promise<TToolResult> => {
     withAttribution(`HTTP ${res.status}: ${text}`, res.headers),
     true,
   );
-};
-
-const sleep = async (ms: number): Promise<void> =>
-  new Promise((resolve) => {
-    setTimeout(resolve, ms);
-  });
-
-const isApiMediaUrl = (url: string, baseUrl: string): boolean => {
-  try {
-    return new URL(url, baseUrl).pathname.startsWith("/api/media/");
-  } catch {
-    return false;
-  }
-};
-
-const fetchDurableMedia = async (
-  url: string,
-  baseUrl: string,
-  retry: boolean,
-): Promise<Response> => {
-  const durableUrl = new URL(url, baseUrl);
-
-  let response: Response | null = null;
-  for (let attempt = 1; attempt <= 4; attempt += 1) {
-    response = await fetch(durableUrl, {
-      signal: AbortSignal.timeout(MEDIA_FETCH_TIMEOUT_MS),
-    });
-
-    if (response.ok || retry === false || attempt === 4) {
-      return response;
-    }
-
-    await response.body?.cancel().catch(() => {});
-    await sleep(attempt % 2 === 0 ? 250 : 500);
-  }
-
-  return response ?? new Response(null, { status: 500 });
-};
-
-const imageContentFromUrl = async (
-  url: string,
-  baseUrl: string,
-): Promise<Extract<TToolResultContent, { type: "image" }>> => {
-  const res = await fetchDurableMedia(
-    url,
-    baseUrl,
-    isApiMediaUrl(url, baseUrl),
-  );
-  if (!res.ok) throw new Error(`HTTP ${res.status}`);
-  return {
-    type: "image",
-    data: base64FromBytes(await res.arrayBuffer()),
-    mimeType: res.headers.get("content-type") ?? "image/png",
-  };
 };
 
 type TImageGenerationItem = {
@@ -566,40 +504,36 @@ const imageResult = async (
     return textResult(JSON.stringify(body, null, 2));
   }
 
+  // URLs only — never the bytes. A tool result lives in the client's session
+  // history and is resent on every later turn, so an embedded multi-MB base64
+  // image floods the context and eventually trips request-size limits (a
+  // Vercel 413 on /v1/responses). The durable URL is the deliverable; a
+  // client that wants to display the image downloads it itself.
   const urls: string[] = [];
   const revisedPrompts: string[] = [];
-  const content: TToolResultContent[] = [];
+  let unsaved = 0;
   for (const item of body.data) {
-    const url = typeof item.url === "string" ? item.url : null;
-    if (url !== null) urls.push(url);
+    if (typeof item.url === "string" && item.url.length > 0) {
+      urls.push(new URL(item.url, config.baseUrl).toString());
+    } else {
+      unsaved += 1;
+    }
     if (typeof item.revised_prompt === "string") {
       revisedPrompts.push(item.revised_prompt);
-    }
-
-    if (typeof item.b64_json === "string") {
-      content.push({
-        type: "image",
-        data: item.b64_json,
-        mimeType: "image/png",
-      });
-      continue;
-    }
-    if (url === null) continue;
-
-    try {
-      content.push(await imageContentFromUrl(url, config.baseUrl));
-    } catch {
-      // The durable URL remains useful even if a transient fetch failure means
-      // it cannot be embedded in this response.
     }
   }
 
   const notes = [
     withAttribution(label, headers),
     ...urls,
+    ...(unsaved > 0
+      ? [
+          `${unsaved} image(s) could not be saved to the media library, so no URL is available for them.`,
+        ]
+      : []),
     ...revisedPrompts.map((prompt) => `Revised prompt: ${prompt}`),
   ];
-  return { content: [{ type: "text", text: notes.join(" ") }, ...content] };
+  return textResult(notes.join(" "), urls.length === 0);
 };
 
 type TMediaRedirectKind = "audio" | "video";
@@ -644,35 +578,12 @@ const mediaRedirectResult = async (
     );
   }
   const durableUrl = new URL(mediaUrl, config.baseUrl).toString();
-  if (kind === "video") {
-    return textResult(
-      withAttribution(`Video generated — ${durableUrl}`, res.headers),
-    );
-  }
-
-  const media = await fetchDurableMedia(durableUrl, config.baseUrl, true);
-  if (!media.ok) {
-    await media.body?.cancel().catch(() => {});
-    return textResult(
-      withAttribution(
-        `Audio generated — ${durableUrl} (still finalizing; open the url shortly)`,
-        res.headers,
-      ),
-    );
-  }
-  return {
-    content: [
-      {
-        type: "text",
-        text: withAttribution(`Audio generated — ${durableUrl}`, res.headers),
-      },
-      {
-        type: "audio",
-        data: base64FromBytes(await media.arrayBuffer()),
-        mimeType: media.headers.get("content-type") ?? "audio/mpeg",
-      },
-    ],
-  };
+  return textResult(
+    withAttribution(
+      `${kind === "video" ? "Video" : "Audio"} generated — ${durableUrl}`,
+      res.headers,
+    ),
+  );
 };
 
 export const handleOpenllmTool = async (
