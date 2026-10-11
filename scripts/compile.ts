@@ -2,7 +2,7 @@
 
 /**
  * Compile the CLI into source-free standalone binaries — the `openllm`
- * twin of `packages/daemon/scripts/compile.ts`.
+ * twin of `packages/cli/daemon/scripts/compile.ts`.
  *
  * `bun build --compile` inlines the runtime deps (the MCP SDK, cheerio,
  * turndown, the committed generated SDK) into a single executable that
@@ -65,7 +65,7 @@ export const COMPILE_BUN_FLAGS = [
 ] as const;
 
 // OpenLLM's own Vercel preview deployments — the same anchor as the daemon's
-// compile script (`packages/daemon/scripts/compile.ts`); keep in sync.
+// compile script (`packages/cli/daemon/scripts/compile.ts`); keep in sync.
 export const OPENLLM_PREVIEW_HOST =
   /^openllm-[a-z0-9-]+-quantide\.vercel\.app$/;
 

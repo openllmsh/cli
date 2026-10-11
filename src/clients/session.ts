@@ -21,12 +21,12 @@ import {
 } from "node:fs";
 import { constants as osConstants } from "node:os";
 import { basename, dirname, join } from "node:path";
+import { daemonInvocation } from "../daemon-delegation";
 import { openllmDir, userHome } from "../env";
 import { requireCliApiKey } from "../onboarding";
 import type { TLiveSessionHost } from "../session-host";
 import {
   discoverLiveSessionHosts,
-  findDaemonBinary,
   sessionHostSpawnArgv,
   spawnSessionHost,
   waitForSessionHostSocket,
@@ -235,8 +235,6 @@ const launchDurableSessionHost = async (args: {
 }): Promise<number | null> => {
   const cli = args.client.daemonCli;
   if (cli === undefined) return null;
-  const binary = findDaemonBinary();
-  if (binary === null) return null;
   const id = crypto.randomUUID();
   const terminalCols = process.stdout.columns ?? 80;
   const terminalRows = process.stdout.rows ?? 24;
@@ -251,7 +249,7 @@ const launchDurableSessionHost = async (args: {
     vendorArgs: args.forwarded,
   });
   if (argv === null) return null;
-  const spawned = spawnSessionHost({ binary, argv });
+  const spawned = spawnSessionHost({ invocation: daemonInvocation(), argv });
   if (spawned === null) return null;
   const socketPath = await waitForSessionHostSocket(id);
   if (socketPath === null) {

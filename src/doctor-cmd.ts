@@ -32,7 +32,7 @@ import { daemonPort } from "./clients/gateway";
 import { bundleIdOf, uninstallMacLauncher } from "./clients/mac-launcher";
 import { removeRegion } from "./clients/merge";
 import { padRight } from "./commands";
-import { managedDaemonBinary } from "./daemon-delegation";
+import { daemonInvocation } from "./daemon-delegation";
 import {
   cliBinPath,
   cliConfig,
@@ -49,7 +49,7 @@ type TLegacyRegion = {
 };
 
 /** Local copy of the daemon `/status` body. The CLI cannot import
- *  `packages/daemon`; keep this in lockstep with `health.ts` and treat the
+ *  `packages/cli/daemon`; keep this in lockstep with `health.ts` and treat the
  *  newer fields as optional so an older daemon still renders. */
 type TKeychainSpawns = {
   readonly attempts: number;
@@ -740,18 +740,9 @@ const runWithTimeout = async (
 };
 
 const collectOpenllmdStatus = async (): Promise<readonly string[]> => {
-  const openllmdBin = managedDaemonBinary();
-  if (!existsSync(openllmdBin)) {
-    return [
-      daemonStatusLinePrefix(
-        `openllmd binary not found at ${openllmdBin} — daemon was never installed`,
-      ),
-    ];
-  }
-
   try {
     const result = await runWithTimeout(
-      [openllmdBin, "status"],
+      [...daemonInvocation(), "status"],
       DAEMON_STATUS_COMMAND_TIMEOUT_MS,
     );
 
@@ -872,17 +863,12 @@ const collectRecentDaemonLogsFromFiles = (): string =>
   boundLogChunk(tailLogLines(DAEMON_LOG_LINES).join("\n"));
 
 const collectRecentDaemonLogs = async (): Promise<string> => {
-  const openllmdBin = managedDaemonBinary();
-  if (!existsSync(openllmdBin)) {
-    return collectRecentDaemonLogsFromFiles();
-  }
-
   let timeout: ReturnType<typeof setTimeout> | undefined;
   let proc: ReturnType<typeof Bun.spawn> | null = null;
   try {
     proc = Bun.spawn(
       [
-        openllmdBin,
+        ...daemonInvocation(),
         collectRecentLogCommand,
         "-n",
         collectRecentLogLinesCommand,

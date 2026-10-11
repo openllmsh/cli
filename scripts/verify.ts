@@ -2,7 +2,7 @@
 
 /**
  * Verify published CLI binaries against the committed checksum manifest —
- * the `openllm` twin of `packages/daemon/scripts/verify.ts`.
+ * the `openllm` twin of `packages/cli/daemon/scripts/verify.ts`.
  *
  * The CLI ships as a compiled binary, so end users don't run this `.ts`
  * source — they run an artifact the cloud serves, which redirects to the

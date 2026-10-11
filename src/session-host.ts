@@ -10,7 +10,6 @@ import {
 import { extname, isAbsolute, join } from "node:path";
 import type { TDaemonCli } from "./clients/registry";
 import { DAEMON_CLIS } from "./clients/registry";
-import { findDaemonBinary as findManagedDaemonBinary } from "./daemon-delegation";
 import { daemonStateDir } from "./env";
 
 export type TSessionHostMeta = {
@@ -276,12 +275,6 @@ export const waitForSessionHostSocket = async (
   return existsSync(socketPath) ? socketPath : null;
 };
 
-/**
- * Resolve the durable-host binary, allowing an explicit dev override or a
- * normal PATH installation. Shared with lifecycle delegation for one policy.
- */
-export const findDaemonBinary = (): string | null => findManagedDaemonBinary();
-
 export const sessionHostSpawnArgv = (args: {
   readonly id: string;
   readonly cli: TDaemonCli;
@@ -321,15 +314,15 @@ export const sessionHostSpawnArgv = (args: {
  * Returns the child process so the caller may clean up on fallback.
  */
 export const spawnSessionHost = (args: {
-  readonly binary: string;
+  readonly invocation: readonly string[];
   readonly argv: readonly string[];
 }): ReturnType<typeof Bun.spawn> | null => {
   try {
+    const [binary = "", ...prefix] = args.invocation;
     const command =
-      process.platform === "win32" &&
-      extname(args.binary).toLowerCase() === ".cmd"
-        ? ["cmd.exe", "/c", args.binary, ...args.argv]
-        : [args.binary, ...args.argv];
+      process.platform === "win32" && extname(binary).toLowerCase() === ".cmd"
+        ? ["cmd.exe", "/c", binary, ...prefix, ...args.argv]
+        : [binary, ...prefix, ...args.argv];
     const reapWithHarness =
       process.env.OPENLLM_SESSION_HOST_KILL_ON_PARENT_EXIT === "1";
     const proc = Bun.spawn(command, {

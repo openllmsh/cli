@@ -1,25 +1,40 @@
 #!/usr/bin/env bun
 
 /**
- * `openllm` — the OpenLLM CLI. Compile entry stays here so the binary
- * identity does not change. Self-version (`--version` / `-v` / `version`)
- * prints `openllm v${CLI_VERSION}` and exits without importing clients,
- * MCP, sessions, or daemon delegation. All other argv goes through a
- * lazy `cli-dispatch` import.
+ * `openllm` — the OpenLLM CLI, and the daemon (`openllm daemon …`), in one
+ * binary. Self-version (`--version` / `-v` / `version`) prints
+ * `openllm v${CLI_VERSION}` and exits without importing clients, MCP,
+ * sessions, or the daemon. Daemon argv lazy-imports the daemon module graph;
+ * all other argv goes through a lazy `cli-dispatch` import.
  *
  * Combined daemon/CLI diagnostics remain on doctor/status, not version.
  */
 
+// MUST be the entrypoint's FIRST import: the daemon half's RTC stack
+// (`werift` → `@peculiar/x509` → tsyringe) throws at module load without the
+// Reflect polyfill, and `bun build --compile` drops the side-effect import
+// unless the ENTRY carries it. See the daemon's `src/main.ts`;
+// `tests/daemon/compiled-boot.test.ts` guards it.
+import "reflect-metadata";
+
+import { basename } from "node:path";
 import { printSelfVersion } from "./cli-version";
+import { daemonArgs } from "./daemon-argv";
 
 const argv = process.argv.slice(2);
 const first = argv[0];
 
-if (first === "--version" || first === "-v" || first === "version") {
-  printSelfVersion();
-}
-
 const run = async (): Promise<void> => {
+  // Daemon first: an `openllmd`-named invocation's `--version` is the daemon's.
+  const forDaemon = daemonArgs(basename(process.argv0), argv);
+  if (forDaemon !== null) {
+    const { runDaemon } = await import("../daemon/src/main");
+    runDaemon(forDaemon);
+    return;
+  }
+  if (first === "--version" || first === "-v" || first === "version") {
+    printSelfVersion();
+  }
   // Per-prompt hooks should not initialize the vendor clients or MCP server.
   if (first === "exec" && argv[1] === "memory") {
     const { runMemoryHookCommand } = await import("./memory-hooks/command");

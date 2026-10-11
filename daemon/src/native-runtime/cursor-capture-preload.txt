@@ -1,0 +1,1413 @@
+/**
+ * Child-scoped Cursor AgentService request-capture preload (CommonJS).
+ *
+ * Loaded ONLY via per-child `NODE_OPTIONS=--require <this-file>` when serve
+ * activates a ready `bridge-capture` route for cursor (capability table
+ * currently omits it). Never install this as an ambient/global preload.
+ *
+ * Why not fetch-only: installed `@anysphere/agent-cli-runtime` (snapshot
+ * 2026.07.23-e383d2b) drives `agent.v1.AgentService` through
+ * `@connectrpc/connect-node@1.6.1`, which uses Node `http`/`https` (HTTP/1.1
+ * RunSSE) and `http2` session `.request` (HTTP/2 Run). A fetch monkey-patch
+ * misses those send paths.
+ *
+ * Captures: AgentService Run / RunSSE / RunPoll (inference). Also intercepts
+ * `aiserver.v1.BidiService/BidiAppend` (HTTP/1 RunSSE companion that carries
+ * AgentClientMessage bytes) so those RPCs cannot escape while capture is
+ * armed — parent settles them as companions, not as the primary envelope.
+ * Leaves NameAgent / model discovery / auth / dashboard alone. Native
+ * `file_service*.node` HTTP/2 sync is outside this JS hook by design.
+ *
+ * Env (request-private; parent sets these on the experimental child only):
+ *   OPENLLM_CURSOR_CAPTURE_SOCK   — unix socket path (0600 parent listener)
+ *   OPENLLM_CURSOR_CAPTURE_TOKEN  — bearer for every IPC frame
+ *   OPENLLM_CURSOR_CAPTURE_EXTERNAL_ORIGIN — optional origin rewrite target
+ *     when the observed URL was relocated (otherwise observed === external)
+ *
+ * IPC: newline-delimited JSON. Bodies travel as base64. No TLS disable. No
+ * credential logging.
+ */
+"use strict";
+
+const http = require("node:http");
+const https = require("node:https");
+const http2 = require("node:http2");
+const net = require("node:net");
+const { EventEmitter } = require("node:events");
+const { randomUUID } = require("node:crypto");
+
+const SOCK = process.env.OPENLLM_CURSOR_CAPTURE_SOCK;
+const TOKEN = process.env.OPENLLM_CURSOR_CAPTURE_TOKEN;
+const EXTERNAL_ORIGIN = process.env.OPENLLM_CURSOR_CAPTURE_EXTERNAL_ORIGIN;
+
+const ENABLED =
+  typeof SOCK === "string" &&
+  SOCK.length > 0 &&
+  typeof TOKEN === "string" &&
+  TOKEN.length > 0;
+
+/** @type {null | { write: (s: string) => void, end: () => void, destroyed: boolean }} */
+let ipc = null;
+/** @type {Map<string, { settle: (msg: any) => void }>} */
+const pending = new Map();
+/**
+ * Primary streams held open for allowlisted duplex inject/follow-up.
+ * @type {Map<string, { inject: (buf: Buffer) => void, closeInject: () => void }>}
+ */
+const duplexStreams = new Map();
+/**
+ * Injects that arrived before `_enterDuplexBridge` registered the stream
+ * (parent settle+inject can race ahead of the child's settle handler).
+ * @type {Map<string, Buffer[]>}
+ */
+const pendingInjects = new Map();
+/** Primary AgentService capture offered for this child (companions may follow). */
+let captureOffered = false;
+/** Close IPC only after the primary settles (companions need the socket alive). */
+let primarySettled = false;
+
+const AGENT_SERVICE_PATH_RE =
+  /\/agent\.v1\.AgentService\/(Run|RunSSE|RunPoll)(?:\?|$)/;
+
+const BIDI_APPEND_PATH_RE =
+  /\/aiserver\.v1\.BidiService\/BidiAppend(?:\?|$)/;
+
+const CONNECT_CONTENT_TYPE_RE =
+  /(?:^|;\s*)application\/connect\+(?:proto|json)(?:\s|;|$)/i;
+
+const markLoaded = () => {
+  // Reachability marker for hermetic tests / doctor — never contains secrets.
+  process.env.OPENLLM_CURSOR_CAPTURE_PRELOAD_LOADED = "1";
+};
+
+const connectIpc = () => {
+  if (!ENABLED || ipc !== null) return;
+  const socket = net.createConnection(SOCK);
+  let buffer = "";
+  socket.setEncoding("utf8");
+  socket.on("data", (chunk) => {
+    buffer += chunk;
+    for (;;) {
+      const nl = buffer.indexOf("\n");
+      if (nl < 0) break;
+      const line = buffer.slice(0, nl).trim();
+      buffer = buffer.slice(nl + 1);
+      if (line.length === 0) continue;
+      let msg;
+      try {
+        msg = JSON.parse(line);
+      } catch {
+        continue;
+      }
+      if (msg && typeof msg === "object" && typeof msg.id === "string") {
+        if (msg.type === "settle") {
+          const waiter = pending.get(msg.id);
+          if (waiter) {
+            // Duplex bridge keeps the waiter registered for inject/follow-up.
+            const kind =
+              msg.settlement && typeof msg.settlement.kind === "string"
+                ? msg.settlement.kind
+                : "";
+            if (kind !== "duplex_bridge") pending.delete(msg.id);
+            waiter.settle(msg);
+          }
+        } else if (msg.type === "inject" && typeof msg.bodyBase64 === "string") {
+          try {
+            const buf = Buffer.from(msg.bodyBase64, "base64");
+            const target = duplexStreams.get(msg.id);
+            if (target && typeof target.inject === "function") {
+              target.inject(buf);
+            } else {
+              // Race: settle hasn't registered duplexStreams yet — queue.
+              const q = pendingInjects.get(msg.id) ?? [];
+              q.push(buf);
+              pendingInjects.set(msg.id, q);
+            }
+          } catch {
+            // ignore malformed inject
+          }
+        } else if (msg.type === "duplex_close") {
+          const target = duplexStreams.get(msg.id);
+          if (target && typeof target.closeInject === "function") {
+            target.closeInject();
+          }
+          duplexStreams.delete(msg.id);
+          pending.delete(msg.id);
+        }
+      }
+    }
+  });
+  socket.on("error", () => {
+    // Parent gone — pending captures fail locally.
+    for (const [id, waiter] of pending) {
+      pending.delete(id);
+      waiter.settle({
+        type: "settle",
+        id,
+        settlement: { kind: "failed", reason: "capture ipc error" },
+      });
+    }
+  });
+  ipc = {
+    destroyed: false,
+    write(s) {
+      if (this.destroyed) return;
+      try {
+        socket.write(s);
+      } catch {
+        this.destroyed = true;
+      }
+    },
+    end() {
+      this.destroyed = true;
+      try {
+        socket.end();
+      } catch {
+        // ignore
+      }
+    },
+  };
+};
+
+/**
+ * @param {string} pathWithQuery
+ * @param {Record<string, unknown> | undefined} headers
+ */
+const isAgentInferenceRequest = (pathWithQuery, headers) => {
+  if (
+    !AGENT_SERVICE_PATH_RE.test(pathWithQuery) &&
+    !BIDI_APPEND_PATH_RE.test(pathWithQuery)
+  ) {
+    return false;
+  }
+  // Prefer Connect content-types when present; path match alone is enough for
+  // AgentService Run* / BidiAppend (Connect always sets one of these).
+  if (headers && typeof headers === "object") {
+    const ct =
+      headers["content-type"] ??
+      headers["Content-Type"] ??
+      headers[http2.constants.HTTP2_HEADER_CONTENT_TYPE];
+    if (
+      typeof ct === "string" &&
+      ct.length > 0 &&
+      !CONNECT_CONTENT_TYPE_RE.test(ct)
+    ) {
+      // Non-connect body on an AgentService Run path is unexpected; still
+      // capture (opaque frames) — classification is by service method.
+    }
+  }
+  return true;
+};
+
+/**
+ * @param {string} observedUrl
+ */
+const externalUrlOf = (observedUrl) => {
+  if (typeof EXTERNAL_ORIGIN !== "string" || EXTERNAL_ORIGIN.length === 0) {
+    return observedUrl;
+  }
+  try {
+    const observed = new URL(observedUrl);
+    const external = new URL(EXTERNAL_ORIGIN);
+    external.pathname = observed.pathname;
+    external.search = observed.search;
+    external.hash = observed.hash;
+    return external.toString();
+  } catch {
+    return observedUrl;
+  }
+};
+
+/**
+ * @param {Array<[string, string]>} pairs
+ * @param {Uint8Array | null} body
+ * @param {"http" | "http2"} wire
+ * @param {string} method
+ * @param {string} observedUrl
+ * @param {Record<string, string | number | boolean | null>} framing
+ * @returns {Promise<{ kind: string, reason: string, companionAck: boolean, isCompanion: boolean, captureId: string | null }>}
+ */
+const offerCapture = (pairs, body, wire, method, observedUrl, framing) => {
+  connectIpc();
+  if (ipc === null) {
+    return Promise.resolve({
+      kind: "failed",
+      reason: "capture ipc unavailable",
+      companionAck: false,
+      isCompanion: false,
+      captureId: null,
+    });
+  }
+  const isBidiAppend = BIDI_APPEND_PATH_RE.test(
+    (() => {
+      try {
+        const u = new URL(observedUrl);
+        return `${u.pathname}${u.search}`;
+      } catch {
+        return observedUrl;
+      }
+    })(),
+  );
+  // One primary AgentService capture per child. BidiAppend companions may
+  // follow (or precede). Companions are buffered by the parent and ack'd
+  // locally with a control-only unary success so the vendor append loop
+  // keeps constructing the transaction — never egressed.
+  if (captureOffered && !isBidiAppend) {
+    return Promise.resolve({
+      kind: "failed",
+      reason: "duplicate_capture",
+      companionAck: false,
+      isCompanion: false,
+      captureId: null,
+    });
+  }
+  if (!isBidiAppend) captureOffered = true;
+  const id = randomUUID();
+  const bodyBase64 =
+    body === null || body.byteLength === 0
+      ? null
+      : Buffer.from(body).toString("base64");
+  const payload = {
+    type: isBidiAppend ? "capture_companion" : "capture",
+    token: TOKEN,
+    id,
+    transport: "connect",
+    wire,
+    method,
+    observedUrl,
+    externalUrl: externalUrlOf(observedUrl),
+    headers: pairs,
+    bodyBase64,
+    framing: {
+      ...framing,
+      companion: isBidiAppend ? "bidi_append" : null,
+    },
+  };
+  return new Promise((resolve) => {
+    pending.set(id, {
+      settle(msg) {
+        const settlement = msg.settlement ?? {
+          kind: "failed",
+          reason: "missing settlement",
+        };
+        const companionAck = msg.companionAck === true || isBidiAppend;
+        const settlementKind =
+          typeof settlement.kind === "string" ? settlement.kind : "failed";
+        // Keep IPC open while companions may still arrive, AND while a
+        // duplex_bridge keeps the primary stream alive for inject/follow-up.
+        // Close only after a terminal primary settlement (or on failure).
+        if (!isBidiAppend && settlementKind !== "duplex_bridge") {
+          primarySettled = true;
+          try {
+            ipc?.end();
+          } catch {
+            // ignore
+          }
+        } else if (
+          isBidiAppend &&
+          primarySettled &&
+          pending.size <= 1
+        ) {
+          try {
+            ipc?.end();
+          } catch {
+            // ignore
+          }
+        }
+        resolve({
+          kind: settlementKind,
+          reason:
+            typeof settlement.reason === "string"
+              ? settlement.reason
+              : "capture settled",
+          companionAck: companionAck && settlementKind !== "failed",
+          isCompanion: isBidiAppend,
+          captureId: id,
+          // Negotiated real-upstream compression (e.g. "gzip") for
+          // duplex_bridge — must reach `_enterDuplexBridge` or a compressed
+          // injected envelope has no algorithm the real Connect client can
+          // decode with (silent hang, not an error).
+          connectContentEncoding:
+            typeof settlement.connectContentEncoding === "string"
+              ? settlement.connectContentEncoding
+              : null,
+        });
+      },
+    });
+    ipc.write(`${JSON.stringify(payload)}\n`);
+  });
+};
+
+/** @param {NodeJS.Dict<string | string[] | undefined> | Array<[string,string]> | undefined} headers */
+const headerPairsFromNode = (headers) => {
+  /** @type {Array<[string, string]>} */
+  const out = [];
+  if (headers === undefined || headers === null) return out;
+  if (Array.isArray(headers)) {
+    for (const entry of headers) {
+      if (!Array.isArray(entry) || entry.length < 2) continue;
+      if (typeof entry[0] === "string" && typeof entry[1] === "string") {
+        out.push([entry[0], entry[1]]);
+      }
+    }
+    return out;
+  }
+  for (const [name, value] of Object.entries(headers)) {
+    if (value === undefined) continue;
+    if (Array.isArray(value)) {
+      for (const item of value) out.push([name, String(item)]);
+    } else {
+      out.push([name, String(value)]);
+    }
+  }
+  return out;
+};
+
+/**
+ * Resolve an absolute observed URL without double-prepending schemes.
+ *
+ * Cursor's Connect stack passes several legal shapes:
+ *   - `http2.connect("https://api2.cursor.sh")` → authority is an absolute URL
+ *   - `http2.connect(new URL("https://…"))` → URL object
+ *   - `:authority` pseudoheader is host[:port] only
+ *   - HTTP/1 absolute-form request-target (`path: "https://host/svc"`)
+ *
+ * Naively doing `` `${scheme}://${authority}${path}` `` when authority already
+ * carries a scheme yields `https://https://…` → origin `https://https`, which
+ * fails the capture destination allowlist. Never invent origins.
+ *
+ * @param {string | null | undefined} schemeRaw
+ * @param {string | URL | null | undefined} authorityRaw
+ * @param {string} pathWithQuery
+ * @returns {string}
+ */
+const resolveObservedUrl = (schemeRaw, authorityRaw, pathWithQuery) => {
+  const path =
+    typeof pathWithQuery === "string" && pathWithQuery.length > 0
+      ? pathWithQuery
+      : "/";
+  // Absolute-form request-target (HTTP/1) or mis-filed full URL as :path.
+  if (/^https?:\/\//i.test(path)) {
+    try {
+      return new URL(path).toString();
+    } catch {
+      // fall through
+    }
+  }
+  let authority =
+    authorityRaw instanceof URL
+      ? authorityRaw.toString()
+      : authorityRaw === undefined || authorityRaw === null
+        ? ""
+        : String(authorityRaw);
+  // connect() authority may already be an absolute origin/URL.
+  if (/^https?:\/\//i.test(authority)) {
+    try {
+      const base = new URL(authority);
+      const rel = path.startsWith("/") ? path : `/${path}`;
+      return new URL(rel, base).toString();
+    } catch {
+      // fall through to host parsing
+    }
+  }
+  let scheme = "https";
+  if (typeof schemeRaw === "string" && schemeRaw.length > 0) {
+    const s = schemeRaw.trim();
+    if (/^https?:\/\//i.test(s)) {
+      // Scheme slot accidentally held a full URL — treat as base.
+      try {
+        const base = new URL(s);
+        const rel = path.startsWith("/") ? path : `/${path}`;
+        return new URL(rel, base).toString();
+      } catch {
+        // ignore
+      }
+    } else {
+      scheme = s.replace(/:$/, "").toLowerCase();
+      if (scheme !== "http" && scheme !== "https") scheme = "https";
+    }
+  }
+  // Strip a duplicated scheme if authority was "https://host" partially cleaned.
+  authority = authority.replace(/^(https?):\/\//i, "");
+  if (authority.length === 0) authority = "localhost";
+  const rel = path.startsWith("/") ? path : `/${path}`;
+  try {
+    return new URL(`${scheme}://${authority}${rel}`).toString();
+  } catch {
+    return `${scheme}://${authority}${rel}`;
+  }
+};
+
+/**
+ * Host[:port] for `:authority` — never a scheme-prefixed URL.
+ * @param {string} absoluteUrl
+ * @param {string} fallback
+ */
+const authorityHostOf = (absoluteUrl, fallback) => {
+  try {
+    return new URL(absoluteUrl).host;
+  } catch {
+    return fallback.replace(/^(https?):\/\//i, "");
+  }
+};
+
+/**
+ * @param {string | URL | object} input
+ * @param {object | undefined} options
+ */
+const normalizeHttpArgs = (input, options) => {
+  if (typeof input === "string" || input instanceof URL) {
+    const url = new URL(String(input));
+    const opts = options && typeof options === "object" ? { ...options } : {};
+    return { url, options: opts };
+  }
+  if (input && typeof input === "object") {
+    const opts = { ...input };
+    const path = typeof opts.path === "string" ? opts.path : "/";
+    // Absolute-form request-target: path already carries the origin.
+    if (/^https?:\/\//i.test(path)) {
+      try {
+        return { url: new URL(path), options: opts };
+      } catch {
+        // fall through to host/protocol assembly
+      }
+    }
+    const host =
+      typeof opts.hostname === "string"
+        ? opts.hostname
+        : typeof opts.host === "string"
+          ? opts.host.split(":")[0]
+          : "localhost";
+    const protocol =
+      typeof opts.protocol === "string" ? opts.protocol : "http:";
+    const port =
+      opts.port !== undefined && opts.port !== null && String(opts.port) !== ""
+        ? `:${opts.port}`
+        : "";
+    const scheme = String(protocol).replace(/:$/, "");
+    const url = new URL(
+      resolveObservedUrl(scheme, `${host}${port}`, path),
+    );
+    return { url, options: opts };
+  }
+  return { url: new URL("http://localhost/"), options: {} };
+};
+
+/**
+ * Fake HTTP/1 ClientRequest: buffers the body, never opens a socket to the
+ * destination, offers the capture, then errors after local settlement.
+ */
+class CapturedHttp1Request extends EventEmitter {
+  /**
+   * @param {URL} url
+   * @param {object} options
+   */
+  constructor(url, options) {
+    super();
+    this.method =
+      typeof options.method === "string" ? options.method.toUpperCase() : "GET";
+    this.path = `${url.pathname}${url.search}`;
+    this.host = url.host;
+    this.protocol = url.protocol;
+    this.headers = options.headers ?? {};
+    this.writableEnded = false;
+    this.destroyed = false;
+    /** @type {Buffer[]} */
+    this._chunks = [];
+    this._offered = false;
+
+    // connect-node waits for 'socket' before writing the body. Present an
+    // already-open socket so sinkRequest proceeds without a real connect.
+    process.nextTick(() => {
+      if (this.destroyed) return;
+      this.emit("socket", { readyState: "open" });
+    });
+  }
+
+  flushHeaders() {
+    // Headers are part of the capture; no network flush.
+  }
+
+  /**
+   * @param {any} chunk
+   * @param {any} encoding
+   * @param {any} cb
+   */
+  write(chunk, encoding, cb) {
+    if (typeof encoding === "function") {
+      cb = encoding;
+    }
+    if (chunk !== undefined && chunk !== null && chunk !== "") {
+      this._chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+    }
+    if (typeof cb === "function") process.nextTick(cb);
+    return true;
+  }
+
+  /**
+   * @param {any} chunk
+   * @param {any} encoding
+   * @param {any} cb
+   */
+  end(chunk, encoding, cb) {
+    if (typeof chunk === "function") {
+      cb = chunk;
+      chunk = undefined;
+    } else if (typeof encoding === "function") {
+      cb = encoding;
+    }
+    if (chunk !== undefined && chunk !== null && chunk !== "") {
+      this.write(chunk);
+    }
+    this.writableEnded = true;
+    if (typeof cb === "function") process.nextTick(cb);
+    void this._finish();
+    return this;
+  }
+
+  /**
+   * @param {Error | undefined} err
+   */
+  destroy(err) {
+    if (this.destroyed) return this;
+    this.destroyed = true;
+    if (err) this.emit("error", err);
+    this.emit("close");
+    return this;
+  }
+
+  async _finish() {
+    if (this._offered || this.destroyed) return;
+    this._offered = true;
+    const body = this._chunks.length === 0 ? null : Buffer.concat(this._chunks);
+    const observedUrl = `${this.protocol}//${this.host}${this.path}`;
+    const pairs = headerPairsFromNode(this.headers);
+    // Ensure Host is present for HTTP/1 captures (Node often sets it later).
+    if (!pairs.some(([n]) => n.toLowerCase() === "host")) {
+      pairs.push(["Host", this.host]);
+    }
+    const isCompanion = BIDI_APPEND_PATH_RE.test(this.path);
+    const settlement = await offerCapture(
+      pairs,
+      body,
+      "http",
+      this.method,
+      observedUrl,
+      {
+        httpVersion: "1.1",
+        agentService: !isCompanion,
+        bidiAppend: isCompanion,
+        suppressed: true,
+      },
+    );
+    if (this.destroyed) return;
+    // Companions: control-only unary success (empty BidiAppendResponse). The
+    // vendor append loop must keep constructing AgentClientMessage bytes —
+    // destroying with error aborts the whole RunSSE transaction early and
+    // drops the real application input.
+    if (settlement.isCompanion && settlement.companionAck) {
+      const res = new CompanionUnaryResponse();
+      this.emit("response", res);
+      res._complete();
+      this.emit("finish");
+      this.emit("close");
+      return;
+    }
+    const err = new Error(
+      `openllm cursor capture suppressed original send (${settlement.kind}: ${settlement.reason})`,
+    );
+    /** @type {any} */ (err).code = "OPENLLM_CURSOR_CAPTURE_SUPPRESSED";
+    this.destroy(err);
+  }
+}
+
+/**
+ * Minimal IncomingMessage stand-in for a Connect unary empty success
+ * (`aiserver.v1.BidiAppendResponse` has no fields). Never carries inference
+ * bytes — control ack only.
+ */
+class CompanionUnaryResponse extends EventEmitter {
+  constructor() {
+    super();
+    this.statusCode = 200;
+    this.headers = {
+      "content-type": "application/proto",
+    };
+    this.httpVersion = "1.1";
+    this.complete = false;
+    this.readableEnded = false;
+  }
+
+  _complete() {
+    // Empty protobuf message body for BidiAppendResponse.
+    process.nextTick(() => {
+      this.emit("data", Buffer.alloc(0));
+      this.complete = true;
+      this.readableEnded = true;
+      this.emit("end");
+      this.emit("close");
+    });
+  }
+
+  resume() {}
+  pause() {}
+  setEncoding() {}
+  destroy() {
+    return this;
+  }
+
+  [Symbol.asyncIterator]() {
+    const self = this;
+    let done = false;
+    return {
+      async next() {
+        if (done) return { done: true, value: undefined };
+        await new Promise((resolve) => {
+          if (self.readableEnded) resolve(undefined);
+          else self.once("end", () => resolve(undefined));
+        });
+        done = true;
+        return { done: true, value: undefined };
+      },
+    };
+  }
+}
+
+/**
+ * Synthetic HTTP/2 server stream response for duplex_bridge: Connect client
+ * reads injected server→client DATA (request_context_args, etc.) while later
+ * client writes are captured as follow-ups. Never carries model inference bytes
+ * from the daemon — only allowlisted control frames the parent injects.
+ */
+class DuplexInjectedResponse extends EventEmitter {
+  /**
+   * @param {() => Promise<Buffer | null>} pull
+   */
+  constructor(pull) {
+    super();
+    this.statusCode = 200;
+    this.headers = {
+      "content-type": "application/connect+proto",
+      ":status": "200",
+    };
+    this.readableEnded = false;
+    this._pull = pull;
+    this._started = false;
+  }
+
+  resume() {}
+  pause() {}
+  setEncoding() {}
+  destroy() {
+    this.readableEnded = true;
+    this.emit("end");
+    this.emit("close");
+    return this;
+  }
+
+  async _pump() {
+    if (this._started) return;
+    this._started = true;
+    try {
+      for (;;) {
+        const buf = await this._pull();
+        if (buf === null) break;
+        if (buf.byteLength > 0) this.emit("data", buf);
+      }
+    } finally {
+      this.readableEnded = true;
+      this.emit("end");
+      this.emit("close");
+    }
+  }
+
+  [Symbol.asyncIterator]() {
+    const self = this;
+    const queue = [];
+    let done = false;
+    let wait = null;
+    const onData = (c) => {
+      if (wait) {
+        const w = wait;
+        wait = null;
+        w({ value: c, done: false });
+      } else queue.push(c);
+    };
+    const onEnd = () => {
+      done = true;
+      if (wait) {
+        const w = wait;
+        wait = null;
+        w({ value: undefined, done: true });
+      }
+    };
+    self.on("data", onData);
+    self.on("end", onEnd);
+    return {
+      next() {
+        if (queue.length > 0) {
+          return Promise.resolve({ value: queue.shift(), done: false });
+        }
+        if (done || self.readableEnded) {
+          return Promise.resolve({ value: undefined, done: true });
+        }
+        return new Promise((resolve) => {
+          wait = resolve;
+        });
+      },
+    };
+  }
+}
+
+/**
+ * Length of the complete Connect envelope prefix in `buf`, or 0 if none yet.
+ * Connect framing: 1 flag byte + 4 big-endian length + payload. Used so HTTP/2
+ * BiDi `Run` can offer capture after the initial AgentClientMessage envelope
+ * without waiting for writable `.end()` (vendors keep the stream open for duplex).
+ * @param {Buffer} buf
+ */
+const completeConnectPrefixLength = (buf) => {
+  let offset = 0;
+  while (offset + 5 <= buf.byteLength) {
+    const length =
+      ((buf[offset + 1] ?? 0) << 24) |
+      ((buf[offset + 2] ?? 0) << 16) |
+      ((buf[offset + 3] ?? 0) << 8) |
+      (buf[offset + 4] ?? 0);
+    if (length < 0 || offset + 5 + length > buf.byteLength) break;
+    offset += 5 + length;
+  }
+  return offset;
+};
+
+/**
+ * Fake HTTP/2 stream: buffers DATA frames, never writes to the real session.
+ * Offers capture when a complete Connect envelope is buffered (duplex-safe) or
+ * on writable end — never waits indefinitely for EOF on an open BiDi stream.
+ */
+class CapturedHttp2Stream extends EventEmitter {
+  /**
+   * @param {Array<[string,string]>} pairs
+   * @param {string} method
+   * @param {string} observedUrl
+   * @param {Record<string, string | number | boolean | null>} framing
+   */
+  constructor(pairs, method, observedUrl, framing) {
+    super();
+    this.closed = false;
+    this.destroyed = false;
+    this.writableEnded = false;
+    this.rstCode = undefined;
+    this._pairs = pairs;
+    this._method = method;
+    this._observedUrl = observedUrl;
+    this._framing = framing;
+    /** @type {Buffer[]} */
+    this._chunks = [];
+    this._offered = false;
+    this._firstWriteAt = null;
+    this._offering = false;
+    this._duplexMode = false;
+    /** @type {string | null} */
+    this._duplexId = null;
+    /** @type {Buffer | null} */
+    this._followRest = null;
+    /** @type {Buffer[] | null} */
+    this._pendingFollowUps = null;
+  }
+
+  /**
+   * @param {any} chunk
+   * @param {any} encoding
+   * @param {any} cb
+   */
+  write(chunk, encoding, cb) {
+    if (typeof encoding === "function") {
+      cb = encoding;
+    }
+    if (chunk !== undefined && chunk !== null && chunk !== "") {
+      if (this._firstWriteAt === null) this._firstWriteAt = Date.now();
+      const bufChunk = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+      if (this._offered) {
+        // After the initial capture offer — whether duplex_bridge has landed
+        // yet or not — further client DATA is follow-up territory. Buffer into
+        // `_followRest` and emit complete envelopes once duplex is active
+        // (or queue them via `_pendingFollowUps` until then). Never re-offer
+        // the original capture body.
+        const followBuf = Buffer.concat([
+          ...(this._followRest ? [this._followRest] : []),
+          bufChunk,
+        ]);
+        const completeLen = completeConnectPrefixLength(followBuf);
+        if (completeLen > 0) {
+          const complete = followBuf.subarray(0, completeLen);
+          this._followRest =
+            completeLen < followBuf.byteLength
+              ? followBuf.subarray(completeLen)
+              : null;
+          if (this._duplexMode) {
+            this._offerFollowUp(complete);
+          } else {
+            if (!this._pendingFollowUps) this._pendingFollowUps = [];
+            this._pendingFollowUps.push(complete);
+          }
+        } else {
+          this._followRest = followBuf;
+        }
+      } else {
+        this._chunks.push(bufChunk);
+        // BiDi Run: offer as soon as the initial Connect message is framed —
+        // do not wait for `.end()` (may never come until a server response).
+        const buf = Buffer.concat(this._chunks);
+        const completeLen = completeConnectPrefixLength(buf);
+        if (completeLen > 0) {
+          // Preserve any bytes beyond the first complete envelope as follow-up
+          // remainder — do NOT leave them in `_chunks` (avoids re-emitting the
+          // initial request if something later flushes `_chunks`).
+          this._chunks = [];
+          this._followRest =
+            completeLen < buf.byteLength ? buf.subarray(completeLen) : null;
+          void this._offerCapture(
+            buf.subarray(0, completeLen),
+            "connect_envelope_complete",
+          );
+        }
+      }
+    }
+    if (typeof cb === "function") process.nextTick(cb);
+    return true;
+  }
+
+  /**
+   * @param {any} chunk
+   * @param {any} encoding
+   * @param {any} cb
+   */
+  end(chunk, encoding, cb) {
+    if (typeof chunk === "function") {
+      cb = chunk;
+      chunk = undefined;
+    } else if (typeof encoding === "function") {
+      cb = encoding;
+    }
+    if (chunk !== undefined && chunk !== null && chunk !== "") {
+      this.write(chunk);
+    }
+    this.writableEnded = true;
+    if (typeof cb === "function") process.nextTick(cb);
+    // Unary-style completion (or trailing bytes after envelopes).
+    const body = this._chunks.length === 0 ? null : Buffer.concat(this._chunks);
+    void this._offerCapture(body, "writable_end");
+    return this;
+  }
+
+  /**
+   * @param {number} code
+   * @param {() => void} [cb]
+   */
+  close(code, cb) {
+    this.closed = true;
+    this.rstCode = code;
+    if (typeof cb === "function") process.nextTick(cb);
+    this.emit("close");
+  }
+
+  /**
+   * @param {Error | undefined} err
+   */
+  destroy(err) {
+    if (this.destroyed) return this;
+    this.destroyed = true;
+    this.closed = true;
+    if (typeof this._duplexId === "string") {
+      duplexStreams.delete(this._duplexId);
+      // Surface parser/stream failures to the parent so duplex waits don't
+      // become opaque timeouts when the Connect client rejects our inject.
+      if (err && this._duplexMode) {
+        connectIpc();
+        try {
+          ipc?.write(
+            `${JSON.stringify({
+              type: "builder_stream_error",
+              token: TOKEN,
+              id: this._duplexId,
+              code:
+                err && typeof err.code === "string" ? err.code : "stream_error",
+              message: String(err && err.message ? err.message : err).slice(
+                0,
+                500,
+              ),
+            })}\n`,
+          );
+        } catch {
+          // ignore
+        }
+      }
+    }
+    if (err) this.emit("error", err);
+    this.emit("close");
+    return this;
+  }
+
+  /**
+   * @param {Buffer | null} body
+   * @param {"connect_envelope_complete" | "writable_end"} offerReason
+   */
+  async _offerCapture(body, offerReason) {
+    if (this._offered || this._offering || this.destroyed) return;
+    this._offering = true;
+    this._offered = true;
+    const offeredAt = Date.now();
+    const framing = {
+      ...this._framing,
+      offerReason,
+      firstWriteAt: this._firstWriteAt,
+      captureOfferedAt: offeredAt,
+      writableEnded: this.writableEnded,
+    };
+    const settlement = await offerCapture(
+      this._pairs,
+      body,
+      "http2",
+      this._method,
+      this._observedUrl,
+      framing,
+    );
+    this._offering = false;
+    if (this.destroyed) return;
+    if (settlement.kind === "duplex_bridge") {
+      // Keep the intercepted stream alive: expose a synthetic server response
+      // the Connect client can read, and forward later client writes as
+      // follow-ups (request_context_result, etc.).
+      this._duplexId = settlement.captureId || null;
+      this._enterDuplexBridge(
+        settlement.captureId,
+        typeof settlement.connectContentEncoding === "string"
+          ? settlement.connectContentEncoding
+          : null,
+      );
+      return;
+    }
+    const err = new Error(
+      `openllm cursor capture suppressed original send (${settlement.kind}: ${settlement.reason})`,
+    );
+    /** @type {any} */ (err).code = "OPENLLM_CURSOR_CAPTURE_SUPPRESSED";
+    this.destroy(err);
+  }
+
+  /**
+   * @param {string | null | undefined} captureId
+   * @param {string | null} connectContentEncoding negotiated real-upstream
+   *   compression (e.g. "gzip") — MUST be mirrored onto the synthetic
+   *   response headers below, or the real Connect client cannot tell how to
+   *   decode COMPRESSED-flagged injected envelopes (silent hang, not an error).
+   */
+  _enterDuplexBridge(captureId, connectContentEncoding) {
+    if (typeof captureId !== "string" || captureId.length === 0) {
+      const err = new Error(
+        "openllm cursor capture duplex_bridge missing capture id",
+      );
+      /** @type {any} */ (err).code = "OPENLLM_CURSOR_CAPTURE_SUPPRESSED";
+      this.destroy(err);
+      return;
+    }
+    this._duplexMode = true;
+    this._injectQueue = [];
+    this._injectClosed = false;
+    /** @type {((buf: Buffer | null) => void) | null} */
+    this._injectWait = null;
+    // Flush any follow-up envelopes that arrived after the initial offer but
+    // before duplex_bridge settlement — otherwise request_context_result can
+    // be lost and only a later heartbeat surfaces.
+    if (this._pendingFollowUps && this._pendingFollowUps.length > 0) {
+      for (const pending of this._pendingFollowUps) {
+        this._offerFollowUp(pending);
+      }
+      this._pendingFollowUps = null;
+    }
+    if (this._followRest && this._followRest.byteLength > 0) {
+      const completeLen = completeConnectPrefixLength(this._followRest);
+      if (completeLen > 0) {
+        this._offerFollowUp(this._followRest.subarray(0, completeLen));
+        this._followRest =
+          completeLen < this._followRest.byteLength
+            ? this._followRest.subarray(completeLen)
+            : null;
+      }
+    }
+    const self = this;
+    duplexStreams.set(captureId, {
+      inject(buf) {
+        // Wake the Connect HTTP/2 body async-iterator (same stream object).
+        if (self._injectWait) {
+          const w = self._injectWait;
+          self._injectWait = null;
+          w(buf);
+        } else {
+          self._injectQueue.push(buf);
+        }
+        // Also emit classic 'data' for any non-asyncIterator consumers.
+        try {
+          self.emit("data", buf);
+        } catch {
+          // ignore
+        }
+      },
+      closeInject() {
+        self._injectClosed = true;
+        if (self._injectWait) {
+          const w = self._injectWait;
+          self._injectWait = null;
+          w(null);
+        }
+        self.emit("duplex_inject_close");
+        // Signal end of server→client body without destroying the client
+        // writable side (builder may still write request_context_result).
+        self.emit("end");
+      },
+    });
+    // Connect-node HTTP/2: `stream.on("response", headers => …)` then reads
+    // the BODY from the SAME stream via asyncIterator — NOT a separate
+    // IncomingMessage. Emitting a fake IncomingMessage here made the native
+    // Connect parser never see control frames → silent timeout.
+    //
+    // `connect-content-encoding` MUST match what the real upstream negotiated
+    // if injected envelopes may carry the COMPRESSED flag — otherwise the real
+    // Connect client has no algorithm to decode with and can hang forever
+    // instead of erroring (this was the retest #26 stuck-phase root cause).
+    // Omit the header entirely when no compression was negotiated.
+    //
+    // Emit response headers SYNCHRONOUSLY before delivering any queued
+    // injects — otherwise a racing inject can be read by for-await before
+    // the response event, and connect-node-shaped clients never see headers.
+    const responseHeaders = {
+      ":status": 200,
+      "content-type": "application/connect+proto",
+      "connect-protocol-version": "1",
+      ...(connectContentEncoding
+        ? { "connect-content-encoding": connectContentEncoding }
+        : {}),
+    };
+    self.emit("response", responseHeaders);
+    self.emit("duplex_ready");
+    // Flush injects that raced ahead of this registration (after response).
+    const queued = pendingInjects.get(captureId);
+    if (queued !== undefined) {
+      pendingInjects.delete(captureId);
+      for (const buf of queued) {
+        duplexStreams.get(captureId)?.inject(buf);
+      }
+    }
+  }
+
+  /**
+   * Subsequent client DATA after the initial capture — follow-up frames.
+   * @param {Buffer} body
+   */
+  _offerFollowUp(body) {
+    if (!this._duplexMode || typeof this._duplexId !== "string") return;
+    connectIpc();
+    if (ipc === null) return;
+    const id = randomUUID();
+    const payload = {
+      type: "capture_followup",
+      token: TOKEN,
+      id,
+      parentId: this._duplexId,
+      transport: "connect",
+      wire: "http2",
+      method: this._method,
+      observedUrl: this._observedUrl,
+      externalUrl: externalUrlOf(this._observedUrl),
+      headers: this._pairs,
+      bodyBase64: body.byteLength === 0 ? null : body.toString("base64"),
+      framing: {
+        ...this._framing,
+        followUp: true,
+        parentCaptureId: this._duplexId,
+      },
+    };
+    ipc.write(`${JSON.stringify(payload)}\n`);
+  }
+
+  [Symbol.asyncIterator]() {
+    const self = this;
+    // Connect-node HTTP/2 body reader: for await (chunk of stream).
+    // Must NOT permanently take the non-duplex "wait for close" branch if
+    // for-await starts before duplex_bridge lands — that caused live timeouts
+    // where injects queued but the client never read them / never replied.
+    return {
+      async next() {
+        for (;;) {
+          if (self._injectQueue && self._injectQueue.length > 0) {
+            const buf = self._injectQueue.shift();
+            return { done: false, value: buf };
+          }
+          if (self._injectClosed || self.destroyed || self.closed) {
+            return { done: true, value: undefined };
+          }
+          if (self._duplexMode) {
+            const buf = await new Promise((resolve) => {
+              self._injectWait = resolve;
+            });
+            if (buf === null || buf === undefined) {
+              return { done: true, value: undefined };
+            }
+            return { done: false, value: buf };
+          }
+          // Not duplex yet: wait until duplex_ready OR close.
+          const signal = await new Promise((resolve) => {
+            if (self._duplexMode) {
+              resolve("duplex");
+              return;
+            }
+            if (self.closed || self.destroyed) {
+              resolve("close");
+              return;
+            }
+            const onDuplex = () => {
+              cleanup();
+              resolve("duplex");
+            };
+            const onClose = () => {
+              cleanup();
+              resolve("close");
+            };
+            const cleanup = () => {
+              self.off("duplex_ready", onDuplex);
+              self.off("close", onClose);
+            };
+            self.once("duplex_ready", onDuplex);
+            self.once("close", onClose);
+          });
+          if (signal === "close") {
+            return { done: true, value: undefined };
+          }
+          // duplex became ready — loop and read inject queue / wait.
+        }
+      },
+      async throw(e) {
+        self.destroy(e instanceof Error ? e : new Error(String(e)));
+        throw e;
+      },
+      async return() {
+        self._injectClosed = true;
+        return { done: true, value: undefined };
+      },
+    };
+  }
+}
+
+const patchHttp1 = () => {
+  /**
+   * @param {typeof http.request} orig
+   * @param {"http:" | "https:"} defaultProtocol
+   */
+  const wrap = (orig, defaultProtocol) =>
+    function patchedRequest(...args) {
+      const input = args[0];
+      let opts = args[1];
+      let cb = args[2];
+      if (typeof opts === "function") {
+        cb = opts;
+        opts = undefined;
+      }
+      const { url, options: normalized } = normalizeHttpArgs(input, opts);
+      if (!url.protocol) url.protocol = defaultProtocol;
+      const pathWithQuery = `${url.pathname}${url.search}`;
+      if (!isAgentInferenceRequest(pathWithQuery, normalized.headers)) {
+        return orig.apply(this, args);
+      }
+      const req = new CapturedHttp1Request(url, {
+        ...normalized,
+        method: normalized.method,
+        headers: normalized.headers,
+      });
+      if (typeof cb === "function") {
+        // Never emits a successful response — settlement destroys with error.
+        req.on("response", cb);
+      }
+      return req;
+    };
+
+  http.request = wrap(http.request, "http:");
+  https.request = wrap(https.request, "https:");
+};
+
+const patchHttp2 = () => {
+  const origConnect = http2.connect;
+  http2.connect = function patchedConnect(...args) {
+    const authority = args[0];
+    const session = origConnect.apply(this, args);
+    patchSession(session, authority);
+    return session;
+  };
+
+  /**
+   * @param {import('node:http2').ClientHttp2Session} session
+   * @param {string | URL} authority
+   */
+  function patchSession(session, authority) {
+    if (/** @type {any} */ (session).__openllmCursorCapturePatched) return;
+    /** @type {any} */ (session).__openllmCursorCapturePatched = true;
+    const origRequest = session.request.bind(session);
+    session.request = function patchedSessionRequest(headers, options) {
+      const hdrs = headers && typeof headers === "object" ? headers : {};
+      const pathRaw =
+        hdrs[http2.constants.HTTP2_HEADER_PATH] ?? hdrs[":path"] ?? "/";
+      const path = Array.isArray(pathRaw) ? pathRaw[0] : String(pathRaw);
+      const methodRaw =
+        hdrs[http2.constants.HTTP2_HEADER_METHOD] ?? hdrs[":method"] ?? "GET";
+      const method = String(
+        Array.isArray(methodRaw) ? methodRaw[0] : methodRaw,
+      ).toUpperCase();
+      if (!isAgentInferenceRequest(path, hdrs)) {
+        return origRequest(headers, options);
+      }
+      const schemeRaw =
+        hdrs[http2.constants.HTTP2_HEADER_SCHEME] ?? hdrs[":scheme"];
+      const authorityHeader =
+        hdrs[http2.constants.HTTP2_HEADER_AUTHORITY] ?? hdrs[":authority"];
+      const schemeVal = Array.isArray(schemeRaw)
+        ? schemeRaw[0]
+        : (schemeRaw ?? "https");
+      const authorityVal =
+        authorityHeader !== undefined && authorityHeader !== null
+          ? Array.isArray(authorityHeader)
+            ? authorityHeader[0]
+            : authorityHeader
+          : authority;
+      const observedUrl = resolveObservedUrl(
+        schemeVal === undefined || schemeVal === null
+          ? "https"
+          : String(schemeVal),
+        authorityVal,
+        path,
+      );
+      let resolved;
+      try {
+        resolved = new URL(observedUrl);
+      } catch {
+        resolved = null;
+      }
+      // :authority must be host[:port], never a scheme-prefixed URL — even when
+      // http2.connect was given an absolute origin string / URL object.
+      const authorityForHeader =
+        resolved !== null
+          ? resolved.host
+          : authorityHostOf(observedUrl, String(authorityVal ?? ""));
+      const schemeForHeader =
+        resolved !== null
+          ? resolved.protocol.replace(/:$/, "")
+          : String(schemeVal ?? "https").replace(/:$/, "");
+      const pathForHeader =
+        resolved !== null
+          ? `${resolved.pathname}${resolved.search}`
+          : path.startsWith("/") || /^https?:\/\//i.test(path)
+            ? path
+            : `/${path}`;
+      // Application headers only — HTTP/2 pseudoheaders are framing (URL /
+      // method / framing.entries). Feeding `:scheme` etc. into Web Headers /
+      // fetch throws `Invalid header name`.
+      const pairs = headerPairsFromNode(hdrs).filter(
+        ([name]) => typeof name === "string" && !name.startsWith(":"),
+      );
+      return new CapturedHttp2Stream(pairs, method, observedUrl, {
+        httpVersion: "2",
+        agentService: true,
+        suppressed: true,
+        authority: authorityForHeader,
+        scheme: schemeForHeader,
+        path: pathForHeader,
+        method,
+      });
+    };
+  }
+};
+
+const patchFetch = () => {
+  if (typeof globalThis.fetch !== "function") return;
+  const origFetch = globalThis.fetch.bind(globalThis);
+  globalThis.fetch = async function patchedFetch(input, init) {
+    const url =
+      typeof input === "string"
+        ? input
+        : input instanceof URL
+          ? input.toString()
+          : input && typeof input === "object" && "url" in input
+            ? String(/** @type {any} */ (input).url)
+            : String(input);
+    let pathWithQuery = "/";
+    try {
+      const u = new URL(url);
+      pathWithQuery = `${u.pathname}${u.search}`;
+    } catch {
+      return origFetch(input, init);
+    }
+    const headersInit = init?.headers;
+    const headerObj =
+      headersInit === undefined
+        ? undefined
+        : headersInit instanceof Headers
+          ? Object.fromEntries(headersInit.entries())
+          : Array.isArray(headersInit)
+            ? Object.fromEntries(headersInit)
+            : { ...headersInit };
+    if (!isAgentInferenceRequest(pathWithQuery, headerObj)) {
+      return origFetch(input, init);
+    }
+    /** @type {Buffer | null} */
+    let body = null;
+    if (init?.body !== undefined && init.body !== null) {
+      if (typeof init.body === "string") body = Buffer.from(init.body);
+      else if (init.body instanceof Uint8Array) body = Buffer.from(init.body);
+      else if (init.body instanceof ArrayBuffer)
+        body = Buffer.from(new Uint8Array(init.body));
+      else {
+        // Streaming fetch bodies are uncommon for Connect unary/server-stream
+        // setup here; refuse to tee unknown streams to the network.
+        body = Buffer.from([]);
+      }
+    }
+    const method =
+      typeof init?.method === "string" ? init.method.toUpperCase() : "GET";
+    const pairs = headerPairsFromNode(headerObj);
+    const isCompanion = BIDI_APPEND_PATH_RE.test(pathWithQuery);
+    const settlement = await offerCapture(pairs, body, "http", method, url, {
+      httpVersion: "fetch",
+      agentService: !isCompanion,
+      bidiAppend: isCompanion,
+      suppressed: true,
+    });
+    if (settlement.isCompanion && settlement.companionAck) {
+      // Control-only unary success — empty BidiAppendResponse bytes.
+      return new Response(new Uint8Array(0), {
+        status: 200,
+        headers: { "content-type": "application/proto" },
+      });
+    }
+    throw Object.assign(
+      new Error(
+        `openllm cursor capture suppressed original send (${settlement.kind}: ${settlement.reason})`,
+      ),
+      { code: "OPENLLM_CURSOR_CAPTURE_SUPPRESSED" },
+    );
+  };
+};
+
+if (ENABLED) {
+  markLoaded();
+  patchHttp1();
+  patchHttp2();
+  patchFetch();
+}
+
+module.exports = {
+  // Test/introspection surface (not used by Cursor).
+  isAgentInferenceRequest,
+  resolveObservedUrl,
+  authorityHostOf,
+  completeConnectPrefixLength,
+  AGENT_SERVICE_PATH_RE,
+  ENABLED,
+};

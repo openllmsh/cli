@@ -9,47 +9,50 @@ export const DAEMON_LIFECYCLE_COMMANDS = ["start", "stop", "restart"] as const;
 export type TDaemonLifecycleCommand =
   (typeof DAEMON_LIFECYCLE_COMMANDS)[number];
 
-/** Upper bound on the `openllmd --version` probe — the version command must
- *  never hang on a wedged binary. */
+/** Upper bound on the `openllm daemon --version` probe — the version command
+ *  must never hang on a wedged binary. */
 const DAEMON_VERSION_TIMEOUT_MS = 2_000;
 
-/** The installer-owned daemon location; daemon state may be elsewhere. */
+/** The installer-owned binary — the single `openllm` that is both CLI and
+ *  daemon. Daemon state may be elsewhere. */
 export const managedDaemonBinary = (): string =>
-  join(openllmDir(), "bin", "openllmd");
+  join(openllmDir(), "bin", "openllm");
 
-/**
- * Resolve a daemon executable for commands that can deliberately use a developer
- * override or a normal PATH installation. Lifecycle delegation still prefers the
- * canonical installer location.
- */
-export const findDaemonBinary = (): string | null => {
-  const override = process.env.OPENLLM_DAEMON_BIN_OVERRIDE;
-  if (override !== undefined && override.length > 0 && existsSync(override))
-    return override;
-  const installed = managedDaemonBinary();
-  if (existsSync(installed)) return installed;
-  for (const directory of (process.env.PATH ?? "").split(":")) {
-    if (directory.length === 0) continue;
-    const candidate = join(directory, "openllmd");
-    if (existsSync(candidate)) return candidate;
-  }
-  return null;
+/** A compiled standalone run: Bun embeds the entry under a virtual root
+ *  (`/$bunfs/…`, `B:/~BUN/…` on Windows) at `argv[1]`. A source run has the
+ *  real script path there instead. */
+const isCompiledRun = (): boolean => {
+  const entry = process.argv[1] ?? "";
+  return entry.startsWith("/$bunfs/") || entry.includes("~BUN");
 };
 
 /**
- * The managed daemon's baked version line (`openllmd --version` prints
- * `openllmd vX.Y.Z`), or null when no daemon binary is installed or the probe
- * fails/times out. Spawns the binary directly rather than probing the running
- * service, so the reported version is the installed artifact's — available even
- * when the daemon is not started.
+ * The argv prefix that runs the daemon half: a developer override binary
+ * (`OPENLLM_DAEMON_BIN_OVERRIDE`, e.g. the dev source shim) as-is, otherwise
+ * THIS binary with the `daemon` token — the compiled binary, or `bun <entry>`
+ * for a source run. Never null: the daemon ships inside every CLI.
+ */
+export const daemonInvocation = (): readonly string[] => {
+  const override = process.env.OPENLLM_DAEMON_BIN_OVERRIDE;
+  if (override !== undefined && override.length > 0 && existsSync(override))
+    return [override];
+  const entry = process.argv[1];
+  return isCompiledRun() || entry === undefined
+    ? [process.execPath, "daemon"]
+    : [process.execPath, entry, "daemon"];
+};
+
+/**
+ * The daemon half's baked version line (`openllmd vX.Y.Z`), or null when the
+ * probe fails/times out. Spawns the binary rather than probing the running
+ * service, so the reported version is the artifact's — available even when
+ * the daemon is not started.
  */
 export const daemonVersion = async (): Promise<string | null> => {
-  const binary = findDaemonBinary();
-  if (binary === null) return null;
   let proc: ReturnType<typeof Bun.spawn> | null = null;
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
-    proc = Bun.spawn([binary, "--version"], {
+    proc = Bun.spawn([...daemonInvocation(), "--version"], {
       stdin: "ignore",
       stdout: "pipe",
       stderr: "ignore",
@@ -82,9 +85,9 @@ export const daemonVersion = async (): Promise<string | null> => {
 };
 
 /**
- * Delegate a public lifecycle command to the product-managed daemon binary.
- * The daemon owns service and automatic-update policy; this function only
- * preserves its stdout, stderr, and exit status for the CLI caller.
+ * Run a public lifecycle command in the daemon half (a child process: daemon
+ * commands `process.exit` and load the daemon module graph, which CLI commands
+ * should not). Preserves its stdout, stderr, and exit status for the caller.
  */
 export const runManagedDaemonCommand = async (
   command:
@@ -96,16 +99,8 @@ export const runManagedDaemonCommand = async (
   args: readonly string[] = [],
   extraEnv: Readonly<Record<string, string>> = {},
 ): Promise<number> => {
-  const binary = findDaemonBinary();
-  if (binary === null) {
-    process.stderr.write(
-      `[openllm] managed daemon binary not found at ${managedDaemonBinary()}; reinstall OpenLLM with \`curl -fsSL https://www.openllm.sh/install | bash\`\n`,
-    );
-    return 1;
-  }
-
   try {
-    const proc = Bun.spawn([binary, command, ...args], {
+    const proc = Bun.spawn([...daemonInvocation(), command, ...args], {
       stdin: "inherit",
       stdout: "inherit",
       stderr: "inherit",

@@ -1,5 +1,5 @@
 /** JSON command adapter for stdio MCP. No daemon implementation or provider catalogue imports. */
-import { findDaemonBinary } from "./daemon-delegation";
+import { daemonInvocation } from "./daemon-delegation";
 import type { TLocalAuthRequest } from "./generated/local-auth";
 import {
   AUTH_LOCAL_VERSION,
@@ -30,19 +30,10 @@ export const runAuthCommand = async (
   } catch {
     return { ok: false, body: { error: "invalid_auth_request" } };
   }
-  const binary = findDaemonBinary();
-  if (binary === null)
-    return {
-      ok: false,
-      body: {
-        error: "daemon_missing",
-        message: "Install OpenLLM, then run openllm start on this machine.",
-      },
-    };
   let child: ReturnType<typeof Bun.spawn> | undefined;
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
-    child = Bun.spawn([binary, ...authCommandArgs(request)], {
+    child = Bun.spawn([...daemonInvocation(), ...authCommandArgs(request)], {
       stdin: request.code === undefined ? "ignore" : "pipe",
       stdout: "pipe",
       stderr: "ignore",

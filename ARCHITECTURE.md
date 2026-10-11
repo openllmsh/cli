@@ -16,7 +16,7 @@
 > Installed by [`packages/cli/install.sh`](install.sh) (or by the daemon's
 > installer, which installs both binaries), self-updating against the gateway's
 > pinned release — the extension-side twin of
-> [`packages/daemon`](../daemon/ARCHITECTURE.md). Design:
+> [`packages/cli/daemon`](daemon/ARCHITECTURE.md). Design:
 > [`docs/proposals/remove-registry-runtime-config-merge.md`](../../docs/proposals/remove-registry-runtime-config-merge.md).
 
 ---
@@ -328,7 +328,7 @@ committed artifacts lag the HttpApi; `@openllm/schema` appears only under
 
 ## 4. Release model (daemon parity)
 
-Everything follows `packages/daemon` exactly — see
+Everything follows `packages/cli/daemon` exactly — see
 [`packages/release/commands/cli.ts`](../release/commands/cli.ts):
 
 - ONE version identity: the manifest tag. `package.json` stays `0.0.0-dev`
