@@ -142,6 +142,19 @@ const swapBinary = async (
     }
     writeFileSync(tmp, bytes, { mode: 0o755 });
     chmodSync(tmp, 0o755); // force mode regardless of umask
+    // The file being replaced IS the daemon (the service execs it). Only ever
+    // install a binary that carries a daemon half: a cloud still pinning a
+    // pre-merge standalone CLI must not overwrite the daemon with it.
+    if ((await binaryFingerprint(tmp)) === null) {
+      logError(
+        "update",
+        safeDiagnosticMessage`downloaded binary has no daemon half — refusing update`,
+        { target, version },
+      );
+      rmSync(tmp, { force: true });
+      recordAttempt("cli", version); // back off; retrying won't change the bytes
+      return false;
+    }
     renameSync(tmp, dest); // atomic; the running daemon keeps its old inode
     hardenMacBinary(dest); // dequarantine + ad-hoc sign so arm64 can exec it
     // Record only AFTER a swap — a transient failure retries next tick, but a

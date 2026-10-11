@@ -59,6 +59,25 @@ export const isSecureOrigin = (raw: string): boolean => {
   }
 };
 
+/** Whether the binary at `path` carries the daemon half (it answers
+ *  `daemon --fingerprint` with a sha-256). */
+const hasDaemonHalf = (path: string): boolean => {
+  try {
+    const probe = Bun.spawnSync([path, "daemon", "--fingerprint"], {
+      stdin: "ignore",
+      stdout: "pipe",
+      stderr: "ignore",
+      timeout: 5_000,
+    });
+    return (
+      probe.exitCode === 0 &&
+      /^[0-9a-f]{64}$/.test(new TextDecoder().decode(probe.stdout).trim())
+    );
+  } catch {
+    return false;
+  }
+};
+
 /** Outcome of one convergence: `updated`/`current` succeed; `skipped` is a
  *  benign no-op (dev build, nothing published); `failed` is an error. */
 export type TSelfUpdateResult = "updated" | "current" | "skipped" | "failed";
@@ -158,6 +177,16 @@ export const convergeSelf = async (
     const self = process.execPath;
     const staging = join(dirname(self), `.openllm.next-${process.pid}`);
     fs.writeFileSync(staging, bytes, { mode: 0o755 });
+    // This file is also the daemon (the service execs `openllm daemon`). Never
+    // install a binary without a daemon half — e.g. a gateway still pinning a
+    // pre-merge standalone CLI.
+    if (!hasDaemonHalf(staging)) {
+      fs.rmSync(staging, { force: true });
+      say(
+        `[self-update] v${latest} has no daemon half (pre-merge release) — not installing`,
+      );
+      return "skipped";
+    }
     fs.renameSync(staging, self);
     return "updated";
   } catch (err) {
