@@ -15,8 +15,7 @@
  * plan/policy gate (below) HERE, not in either transport adapter, is what
  * makes both transports share exactly one entitlement check — a browser
  * reaching this daemon over the mux/relay path is held to the SAME
- * account/model gate a same-machine 307 or the local-first-gateway direct
- * path enforces (`fetchPlan` + `planSignatureOk`, `walker.ts`); neither
+ * account/model gate the local-first-gateway direct path enforces (`fetchPlan` + `planSignatureOk`, `walker.ts`); neither
  * transport can reach the vendor dial without passing it.
  *
  * No live network call happens anywhere in this module's OWN test suite —
@@ -65,7 +64,7 @@ export type TRealtimePlanAuthorization =
  * This is the ONE gate both transports share (`localRealtimeWebSocket` and
  * `serveMuxRealtime` both bottom out in `openRealtimeSession` below), so a
  * browser reaching the daemon over the mux/relay path is held to exactly the
- * account entitlement a same-machine 307 would enforce — neither transport
+ * account entitlement a direct local request enforces — neither transport
  * gets to skip it. Fails CLOSED on any unreachable/unsigned/mismatched
  * response: an unresolvable plan is refused, never treated as "unsigned dev
  * mode" (that leniency lives inside `planSignatureOk` itself, for a daemon

@@ -10,7 +10,6 @@
 import {
   MEDIA_ERROR_RESPONSE_HEADER,
   MEDIA_PERSISTENCE_RESPONSE_HEADER,
-  NO_DAEMON_HEADER,
   TOOL_SESSION_HEADER,
 } from "@openllmsh/protocol";
 import { daemonEnv, isDevMode } from "./env";
@@ -99,15 +98,11 @@ const allowOrigin = (req: Request): string => {
 /**
  * CORS response headers. `allow-headers` includes:
  *  - `authorization` — the `/v1/*` surface takes `Authorization: Bearer sk-llm-…`;
- *  - `x-openllm-daemon` / `x-openllm-no-daemon` — when the gateway 307s a
- *    subscription request to `127.0.0.1`, the browser REPLAYS the original
- *    request (incl. these presence headers) to the daemon as a fresh
- *    cross-origin call; the preflight must allow them even though the daemon
- *    ignores them (the plan rides in the `?__plan=` query, not a header).
+ *  - the tool-session header the chat client sends.
  * (The control surface only needs `content-type`, but a superset is harmless.)
  *
- * `expose-headers` covers the DIRECT cross-origin path only (the browser
- * replaying a gateway 307 to `127.0.0.1`); the mux carries its own closed
+ * `expose-headers` covers the DIRECT cross-origin path only (a page calling
+ * `127.0.0.1` itself); the mux carries its own closed
  * `res_head` struct instead. An unexposed response header is unreadable to
  * the page and therefore indistinguishable from one the daemon never sent —
  * so every media header the browser BRANCHES on must be listed, or an
@@ -116,7 +111,7 @@ const allowOrigin = (req: Request): string => {
 export const corsHeaders = (req: Request): Record<string, string> => ({
   "access-control-allow-origin": allowOrigin(req),
   "access-control-allow-methods": "GET, POST, OPTIONS",
-  "access-control-allow-headers": `content-type, authorization, ${TOOL_SESSION_HEADER}, ${NO_DAEMON_HEADER}`,
+  "access-control-allow-headers": `content-type, authorization, ${TOOL_SESSION_HEADER}`,
   "access-control-expose-headers": `x-openllm-media-id, x-openllm-media-url, x-openllm-resolved-model, x-openllm-chain, ${MEDIA_ERROR_RESPONSE_HEADER}, ${MEDIA_PERSISTENCE_RESPONSE_HEADER}, ${TOOL_SESSION_HEADER}`,
   "access-control-allow-private-network": "true",
   vary: "origin",

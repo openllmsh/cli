@@ -4,11 +4,10 @@
  * `@openllm/core`-free `walker.ts` (subscription hops run on the official
  * CLI's credential; API-key hops are forwarded to the cloud).
  *
- * Single flow: a client points at the gateway, the gateway 307s a
- * subscription-involving chain here with the resolved `?__plan=`, and the
- * walker executes that plan. The daemon holds NO routing brain of its own
- * — without a `?__plan=` there is nothing to walk, so it answers 400
- * (there is no legacy "daemon resolves its own chain" path).
+ * Single flow: a request arrives (a local client, or a relay tunnel opened
+ * by a browser, a fleet peer, or the origin), the daemon fetches a signed
+ * plan from `/api/daemon/plan`, and the walker executes it. The daemon holds
+ * NO routing brain of its own — the cloud resolves the chain.
  *
  * The daemon binds to 127.0.0.1 and the caller owns the machine, so there
  * is no API-key auth gate here (unlike the cloud handler).
@@ -105,11 +104,6 @@ const withCors = (req: Request, res: Response): Response => {
     headers,
   });
 };
-
-const contextOverflowStrategyParam = (
-  raw: string | null,
-): TContextOverflowStrategy | null =>
-  raw === "compact_in_place" ? "compact_in_place" : null;
 
 export const handleInference = async (req: Request): Promise<Response> => {
   // CORS/PNA preflight — the dashboard fetches this surface cross-origin
@@ -325,29 +319,18 @@ export const handleInference = async (req: Request): Promise<Response> => {
     ) as ArrayBuffer;
   }
 
-  // Signed-plan cache (flag-gated rider — `plan-cache.ts`). A 307-borne
-  // request remembers its signed tuple per model alias; a DIRECT request
-  // (no `?__plan=`) within the TTL replays it, skipping the cloud round
-  // trip. The walker verifies the signature either way, so the flag being
-  // off (or a cache miss) is exactly the pre-rider flow: no plan → the
-  // walker's clean 400.
-  //
-  // A tuple enters the cache ONLY after the same signature check the walker
-  // enforces (unsigned accepted only in no-key dev mode), so a forged or
-  // tampered tuple can never overwrite an entry. Residual scope, accepted:
-  // the alias is NOT inside the signed payload (adding it would change the
-  // canonical payload and fail-close every already-deployed daemon), so a
-  // LOOPBACK caller could pair a genuinely-signed tuple with a different
-  // `model` in the body — but this surface is 127.0.0.1 with the caller
-  // owning the machine (see the module doc: no auth gate), and such a
-  // caller can already address the daemon/cloud arbitrarily as themselves.
-  let planParam = url.searchParams.get("__plan");
-  let pmidsParam = url.searchParams.get("__pmids");
-  let originParam = url.searchParams.get("__origin");
-  let contextOverflowStrategy = contextOverflowStrategyParam(
-    url.searchParams.get("__context_overflow_strategy"),
-  );
-  let sigParam = url.searchParams.get("__sig");
+  // Signed-plan cache (flag-gated rider — `plan-cache.ts`). A plan fetched
+  // from `/api/daemon/plan` is remembered per (surface, model alias); a later
+  // request within the TTL replays it, skipping the cloud round trip. A tuple
+  // enters the cache only after the same signature check the walker enforces,
+  // so a forged tuple can never overwrite an entry. The alias is NOT inside the
+  // signed payload; that residual scope is accepted because this surface is
+  // 127.0.0.1 and the caller owns the machine (see the module doc).
+  let planParam: string | null = null;
+  let pmidsParam: string | null = null;
+  let originParam: string | null = null;
+  let contextOverflowStrategy: TContextOverflowStrategy | null = null;
+  let sigParam: string | null = null;
   let passthroughContentType: string | null = null;
   const explicitAlias =
     modelField.kind === "explicit" ? modelField.value : null;
@@ -364,35 +347,15 @@ export const handleInference = async (req: Request): Promise<Response> => {
   // Never cache model-less defaults under one empty alias — selection
   // depends on surface/options and current availability.
   if (planCacheEnabled() && planCacheKey !== null) {
-    if (planParam !== null) {
-      if (
-        planSignatureOk(
-          planParam,
-          pmidsParam,
-          originParam,
-          contextOverflowStrategy,
-          sigParam,
-        )
-      ) {
-        storePlan(planCacheKey, {
-          planParam,
-          pmidsParam,
-          originParam,
-          contextOverflowStrategy,
-          sigParam,
-        });
-      }
-    } else {
-      const cached = lookupPlan(planCacheKey);
-      if (cached !== null) {
-        ({
-          planParam,
-          pmidsParam,
-          originParam,
-          contextOverflowStrategy,
-          sigParam,
-        } = cached);
-      }
+    const cached = lookupPlan(planCacheKey);
+    if (cached !== null) {
+      ({
+        planParam,
+        pmidsParam,
+        originParam,
+        contextOverflowStrategy,
+        sigParam,
+      } = cached);
     }
   }
 
@@ -431,28 +394,6 @@ export const handleInference = async (req: Request): Promise<Response> => {
     return null;
   };
 
-  const rejectUnverifiedRedirect = (): Response =>
-    withCors(req, errorJson(403, "invalid or missing __plan signature"));
-
-  // 307-borne: verify the signed tuple BEFORE deriving a missing model or
-  // running required-model decode. Unsigned/tampered plans never authorize
-  // inference; an explicit caller model is never rewritten.
-  if (planParam !== null && explicitAlias === null && mediaSurface !== null) {
-    if (
-      !planSignatureOk(
-        planParam,
-        pmidsParam,
-        originParam,
-        contextOverflowStrategy,
-        sigParam,
-      )
-    ) {
-      return rejectUnverifiedRedirect();
-    }
-    const materialized = await materializeFromVerifiedPlan(planParam);
-    if (materialized !== null) return withCors(req, materialized);
-  }
-
   const handlePlanFetchError = (
     err: unknown,
     label: string,
@@ -482,16 +423,13 @@ export const handleInference = async (req: Request): Promise<Response> => {
     return "passthrough";
   };
 
-  // Local-first gateway (docs/proposals/local-first-gateway.md): a DIRECT
-  // request (no `?__plan=` — the client's base URL is the daemon, baked at
-  // install time by a `--gateway local` setup) that the plan cache didn't
-  // cover. Fetch a signed plan from the origin (body never transits the
-  // cloud), verify it with the SAME per-user key a 307 is verified with,
+  // Local-first gateway (docs/proposals/local-first-gateway.md): a request
+  // the plan cache didn't cover. Fetch a signed plan from the origin (body never transits the
+  // cloud), verify it with the per-user key handed over at bootstrap,
   // and walk it locally when it contains at least one subscription hop; a
   // pure-BYOK plan (and a failed fetch) passes through to the origin
   // verbatim — the cloud keeps its own fallback/cooldown machinery,
-  // byte-identical to a directly-pointed client. 307-borne requests are
-  // untouched by this branch.
+  // byte-identical to a directly-pointed client.
   if (planParam === null && !isResponsesCompact && explicitAlias !== null) {
     let fetched: Awaited<ReturnType<typeof fetchPlan>> | null = null;
     try {
@@ -580,7 +518,7 @@ export const handleInference = async (req: Request): Promise<Response> => {
       if (outcome !== "passthrough") return outcome;
       // Model-less media must not forward prompt/bytes to origin after a
       // failed selection — that would leak content and let the cloud pick
-      // a paid model under NO_DAEMON. Explicit-model failures still
+      // a paid model. Explicit-model failures still
       // passthrough above.
       return withCors(
         req,
@@ -603,10 +541,7 @@ export const handleInference = async (req: Request): Promise<Response> => {
       fetched.sig,
     );
     if (!verified) {
-      return withCors(
-        req,
-        errorJson(403, "invalid or missing __plan signature"),
-      );
+      return withCors(req, errorJson(403, "invalid or missing plan signature"));
     }
     const materialized = await materializeFromVerifiedPlan(fetched.plan);
     if (materialized !== null) return withCors(req, materialized);
@@ -625,7 +560,7 @@ export const handleInference = async (req: Request): Promise<Response> => {
     sigParam = fetched.sig;
   }
 
-  // Mux GET video retrieve/content has no body and no ?__plan=. Decode the
+  // Mux GET video retrieve/content has no body and no model. Decode the
   // opaque job id (provider + model) and fetch a signed plan for that model.
   // HMAC is still required; a plan that does not cover the job is rejected.
   if (
@@ -680,10 +615,7 @@ export const handleInference = async (req: Request): Promise<Response> => {
       fetched.sig,
     );
     if (!verified) {
-      return withCors(
-        req,
-        errorJson(403, "invalid or missing __plan signature"),
-      );
+      return withCors(req, errorJson(403, "invalid or missing plan signature"));
     }
     planParam = fetched.plan;
     pmidsParam = fetched.pmids;

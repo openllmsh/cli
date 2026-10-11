@@ -5,10 +5,9 @@
  * `DAEMON_PLAN_CACHE=0` on the cloud disables it fleet-wide).
  *
  * The audit's largest remaining latency item is the per-request WAN round
- * trip (client → cloud plan resolution → 307). Within one interactive burst
+ * trip (daemon → cloud plan resolution). Within one interactive burst
  * the cloud resolves the SAME alias to the same signed tuple over and over;
- * this cache lets a request that reaches the daemon DIRECTLY (no `?__plan=`)
- * reuse the most recent cloud-signed tuple for its model alias within a
+ * this cache lets a request reuse the most recent cloud-signed tuple for its model alias within a
  * short TTL instead of bouncing through the cloud.
  *
  * Safety properties:
@@ -34,7 +33,7 @@ export type TCachedPlan = {
   readonly planParam: string;
   readonly pmidsParam: string | null;
   readonly originParam: string | null;
-  /** Signed 307 context-overflow policy; null preserves bootstrap/default hop. */
+  /** Signed context-overflow policy; null preserves bootstrap/default hop. */
   readonly contextOverflowStrategy: TContextOverflowStrategy | null;
   readonly sigParam: string | null;
   readonly storedAtMs: number;
@@ -42,8 +41,8 @@ export type TCachedPlan = {
 
 const cache = new Map<string, TCachedPlan>();
 
-/** Remember the signed tuple that served `alias` (called on every 307-borne
- *  request while the flag is on — the newest tuple wins). */
+/** Remember the signed tuple that served `alias` (called after every verified
+ *  plan fetch while the flag is on — the newest tuple wins). */
 export const storePlan = (
   alias: string,
   tuple: Omit<TCachedPlan, "storedAtMs">,

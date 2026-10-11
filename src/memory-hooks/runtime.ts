@@ -375,7 +375,7 @@ export const runMemoryExtraction = async (input: unknown): Promise<void> => {
           temperature: 0.0,
         },
       },
-      { timeoutMs: 30_000, fetch: memoryHookTransport(true) },
+      { timeoutMs: 30_000, fetch: memoryHookTransport() },
     );
     const extraction = extractionOf(response.body);
     const mutations = cloudClient(config, 5000);

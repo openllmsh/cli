@@ -213,10 +213,12 @@ refresh. See
 ## Coreless walker (the data path)
 
 `walker.ts` is the thin `@openllm/core`-free executor of the coreless
-proposal's §3.3 — the daemon's **sole** data path. A gateway redirect carries
-the cloud-signed `?__plan=<provider/model,…>` (see
-[`coreless-daemon-passthrough.md`](../../docs/proposals/coreless-daemon-passthrough.md)).
-For a direct local-first request, `listener.ts` first reuses a valid cached
+proposal's §3.3 — the daemon's **sole** data path. Every plan the walker runs
+is a cloud-signed `<provider/model,…>` tuple from `GET /api/daemon/plan`
+(see [`coreless-daemon-passthrough.md`](../../docs/proposals/coreless-daemon-passthrough.md));
+there is no URL-carried plan and no 307 arrival path. Whether a request comes
+from a local client or over a relay tunnel (browser, fleet peer, or the origin
+handing over a subscription hop), `listener.ts` first reuses a valid cached
 plan or fetches one from the cloud without sending the request body; a pure
 BYOK plan, or a failed explicit-model plan fetch, is forwarded to the cloud.
 **Model-less media** (image, image edit, transcription, speech, video create)
@@ -230,10 +232,11 @@ materializes the first hop id into JSON or a re-serialized multipart body
 only — walkers still iterate remaining hops. A failed or unverifiable
 media-default plan returns an error and never forwards the original media
 body to origin. Explicit-model plan-fetch failures still passthrough as
-before. A 307 with a model-less original body is the same: verify the plan
-**before** required-model decode (including image-edit multipart);
-unsigned/tampered plans never authorize inference; an explicit caller model
-is never rewritten. The listener validates the body and hands the signed
+before. The plan is verified **before** required-model decode (including
+image-edit multipart); unsigned/tampered plans never authorize inference; an
+explicit caller model is never rewritten. Requests the daemon passes through or
+forwards to origin carry `x-openllm-tunneled`, so the origin never tunnels them
+back to a daemon. The listener validates the body and hands the signed
 plan to the walker. Media walkers (`image-walker`, `audio-walker`,
 `video-walker`) iterate the **full signed plan**. Advance uses protocol
 `decideMediaChainAdvance` (429/auth/quota/missing credential before accept,
@@ -241,7 +244,7 @@ including API hops). Timeout, network, 5xx after submit, accepted 2xx,
 delivered output, and persist-after-success are terminal. Image edits never
 forward a paid generation hop. Successful responses set
 `x-openllm-resolved-model` / `x-openllm-chain` from protocol header constants.
-Bodyless video retrieve/content/cancel (mux GET) have no `?__plan=`: the
+Bodyless video retrieve/content/cancel (mux GET) carry no model: the
 listener `decodeVideoId`s the opaque job and `GET /api/daemon/plan?video_job=`
 with `{model, provider}` only (never prompt, aliases, or cooldown rewrite),
 verifies HMAC, and requires the plan to contain that exact model id.
@@ -288,7 +291,7 @@ pinned together by `tests/transport/upstream-request-parity.test.ts`. See
 
 The walker supplies only what's transport-local: the resolved
 `providerModelId`, the client's `stream` intent (the daemon PINS both off
-the 307; the cloud passthrough preserves the body's), and `baseHeaders` —
+the signed plan; the cloud passthrough preserves the body's), and `baseHeaders` —
 the **ORIGINATOR's own headers** (denylist passthrough via
 `@openllmsh/wire/lib/forwarded-headers` `originatorHeadersFrom`), with the
 delegate's CREDENTIAL-INTRINSIC headers (codex `chatgpt-account-id` — the
@@ -406,7 +409,7 @@ consent/account/origin purges still apply.
 
 **Validated live** (`RUN_DAEMON_LIVE=1`, `tests/server/daemon-walker-live
 .e2e.test.ts`) against the real authenticated CLIs, through the full
-production flow (client → cloud → signed 307 → walker → vendor): the core
+production flow (client → daemon → signed plan fetch → walker → vendor): the core
 Claude/Codex/Kimi providers + cross-wire, stream + non-stream, and the
 forged-signature → 403 gate. The remaining §8 byte-identical-upstream diff
 is a belt-and-braces confidence check, not a ship gate.

@@ -13,7 +13,7 @@
  */
 import {
   MEDIA_PERSISTENCE_REQUEST_HEADER,
-  NO_DAEMON_HEADER,
+  TUNNELED_REQUEST_HEADER,
 } from "@openllmsh/protocol";
 import { CLOUD_FETCH_TIMEOUT_MS } from "./cloud-client";
 import { errorJson } from "./cors";
@@ -110,11 +110,9 @@ export const forwardToCloud = async (
   origin?: string | null,
 ): Promise<Response> => {
   const url = new URL(inbound.url);
-  // Forward to the deployment that ISSUED the 307 (`?__origin=`, signed) so a
-  // single daemon serves any deployment; fall back to the pinned cloud origin
-  // for older/unsigned redirects. Drop the inbound query — the only params
-  // here are the daemon's own `?__plan=`/`?__sig=`/… (off the 307), which the
-  // cloud `/v1` surface never reads (it selects via `x-openllm-pin-model`).
+  // Forward to the deployment that SIGNED the plan so a single daemon serves
+  // any deployment; fall back to the pinned cloud origin. The cloud `/v1`
+  // surface selects via `x-openllm-pin-model`, so no query is forwarded.
   const base =
     origin !== undefined && origin !== null && origin.length > 0
       ? origin.replace(/\/+$/, "")
@@ -126,6 +124,8 @@ export const forwardToCloud = async (
   // Lock the cloud to the exact concrete model the local chain picked, so
   // the cloud doesn't re-run its own alias/fallback resolution.
   headers.set("x-openllm-pin-model", pinnedModel);
+  // Daemon-originated: the origin must never tunnel it back to a daemon.
+  headers.set(TUNNELED_REQUEST_HEADER, "1");
   headers.delete("host");
   headers.delete("content-length");
 
@@ -153,10 +153,9 @@ export const forwardToCloud = async (
  * Auth: the caller's own `Authorization` bearer is forwarded when present
  * (clients configured at the daemon carry their `sk-llm` key, and it may
  * differ from the daemon's paired key — usage must account to the caller's
- * key); absent one, the daemon's paired key fills in. `x-openllm-no-daemon`
- * is set so the cloud never 307s the request back to this same daemon (a
- * wasted loopback bounce — we ARE the machine, and we already chose not to
- * walk this request).
+ * key); absent one, the daemon's paired key fills in. `x-openllm-tunneled`
+ * is set so the origin never tunnels the request back to a daemon (we
+ * already chose not to walk it; a re-tunnel could loop).
  */
 export type TPassthroughOptions = {
   /** Pin the cloud to this concrete model (media-default BYOK). */
@@ -171,12 +170,7 @@ export const passthroughToOrigin = async (
   options?: TPassthroughOptions,
 ): Promise<Response> => {
   const url = new URL(inbound.url);
-  const search = new URLSearchParams(url.search);
-  // Strip the daemon's own plan params (present on a replayed/307-borne
-  // shape) — the cloud `/v1` surface never reads them.
-  for (const p of ["__plan", "__pmids", "__origin", "__sig"]) search.delete(p);
-  const qs = search.toString();
-  const target = `${daemonEnv().cloudOrigin}${url.pathname}${qs.length > 0 ? `?${qs}` : ""}`;
+  const target = `${daemonEnv().cloudOrigin}${url.pathname}${url.search}`;
   const headers = new Headers(inbound.headers);
   headers.delete(MEDIA_PERSISTENCE_REQUEST_HEADER);
   if (options?.pinModel !== undefined && options.pinModel.length > 0) {
@@ -192,7 +186,7 @@ export const passthroughToOrigin = async (
     const { apiKey } = daemonEnv();
     if (apiKey !== null) headers.set("authorization", `Bearer ${apiKey}`);
   }
-  headers.set(NO_DAEMON_HEADER, "1");
+  headers.set(TUNNELED_REQUEST_HEADER, "1");
   headers.delete("host");
   headers.delete("content-length");
 

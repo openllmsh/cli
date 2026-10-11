@@ -649,8 +649,8 @@ let lastPresenceRefreshAt = 0;
  * Without this, presence is only ever asserted on hello or on a CHANGED status
  * snapshot, so a daemon that is demonstrably serving traffic could still read
  * offline to the proxy — and the next chain that leads with a subscription hop
- * gets `subscription_requires_daemon` instead of a 307 to the very daemon that
- * just answered. Throttled, fire-and-forget, never on the response path.
+ * gets `subscription_requires_daemon` instead of a tunnel to the very daemon
+ * that just answered. Throttled, fire-and-forget, never on the response path.
  */
 export const notePresenceActivity = (): void => {
   const now = Date.now();

@@ -1,8 +1,7 @@
 /**
  * Local `/v1/audio/transcriptions` + `/v1/audio/speech` for subscription
  * providers, served the same way `image-walker.ts` serves
- * `/v1/images/generations`: the cloud only 307s here (or the local-first
- * gateway only walks here) once it already knows a subscription hop can
+ * `/v1/images/generations`: the daemon only walks here once it already knows a subscription hop can
  * serve the model, so a missing credential is a real local failure (404),
  * not a signal to fall back anywhere else.
  *
@@ -146,7 +145,7 @@ const requirePlanned = (args: TWalkArgs): Response | null => {
       args.sigParam,
     )
   ) {
-    return errorJson(403, "invalid or missing __plan signature");
+    return errorJson(403, "invalid or missing plan signature");
   }
   if (args.planParam === null) {
     return errorJson(400, "audio requires a daemon plan");

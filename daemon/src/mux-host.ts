@@ -3,6 +3,7 @@ import {
   MEDIA_HTTP_CAP,
   MEDIA_HTTP_VIDEO_CAP,
   MUX_CAP,
+  parseStreamOpenPayload,
   REALTIME_DUPLEX_CAP,
   RTC_CAP,
   SEEDGATE_CAP,
@@ -11,7 +12,7 @@ import {
   decodeChannelEnvelope,
   encodeChannelEnvelope,
 } from "@openllmsh/tunnel/channel-envelope";
-import { encodeJsonPayload } from "@openllmsh/tunnel/codec";
+import { decodeJsonPayload, encodeJsonPayload } from "@openllmsh/tunnel/codec";
 import type { TDuplex, TMuxChannel } from "@openllmsh/tunnel/mux";
 import { createChannel } from "@openllmsh/tunnel/mux";
 import { serveStream } from "@openllmsh/tunnel/streams";
@@ -98,6 +99,13 @@ type TRelayChannel = {
   readonly keyId: string | null;
   readonly consumer: "browser" | "daemon" | null;
   readonly channel: TMuxChannel;
+  /**
+   * Seed gate outcome for this channel, re-evaluated on every (re)open. True
+   * for a relay-stamped `consumer:"daemon"` (a fleet peer or origin) or a
+   * verified grant. Only PTY `kind:"session"` streams require it; tunnel and
+   * realtime streams are served on any same-user channel the relay admitted.
+   */
+  seedGated: boolean;
   /** The mux's durable inbound callback, installed exactly once at construction. */
   muxSink: ((bytes: Uint8Array | null) => void) | null;
   /** The relay binding currently allowed to deliver to {@link muxSink}. */
@@ -368,6 +376,19 @@ const registerChannel = (
       ? {
           onStream: (stream, open) => {
             if (record !== null) touchChannel(record);
+            if (
+              record?.seedGated !== true &&
+              parseStreamOpenPayload(decodeJsonPayload(open))?.kind ===
+                "session"
+            ) {
+              logWarn(
+                "mux-host",
+                safeDiagnosticMessage`session open refused: channel not seed-gated`,
+                { channelId },
+              );
+              stream.reset(encodeJsonPayload({ code: "unauthorized" }));
+              return;
+            }
             serveMuxOnStream(stream, open);
           },
         }
@@ -387,6 +408,7 @@ const registerChannel = (
     channelId,
     keyId,
     consumer: side === "daemon" ? "browser" : null,
+    seedGated: false,
     muxSink,
     sink: null,
     lastActivityAt: Date.now(),
@@ -532,23 +554,18 @@ export const serveMuxOnStream = serveStream({
 });
 
 /**
- * Seed-gate: browser consumers must present a vault-signed grant when
- * provisioned. Fleet daemon→daemon hops set consumer:"daemon" and have no
- * vault DEK — skip enforcement for those (parity with tunnel-server).
- * Trust boundary: the relay stamps `consumer` from the authenticated
- * socket role before forward, so a watcher cannot claim "daemon" to
- * skip the gate. Direct (non-relay) sockets must not self-assert.
- * Shared by fresh opens AND rebinds — a rebind is still a consumer proving
- * access. Sends the `unauthorized` nack and returns false on rejection.
+ * Seed gate — PTY sessions only, never request tunnelling. A fleet peer or
+ * origin (`consumer:"daemon"`) is gated by its relay identity; anything else
+ * must present a vault-signed grant. Trust boundary: the relay stamps
+ * `consumer` from the authenticated socket role before forward, so a watcher
+ * cannot claim "daemon". The result is recorded on the channel; the open is
+ * never refused for it. Shared by fresh opens AND rebinds.
  */
-const admitBySeedGate = (
-  frame: {
-    readonly channel_id: string;
-    readonly grant?: string;
-    readonly consumer?: "browser" | "daemon";
-  },
-  send: (frame: TRelayFrame) => void,
-): boolean => {
+const seedGateOf = (frame: {
+  readonly channel_id: string;
+  readonly grant?: string;
+  readonly consumer?: "browser" | "daemon";
+}): boolean => {
   if (frame.consumer === "daemon") return true;
   const gate = enforceSeedGate(frame.grant, {
     keyId: daemonApiKeyId(),
@@ -556,15 +573,9 @@ const admitBySeedGate = (
     aud: daemonPublicKey(),
   });
   if (gate.mode !== "reject") return true;
-  logWarn("mux-host", safeDiagnosticMessage`channel_open rejected: seedgate`, {
+  logInfo("mux-host", "channel_open not seed-gated (sessions refused)", {
     channelId: frame.channel_id,
     reason: gate.reason,
-  });
-  send({
-    type: "channel_open_ack",
-    channel_id: frame.channel_id,
-    ok: false,
-    error: "unauthorized",
   });
   return false;
 };
@@ -623,9 +634,8 @@ export const acceptChannel = (frame: {
     // serving channel is the consumer re-attaching — NOT a collision. Swap the
     // inbound sink onto the EXISTING channel (its attached session streams
     // survive untouched; PTY hosts are durable and never respawned here) and
-    // re-ack so the peer's open settles. A refused rebind (seed gate) leaves
-    // the incumbent channel alone.
-    if (!admitBySeedGate(frame, send)) return;
+    // re-ack so the peer's open settles. The rebind re-evaluates the seed gate.
+    existing.seedGated = seedGateOf(frame);
     bindSink(existing);
     touchChannel(existing);
     logInfo("mux-host", "channel_open rebind", {
@@ -638,8 +648,8 @@ export const acceptChannel = (frame: {
   // A map-resident record with a null mux sink is a closed shell that never
   // got reaped — drop it so the re-open registers fresh below.
   if (existing !== undefined) channels.delete(frame.channel_id);
-  if (!admitBySeedGate(frame, send)) return;
-  registerChannel(frame.channel_id, null, "daemon");
+  const seedGated = seedGateOf(frame);
+  registerChannel(frame.channel_id, null, "daemon").seedGated = seedGated;
   logInfo("mux-host", "channel_open accepted", {
     channelId: frame.channel_id,
     consumer: frame.consumer ?? "browser",

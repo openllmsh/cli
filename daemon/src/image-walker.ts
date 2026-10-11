@@ -559,7 +559,7 @@ export const runImageWalker = async (args: TWalkArgs): Promise<Response> => {
       args.sigParam,
     )
   ) {
-    return errorJson(403, "invalid or missing __plan signature");
+    return errorJson(403, "invalid or missing plan signature");
   }
   if (args.planParam === null) {
     return errorJson(400, "images require a daemon plan");
@@ -965,7 +965,7 @@ export const persistImageEditResultItem = async (
  * The plan candidate must be a subscription provider whose delegate exposes
  * `credentialForImageEdit` — an API-key (BYOK) hop is never considered here;
  * the cloud handler is responsible for refusing BYOK explicitly rather than
- * ever 307ing one to this walker.
+ * ever routing one to this walker.
  */
 export const runImageEditWalker = async (
   args: TWalkArgs,
@@ -979,7 +979,7 @@ export const runImageEditWalker = async (
       args.sigParam,
     )
   ) {
-    return errorJson(403, "invalid or missing __plan signature");
+    return errorJson(403, "invalid or missing plan signature");
   }
   if (args.planParam === null) {
     return errorJson(400, "image edits require a daemon plan");

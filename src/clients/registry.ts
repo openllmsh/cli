@@ -225,7 +225,7 @@ export type TClientFlags = {
   /** `-d` — translate to the client's own skip-all-approvals flag. */
   readonly dangerous: boolean;
   /** `-r` — point the session at the CLOUD gateway instead of this machine's
-   *  daemon, so subscription hops take the cloud's 307-redirect path. */
+   *  daemon, so subscription hops take the cloud's relay-tunnel path. */
   readonly remote: boolean;
   /** `--new` — always start a fresh session; never offer to attach to one
    *  already running on this machine. */

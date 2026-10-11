@@ -268,9 +268,9 @@ const cloudFetch = (url: string, init: RequestInit): Promise<Response> =>
         : AbortSignal.timeout(CLOUD_FETCH_TIMEOUT_MS),
   });
 
-// Default to the pinned cloud origin, but let the same-machine-307 path
-// override per-request with the deployment that issued the redirect
-// (`?__origin=`), so one daemon serves any deployment.
+// Default to the pinned cloud origin, but let a signed plan override
+// per-request with the deployment that signed it, so one daemon serves any
+// deployment.
 const cloudUrl = (path: string, origin?: string | null): string => {
   const base =
     origin !== undefined && origin !== null && origin.length > 0
@@ -299,8 +299,8 @@ export const fetchBootstrap = async (): Promise<TDaemonBootstrap> => {
 
 /**
  * Fetch a signed plan for a DIRECT client request (local-first gateway,
- * `docs/proposals/local-first-gateway.md` §4.1): the same tuple a
- * same-machine 307 carries, as JSON — the request body never transits the
+ * `docs/proposals/local-first-gateway.md` §4.1): the signed tuple, as
+ * JSON — the request body never transits the
  * cloud. The caller MUST verify `sig` (`planSignatureOk`) before caching
  * or executing. Throws on keyless/rejected/unreachable so the listener
  * can fall back to passthrough.

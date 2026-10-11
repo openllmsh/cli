@@ -53,10 +53,6 @@ const checkedUrl = (value: string): URL => {
   return url;
 };
 
-const isLoopback = (url: URL): boolean =>
-  url.protocol === "http:" &&
-  ["127.0.0.1", "localhost", "[::1]"].includes(url.hostname);
-
 /** Historical installs used the apex; only its exact HTTPS canonical move is
  * credential-preserving. Never trust arbitrary cross-origin redirects.
  */
@@ -126,11 +122,10 @@ const readBounded = async (
 };
 
 /** Uses native compiled-CLI fetch. No interpreter, browser UA, or global patch.
- * Manual redirects keep secrets on the original origin. Legacy signed /v1
- * loopback redirects are allowed without Authorization, matching normal fetch.
+ * Manual redirects keep secrets on the original origin.
  */
 export const memoryHookTransport =
-  (inference = false): NonNullable<THttpClientOptions["fetch"]> =>
+  (): NonNullable<THttpClientOptions["fetch"]> =>
   async (input, init = {}): Promise<Response> => {
     let initial: URL;
     try {
@@ -143,8 +138,6 @@ export const memoryHookTransport =
     }
     let target = initial;
     let cloudTarget = initial;
-    let redirectedToDaemon = false;
-    let noDaemonRetry = false;
     const headers = new Headers(init.headers);
     headers.set("User-Agent", HOOK_USER_AGENT);
     const diagnostic = (code: string, response?: Response): MemoryHookFailure =>
@@ -163,7 +156,6 @@ export const memoryHookTransport =
       const requestHeaders = new Headers(headers);
       if (target.origin !== cloudTarget.origin)
         requestHeaders.delete("Authorization");
-      if (noDaemonRetry) requestHeaders.set("x-openllm-no-daemon", "1");
       let response: Response;
       try {
         response = await fetch(target, {
@@ -171,21 +163,7 @@ export const memoryHookTransport =
           headers: requestHeaders,
           redirect: "manual",
         });
-      } catch (error) {
-        const detail = recordOf(error);
-        const code = detail?.code ?? recordOf(detail?.cause)?.code;
-        // Negative liveness only for an actually refused daemon socket, never
-        // for auth/provider HTTP failures or an ambiguous accepted request.
-        if (
-          redirectedToDaemon &&
-          !noDaemonRetry &&
-          (code === "ECONNREFUSED" || code === "ConnectionRefused")
-        ) {
-          target = cloudTarget;
-          noDaemonRetry = true;
-          redirectedToDaemon = false;
-          continue;
-        }
+      } catch {
         throw diagnostic(init.signal?.aborted ? "timeout" : "network_error");
       }
       if ([301, 302, 303, 307, 308].includes(response.status)) {
@@ -200,26 +178,11 @@ export const memoryHookTransport =
         const preservesMethod =
           init.method === "GET" || [307, 308].includes(response.status);
         const sameOrigin = next.origin === target.origin;
-        const canonical =
-          !redirectedToDaemon && isCanonicalCloudRedirect(target, next);
-        const daemon: boolean =
-          inference &&
-          !redirectedToDaemon &&
-          !noDaemonRetry &&
-          target.origin === cloudTarget.origin &&
-          [307, 308].includes(response.status) &&
-          isLoopback(next) &&
-          next.pathname === initial.pathname &&
-          next.pathname === "/v1/chat/completions";
-        if (
-          !location ||
-          !preservesMethod ||
-          (!sameOrigin && !canonical && !daemon)
-        )
+        const canonical = isCanonicalCloudRedirect(target, next);
+        if (!location || !preservesMethod || (!sameOrigin && !canonical))
           throw diagnostic("redirect_blocked", response);
         if (canonical) cloudTarget = next;
         target = next;
-        redirectedToDaemon ||= daemon;
         continue;
       }
       let text: string;

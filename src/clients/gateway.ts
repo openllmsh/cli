@@ -58,8 +58,8 @@ const daemonReachable = async (port: number): Promise<boolean> => {
  * LOCAL BY DEFAULT: the client points at this machine's daemon
  * (`http://127.0.0.1:<port>`), so subscription models serve locally with no
  * cloud round trip. `-r` (`remote: true`) points it at the cloud origin
- * instead, where subscription hops take the cloud's 307-redirect path back to
- * whichever daemon is live for that key.
+ * instead, where the cloud tunnels subscription hops over the relay to an
+ * online device that serves them.
  *
  * The local default is still PROBED: if no daemon answers, a local base URL
  * would hand the client an address nothing is listening on, so we fall back to

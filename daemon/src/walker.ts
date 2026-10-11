@@ -2,10 +2,10 @@
  * The coreless §3.3 walker — a thin executor of the cloud-resolved plan.
  *
  * The cloud is the only brain: it resolves the alias + cooldowns and hands
- * the daemon the concrete ordered chain across the 307 as `?__plan=`. This
+ * the daemon the concrete ordered chain as a signed plan (`/api/daemon/plan`). This
  * walker walks that list in order — making ZERO routing decisions:
  *
- *   for hop in __plan (in order):
+ *   for hop in plan (in order):
  *     - subscription hop  → inject the local CLI credential, call the
  *                           vendor upstream
  *     - API-key hop       → forward inbound to the cloud, pinned to the hop
@@ -331,17 +331,17 @@ export type TWalkArgs = {
   readonly rawBody: unknown;
   /** The raw inbound bytes — forwarded verbatim to the cloud for API-key hops. */
   readonly rawBytes: ArrayBuffer;
-  /** The `?__plan=` value off the 307 redirect, or null. */
+  /** The signed plan (comma-separated model ids) from `/api/daemon/plan`, or null. */
   readonly planParam: string | null;
-  /** The `?__pmids=` value — concrete upstream `provider_model_id`s parallel
-   *  to `__plan`, so the daemon serves catalog-free. Null on older redirects. */
+  /** Concrete upstream `provider_model_id`s parallel to the plan, so the
+   *  daemon serves catalog-free. Null when the cloud sent none. */
   readonly pmidsParam: string | null;
-  /** The `?__origin=` value — the deployment that issued the 307; the daemon
-   *  forwards API-key hops + records usage back here. Null → pinned origin. */
+  /** The deployment that signed the plan; the daemon forwards API-key hops
+   *  + records usage back here. Null → pinned origin. */
   readonly originParam: string | null;
   /** Signed plan policy; null falls back to the bootstrap/default hop setting. */
   readonly contextOverflowStrategy?: TContextOverflowStrategy | null;
-  /** The `?__sig=` HMAC of the signed payload (plan+pmids+origin+strategy), or null. */
+  /** The HMAC of the signed payload (plan+pmids+origin+strategy), or null. */
   readonly sigParam: string | null;
   readonly startedAt: number;
 };
@@ -364,8 +364,8 @@ type THop = {
   readonly stripSubagentIsolation: boolean;
 };
 
-/** Parse `?__plan=provider/model,provider/model` into ordered model ids.
- *  Also used for the parallel `?__pmids=` list (same comma encoding). */
+/** Parse a `provider/model,provider/model` plan into ordered model ids.
+ *  Also used for the parallel pmids list (same comma encoding). */
 export const parsePlan = (planParam: string | null): ReadonlyArray<string> =>
   planParam === null
     ? []
@@ -376,9 +376,9 @@ export const parsePlan = (planParam: string | null): ReadonlyArray<string> =>
 
 /**
  * Resolve a plan model id to its `{ provider, providerModelId }`. Precedence:
- * (1) the concrete `providerModelId` the cloud pushed in `__pmids` — the
+ * (1) the concrete `providerModelId` the cloud pushed in the plan's pmids — the
  * catalog-free path; (2) the cloud-pulled catalog; (3) splitting the
- * `provider/model` pair (dev / older redirects). Only the provider prefix is
+ * `provider/model` pair (dev / older plans). Only the provider prefix is
  * ever derived locally; the upstream id is authoritative from the cloud.
  */
 export const resolveHop = (modelId: string, providerModelId?: string): THop => {
@@ -443,7 +443,7 @@ export const resolveHop = (modelId: string, providerModelId?: string): THop => {
 };
 
 /**
- * Verify a cloud-signed `?__plan=` against the per-user key handed over at
+ * Verify a cloud-signed plan against the per-user key handed over at
  * bootstrap (coreless proposal §9). Timing-safe. A missing/short/mismatched
  * signature fails closed.
  */
@@ -2140,9 +2140,8 @@ const serveKimiBuiltinSearch = async (
  * Walk the plan and return the committed `Response`. The walker is the
  * daemon's ONLY data path — there is no core-backed fallback — so it
  * always answers with a Response (never throws; a bare throw would 500 the
- * user instead of surfacing a clean error). A request with no `?__plan=`
- * is a misuse of the daemon surface (clients reach it only via the
- * gateway's 307, which always carries a plan) → 400.
+ * user instead of surfacing a clean error). A request the listener could
+ * not resolve a plan for → 400.
  */
 /**
  * Local subscription readiness for one provider — shared by the auth gate
@@ -2312,12 +2311,12 @@ export const runWalker = async (args: TWalkArgs): Promise<Response> => {
   if (planModelIds.length === 0) {
     return errorJson(
       400,
-      "the daemon /v1 surface expects a cloud-issued ?__plan= — point your client at the gateway, which 307s subscription chains here with the resolved plan",
+      "the daemon could not resolve a plan for this request — send an explicit `model` so it can fetch a signed plan from the gateway",
     );
   }
 
   // Reject a forged plan: when the cloud configured a signing secret (so it
-  // handed us a per-user key at bootstrap), the 307 MUST carry a valid `__sig`
+  // handed us a per-user key at bootstrap), the plan MUST carry a valid sig
   // over the full canonical payload (plan + pmids + origin). No key → unsigned
   // mode (dev), accept. (§9 + daemon-presence-without-heartbeat)
   if (
@@ -2329,7 +2328,7 @@ export const runWalker = async (args: TWalkArgs): Promise<Response> => {
       args.sigParam,
     )
   ) {
-    return errorJson(403, "invalid or missing __plan signature");
+    return errorJson(403, "invalid or missing plan signature");
   }
 
   // The concrete upstream ids ride parallel to the plan — split WITHOUT
@@ -3475,8 +3474,8 @@ export const compactUpstreamUrl = (responsesUrl: string): string =>
 
 /**
  * The provider model id a `/responses/compact` call should pin: the
- * plan's first chatgpt hop when a (cloud-resolved) plan rode in via the
- * 307 or the signed-plan cache — the same alias→pmid authority every
+ * plan's first chatgpt hop when a (cloud-resolved) plan was fetched or
+ * replayed from the signed-plan cache — the same alias→pmid authority every
  * inference call uses — else the body's own model id forwarded verbatim
  * (a client naming a concrete Codex model needs no translation).
  */

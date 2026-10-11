@@ -356,8 +356,8 @@ applied to its config once:
   openllm raycast status       report whether OpenLLM is wired in
 
 The applied base URL defaults to your local daemon (127.0.0.1:8787). \`-r\`
-bakes the cloud origin instead, which 307-redirects subscription hops back to a
-live daemon. Because Raycast reads the FILE (it isn't relaunched per session),
+bakes the cloud origin instead, which tunnels subscription hops to an online
+device. Because Raycast reads the FILE (it isn't relaunched per session),
 that choice persists until the next apply — re-run to switch.
 
 Re-run apply after adding models or providers. Restart Raycast afterwards.

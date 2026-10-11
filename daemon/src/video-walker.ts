@@ -141,7 +141,7 @@ const signedPlanError = (args: TWalkArgs): Response | null => {
       args.sigParam,
     )
   ) {
-    return errorJson(403, "invalid or missing __plan signature");
+    return errorJson(403, "invalid or missing plan signature");
   }
   if (args.planParam === null)
     return errorJson(400, "videos require a daemon plan");

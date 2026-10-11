@@ -8,7 +8,7 @@
  * `@openllm/api`, no db) and lets config update without recompiling.
  *
  * The walker makes ZERO routing decisions (the cloud resolved the chain
- * and 307'd it as `?__plan=`), so the daemon only needs from the snapshot:
+ * and handed it over as a signed plan), so the daemon only needs from the snapshot:
  * model id → `provider_model_id` (catalog), per-model `output_token_limit`
  * (raise-only max-tokens backfill on alias hops), the per-user
  * plan-signing key, and the cloud-state for `/status`. Fallback/binding
@@ -145,7 +145,7 @@ export const refreshBootstrap = (): Promise<boolean> =>
   });
 
 /**
- * The per-user key for verifying the cloud's `?__plan=` signature (handed
+ * The per-user key for verifying the cloud's plan signature (handed
  * over at bootstrap). Null when the cloud has no signing secret configured
  * — the walker then accepts unsigned plans (dev). See `walker.ts`.
  */
@@ -254,7 +254,7 @@ export const latestCliVersion = (): string | null =>
 
 /**
  * Look up a model id in the cached catalog → its `{ provider,
- * provider_model_id }` row. The walker uses this to resolve each `__plan`
+ * provider_model_id }` row. The walker uses this to resolve each plan
  * hop to its concrete upstream model id (falling back to splitting the
  * `provider/model` pair when uncached).
  */

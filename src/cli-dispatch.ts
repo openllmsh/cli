@@ -163,7 +163,7 @@ ${sessionSelection}
 
 The session points at your local daemon by default, so subscription models
 serve locally with no cloud round trip. \`-r\` points it at the cloud origin,
-which 307-redirects subscription hops back to a live daemon.
+which tunnels subscription hops to one of your online devices.
 
   openllm ${id} -- --help   # \`--\` also works, though nothing after the
                           # client name is ever read by openllm

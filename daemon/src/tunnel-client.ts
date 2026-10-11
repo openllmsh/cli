@@ -8,18 +8,18 @@
  * `tunnel_*` splice — if neither RTC nor mux is available the hop fails and
  * the walker continues.
  *
- * Stream OPENs set `consumer:"daemon"` so the peer's tunnel-server stamps
- * `x-openllm-tunneled` and the peer walker loop-guards further fleet.
- * Browser `tunnelFetch` omits that field — selected-device contract.
+ * Both rungs go through `fleetRequest` (`@openllmsh/tunnel/fleet`), the one
+ * handler origin also uses: it sets `consumer:"daemon"` so the peer's
+ * tunnel-server stamps `x-openllm-tunneled` and the peer walker loop-guards
+ * further fleet hops.
  *
- * Mirrors the browser's `tunnelFetch` (lib/stores/daemon-store.ts).
  * Any failure rejects — the walker treats it as a failed hop and continues
  * the walk (degradation preserved).
  */
 
 import type { TTunnelSurface } from "@openllmsh/protocol";
 import { RTC_CAP, SEEDGATE_CAP } from "@openllmsh/protocol";
-import { tunnelStream } from "@openllmsh/tunnel/streams";
+import { fleetRequest } from "@openllmsh/tunnel/fleet";
 import { fleetSubscriptionPubkeyFor } from "./config";
 import { getMuxPeerCaps, muxChannelTo } from "./mux-host";
 import { ensureRtcTo, getRtcMuxChannel, markRtcFailure } from "./rtc-client";
@@ -91,27 +91,17 @@ const tunnelToPeerLive: TTunnelToPeerImpl = async (args) => {
     hasSeedgate1: peerCaps?.has(SEEDGATE_CAP) ?? false,
   });
 
-  // Fleet hop identity rides the stream OPEN so the peer's tunnel-server can
-  // stamp the walker loop-guard. Browser tunnels omit `consumer` and must
-  // remain free to tryFleetTunnel once (selected-device contract).
-  const fleetOpen = {
+  const request = {
+    surface: args.surface,
     headers,
     body: args.body,
     signal: args.signal,
-    consumer: "daemon" as const,
   };
 
   const rtc = getRtcMuxChannel(args.keyId);
   if (rtc !== null) {
     try {
-      const result = await tunnelStream(rtc, {
-        surface: args.surface,
-        ...fleetOpen,
-      });
-      return new Response(result.body, {
-        status: result.status,
-        headers: result.headers,
-      });
+      return await fleetRequest(rtc, request);
     } catch (error: unknown) {
       // Caller abort is not an RTC path failure — do not cache or fall through.
       if (args.signal.aborted) {
@@ -135,14 +125,7 @@ const tunnelToPeerLive: TTunnelToPeerImpl = async (args) => {
     );
   }
   try {
-    const result = await tunnelStream(mux, {
-      surface: args.surface,
-      ...fleetOpen,
-    });
-    return new Response(result.body, {
-      status: result.status,
-      headers: result.headers,
-    });
+    return await fleetRequest(mux, request);
   } catch (error: unknown) {
     if (args.signal.aborted) {
       throw error instanceof Error
