@@ -1466,7 +1466,16 @@ provision_clis() {
     fi
     launch_vendor_cli_install "$name" "$cmd" "$slug" "$dest" "$url" "$run_path" "$curl_bin" || true
   done
-  provision_antigravity "$run_path" "$curl_bin" || true
+  # Antigravity is behind a kill switch (off by default — not yet reliable).
+  # `OPENLLM_ANTIGRAVITY=1` opts in and writes the marker the daemon reads
+  # (packages/cli/daemon/src/antigravity-feature.ts); `=0` opts back out.
+  case "${OPENLLM_ANTIGRAVITY:-}" in
+    1) touch "$OPENLLM_DIR/antigravity-enabled" 2>/dev/null || true ;;
+    0) rm -f "$OPENLLM_DIR/antigravity-enabled" 2>/dev/null || true ;;
+  esac
+  if [ -f "$OPENLLM_DIR/antigravity-enabled" ]; then
+    provision_antigravity "$run_path" "$curl_bin" || true
+  fi
 }
 # `|| true` + the subshell/background jobs keep this off the `set -euo
 # pipefail` path — a vendor install can never abort the daemon install.

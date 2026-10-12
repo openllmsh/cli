@@ -1,4 +1,5 @@
 import type { TSubscriptionProviderSlug } from "@openllmsh/protocol";
+import { antigravityEnabled } from "../antigravity-feature";
 import { antigravityDelegate } from "./antigravity";
 import { chatgptDelegate } from "./chatgpt";
 import { claudeCodeDelegate } from "./claude-code";
@@ -13,7 +14,8 @@ export * from "./types";
 /**
  * The subscription provider slugs the daemon serves locally. These are
  * exactly the `authKind: "oauth"` providers the cloud refuses
- * server-side (`packages/core/providers/registry.ts`).
+ * server-side (`packages/core/providers/registry.ts`). Antigravity is
+ * registered only when its kill switch is on (`antigravity-feature.ts`).
  */
 export const DELEGATES: Readonly<Record<string, TProviderDelegate>> = {
   claude_code: claudeCodeDelegate,
@@ -22,7 +24,7 @@ export const DELEGATES: Readonly<Record<string, TProviderDelegate>> = {
   grok: grokDelegate,
   cursor: cursorDelegate,
   muse: museDelegate,
-  antigravity: antigravityDelegate,
+  ...(antigravityEnabled() ? { antigravity: antigravityDelegate } : {}),
 };
 
 export const isSubscriptionSlug = (
