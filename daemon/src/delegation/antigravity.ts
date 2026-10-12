@@ -29,6 +29,7 @@ import { request as httpRequest } from "node:http";
 import { join } from "node:path";
 import type {
   TDaemonProviderConnection,
+  TProviderModelEntry,
   TProviderUsageSnapshot,
 } from "@openllmsh/protocol";
 import { noteAuthStoreIdentityChange } from "../auth-user-action";
@@ -39,6 +40,7 @@ import {
   ANTIGRAVITY_AUTH_METHOD,
   ANTIGRAVITY_INIT_PARAMS,
   antigravityArgv,
+  antigravityModelRows,
   antigravitySpawnEnv,
   antigravityTokenPath,
   classifyAntigravityFailure,
@@ -49,6 +51,10 @@ import {
   validateAntigravityCallback,
   writeAntigravityBrowserHelper,
 } from "../native-runtime/antigravity-acp";
+import {
+  readAntigravityModels,
+  recordAntigravityModels,
+} from "../native-runtime/antigravity-model-observation";
 import { AcpClient, AcpRpcError } from "../native-runtime/cursor-acp";
 import {
   clearPendingAuth,
@@ -69,7 +75,11 @@ import {
   publishPendingAuth,
   resolveLoginFlow,
 } from "./login-flow";
-import type { TProviderDelegate } from "./types";
+import type {
+  TModelDiscoveryOptions,
+  TModelDiscoveryResult,
+  TProviderDelegate,
+} from "./types";
 import {
   connectedObservation,
   disconnectedObservation,
@@ -292,6 +302,22 @@ const connect = (): Promise<TConnectResult> =>
             { methodId: ANTIGRAVITY_AUTH_METHOD },
             LOGIN_TIMEOUT_MS,
           );
+          // Same process, one RPC: learn the account's selectable models now
+          // so the first request never plans a model the plan lacks. Best
+          // effort — a failure here never fails the sign-in.
+          await client
+            .request(
+              "session/new",
+              { cwd: scratch, mcpServers: [] },
+              URL_WAIT_MS,
+            )
+            .then((opened) =>
+              recordAntigravityModels(
+                geminiHome(),
+                antigravityModelRows(opened),
+              ),
+            )
+            .catch(() => {});
           finish({ ok: true });
         } catch (error) {
           const failure = classifyAntigravityFailure(error);
@@ -439,6 +465,18 @@ export const antigravityDelegate: TProviderDelegate = {
           }),
     };
   },
+
+  // Models come ONLY from the agent's own session/new selector, observed
+  // during sign-in and every inference turn — never a dedicated probe.
+  // Unobserved → skipped (the previously reported list stands).
+  discoverModels: async (
+    _options: TModelDiscoveryOptions,
+  ): Promise<TModelDiscoveryResult> => {
+    const models = readAntigravityModels(geminiHome());
+    return models === null ? { kind: "skipped" } : { kind: "success", models };
+  },
+  listModels: async (): Promise<ReadonlyArray<TProviderModelEntry> | null> =>
+    readAntigravityModels(geminiHome()),
 
   // Quota windows via Google's Code Assist quota endpoints with the agent's
   // own token — the t3code approach (see `./antigravity-usage.ts`).

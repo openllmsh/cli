@@ -45,6 +45,10 @@ import { join } from "node:path";
 import type { TChatCompletionChunk } from "@openllmsh/protocol";
 import { daemonTempDir } from "../sandbox/working-set";
 import { DAEMON_VERSION } from "../version";
+import {
+  readAntigravityModels,
+  recordAntigravityModels,
+} from "./antigravity-model-observation";
 import { AcpClient, AcpRpcError, createAcpTurnState } from "./cursor-acp";
 import type { TCursorMcpServer } from "./cursor-mcp-server";
 import { startCursorMcpServer } from "./cursor-mcp-server";
@@ -189,6 +193,20 @@ export const classifyAntigravityFailure = (
         cooldown: "payment",
       };
     }
+    // Plan-gated model: our pre-submit pin check, or the agent's own -32602
+    // ("Model 'x' is not available for the current authentication method").
+    // Keep the model id so the client sees WHY, not "request rejected".
+    if (
+      /is not available (on this Google account|for the current authentication method)/i.test(
+        error.message,
+      )
+    ) {
+      const model = /model '?([\w.-]+)'?/i.exec(error.message)?.[1];
+      return {
+        reason: `antigravity: model ${model ?? "requested"} is not available on this Google account's plan`,
+        cooldown: "payment",
+      };
+    }
     if (QUOTA_RE.test(error.message)) {
       return {
         reason: "antigravity: quota exhausted",
@@ -261,7 +279,63 @@ export const handleAntigravityServerRequest = (
   return null;
 };
 
-type TSelectOption = { readonly value?: unknown; readonly options?: unknown };
+type TSelectOption = {
+  readonly value?: unknown;
+  readonly name?: unknown;
+  readonly options?: unknown;
+};
+
+/** Flatten a `select` config option into `{ value, name }` rows. */
+const selectRows = (
+  options: unknown,
+): Array<{ readonly value: string; readonly name: string | null }> => {
+  if (!Array.isArray(options)) return [];
+  const out: Array<{ readonly value: string; readonly name: string | null }> =
+    [];
+  for (const entry of options as ReadonlyArray<TSelectOption>) {
+    if (typeof entry?.value === "string") {
+      out.push({
+        value: entry.value,
+        name: typeof entry.name === "string" ? entry.name : null,
+      });
+    } else out.push(...selectRows(entry?.options));
+  }
+  return out;
+};
+
+/**
+ * The account's selectable model rows from a `session/new` result (ACP v2
+ * configOptions, else the legacy models block). Empty when absent.
+ */
+export const antigravityModelRows = (
+  sessionResult: unknown,
+): ReadonlyArray<{ readonly value: string; readonly name: string | null }> => {
+  const r = sessionResult as {
+    readonly configOptions?: ReadonlyArray<{
+      readonly id?: unknown;
+      readonly category?: unknown;
+      readonly type?: unknown;
+      readonly options?: unknown;
+    }>;
+    readonly models?: {
+      readonly availableModels?: ReadonlyArray<{
+        readonly modelId?: unknown;
+        readonly name?: unknown;
+      }>;
+    };
+  } | null;
+  const config = r?.configOptions?.find(
+    (o) => o.id === "model" || o.category === "model",
+  );
+  if (config !== undefined && config.type === "select") {
+    return selectRows(config.options);
+  }
+  return (r?.models?.availableModels ?? []).flatMap((m) =>
+    typeof m.modelId === "string"
+      ? [{ value: m.modelId, name: typeof m.name === "string" ? m.name : null }]
+      : [],
+  );
+};
 
 /** Flatten a `select` config option (grouped or flat) into its values. */
 const selectValues = (options: unknown): string[] => {
@@ -443,6 +517,23 @@ export const runAntigravityNative = async (
   if (params.signal.aborted) {
     return { kind: "declined", reason: "client aborted" };
   }
+  // Pre-flight from the selector this sign-in already showed us: a model the
+  // account lacks declines instantly instead of after a cold agent spawn.
+  const observed =
+    params.env.GEMINI_HOME === undefined
+      ? null
+      : readAntigravityModels(params.env.GEMINI_HOME);
+  const requestedModel = params.providerModelId.trim();
+  if (
+    observed !== null &&
+    !observed.some((m) => m.provider_model_id === requestedModel)
+  ) {
+    return {
+      kind: "declined",
+      reason: `antigravity: model ${requestedModel} is not available on this Google account's plan`,
+      cooldownReason: "payment",
+    };
+  }
 
   type TQueueItem =
     | TChatCompletionChunk
@@ -610,6 +701,12 @@ export const runAntigravityNative = async (
       });
     }
     sessionId = sid;
+    // Free model discovery: this session/new already carries the account's
+    // selectable models — record them so planning skips ids it lacks.
+    const geminiHome = params.env.GEMINI_HOME;
+    if (geminiHome !== undefined) {
+      recordAntigravityModels(geminiHome, antigravityModelRows(opened));
+    }
     await ensureAntigravityModel(client, sid, params.providerModelId, opened);
     if (params.signal.aborted) {
       throw new DOMException("client aborted", "AbortError");
