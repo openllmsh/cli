@@ -14,12 +14,14 @@
  * agent's own file store under the isolated GEMINI_HOME — the daemon never
  * reads it (status only checks the file exists).
  *
- * Inference is bridge-only (`native-runtime/antigravity-acp.ts`). Google
- * exposes no quota API, so `usage()` reports unavailable and quota-aware
- * fallback is reactive (classified ACP errors → hop cooldown).
+ * Inference is bridge-only (`native-runtime/antigravity-acp.ts`). The agent
+ * exposes no quota over ACP, so `usage()` reads Google's Code Assist quota
+ * endpoints with the agent's own token, as t3code does
+ * (`./antigravity-usage.ts`); classified ACP errors still drive hop cooldown.
  *
  * Demand-only: `status()` never spawns the agent (each launch unpacks ~1 GB).
  */
+
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import { request as httpRequest } from "node:http";
@@ -53,6 +55,7 @@ import {
   pendingAuthDetail,
 } from "../pending-auth";
 import { daemonTempDir } from "../sandbox/working-set";
+import { readAntigravityUsage } from "./antigravity-usage";
 import { loginWiring } from "./delegate-shared";
 import type { TConnectResult } from "./login-flow";
 import {
@@ -412,12 +415,10 @@ export const antigravityDelegate: TProviderDelegate = {
     };
   },
 
-  usage: async (): Promise<TProviderUsageSnapshot> => ({
-    kind: "unavailable",
-    reason:
-      "Google does not publish Antigravity quota through a local API. Fallback triggers on quota errors instead.",
-    link: "https://antigravity.google/docs/plans",
-  }),
+  // Quota windows via Google's Code Assist quota endpoints with the agent's
+  // own token — the t3code approach (see `./antigravity-usage.ts`).
+  usage: (): Promise<TProviderUsageSnapshot> =>
+    readAntigravityUsage({ geminiHome: geminiHome() }),
 
   credentialForUpstream: async () => {
     throw new Error(

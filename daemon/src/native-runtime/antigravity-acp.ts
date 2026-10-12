@@ -35,8 +35,8 @@
  * `tool_call` update that is not our loopback MCP tool cancels the turn.
  *
  * v1 = one cold session per request (the conversation is flattened by
- * `cursorRequestOf`). ACP reports no token usage — the terminal chunk carries
- * the shared chars/4 estimate (`createAcpTurnState`).
+ * `cursorRequestOf`). The agent reports real per-call token totals via ACP
+ * `usage_update` (`createAcpTurnState` sums them; output share estimated).
  */
 
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
@@ -166,6 +166,22 @@ export const classifyAntigravityFailure = (
   error: unknown,
 ): TAntigravityFailure => {
   if (error instanceof AcpRpcError) {
+    // Google's onboarding refused the signed-in account (e.g. "User is
+    // ineligible for free-tier … Verify your account", VALIDATION_REQUIRED).
+    // The agent wipes its own token afterwards, so without this branch the
+    // -32000 below would misreport it as a plain missing sign-in.
+    if (
+      /Onboarding failed|not eligible for Antigravity|ineligible/i.test(
+        error.message,
+      )
+    ) {
+      return {
+        reason: /verify your account|VALIDATION_REQUIRED/i.test(error.message)
+          ? "antigravity: Google account not eligible — verify the account with Google, then sign in again"
+          : "antigravity: Google account not eligible for Antigravity",
+        cooldown: "payment",
+      };
+    }
     if (/SUBSCRIPTION_REQUIRED/.test(error.message)) {
       return {
         reason: "antigravity: Google account has no eligible Antigravity plan",

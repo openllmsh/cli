@@ -278,6 +278,9 @@ export const createAcpTurnState = (params: {
   let sawOutput = false;
   let outputChars = 0;
   let thoughtChars = 0;
+  // Tokens the agent itself reported via ACP `usage_update` (Antigravity sends
+  // one per landed model call, `used` = that call's delta). 0 = none reported.
+  let reportedTokens = 0;
   let buffered = "";
   const baseChunk = (
     delta: Record<string, unknown>,
@@ -307,11 +310,22 @@ export const createAcpTurnState = (params: {
     return baseChunk({ role: "assistant", content: "", ...delta }, null);
   };
   const usageRow = (): TUsage => {
-    // ACP reports no token counts — ESTIMATE with the walker's own chars/4
-    // ruler (marked by construction: prompt side runs through
-    // estimateBodyTokens; output side is the accumulated chunk text).
+    // Output side: the walker's chars/4 ruler over the accumulated chunk text.
+    const estimatedCompletion = Math.ceil((outputChars + thoughtChars) / 4);
+    if (reportedTokens > 0) {
+      // The agent reported a real TOTAL but no input/output split: keep the
+      // real total and attribute the estimated output share within it.
+      const completionTokens = Math.min(estimatedCompletion, reportedTokens);
+      return {
+        prompt_tokens: reportedTokens - completionTokens,
+        completion_tokens: completionTokens,
+        total_tokens: reportedTokens,
+      };
+    }
+    // No usage reported (Cursor) — ESTIMATE both sides; prompt side runs
+    // through estimateBodyTokens.
     const promptTokens = estimateBodyTokens(params.promptText);
-    const completionTokens = Math.ceil((outputChars + thoughtChars) / 4);
+    const completionTokens = estimatedCompletion;
     return {
       prompt_tokens: promptTokens,
       completion_tokens: completionTokens,
@@ -324,7 +338,18 @@ export const createAcpTurnState = (params: {
       const u = update as {
         readonly sessionUpdate?: unknown;
         readonly content?: unknown;
+        readonly used?: unknown;
       };
+      if (u.sessionUpdate === "usage_update") {
+        if (
+          typeof u.used === "number" &&
+          Number.isSafeInteger(u.used) &&
+          u.used > 0
+        ) {
+          reportedTokens += u.used;
+        }
+        return null;
+      }
       if (u.sessionUpdate === "agent_message_chunk") {
         const text = updateText(u.content);
         if (text === null || text.length === 0) return null;
