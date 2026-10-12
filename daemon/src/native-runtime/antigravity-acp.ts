@@ -464,6 +464,18 @@ const isNativeToolUpdate = (update: unknown): boolean => {
   return kind === "tool_call" || kind === "tool_call_update";
 };
 
+/**
+ * `session/new` metadata: an EMPTY built-in tool allowlist. agy_acp_server
+ * reads `_meta.agy.enabledTools` (its `ToolFilterConfig`); `[]` disables every
+ * built-in tool (shell, file, web search, subagents…) so the model only sees
+ * our loopback MCP tools. Native tools were already refused at permission
+ * time, but advertised they let the model plan around them (e.g. `search_web`
+ * on a follow-up), costing seconds and failing turns.
+ */
+export const ANTIGRAVITY_SESSION_META = {
+  agy: { enabledTools: [] },
+} as const;
+
 /** MCP server name we register for client tools (session/new). */
 const CLIENT_TOOLS_MCP_SERVER = "openllm-client-tools";
 
@@ -935,6 +947,7 @@ export const runAntigravityNative = async (
                 },
               ]
             : [],
+        _meta: ANTIGRAVITY_SESSION_META,
       },
       RPC_TIMEOUT_MS,
     );
