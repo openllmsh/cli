@@ -575,7 +575,8 @@ type TWarmAgent = {
   /** Pool epoch the process was spawned in; a bump makes it un-parkable. */
   readonly epoch: number;
   turns: number;
-  /** Sign-in identity observed when parked. */
+  /** Sign-in identity recorded when the process authenticated; never
+   *  overwritten, so a token swap mid-life retires the process. */
   identity: string | null;
   idleTimer: ReturnType<typeof setTimeout> | undefined;
 };
@@ -657,12 +658,13 @@ const releaseWarmAgent = (
     !agent.client.isAlive() ||
     agent.epoch !== warmEpoch ||
     agent.turns >= ANTIGRAVITY_WARM_MAX_TURNS ||
-    identity === null
+    identity === null ||
+    agent.identity === null ||
+    agent.identity !== identity
   ) {
     retireWarmAgent(agent, null);
     return;
   }
-  agent.identity = identity;
   if (!exitHookInstalled) {
     exitHookInstalled = true;
     process.on("exit", () => disposeAntigravityWarmPool());
@@ -929,6 +931,11 @@ export const runAntigravityNative = async (
       { methodId: ANTIGRAVITY_AUTH_METHOD },
       params.authTimeoutMs ?? INFERENCE_AUTH_TIMEOUT_MS,
     );
+    const owned = currentAgent();
+    if (owned !== null && owned.client === client) {
+      owned.identity =
+        geminiHome === undefined ? null : antigravitySignInIdentity(geminiHome);
+    }
   };
 
   const openSession = (owned: TWarmAgent): Promise<unknown> =>

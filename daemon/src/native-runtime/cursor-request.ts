@@ -124,6 +124,9 @@ export const cursorRequestOf = (
   // begins with "User: " must not be mistaken for framing and stripped.
   let nonSystemTurns = 0;
   let loneUserText: string | null = null;
+  // Trailing run of unanswered user turns — together they are the current
+  // request; only a reply closes a request into completed history.
+  let pendingUserTexts: string[] = [];
   for (const message of canonical.messages) {
     if (message.role === "system") {
       const text = textAndImagesOf(message.content, images);
@@ -134,12 +137,14 @@ export const cursorRequestOf = (
       const text = textAndImagesOf(message.content, images);
       nonSystemTurns += 1;
       lines.push(`Tool result (${message.tool_call_id}): ${text}`);
+      pendingUserTexts = [];
       continue;
     }
     if (message.role === "user") {
       const text = textAndImagesOf(message.content, images);
       nonSystemTurns += 1;
       loneUserText = text;
+      pendingUserTexts.push(text);
       lines.push(`User: ${text}`);
       continue;
     }
@@ -155,6 +160,7 @@ export const cursorRequestOf = (
       if (rendered.length > 0) {
         nonSystemTurns += 1;
         lines.push(`Assistant: ${rendered}`);
+        pendingUserTexts = [];
       }
     }
   }
@@ -166,17 +172,17 @@ export const cursorRequestOf = (
       ? loneUserText
       : lines.join("\n\n");
   const lastTurn = canonical.messages.findLast(
-    (message) => message.role !== "system",
+    (message): boolean => message.role !== "system",
   );
   if (
     options.frameHistory === true &&
     lastTurn?.role === "user" &&
-    loneUserText !== null &&
-    lines.length > 1
+    pendingUserTexts.length > 0 &&
+    lines.length > pendingUserTexts.length
   ) {
     promptText = `Conversation so far (already completed — do not repeat any of it):\n\n${lines
-      .slice(0, -1)
-      .join("\n\n")}\n\nCurrent request (answer only this):\n${loneUserText}`;
+      .slice(0, -pendingUserTexts.length)
+      .join("\n\n")}\n\nCurrent request (answer only this):\n${pendingUserTexts.join("\n\n")}`;
   }
   // ACP starts cold after a caller-tool handoff. Mark the resumption boundary
   // rather than presenting the original request as fresh work a second time.
