@@ -1332,10 +1332,10 @@ install_antigravity_release() {
 
   local versions="$ANTIGRAVITY_DIR/versions"
   local final="$versions/$version"
-  mkdir -p "$versions"
+  mkdir -p "$versions" || return 6
   if [ -f "$final/.install-complete" ] && [ -x "$final/$ANTIGRAVITY_EXE" ] \
     && [ -x "$final/$ANTIGRAVITY_HARNESS" ]; then
-    ln -sfn "versions/$version" "$ANTIGRAVITY_DIR/current"
+    ln -sfn "versions/$version" "$ANTIGRAVITY_DIR/current" || return 6
     echo "Antigravity: release $version already unpacked — activated."
     return 0
   fi
@@ -1353,7 +1353,8 @@ install_antigravity_release() {
   esac
 
   local staging rc=0
-  staging="$(mktemp -d "$versions/.staging.XXXXXX")"
+  staging="$(mktemp -d "$versions/.staging.XXXXXX")" || return 6
+  [ -n "$staging" ] && [ -d "$staging" ] || return 6
   # Staging lives beside the target so the final `mv` is a same-filesystem
   # rename. The body runs in a subshell so staging is removed on every exit
   # path. It sits in a `|| rc=$?` context, where bash IGNORES `set -e`, so every
