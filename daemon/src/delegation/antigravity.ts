@@ -44,6 +44,7 @@ import {
   antigravitySpawnEnv,
   antigravityTokenPath,
   classifyAntigravityFailure,
+  disposeAntigravityWarmPool,
   isAntigravityAgent,
   parseAntigravityAuthUrl,
   prepareAntigravityProfile,
@@ -256,6 +257,8 @@ const connect = (): Promise<TConnectResult> =>
           return;
         }
         if (result.ok && tokenPresent()) {
+          // A new sign-in: no warm agent from the previous one may serve.
+          disposeAntigravityWarmPool();
           noteAuthStoreIdentityChange(PROVIDER);
           finalizeLoginTerminal({
             flow,
@@ -522,6 +525,7 @@ export const antigravityDelegate: TProviderDelegate = {
         await rm(scratch, { recursive: true, force: true });
       }
     }
+    disposeAntigravityWarmPool();
     noteAuthStoreIdentityChange(PROVIDER);
     return tokenPresent()
       ? { ok: false, detail: "credential still present after logout" }

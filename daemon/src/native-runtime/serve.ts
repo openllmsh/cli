@@ -1346,8 +1346,8 @@ const serveCursorHop = async (
 };
 
 /**
- * Antigravity serve path — cold ACP session per request through Google's
- * `agy_acp_server`. The conversation is flattened by `cursorRequestOf` (same
+ * Antigravity serve path — a fresh ACP session per request through Google's
+ * `agy_acp_server` (on a warm agent process when one is idle). The conversation is flattened by `cursorRequestOf` (same
  * ACP prompt shape); client tools ride the loopback MCP server.
  */
 const serveAntigravityHop = async (

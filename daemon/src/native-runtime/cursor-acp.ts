@@ -449,6 +449,7 @@ export class AcpClient {
   private readonly proc: ReturnType<typeof Bun.spawn>;
   private readonly stdin: { write: (s: string) => void; flush?: () => void };
   private disposed = false;
+  private exited = false;
   private cancelTimer: ReturnType<typeof setTimeout> | undefined;
   private readonly label: string;
   private readonly onNonJsonLine: ((line: string) => void) | undefined;
@@ -494,6 +495,7 @@ export class AcpClient {
       () => this.failAllPending(`${this.label} stdout failed`),
     );
     void this.proc.exited.then(() => {
+      this.exited = true;
       clearTimeout(this.cancelTimer);
       this.failAllPending(`${this.label} exited`);
     });
@@ -559,6 +561,20 @@ export class AcpClient {
     if (this.disposed || this.cancelTimer !== undefined) return;
     this.notify("session/cancel", { sessionId });
     this.cancelTimer = setTimeout(() => this.dispose(), 1_000);
+  }
+
+  /** True while the child runs and nothing has disposed it — a reusable
+   *  (warm) client must pass this before its next turn. */
+  isAlive(): boolean {
+    return !this.disposed && !this.exited;
+  }
+
+  /** Resolves once the child process has exited (never rejects). */
+  whenExited(): Promise<void> {
+    return this.proc.exited.then(
+      () => undefined,
+      () => undefined,
+    );
   }
 
   dispose(): void {

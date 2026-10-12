@@ -34,11 +34,16 @@
  * capabilities are off, the cwd is an empty daemon temp dir, and any native
  * `tool_call` update that is not our loopback MCP tool cancels the turn.
  *
- * v1 = one cold session per request (the conversation is flattened by
- * `cursorRequestOf`). The agent reports real per-call token totals via ACP
- * `usage_update` (`createAcpTurnState` sums them; output share estimated).
+ * One FRESH session per request (the conversation is flattened by
+ * `cursorRequestOf`), each in its own empty temp cwd with its own loopback
+ * MCP server. The agent PROCESS may be warm: a process whose last turn ended
+ * on a clean ACP terminal is parked in a small idle pool (see "Warm process
+ * reuse" below) so the next request skips spawn + initialize + authenticate.
+ * The agent reports real per-call token totals via ACP `usage_update`
+ * (`createAcpTurnState` sums them; output share estimated).
  */
 
+import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import { join } from "node:path";
@@ -46,6 +51,7 @@ import type { TChatCompletionChunk } from "@openllmsh/protocol";
 import { daemonTempDir } from "../sandbox/working-set";
 import { DAEMON_VERSION } from "../version";
 import {
+  antigravitySignInIdentity,
   readAntigravityModels,
   recordAntigravityModels,
 } from "./antigravity-model-observation";
@@ -251,27 +257,48 @@ const declineFrom = (error: unknown, signal: AbortSignal): TNativeRunResult => {
 };
 
 /**
- * Server→client requests: native tools never run, so every permission ask is
- * REJECTED (prefer `reject_once`, else `reject_always`, else cancel). All
- * other requests are refused (fs/terminal capabilities are advertised off).
+ * Server→client requests. Native tools never run, so a permission ask is
+ * REJECTED (prefer `reject_once`, else `reject_always`, else cancel) — with
+ * one exception: the agent's pre-tool hook also asks before dispatching to
+ * OUR loopback MCP server, and rejecting that is what made every caller tool
+ * call fail. Such an ask is allowed ONCE when its structured `_meta` names our
+ * server AND a tool registered for this turn (`allowedMcpTools`); the
+ * model-controlled title/rawInput are never consulted. Everything else is
+ * refused (fs/terminal capabilities are advertised off).
  */
 export const handleAntigravityServerRequest = (
   method: string,
   params: unknown,
+  allowedMcpTools: ReadonlySet<string> = new Set(),
 ): unknown => {
   if (method === "session/request_permission") {
-    const options = (
-      params as {
-        readonly options?: ReadonlyArray<{
-          readonly optionId?: unknown;
-          readonly kind?: unknown;
-        }>;
-      } | null
-    )?.options;
-    const pick = Array.isArray(options)
-      ? (options.find((o) => o.kind === "reject_once") ??
-        options.find((o) => o.kind === "reject_always"))
-      : undefined;
+    const p = params as {
+      readonly toolCall?: unknown;
+      readonly options?: ReadonlyArray<{
+        readonly optionId?: unknown;
+        readonly kind?: unknown;
+      }>;
+    } | null;
+    const options = Array.isArray(p?.options) ? p.options : [];
+    const meta = (p?.toolCall as { readonly _meta?: unknown } | null)?._meta as
+      | {
+          readonly is_mcp_tool_call?: unknown;
+          readonly mcp?: {
+            readonly server?: unknown;
+            readonly tool?: unknown;
+          } | null;
+        }
+      | null
+      | undefined;
+    const ours =
+      meta?.is_mcp_tool_call === true &&
+      meta.mcp?.server === CLIENT_TOOLS_MCP_SERVER &&
+      typeof meta.mcp.tool === "string" &&
+      allowedMcpTools.has(meta.mcp.tool);
+    const pick = ours
+      ? options.find((o) => o.kind === "allow_once")
+      : (options.find((o) => o.kind === "reject_once") ??
+        options.find((o) => o.kind === "reject_always"));
     return typeof pick?.optionId === "string"
       ? { outcome: { outcome: "selected", optionId: pick.optionId } }
       : { outcome: { outcome: "cancelled" } };
@@ -484,6 +511,174 @@ export const createMcpCallTracker = (): {
   };
 };
 
+// ─── Warm process reuse ─────────────────────────────────────────────────────
+//
+// Spawn + initialize + authenticate is most of a short turn's latency, so a
+// process whose turn ended on a CLEAN ACP terminal may be parked and leased
+// to the next request. Rules (each one is load-bearing):
+//
+//   - On demand only. Nothing is spawned, authenticated or pre-opened in the
+//     background; the pool only ever holds processes a real request started.
+//   - Keyed by the binary + the COMPLETE final spawn env (sha256 — the raw
+//     env, which may carry secrets, is never stored as a key or logged), so a
+//     different profile, account home or override never shares a process.
+//   - Bound to the sign-in identity (refresh-token hash) observed when parked;
+//     a different or missing identity at lease time retires the process, and
+//     sign-in / sign-out bumps an epoch that retires every process.
+//   - Exclusive leases: a parked process is removed from the pool for the
+//     whole turn. A concurrent request finds no idle match and cold-spawns its
+//     own process — two turns never share one agent.
+//   - Every request still gets a fresh empty cwd, a fresh session/new and a
+//     fresh loopback MCP server; only the process is reused. The process has
+//     its own daemon-owned cwd that lives until the process is disposed.
+//   - Only a successful `session/prompt` terminal parks. Setup failures,
+//     aborts, idle/turn timeouts, native-tool cancels and the client-tool
+//     early settlement (a cancelled turn) all dispose the process.
+//   - Bounded: at most ANTIGRAVITY_WARM_POOL_MAX idle processes, each retired
+//     after ANTIGRAVITY_WARM_IDLE_TTL_MS idle or ANTIGRAVITY_WARM_MAX_TURNS
+//     turns, and all killed on daemon exit.
+
+/** Idle processes kept across all keys (oldest evicted first). */
+export const ANTIGRAVITY_WARM_POOL_MAX = 2;
+/** How long a parked process may sit idle before it is killed. */
+export const ANTIGRAVITY_WARM_IDLE_TTL_MS = 180_000;
+/** Turns one process serves before it is retired (bounds agent-side session
+ *  accumulation — ACP has no portable session close). */
+export const ANTIGRAVITY_WARM_MAX_TURNS = 20;
+
+type TWarmRoute = {
+  /** The leasing turn's `session/update` handler; null while parked. */
+  onUpdate: ((params: unknown) => void) | null;
+  /** Caller tools the leasing turn registered on its MCP server; empty while
+   *  parked, so a parked process can never get a permission approved. */
+  allowedMcpTools: ReadonlySet<string>;
+};
+
+type TWarmAgent = {
+  readonly key: string;
+  readonly client: AcpClient;
+  /** Process cwd (daemon-owned temp dir) — removed only after exit. */
+  readonly procCwd: string;
+  readonly route: TWarmRoute;
+  /** Pool epoch the process was spawned in; a bump makes it un-parkable. */
+  readonly epoch: number;
+  turns: number;
+  /** Sign-in identity observed when parked. */
+  identity: string | null;
+  idleTimer: ReturnType<typeof setTimeout> | undefined;
+};
+
+const idlePool: TWarmAgent[] = [];
+let warmEpoch = 0;
+let exitHookInstalled = false;
+
+/** Stable, non-reversible identity of a spawn (binary + final env). */
+export const antigravityWarmKey = (
+  bin: string,
+  env: Record<string, string>,
+): string => {
+  const entries = Object.entries(env).sort(([a], [b]) =>
+    a < b ? -1 : a > b ? 1 : 0,
+  );
+  return createHash("sha256")
+    .update(JSON.stringify([bin, entries]))
+    .digest("hex");
+};
+
+const retireWarmAgent = (agent: TWarmAgent, sessionId: string | null): void => {
+  clearTimeout(agent.idleTimer);
+  agent.idleTimer = undefined;
+  agent.route.onUpdate = null;
+  agent.route.allowedMcpTools = new Set();
+  if (sessionId !== null) agent.client.cancelAndDispose(sessionId);
+  else agent.client.dispose();
+  void agent.client
+    .whenExited()
+    .then(() => rm(agent.procCwd, { recursive: true, force: true }))
+    .catch(() => undefined);
+};
+
+const removeFromIdlePool = (agent: TWarmAgent): void => {
+  const index = idlePool.indexOf(agent);
+  if (index >= 0) idlePool.splice(index, 1);
+};
+
+/** Lease an idle process for `key` (exclusive), or null → cold spawn. */
+const acquireWarmAgent = (
+  key: string,
+  geminiHome: string | undefined,
+): TWarmAgent | null => {
+  const identity =
+    geminiHome === undefined ? null : antigravitySignInIdentity(geminiHome);
+  for (let i = idlePool.length - 1; i >= 0; i--) {
+    const agent = idlePool[i];
+    if (agent === undefined || agent.key !== key) continue;
+    idlePool.splice(i, 1);
+    clearTimeout(agent.idleTimer);
+    agent.idleTimer = undefined;
+    if (
+      !agent.client.isAlive() ||
+      agent.epoch !== warmEpoch ||
+      identity === null ||
+      agent.identity !== identity
+    ) {
+      retireWarmAgent(agent, null);
+      continue;
+    }
+    return agent;
+  }
+  return null;
+};
+
+/** Park a process after a clean turn, or retire it when it may not stay. */
+const releaseWarmAgent = (
+  agent: TWarmAgent,
+  geminiHome: string | undefined,
+  idleTtlMs: number,
+): void => {
+  agent.turns += 1;
+  agent.route.onUpdate = null;
+  agent.route.allowedMcpTools = new Set();
+  const identity =
+    geminiHome === undefined ? null : antigravitySignInIdentity(geminiHome);
+  if (
+    !agent.client.isAlive() ||
+    agent.epoch !== warmEpoch ||
+    agent.turns >= ANTIGRAVITY_WARM_MAX_TURNS ||
+    identity === null
+  ) {
+    retireWarmAgent(agent, null);
+    return;
+  }
+  agent.identity = identity;
+  if (!exitHookInstalled) {
+    exitHookInstalled = true;
+    process.on("exit", () => disposeAntigravityWarmPool());
+  }
+  idlePool.push(agent);
+  agent.idleTimer = setTimeout(() => {
+    removeFromIdlePool(agent);
+    retireWarmAgent(agent, null);
+  }, idleTtlMs);
+  (agent.idleTimer as { unref?: () => void }).unref?.();
+  while (idlePool.length > ANTIGRAVITY_WARM_POOL_MAX) {
+    const oldest = idlePool.shift();
+    if (oldest !== undefined) retireWarmAgent(oldest, null);
+  }
+};
+
+/**
+ * Kill every parked process and make every leased one un-parkable. Called on
+ * sign-in / sign-out (the account behind the agent changed) and daemon exit.
+ */
+export const disposeAntigravityWarmPool = (): void => {
+  warmEpoch += 1;
+  for (const agent of idlePool.splice(0)) retireWarmAgent(agent, null);
+};
+
+/** Number of parked processes (diagnostics + tests). */
+export const antigravityWarmPoolSize = (): number => idlePool.length;
+
 export type TAntigravityNativeParams = {
   /** Isolated agent binary (`cliBin("antigravity")`). */
   readonly bin: string;
@@ -500,13 +695,16 @@ export type TAntigravityNativeParams = {
   readonly idleMs?: number;
   readonly turnTimeoutMs?: number;
   readonly authTimeoutMs?: number;
+  readonly warmIdleTtlMs?: number;
 };
 
 /**
- * One COLD turn: spawn → initialize (identity check) → authenticate (short
- * budget) → session/new in an empty temp cwd (+ loopback MCP for client tools)
- * → exact model pin → session/prompt. Commit-on-first-output; every pre-commit
- * failure declines with a classified cooldown so the walker advances the plan.
+ * One turn: lease a warm agent process (or spawn → initialize (identity
+ * check) → authenticate (short budget)) → session/new in a fresh empty temp
+ * cwd (+ fresh loopback MCP for client tools) → exact model pin →
+ * session/prompt. Commit-on-first-output; every pre-commit failure declines
+ * with a classified cooldown so the walker advances the plan. A clean
+ * terminal parks the process; anything else disposes it.
  */
 export const runAntigravityNative = async (
   params: TAntigravityNativeParams,
@@ -519,10 +717,9 @@ export const runAntigravityNative = async (
   }
   // Pre-flight from the selector this sign-in already showed us: a model the
   // account lacks declines instantly instead of after a cold agent spawn.
+  const geminiHome = params.env.GEMINI_HOME;
   const observed =
-    params.env.GEMINI_HOME === undefined
-      ? null
-      : readAntigravityModels(params.env.GEMINI_HOME);
+    geminiHome === undefined ? null : readAntigravityModels(geminiHome);
   const requestedModel = params.providerModelId.trim();
   if (
     observed !== null &&
@@ -559,8 +756,21 @@ export const runAntigravityNative = async (
     promptText,
   });
 
-  // Empty, daemon-owned cwd: bounds anything the agent could see natively.
-  const cwd = await mkdtemp(join(daemonTempDir(), "agy-"));
+  const spawnEnv = antigravitySpawnEnv(params.env);
+  const warmKey = antigravityWarmKey(params.bin, spawnEnv);
+
+  // Empty, daemon-owned TURN cwd: bounds anything the agent could see
+  // natively. Fresh per request, independent of the process cwd.
+  let cwd: string;
+  try {
+    cwd = await mkdtemp(join(daemonTempDir(), "agy-"));
+  } catch (error) {
+    return declineFrom(error, params.signal);
+  }
+  let agent: TWarmAgent | null = null;
+  /** Read through a function: `agent` is assigned inside closures, which
+   *  TypeScript's flow narrowing does not see. */
+  const currentAgent = (): TWarmAgent | null => agent;
   let sessionId: string | null = null;
   let ended = false;
   let cleaned = false;
@@ -568,25 +778,47 @@ export const runAntigravityNative = async (
   let lastActivityAt = Date.now();
   let mcp: TCursorMcpServer | null = null;
   const ourMcpCalls = createMcpCallTracker();
+  const allowedMcpTools: ReadonlySet<string> = new Set(
+    (params.tools ?? []).map((tool) => tool.name),
+  );
 
-  let client: AcpClient;
-  const cleanup = (cancel: boolean): void => {
+  /** How the turn leaves the agent process. */
+  type TSettle = "park" | "cancel" | "dispose";
+  const cleanup = (settle: TSettle): void => {
     if (cleaned) return;
     cleaned = true;
     clearInterval(idleTimer);
     params.signal.removeEventListener("abort", abort);
-    if (cancel && sessionId !== null) client.cancelAndDispose(sessionId);
-    else client.dispose();
+    // Settle the process FIRST: `mcp.stop()` force-closes connections and,
+    // called from inside the MCP tool handler, can run other JS before it
+    // returns — the process's fate must already be decided by then.
+    const owned = agent;
+    if (owned !== null) {
+      owned.route.onUpdate = null;
+      owned.route.allowedMcpTools = new Set();
+      if (settle === "park") {
+        releaseWarmAgent(
+          owned,
+          geminiHome,
+          params.warmIdleTtlMs ?? ANTIGRAVITY_WARM_IDLE_TTL_MS,
+        );
+      } else {
+        retireWarmAgent(owned, settle === "cancel" ? sessionId : null);
+      }
+    }
     mcp?.stop();
     mcp = null;
     void rm(cwd, { recursive: true, force: true });
   };
-  const endWith = (chunks: ReadonlyArray<TChatCompletionChunk>): void => {
+  const endWith = (
+    chunks: ReadonlyArray<TChatCompletionChunk>,
+    settle: "park" | "cancel",
+  ): void => {
     if (ended) return;
     ended = true;
     for (const chunk of chunks) push(chunk);
     push("end");
-    cleanup(true);
+    cleanup(settle);
   };
   const failStream = (
     error: Error,
@@ -595,68 +827,79 @@ export const runAntigravityNative = async (
     if (ended) return;
     ended = true;
     push(cooldown !== undefined ? { error, cooldown } : { error });
-    cleanup(true);
+    cleanup("cancel");
   };
   const abort = (): void => {
     failStream(new DOMException("client aborted", "AbortError"));
   };
 
-  try {
-    prepareAntigravityProfile(params.env.GEMINI_HOME ?? cwd);
-    client = new AcpClient(
-      params.bin,
-      antigravitySpawnEnv(params.env),
-      (method, p) => {
-        if (method !== "session/update" || ended) return;
-        const notif = p as
-          | { readonly sessionId?: unknown; readonly update?: unknown }
-          | undefined;
-        if (sessionId === null || notif?.sessionId !== sessionId) return;
-        lastActivityAt = Date.now();
-        if (
-          isNativeToolUpdate(notif.update) &&
-          !ourMcpCalls.admits(notif.update)
-        ) {
-          // The agent tried one of ITS tools — never let it run.
-          failStream(new Error("antigravity attempted a native tool"));
-          return;
-        }
-        const chunk = turn.handleUpdate(notif.update);
-        if (chunk !== null) push(chunk);
-      },
-      handleAntigravityServerRequest,
-      {
-        argv: antigravityArgv(params.bin),
-        label: "agy_acp_server",
-        // File-backed store under the isolated home — stays confined.
-        probe: false,
-        exactEnv: true,
-        cwd,
-      },
-    );
-  } catch (error) {
-    void rm(cwd, { recursive: true, force: true });
-    return declineFrom(error, params.signal);
-  }
-  params.signal.addEventListener("abort", abort, { once: true });
-
-  const failSetup = (error: unknown): TNativeRunResult => {
-    ended = true;
-    cleanup(false);
-    return declineFrom(error, params.signal);
+  /** The leasing turn's view of agent notifications (installed per turn on
+   *  the process route — the client's own callback outlives every turn). */
+  const onUpdate = (p: unknown): void => {
+    if (ended) return;
+    const notif = p as
+      | { readonly sessionId?: unknown; readonly update?: unknown }
+      | undefined;
+    if (sessionId === null || notif?.sessionId !== sessionId) return;
+    lastActivityAt = Date.now();
+    if (isNativeToolUpdate(notif.update) && !ourMcpCalls.admits(notif.update)) {
+      // The agent tried one of ITS tools — never let it run.
+      failStream(new Error("antigravity attempted a native tool"));
+      return;
+    }
+    const chunk = turn.handleUpdate(notif.update);
+    if (chunk !== null) push(chunk);
   };
 
-  let opened: unknown;
-  try {
-    if ((params.tools?.length ?? 0) > 0) {
-      mcp = startCursorMcpServer({
-        tools: params.tools ?? [],
-        onToolCall: (name, args) => {
-          if (ended) return;
-          endWith(turn.emitToolCall(name, args));
-        },
-      });
+  /** Take ownership of a process for this turn. If the turn already ended
+   *  (client abort mid-setup) the process is retired immediately. */
+  const adopt = (next: TWarmAgent): void => {
+    agent = next;
+    if (cleaned) {
+      retireWarmAgent(next, null);
+      return;
     }
+    next.route.onUpdate = onUpdate;
+    next.route.allowedMcpTools = allowedMcpTools;
+  };
+
+  /** Spawn a cold process and run the handshake on it. */
+  const startCold = async (): Promise<void> => {
+    const procCwd = await mkdtemp(join(daemonTempDir(), "agy-proc-"));
+    const route: TWarmRoute = { onUpdate: null, allowedMcpTools: new Set() };
+    let client: AcpClient;
+    try {
+      client = new AcpClient(
+        params.bin,
+        spawnEnv,
+        (method, p) => {
+          if (method === "session/update") route.onUpdate?.(p);
+        },
+        (method, p) =>
+          handleAntigravityServerRequest(method, p, route.allowedMcpTools),
+        {
+          argv: antigravityArgv(params.bin),
+          label: "agy_acp_server",
+          // File-backed store under the isolated home — stays confined.
+          probe: false,
+          exactEnv: true,
+          cwd: procCwd,
+        },
+      );
+    } catch (error) {
+      void rm(procCwd, { recursive: true, force: true });
+      throw error;
+    }
+    adopt({
+      key: warmKey,
+      client,
+      procCwd,
+      route,
+      epoch: warmEpoch,
+      turns: 0,
+      identity: null,
+      idleTimer: undefined,
+    });
     const init = await client.request(
       "initialize",
       ANTIGRAVITY_INIT_PARAMS,
@@ -674,7 +917,10 @@ export const runAntigravityNative = async (
       { methodId: ANTIGRAVITY_AUTH_METHOD },
       params.authTimeoutMs ?? INFERENCE_AUTH_TIMEOUT_MS,
     );
-    opened = await client.request(
+  };
+
+  const openSession = (owned: TWarmAgent): Promise<unknown> =>
+    owned.client.request(
       "session/new",
       {
         cwd,
@@ -692,6 +938,62 @@ export const runAntigravityNative = async (
       },
       RPC_TIMEOUT_MS,
     );
+
+  params.signal.addEventListener("abort", abort, { once: true });
+
+  const failSetup = (error: unknown): TNativeRunResult => {
+    ended = true;
+    cleanup("dispose");
+    return declineFrom(error, params.signal);
+  };
+
+  let opened: unknown;
+  try {
+    prepareAntigravityProfile(geminiHome ?? cwd);
+    if ((params.tools?.length ?? 0) > 0) {
+      mcp = startCursorMcpServer({
+        tools: params.tools ?? [],
+        onToolCall: (name, args) => {
+          if (ended) return;
+          // Early settlement: the turn is cut off mid-flight — never park.
+          endWith(turn.emitToolCall(name, args), "cancel");
+        },
+      });
+    }
+    const leased = acquireWarmAgent(warmKey, geminiHome);
+    if (leased !== null) {
+      adopt(leased);
+      try {
+        opened = await openSession(leased);
+      } catch (error) {
+        // A parked process that died after its liveness check fails at the
+        // transport; replace it with a cold one once. Anything else (an RPC
+        // answer, an abort) is a real outcome and declines as usual.
+        const stale =
+          error instanceof AcpRpcError &&
+          error.kind === "transport" &&
+          !params.signal.aborted &&
+          !cleaned;
+        if (!stale) throw error;
+        retireWarmAgent(leased, null);
+        agent = null;
+        await startCold();
+        const fresh = currentAgent();
+        if (fresh === null) throw error;
+        opened = await openSession(fresh);
+      }
+    } else {
+      await startCold();
+      const fresh = currentAgent();
+      if (fresh === null) {
+        throw new DOMException("client aborted", "AbortError");
+      }
+      opened = await openSession(fresh);
+    }
+    const owned = currentAgent();
+    if (owned === null || cleaned) {
+      throw new DOMException("client aborted", "AbortError");
+    }
     const sid = (opened as { readonly sessionId?: unknown } | null)?.sessionId;
     if (typeof sid !== "string" || sid.length === 0) {
       throw new AcpRpcError({
@@ -703,11 +1005,15 @@ export const runAntigravityNative = async (
     sessionId = sid;
     // Free model discovery: this session/new already carries the account's
     // selectable models — record them so planning skips ids it lacks.
-    const geminiHome = params.env.GEMINI_HOME;
     if (geminiHome !== undefined) {
       recordAntigravityModels(geminiHome, antigravityModelRows(opened));
     }
-    await ensureAntigravityModel(client, sid, params.providerModelId, opened);
+    await ensureAntigravityModel(
+      owned.client,
+      sid,
+      params.providerModelId,
+      opened,
+    );
     if (params.signal.aborted) {
       throw new DOMException("client aborted", "AbortError");
     }
@@ -715,8 +1021,12 @@ export const runAntigravityNative = async (
     return failSetup(error);
   }
 
+  const owned = currentAgent();
+  if (owned === null || sessionId === null) {
+    return failSetup(new DOMException("client aborted", "AbortError"));
+  }
   lastActivityAt = Date.now();
-  void client
+  void owned.client
     .request(
       "session/prompt",
       {
@@ -741,7 +1051,8 @@ export const runAntigravityNative = async (
       } else if (!turn.sawOutput()) {
         failStream(new Error("antigravity turn ended before producing output"));
       } else {
-        endWith(turn.finish(stop));
+        // The ONLY path that may park the process: a clean ACP terminal.
+        endWith(turn.finish(stop), "park");
       }
     })
     .catch((error: unknown) => {
@@ -786,7 +1097,8 @@ export const runAntigravityNative = async (
     };
   }
   if (first === "end" || "error" in first) {
-    cleanup(true);
+    // Already settled by endWith/failStream; this is a no-op safety net.
+    cleanup("cancel");
     const reason =
       first === "end"
         ? "antigravity turn ended before producing output"
