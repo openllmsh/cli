@@ -11,8 +11,9 @@
  * listener directly; on a remote/headless box the user pastes the resulting
  * `http://127.0.0.1:…` address back (`submitLoginCode`), which the daemon
  * validates and replays ONLY to that loopback listener. The token lands in the
- * agent's own file store under the isolated GEMINI_HOME — the daemon never
- * reads it (status only checks the file exists).
+ * agent's own file store under the isolated GEMINI_HOME. Login and status()
+ * never read it (status only checks the file exists); usage() DOES read it to
+ * mint an access token for Google's quota endpoints (`./antigravity-usage.ts`).
  *
  * Inference is bridge-only (`native-runtime/antigravity-acp.ts`). The agent
  * exposes no quota over ACP, so `usage()` reads Google's Code Assist quota
@@ -225,11 +226,16 @@ const connect = (): Promise<TConnectResult> =>
         }
       }, 200);
 
+      let finished = false;
       const finish = (result: {
         readonly ok: boolean;
         readonly message?: string;
         readonly timedOut?: boolean;
       }): void => {
+        // Idempotent: the URL-wait timeout and the authenticate settle can
+        // both reach here.
+        if (finished) return;
+        finished = true;
         clearInterval(poll);
         if (wiring.slot.wasCancelled()) {
           dispose();
@@ -297,16 +303,26 @@ const connect = (): Promise<TConnectResult> =>
         }
       })();
 
+      let urlWaitTimer: ReturnType<typeof setTimeout> | undefined;
       const first = await Promise.race([
         urlReady,
-        authDone.then(() => null),
-        new Promise<null>((resolve) =>
-          setTimeout(() => resolve(null), URL_WAIT_MS),
-        ),
+        authDone.then(() => "settled" as const),
+        new Promise<"timeout">((resolve) => {
+          urlWaitTimer = setTimeout(() => resolve("timeout"), URL_WAIT_MS);
+        }),
       ]);
-      if (first === null) {
+      clearTimeout(urlWaitTimer);
+      if (first === "timeout") {
+        // No URL and no settle in time: end the attempt now instead of
+        // waiting out the full login timeout on a stuck agent.
+        finish({
+          ok: false,
+          message: "no Google sign-in URL surfaced from the agent",
+          timedOut: true,
+        });
+      }
+      if (first === "settled" || first === "timeout" || first === null) {
         // Already signed in (authenticate resolved with no browser) or failed.
-        await authDone;
         if (tokenPresent()) {
           return { connected: true, detail: wiring.connectedDetail };
         }

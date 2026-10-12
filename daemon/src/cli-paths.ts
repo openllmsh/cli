@@ -312,8 +312,8 @@ const SPECS: Readonly<Record<TCliProvider, TCliSpec>> = {
   //
   // Profile: GEMINI_HOME is pinned inside the isolated home with file storage
   // forced, so the agent's Google sign-in token
-  // (`<GEMINI_HOME>/antigravity-acp/acp_token.json`, never read by the daemon)
-  // can never touch the user's own `~/.gemini` or the OS keychain.
+  // (`<GEMINI_HOME>/antigravity-acp/acp_token.json`; read only by the usage
+  // probe, `delegation/antigravity-usage.ts`) can never touch the user's own `~/.gemini` or the OS keychain.
   antigravity: {
     binRel: "bin/agy_acp_server",
     cmd: "agy_acp_server",

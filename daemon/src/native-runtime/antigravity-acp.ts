@@ -27,8 +27,8 @@
  * Isolation: GEMINI_HOME lives in the daemon's isolated home with file storage
  * forced (`cli-paths.ts`), and the spawn env drops every Google API-key /
  * project override (`ANTIGRAVITY_POISON_KEYS`) so an exported GEMINI_API_KEY can
- * never turn a subscription hop into a metered one. The daemon never reads the
- * agent's token file — status only checks that it EXISTS.
+ * never turn a subscription hop into a metered one. Inference never reads the
+ * agent's token file (only the usage probe does — `delegation/antigravity-usage.ts`).
  *
  * Native tools never run: permission requests are rejected, fs/terminal client
  * capabilities are off, the cwd is an empty daemon temp dir, and any native
@@ -110,7 +110,8 @@ export const antigravitySpawnEnv = (
 export const antigravityArgv = (bin: string): string[] =>
   process.platform === "linux" ? [bin, "--uid="] : [bin];
 
-/** Where the agent keeps its sign-in token under GEMINI_HOME (never read). */
+/** Where the agent keeps its sign-in token under GEMINI_HOME (read only by
+ *  the usage probe). */
 export const antigravityTokenPath = (geminiHome: string): string =>
   join(geminiHome, "antigravity-acp", "acp_token.json");
 
@@ -362,10 +363,52 @@ const isNativeToolUpdate = (update: unknown): boolean => {
   return kind === "tool_call" || kind === "tool_call_update";
 };
 
-/** Our loopback MCP tool calls surface as tool_call updates too; their
- *  title/name carries the MCP server name. */
-const isOurMcpToolUpdate = (update: unknown): boolean =>
-  JSON.stringify(update ?? null).includes("openllm-client-tools");
+/** MCP server name we register for client tools (session/new). */
+const CLIENT_TOOLS_MCP_SERVER = "openllm-client-tools";
+
+/** Our loopback MCP tool calls surface as tool_call updates too. The agent
+ *  tags MCP dispatches with a structured `_meta` bag
+ *  (`{ is_mcp_tool_call: true, mcp: { server } }`, agy_acp_server
+ *  `unwrap_mcp_tool_call`); match that exactly and fail closed otherwise, so
+ *  a model-controlled title/rawInput can never pass the native-tool guard. */
+export const isOurMcpToolUpdate = (update: unknown): boolean => {
+  const meta = (update as { readonly _meta?: unknown } | null)?._meta as
+    | {
+        readonly is_mcp_tool_call?: unknown;
+        readonly mcp?: { readonly server?: unknown } | null;
+      }
+    | null
+    | undefined;
+  return (
+    meta?.is_mcp_tool_call === true &&
+    meta.mcp?.server === CLIENT_TOOLS_MCP_SERVER
+  );
+};
+
+/** Tool-call ids the agent tagged as OUR MCP dispatch on their `tool_call`
+ *  start. Later `tool_call_update` frames mostly omit `_meta`, so they are
+ *  admitted only by an id already proven ours — never by content. */
+export const createMcpCallTracker = (): {
+  readonly admits: (update: unknown) => boolean;
+} => {
+  const ours = new Set<string>();
+  return {
+    admits: (update) => {
+      const u = update as {
+        readonly sessionUpdate?: unknown;
+        readonly toolCallId?: unknown;
+      } | null;
+      const id = typeof u?.toolCallId === "string" ? u.toolCallId : null;
+      if (isOurMcpToolUpdate(update)) {
+        if (id !== null) ours.add(id);
+        return true;
+      }
+      return (
+        u?.sessionUpdate === "tool_call_update" && id !== null && ours.has(id)
+      );
+    },
+  };
+};
 
 export type TAntigravityNativeParams = {
   /** Isolated agent binary (`cliBin("antigravity")`). */
@@ -401,7 +444,13 @@ export const runAntigravityNative = async (
     return { kind: "declined", reason: "client aborted" };
   }
 
-  type TQueueItem = TChatCompletionChunk | "end" | { readonly error: Error };
+  type TQueueItem =
+    | TChatCompletionChunk
+    | "end"
+    | {
+        readonly error: Error;
+        readonly cooldown?: TAntigravityFailure["cooldown"];
+      };
   const queue: TQueueItem[] = [];
   let wake: (() => void) | null = null;
   const push = (item: TQueueItem): void => {
@@ -427,6 +476,7 @@ export const runAntigravityNative = async (
   let idleTimer: ReturnType<typeof setInterval> | undefined;
   let lastActivityAt = Date.now();
   let mcp: TCursorMcpServer | null = null;
+  const ourMcpCalls = createMcpCallTracker();
 
   let client: AcpClient;
   const cleanup = (cancel: boolean): void => {
@@ -447,10 +497,13 @@ export const runAntigravityNative = async (
     push("end");
     cleanup(true);
   };
-  const failStream = (error: Error): void => {
+  const failStream = (
+    error: Error,
+    cooldown?: TAntigravityFailure["cooldown"],
+  ): void => {
     if (ended) return;
     ended = true;
-    push({ error });
+    push(cooldown !== undefined ? { error, cooldown } : { error });
     cleanup(true);
   };
   const abort = (): void => {
@@ -471,7 +524,7 @@ export const runAntigravityNative = async (
         lastActivityAt = Date.now();
         if (
           isNativeToolUpdate(notif.update) &&
-          !isOurMcpToolUpdate(notif.update)
+          !ourMcpCalls.admits(notif.update)
         ) {
           // The agent tried one of ITS tools — never let it run.
           failStream(new Error("antigravity attempted a native tool"));
@@ -539,7 +592,7 @@ export const runAntigravityNative = async (
             ? [
                 {
                   type: "http",
-                  name: "openllm-client-tools",
+                  name: CLIENT_TOOLS_MCP_SERVER,
                   url: mcp.url,
                   headers: mcp.headers,
                 },
@@ -595,7 +648,8 @@ export const runAntigravityNative = async (
       }
     })
     .catch((error: unknown) => {
-      failStream(new Error(classifyAntigravityFailure(error).reason));
+      const failure = classifyAntigravityFailure(error);
+      failStream(new Error(failure.reason), failure.cooldown);
     });
 
   const idleBudget = params.idleMs ?? ANTIGRAVITY_IDLE_TIMEOUT_MS;
@@ -640,9 +694,12 @@ export const runAntigravityNative = async (
       first === "end"
         ? "antigravity turn ended before producing output"
         : first.error.message;
-    const failure = QUOTA_RE.test(reason)
-      ? ("quota_exhausted" as const)
-      : undefined;
+    const failure =
+      first !== "end" && first.cooldown !== undefined
+        ? first.cooldown
+        : QUOTA_RE.test(reason)
+          ? ("quota_exhausted" as const)
+          : undefined;
     return {
       kind: "declined",
       reason,

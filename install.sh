@@ -1355,26 +1355,29 @@ install_antigravity_release() {
   local staging rc=0
   staging="$(mktemp -d "$versions/.staging.XXXXXX")"
   # Staging lives beside the target so the final `mv` is a same-filesystem
-  # rename. The fetch/extract/activate body runs in a subshell so ANY failure
-  # (set -e) returns here and staging is removed on every exit path.
+  # rename. The body runs in a subshell so staging is removed on every exit
+  # path. It sits in a `|| rc=$?` context, where bash IGNORES `set -e`, so every
+  # side-effecting step checks itself and exits nonzero — `current` only flips
+  # after a complete, checked version is in place.
   (
-    set -euo pipefail
-    "$curl_bin" -fsSL --proto '=https' --retry 2 -o "$staging/download.zip" "$url"
-    mkdir -p "$staging/runtime"
+    "$curl_bin" -fsSL --proto '=https' --retry 2 -o "$staging/download.zip" "$url" \
+      || { echo "Antigravity: download failed." >&2; exit 6; }
+    mkdir -p "$staging/runtime" || exit 6
     # Extract ONLY the two expected members — never anything else the archive holds.
     unzip -q -o "$staging/download.zip" "$ANTIGRAVITY_EXE" "$ANTIGRAVITY_HARNESS" \
-      -d "$staging/runtime"
+      -d "$staging/runtime" \
+      || { echo "Antigravity: could not unpack the release." >&2; exit 6; }
     for f in "$ANTIGRAVITY_EXE" "$ANTIGRAVITY_HARNESS"; do
       if [ ! -f "$staging/runtime/$f" ] || [ -L "$staging/runtime/$f" ]; then
         echo "Antigravity: archive is missing the agent or its harness." >&2
         exit 5
       fi
     done
-    chmod 755 "$staging/runtime/$ANTIGRAVITY_EXE" "$staging/runtime/$ANTIGRAVITY_HARNESS"
-    printf '{"version":"%s"}\n' "$version" >"$staging/runtime/.install-complete"
-    rm -rf "$final"
-    mv "$staging/runtime" "$final"
-    ln -sfn "versions/$version" "$ANTIGRAVITY_DIR/current"
+    chmod 755 "$staging/runtime/$ANTIGRAVITY_EXE" "$staging/runtime/$ANTIGRAVITY_HARNESS" || exit 6
+    printf '{"version":"%s"}\n' "$version" >"$staging/runtime/.install-complete" || exit 6
+    rm -rf "$final" || exit 6
+    mv "$staging/runtime" "$final" || exit 6
+    ln -sfn "versions/$version" "$ANTIGRAVITY_DIR/current" || exit 6
   ) || rc=$?
   rm -rf "$staging"
   [ "$rc" -eq 0 ] || return "$rc"
