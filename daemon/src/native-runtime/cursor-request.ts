@@ -101,8 +101,20 @@ const stringifyToolArgs = (args: unknown): string =>
  * semantics: the client executes tools and resends the conversation with
  * `tool`-role results, which this renderer folds back in as context).
  */
+export type TCursorRequestOptions = {
+  /**
+   * Split a multi-turn transcript ending on a user turn into explicit
+   * "completed history" and "current request" sections. Antigravity
+   * (Gemini) otherwise re-executes the replayed original request — e.g. calls
+   * a tool again after its result — and spends tens of seconds re-reading
+   * the history (live A/B: 8/8 vs 6/8 correct, ~3s vs ~30s median).
+   */
+  readonly frameHistory?: boolean;
+};
+
 export const cursorRequestOf = (
   canonical: TChatCompletionRequest,
+  options: TCursorRequestOptions = {},
 ): TCursorRequest => {
   const systemParts: string[] = [];
   const lines: string[] = [];
@@ -153,6 +165,19 @@ export const cursorRequestOf = (
     nonSystemTurns === 1 && loneUserText !== null && lines.length === 1
       ? loneUserText
       : lines.join("\n\n");
+  const lastTurn = canonical.messages.findLast(
+    (message) => message.role !== "system",
+  );
+  if (
+    options.frameHistory === true &&
+    lastTurn?.role === "user" &&
+    loneUserText !== null &&
+    lines.length > 1
+  ) {
+    promptText = `Conversation so far (already completed — do not repeat any of it):\n\n${lines
+      .slice(0, -1)
+      .join("\n\n")}\n\nCurrent request (answer only this):\n${loneUserText}`;
+  }
   // ACP starts cold after a caller-tool handoff. Mark the resumption boundary
   // rather than presenting the original request as fresh work a second time.
   // Do not apply this to historical tool results followed by a new user turn.

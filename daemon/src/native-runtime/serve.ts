@@ -1362,7 +1362,7 @@ const serveAntigravityHop = async (
   if (explicitDispatch !== null && !explicitDispatch.ok) {
     return { declined: explicitDispatch.declined };
   }
-  const req = cursorRequestOf(params.canonical);
+  const req = cursorRequestOf(params.canonical, { frameHistory: true });
   if (req.promptText.length === 0 && req.images.length === 0) {
     return { declined: "no user turn to answer" };
   }
