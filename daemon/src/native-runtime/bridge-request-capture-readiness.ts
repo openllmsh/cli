@@ -1,16 +1,16 @@
 /**
  * Integrator-owned readiness for bridge request capture.
  *
- * Selection is owned by `ACTIVE_SUB_METHOD` / `sub-method.ts`. There is NO
- * separate capture env flag. Cursor/Claude/Codex/Muse declare bridge-capture
- * when their serve path is ready (Cursor: RunSSE+BidiAppend transaction).
+ * Selection is owned by `ACTIVE_SUB_METHOD` / `sub-method.ts`; capture-capable
+ * variants are declared in `execution-registry.ts`. There is NO separate
+ * capture env flag. This table is the dynamic kill switch a `-capture`
+ * selection must also pass.
  *
- * Text + first-turn caller tools activate under `bridge-capture`. Multi-turn
+ * Text + first-turn caller tools activate under a `-capture` selection. Multi-turn
  * tool/reasoning history stays refuse-before-send until each provider's
  * structured inject is LIVE-proven (not hermetic-only).
  */
 
-import { providerDeclaresBridgeCapture } from "../sub-method";
 import type { TNativeRuntimeProvider } from "./types";
 
 export type TBridgeCaptureReadiness = {
@@ -18,7 +18,8 @@ export type TBridgeCaptureReadiness = {
   readonly ready: boolean;
   /**
    * `capture` = serve may enter the capture path for text and first-turn tools.
-   * `unchanged_bridge` = keep today's native bridge; capability omits capture.
+   * `unchanged_bridge` = plain native path only; the registry declares no
+   *   capture variant.
    */
   readonly mode: "capture" | "unchanged_bridge";
   readonly reason: string;
@@ -61,7 +62,7 @@ const ANTIGRAVITY_UNCHANGED: TBridgeCaptureReadiness = {
   ready: false,
   mode: "unchanged_bridge",
   reason:
-    "Antigravity serves through the plain ACP bridge only; no request-capture path is proven for agy_acp_server",
+    "Antigravity serves through plain `acp` only; no request-capture path is proven for agy_acp_server",
 };
 
 const READINESS: Record<TNativeRuntimeProvider, TBridgeCaptureReadiness> = {
@@ -75,15 +76,6 @@ const READINESS: Record<TNativeRuntimeProvider, TBridgeCaptureReadiness> = {
 export const bridgeRequestCaptureReadiness = (
   provider: TNativeRuntimeProvider,
 ): TBridgeCaptureReadiness => READINESS[provider];
-
-export const shouldActivateBridgeRequestCapture = (
-  provider: TNativeRuntimeProvider,
-  bridgeCaptureSelected: boolean,
-): boolean => {
-  if (!bridgeCaptureSelected) return false;
-  if (!providerDeclaresBridgeCapture(provider)) return false;
-  return bridgeRequestCaptureReadiness(provider).ready;
-};
 
 export const bridgeRequestCaptureReadinessTable =
   (): ReadonlyArray<TBridgeCaptureReadiness> => [

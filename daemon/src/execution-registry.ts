@@ -2,18 +2,14 @@
  * The capability and default authority for named execution methods.
  * `defaultSelection` is policy; variants/captureVariants are supported sets,
  * never priority lists. `sub-method.ts#resolveHopExecution` combines these
- * defaults with both bootstrap vocabularies and caller policy before dispatch.
+ * defaults with the bootstrap preference and caller policy before dispatch.
  * Concrete vendor selections still validate strictly; selecting a default
  * is not permission to substitute another method after dispatch fails.
- *
- * Historical legacy bridge equivalents are separate from current defaults:
- * changing a default must never change what an older daemon's bridge means.
  */
 
 import type {
   TBridgeVariant,
   TExecutionSelection,
-  TSubMethod,
   TSubscriptionProviderSlug,
 } from "@openllmsh/protocol";
 import {
@@ -30,16 +26,13 @@ export type TProviderExecutionRegistration = {
   readonly defaultSelection: TExecutionSelection;
   /** Caller-policy fallback only; never an inference-failure retry. */
   readonly policyFallbackSelection?: TExecutionSelection;
-  /** Frozen meaning of old daemons' bridge selector, not a current default. */
-  readonly legacyBridgeVariant?: TBridgeVariant;
   /** Capture-capable subset of `variants`; the bridge-only type excludes
    *  `handrolled`, which never supports capture. */
   readonly captureVariants: readonly TBridgeVariant[];
 };
 
 /**
- * The new-vocabulary registration, grounded in `SUB_METHOD_CAPABILITIES`
- * (`./sub-method.ts`) and the baseline plan's target matrix
+ * The per-provider registration, grounded in the baseline plan's target matrix
  * (09-implementation-plan.md §2). `agent-sdk` (independently selectable) is
  * a reserved public id with NO registration yet — selecting it MUST resolve
  * to `unsupported_execution_variant` until a later phase implements and
@@ -63,28 +56,24 @@ export const PROVIDER_EXECUTION_REGISTRY: readonly TProviderExecutionRegistratio
     {
       provider: "chatgpt",
       defaultSelection: executionSelectionHandrolled(),
-      legacyBridgeVariant: "app-server",
       variants: ["app-server", "handrolled"],
       captureVariants: ["app-server"],
     },
     {
       provider: "cursor",
       defaultSelection: executionSelectionBridge("acp", false),
-      legacyBridgeVariant: "acp",
       variants: ["acp"],
       captureVariants: ["acp"],
     },
     {
       provider: "muse",
       defaultSelection: executionSelectionBridge("msp", true),
-      legacyBridgeVariant: "msp",
       variants: ["msp"],
       captureVariants: ["msp"],
     },
     {
       provider: "antigravity",
       defaultSelection: executionSelectionBridge("acp", false),
-      legacyBridgeVariant: "acp",
       variants: ["acp"],
       captureVariants: [],
     },
@@ -138,45 +127,18 @@ export const providerSupportsCaptureFor = (
     (captureVariant) => captureVariant === variant,
   ) ?? false;
 
-/**
- * The legacy `SubMethod` an old daemon (one that never negotiated
- * `EXECUTION_SELECTION2_CAP`) would already behave identically to, for an
- * EXPLICIT concrete `selection` on `provider` — or `null` when no such
- * equivalence exists and the selection must instead be logged as
- * unsupported for that daemon rather than silently projected.
- *
- * `handrolled` is always its own trivial equivalent (both vocabularies
- * agree on its meaning). For a `bridge` selection, only the providers
- * whose ALREADY-SHIPPED legacy `bridge` unconditionally means the SAME
- * variant get a projection (`chatgpt`→`app-server`, `cursor`→`acp`,
- * `muse`→`msp`); `claude_code` never does, because its legacy `bridge`
- * is request-shape-dependent (text→`stream-json`, tools→`agent-sdk`) and
- * an explicit `stream-json`-only (or `sdk-facade`) selection would behave
- * DIFFERENTLY under that ambiguity than the admin explicitly chose. Any
- * variant with no shipped legacy meaning at all (e.g. `sdk-facade`,
- * `agent-sdk`, on any provider) never projects either — there is no old
- * behavior to be equivalent to.
- */
-export const legacySubMethodEquivalentFor = (
+/** The provider's first capture-capable variant, with capture on — null
+ *  when it registers none. */
+export const captureSelectionFor = (
   provider: string,
-  selection: TExecutionSelection,
-): TSubMethod | null => {
-  if (selection.kind === "handrolled") {
-    return providerSupportsVariant(provider, "handrolled")
-      ? "handrolled"
-      : null;
-  }
-  if (provider === "claude_code") return null;
-  const registration = registrationFor(provider);
-  if (registration === undefined) return null;
-  // Only the provider's OWN single already-shipped variant has a legacy
-  // meaning to be equivalent to (not merely any registered variant).
-  if (registration.legacyBridgeVariant !== selection.variant) return null;
-  if (!selection.capture) return "bridge";
-  return providerSupportsCaptureFor(provider, selection.variant)
-    ? "bridge-capture"
-    : null;
+): TExecutionSelection | null => {
+  const variant = registrationFor(provider)?.captureVariants[0];
+  return variant === undefined ? null : executionSelectionBridge(variant, true);
 };
+
+/** Whether the provider registers any capture-capable variant. */
+export const providerDeclaresBridgeCapture = (provider: string): boolean =>
+  (registrationFor(provider)?.captureVariants.length ?? 0) > 0;
 
 /**
  * Provider/variant combinations whose request-shape support is not yet
@@ -186,10 +148,8 @@ export const legacySubMethodEquivalentFor = (
  * tools on an explicit `stream-json`/`stream-json-capture` selection must
  * refuse pre-dispatch rather than silently falling back to the held Agent
  * SDK (`agent-sdk`) — that would defeat the whole point of an explicit
- * selection. This is UNRELATED to the legacy `bridge`/`bridge-capture`
- * selector, which keeps its existing text→CLI / tools→SDK dispatch
- * unconditionally (see `legacySubMethodEquivalentFor`'s claude_code note) —
- * this check only ever runs for an EXPLICIT new-vocabulary selection.
+ * selection.
+ * this check runs for every concrete selection.
  */
 const requestShapeUnsupportedFor = (
   provider: string,
@@ -206,7 +166,7 @@ const requestShapeUnsupportedFor = (
   return null;
 };
 
-/** Typed refusal for an explicit new-vocabulary selection this registry
+/** Typed refusal for a concrete selection this registry
  *  cannot honor. */
 export type TExecutionSelectionRefusal =
   | {
@@ -237,14 +197,11 @@ export type TExecutionSelectionResolution =
   | { readonly ok: false; readonly refusal: TExecutionSelectionRefusal };
 
 /**
- * Resolve one hop's EXPLICIT new-vocabulary selection against this
- * registry. `requested === null` means no explicit new-vocabulary
- * selection was configured for this hop — callers keep using the
- * unchanged legacy `sub-method.ts` resolution in that case; this function
- * is only for a hop that DID configure one.
+ * Resolve one hop's concrete selection against this registry.
+ * `requested === null` returns null (no selection to validate).
  *
  * The genuine-Claude-Code-originator override mirrors
- * `sub-method.ts#selectSubMethod`'s ToS-alignment rule exactly: a request
+ * `sub-method.ts#resolveHopExecution`'s ToS-alignment rule exactly: a request
  * that is itself the real Claude Code client always resolves to
  * `handrolled`, beating any configured preference, because forwarding the
  * genuine client's own request on its own credential IS the official-
@@ -327,17 +284,3 @@ export const describeExecutionSelectionRefusal = (
   }
   return refusal.reason;
 };
-
-/**
- * The explicit selection for one provider hop. A provider override in either
- * vocabulary beats the global new-vocabulary preference; a legacy override
- * returns null so native-runtime dispatch keeps its legacy semantics.
- */
-export const effectiveExecutionSelectionForHop = (
-  provider: string,
-  executionSelectionOverrides: Readonly<Record<string, TExecutionSelection>>,
-  legacyOverrides: Readonly<Record<string, TSubMethod>>,
-  globalSelection: TExecutionSelection | null,
-): TExecutionSelection | null =>
-  executionSelectionOverrides[provider] ??
-  (legacyOverrides[provider] === undefined ? globalSelection : null);

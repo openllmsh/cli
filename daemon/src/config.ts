@@ -23,7 +23,6 @@ import type {
   TExecutionSelection,
   TModelCapsDefaultRule,
   TModelSettingsOverrides,
-  TSubMethod,
 } from "@openllmsh/protocol";
 import { resolveContextOverflowStrategy } from "@openllmsh/wire";
 import {
@@ -161,52 +160,20 @@ export const contextOverflowStrategy = (): TContextOverflowStrategy =>
   resolveContextOverflowStrategy(snapshot.context_overflow_strategy);
 
 /**
- * The cloud's resolved `ACTIVE_SUB_METHOD` preference from the last
- * bootstrap (`bridge` | `handrolled` | null = no preference). The daemon
- * NEVER reads an `ACTIVE_SUB_METHOD` env of its own — this snapshot field
- * is the only source; a daemon that has never bootstrapped has no
- * preference, and a stale snapshot keeps the last-known value. Sampled
- * once per hop at selection time (`sub-method.ts`) so it never switches
- * mid-hop. See `docs/proposals/active-sub-method.md`.
- */
-export const activeSubMethod = (): TSubMethod | null =>
-  snapshot.active_sub_method ?? null;
-
-/**
- * Per-provider overrides layered on top of `activeSubMethod` (from the
- * same bootstrap snapshot — `provider:method` entries in the cloud's
- * `ACTIVE_SUB_METHOD` env). Empty when the cloud sent none / predates the
- * field. Sampled together with the global preference once per request so
- * a mid-walk bootstrap refresh never switches a hop.
- */
-export const activeSubMethodOverrides = (): Readonly<
-  Record<string, TSubMethod>
-> => snapshot.active_sub_methods ?? {};
-
-/**
- * The cloud's resolved named-execution-variant global preference
- * (`stream-json` / `sdk-facade` / `acp` / `app-server` / `msp` /
- * `agent-sdk` / `handrolled`; see `@openllmsh/protocol`'s
- * `execution-selection.ts`), from the last bootstrap. Null when the cloud
- * sent none (no explicit new-vocabulary global selection configured, or
- * this daemon hasn't negotiated `EXECUTION_SELECTION2_CAP` so the cloud
- * omitted the field — see `cloud-client.ts`'s capability header).
- *
- * `walker.ts` samples this (together with `activeExecutionSelectionOverrides`
- * below) once per request and, when a hop's provider has a non-null
- * explicit selection, `native-runtime/serve.ts` resolves it through
- * `execution-registry.ts`'s `resolveExecutionSelection` instead of its
- * legacy heuristic (09-implementation-plan.md phase 5). A hop whose
- * provider has NO explicit selection here (the common case — this field is
- * null until an admin configures a new-vocabulary `ACTIVE_SUB_METHOD`
- * token) keeps the unchanged legacy `activeSubMethod()`/
- * `activeSubMethodOverrides()` dispatch below.
+ * The cloud's resolved `ACTIVE_SUB_METHOD` global preference — a named
+ * execution variant (`stream-json` / `sdk-facade` / `acp` / `app-server` /
+ * `msp` / `agent-sdk`, optionally capture) or `handrolled`; see
+ * `@openllmsh/protocol`'s `execution-selection.ts`. The daemon NEVER reads an
+ * `ACTIVE_SUB_METHOD` env of its own — this snapshot field is the only
+ * source; null = no preference (each hop uses its registry default).
+ * `walker.ts` samples it (with the overrides below) once per request so a
+ * mid-walk bootstrap refresh never switches a hop.
  */
 export const activeExecutionSelection = (): TExecutionSelection | null =>
   snapshot.execution_selection ?? null;
 
 /** Per-provider overrides layered on top of {@link activeExecutionSelection},
- *  same sampling/staleness contract as {@link activeSubMethodOverrides}. */
+ *  same sampling/staleness contract. */
 export const activeExecutionSelectionOverrides = (): Readonly<
   Record<string, TExecutionSelection>
 > => snapshot.execution_selections ?? {};

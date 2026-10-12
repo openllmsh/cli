@@ -189,8 +189,6 @@ import { recordRequest } from "./cloud-client";
 import {
   activeExecutionSelection,
   activeExecutionSelectionOverrides,
-  activeSubMethod,
-  activeSubMethodOverrides,
   contextOverflowStrategy as bootstrapContextOverflowStrategy,
   catalogCapsDefaults,
   fleetSubscriptionServerFor,
@@ -222,11 +220,7 @@ import {
 import type { TNativeTokens } from "./native-runtime/types";
 import { tokensFromResponse, ZERO_TOKENS } from "./native-runtime/types";
 import { clearPlanCache } from "./plan-cache";
-import {
-  isClaudeCodeOriginator,
-  methodsIncludeNativeBridge,
-  resolveHopExecution,
-} from "./sub-method";
+import { isClaudeCodeOriginator, resolveHopExecution } from "./sub-method";
 import { tunnelToPeer } from "./tunnel-client";
 import {
   peekUsageForQuotaGate,
@@ -2554,17 +2548,10 @@ const walkPlan = async (
   // overrides — sampled ONCE per request from the cached bootstrap
   // snapshot so it can never switch mid-hop (a bootstrap refresh landing
   // mid-walk applies to the NEXT request). Resolved per hop against the
-  // provider's declared defaults in `resolveHopExecution` (both vocabularies +
-  // caller policy: first-party Claude → handrolled-only; other Claude callers
-  // and Cursor/Muse → vendor runtime only).
-  const requestedSubMethod = activeSubMethod();
-  const subMethodOverrides = activeSubMethodOverrides();
+  // provider's registry defaults in `resolveHopExecution` (+ caller policy:
+  // first-party Claude → handrolled-only; other Claude callers and
+  // Cursor/Muse/Antigravity → vendor runtime only).
   const claudeCodeOriginator = isClaudeCodeOriginator(args.req.headers);
-  // The same env's NEW-vocabulary projection (populated only when this
-  // daemon negotiated `EXECUTION_SELECTION2_CAP` — see `cloud-client.ts`),
-  // sampled together so it can never switch mid-hop either. Missing preferences
-  // resolve to registry defaults; explicit legacy selectors keep their old
-  // request-shape-dependent dispatch.
   const requestedExecutionSelection = activeExecutionSelection();
   const executionSelectionOverrides = activeExecutionSelectionOverrides();
 
@@ -2832,8 +2819,6 @@ const walkPlan = async (
     // dispatch after its outer selector has fallen back to the provider default.
     const { methods, executionSelection } = resolveHopExecution({
       provider: hop.provider,
-      legacyPreference: requestedSubMethod,
-      legacyOverrides: subMethodOverrides,
       executionPreference: requestedExecutionSelection,
       executionOverrides: executionSelectionOverrides,
       originator: { isClaudeCode: claudeCodeOriginator },
@@ -2845,14 +2830,10 @@ const walkPlan = async (
     let nativeCooldownReason: TCooldownReason | undefined;
     let handrolledRetry: THopRetry | null = null;
 
-    if (
-      methodsIncludeNativeBridge(methods) &&
-      isNativeRuntimeProvider(hop.provider)
-    ) {
-      // Official vendor runtime (Claude stream-json / Codex app-server /
-      // cursor ACP). `bridge-capture` is the same entry with capture forced
-      // for ready providers (Claude/Codex text). Pre-commit declines fall
-      // through to handrolled when `methods` still allows it; otherwise fleet.
+    if (methods.includes("native") && isNativeRuntimeProvider(hop.provider)) {
+      // Official vendor runtime for the hop's concrete selection (variant +
+      // capture). Pre-commit declines fall through to handrolled when
+      // `methods` still allows it; otherwise fleet.
       const native = await serveNativeRuntime({
         provider: hop.provider,
         providerModelId: hop.providerModelId,
@@ -2866,7 +2847,6 @@ const walkPlan = async (
         // fallback. Until a durable owner registry exists, validation below gives
         // a precise wrong-owner/epoch decline rather than a misleading map miss.
         continuationToken: args.req.headers.get(TOOL_SESSION_HEADER),
-        bridgeCapture: methods.includes("bridge-capture"),
         executionSelection,
         stripSubagentIsolation: hop.stripSubagentIsolation,
         signal: args.req.signal,

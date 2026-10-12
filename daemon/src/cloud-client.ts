@@ -28,7 +28,6 @@ import {
   DAEMON_DEVICE_ID_HEADER,
   DAEMON_DEVICE_LABEL_HEADER,
   DaemonPlanResponse,
-  EXECUTION_SELECTION2_CAP,
   encodeMediaDefaultPlanQuery,
   encodePlanSurfaceQueryValue,
   encodeVideoJobPlanQuery,
@@ -36,7 +35,6 @@ import {
   MODEL_CAPABILITIES_OPEN_CAP,
   PLAN_SURFACE_QUERY_KEY,
   RelayChannelResponse,
-  SUB_METHOD_BRIDGE_CAPTURE_CAP,
   VideoJobPlanRequest,
 } from "@openllmsh/protocol";
 import { Schema } from "effect";
@@ -221,23 +219,9 @@ const authHeaders = (): Record<string, string> => {
     // `docs/proposals/daemon-device-aware-this-machine.md`.
     [DAEMON_DEVICE_ID_HEADER]: deviceId(),
     [DAEMON_DEVICE_LABEL_HEADER]: deviceLabel(),
-    // Capability negotiation (never version-gated):
-    // - open model capabilities list (post image_editing/realtime widening)
-    // - bridge-capture SubMethod tokens in active_sub_method(s)
-    // - EXECUTION_SELECTION2_CAP (`@openllmsh/protocol`'s named-execution-
-    //   variant bootstrap fields, `execution_selection`/
-    //   `execution_selections`): `native-runtime/serve.ts` now resolves an
-    //   explicit selection through `execution-registry.ts`'s
-    //   `resolveExecutionSelection` for claude_code/chatgpt/cursor/muse hops
-    //   (09-implementation-plan.md phase 5, "existing-path migration"), so
-    //   advertising this cap is now a true behavioral claim rather than
-    //   plumbing-only decode support. See
-    //   docs/plan/bridge-variants-and-capture-adapters/09-implementation-plan.md §8.
-    [DAEMON_BOOTSTRAP_CAPS_HEADER]: [
-      MODEL_CAPABILITIES_OPEN_CAP,
-      SUB_METHOD_BRIDGE_CAPTURE_CAP,
-      EXECUTION_SELECTION2_CAP,
-    ].join(","),
+    // Capability negotiation (never version-gated): open model capabilities
+    // list (post image_editing/realtime widening).
+    [DAEMON_BOOTSTRAP_CAPS_HEADER]: [MODEL_CAPABILITIES_OPEN_CAP].join(","),
   };
 };
 

@@ -53,10 +53,7 @@ import {
 } from "../execution-registry";
 import { logDebug, logWarn, safeDiagnosticMessage } from "../logger";
 import { runAntigravityNative } from "./antigravity-acp";
-import {
-  bridgeRequestCaptureReadiness,
-  shouldActivateBridgeRequestCapture,
-} from "./bridge-request-capture-readiness";
+import { bridgeRequestCaptureReadiness } from "./bridge-request-capture-readiness";
 import { runClaudeNative } from "./claude-native";
 import { runClaudeSdkFacade } from "./claude-sdk-facade";
 import { runClaudeSdkFacadeCapture } from "./claude-sdk-facade-capture";
@@ -343,12 +340,10 @@ export type TNativeServeOutcome =
  * registry, folding in the one request-shape gate this baseline defines
  * (Claude `stream-json` + caller tools). Callers use the result like this:
  *
- *   - `null` — preserve the legacy selector's request-shape-dependent dispatch.
- *     The walker passes concrete provider defaults for unconfigured hops.
- *     Unsupported concrete vendor preferences are not folded into this case;
- *     they resolve through `{ ok: false, declined }` below.
+ *   - `null` — no selection (direct callers only; the walker always passes
+ *     one): the provider's plain native path without capture.
  *   - `{ ok: true, captureActive, variant }` — the explicit selection was
- *     accepted; use ITS `capture` flag instead of the legacy heuristic.
+ *     accepted; use ITS `capture` flag.
  *     `claude_code` now declares TWO variants (`stream-json`, `sdk-facade` —
  *     `../execution-registry.ts`), so callers MUST branch on `variant`
  *     rather than assume "the one variant this function is already about
@@ -372,8 +367,7 @@ export type TNativeServeOutcome =
  * `sdk-facade` being claude_code-only) is therefore refused pre-dispatch
  * exactly like an unambiguous per-provider override would be — §4.2 requires
  * the admin to either override that provider explicitly or accept the
- * refusal, never a silent, unrequested fall-through to the legacy `bridge`
- * dispatch. There is no scope-dependent softening here: every refusal kind
+ * refusal, never a silent, unrequested fall-through to another variant. There is no scope-dependent softening here: every refusal kind
  * (`unsupported_execution_variant`, `capture_not_supported`,
  * `unsupported_execution_shape`) is a hard pre-dispatch decline regardless
  * of whether the selection came from the global preference or a per-
@@ -414,9 +408,7 @@ const resolveExplicitDispatch = (
   }
   // The registry's `providerSupportsCaptureFor` is a STATIC declaration
   // (this provider's binding is capture-eligible AT ALL); the readiness
-  // table below is the dynamic kill switch the legacy
-  // `shouldActivateBridgeRequestCapture` path already consults on every
-  // capture activation. An explicit selection must not bypass that switch —
+  // table below is the dynamic kill switch. A selection must not bypass it —
   // if a provider's readiness ever flips to `ready: false`, an explicit
   // `<variant>-capture` selection refuses rather than silently forcing
   // capture on anyway.
@@ -470,9 +462,7 @@ const resolveExplicitDispatch = (
  * (`resolveExplicitDispatch` above) covers all four migrated providers, so
  * this never duplicates per provider. Privacy-safe: provider/variant/
  * capture/outcome tags only — never the request body, prompt, or
- * credentials. Concrete provider defaults log here too; explicit legacy
- * selectors return `null` from `resolveExplicitDispatch` and retain their
- * own dispatch diagnostics.
+ * credentials. Concrete provider defaults log here too.
  *
  * Every explicit selection resolves to exactly one of these two outcomes —
  * there is no scope-dependent third "ignored" outcome (09-implementation-
@@ -523,17 +513,11 @@ export type TNativeServeParams = {
   /** Opaque continuation capability echoed by a client after a tool pause. */
   readonly continuationToken?: string | null;
   /**
-   * True when this hop's selected sub-method is `bridge-capture` (from
-   * `ACTIVE_SUB_METHOD` via capability selection). Serve activates capture
-   * only when readiness also admits the provider — there is no separate
-   * capture env flag.
-   */
-  readonly bridgeCapture?: boolean;
-  /**
    * The walker's concrete provider selection (override, global preference or
-   * registry default). `null`/omitted preserves legacy `bridgeCapture`
-   * dispatch. Non-null selections validate through resolveExecutionSelection
-   * and either decline pre-dispatch or select their own variant/capture path.
+   * registry default). Validated through resolveExecutionSelection: it either
+   * declines pre-dispatch or selects its own variant/capture path.
+   * `null`/omitted (direct callers only) = the provider's plain native path
+   * without capture.
    */
   readonly executionSelection?: TExecutionSelection | null;
   /** Catalog-gated client-output repair, resolved by the walker. */
@@ -675,7 +659,7 @@ export const tryServeNativeRuntime = async (
   }
   // Resolve the concrete selection ONCE, ahead of the tool/text branch.
   // The walker supplies either an explicit variant or the provider default.
-  // `null` preserves request-shape-dependent legacy bridge selectors.
+  // `null` (direct callers only) keeps the plain native path.
   const explicitDispatch = resolveExplicitDispatch(
     params.provider,
     params.executionSelection,
@@ -691,7 +675,7 @@ export const tryServeNativeRuntime = async (
   // itself, so it branches BEFORE the `hasClientTools`/`nativeRequestOf`
   // split below, which is `stream-json`/`agent-sdk`-specific. Only reached
   // for a concrete `sdk-facade` selection, either explicit or the registry's
-  // caller-policy default. Explicit legacy bridge selectors keep their paths.
+  // caller-policy default.
   if (
     params.provider === "claude_code" &&
     explicitDispatch !== null &&
@@ -704,11 +688,11 @@ export const tryServeNativeRuntime = async (
       explicitDispatch.captureActive,
     );
   }
-  // Tool-bearing requests: when `bridge-capture` is selected AND readiness
-  // admits the provider, use capture (inert schemas / refused item/tool/call)
+  // Tool-bearing requests: when a `-capture` selection is accepted (registry
+  // + readiness), use capture (inert schemas / refused item/tool/call)
   // — NEVER the ordinary held SDK / app-server execution path. Otherwise keep
   // today's completion tool-passthrough. A pre-send capture decline may still
-  // fall through to handrolled on the same hop when `localMethodsForHop` lists
+  // fall through to handrolled on the same hop when `resolveHopExecution` lists
   // it; accepted/uncertain terminates the walk (walker-enforced).
   if (hasClientTools(params.canonical)) {
     const toolProvider: "claude_code" | "chatgpt" | null =
@@ -718,13 +702,7 @@ export const tryServeNativeRuntime = async (
           ? "claude_code"
           : null;
     const activateToolCapture =
-      explicitDispatch !== null
-        ? explicitDispatch.captureActive
-        : toolProvider !== null &&
-          shouldActivateBridgeRequestCapture(
-            toolProvider,
-            params.bridgeCapture === true,
-          );
+      explicitDispatch !== null && explicitDispatch.captureActive;
     if (toolProvider !== null && activateToolCapture) {
       return serveCapturedToolTurn(params, overrides, toolProvider);
     }
@@ -757,12 +735,7 @@ export const tryServeNativeRuntime = async (
   const textProvider: "claude_code" | "chatgpt" =
     params.provider === "chatgpt" ? "chatgpt" : "claude_code";
   const captureActive =
-    explicitDispatch !== null
-      ? explicitDispatch.captureActive
-      : shouldActivateBridgeRequestCapture(
-          textProvider,
-          params.bridgeCapture === true,
-        );
+    explicitDispatch !== null && explicitDispatch.captureActive;
   // Normalized identity for THIS hop's engine (see `../execution-identity.ts`)
   // — partitions the session store so a future sibling text variant for the
   // same provider can never resume this variant's native session state.
@@ -824,7 +797,7 @@ export const tryServeNativeRuntime = async (
       coldBuilder: true,
       // Cross-reference against the phase-1/2 capability authority
       // (`../execution-registry.ts`) so a capture activation is always
-      // visible against BOTH the legacy readiness table and the new
+      // visible against BOTH the readiness table and the
       // registry's independent capability declaration — see
       // 09-implementation-plan.md §8.3 ("Add admin/log diagnostics for
       // requested versus effective selection"). For this text engine the
@@ -1273,19 +1246,7 @@ const serveCursorHop = async (
     return { declined: explicitDispatch.declined };
   }
   const captureActive =
-    explicitDispatch !== null
-      ? explicitDispatch.captureActive
-      : shouldActivateBridgeRequestCapture(
-          "cursor",
-          params.bridgeCapture === true,
-        );
-  if (params.bridgeCapture === true && !captureActive) {
-    const readiness = bridgeRequestCaptureReadiness("cursor");
-    logDebug("native-runtime", "cursor bridge request capture not activated", {
-      ready: readiness.ready,
-      reason: readiness.reason,
-    });
-  }
+    explicitDispatch !== null && explicitDispatch.captureActive;
   if (captureActive) {
     logDebug("native-runtime", "bridge request capture active", {
       provider: "cursor",
@@ -1489,19 +1450,7 @@ const serveMuseHop = async (
     return { declined: explicitDispatch.declined };
   }
   const captureActive =
-    explicitDispatch !== null
-      ? explicitDispatch.captureActive
-      : shouldActivateBridgeRequestCapture(
-          "muse",
-          params.bridgeCapture === true,
-        );
-  if (params.bridgeCapture === true && !captureActive) {
-    const readiness = bridgeRequestCaptureReadiness("muse");
-    logDebug("native-runtime", "muse bridge request capture not activated", {
-      ready: readiness.ready,
-      reason: readiness.reason,
-    });
-  }
+    explicitDispatch !== null && explicitDispatch.captureActive;
   if (captureActive) {
     logDebug("native-runtime", "bridge request capture active", {
       provider: "muse",
@@ -1599,7 +1548,6 @@ const serveMuseHop = async (
 export {
   bridgeRequestCaptureReadiness,
   bridgeRequestCaptureReadinessTable,
-  shouldActivateBridgeRequestCapture,
 } from "./bridge-request-capture-readiness";
 export type { TChatCompletionChunk };
 /** Re-exported for the walker + tests. */

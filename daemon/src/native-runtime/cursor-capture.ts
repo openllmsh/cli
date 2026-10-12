@@ -36,7 +36,7 @@
  *      (or `publishCapturedDirectOutput` with that stream);
  *   2. settle ACP via `settleCursorCaptureViaAcpCancel` — never feed chunks
  *      back into the vendor child;
- *   3. flip `SUB_METHOD_CAPABILITIES.cursor` to include `bridge-capture` only
+ *   3. add `acp` to cursor's `captureVariants` (execution-registry.ts) only
  *      after serve uses this path and the HTTP/1 multi-RPC note below is
  *      accepted or solved.
  *
@@ -61,7 +61,7 @@ import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { TChatCompletionChunk } from "@openllmsh/protocol";
-import { providerDeclaresBridgeCapture } from "../sub-method";
+import { providerDeclaresBridgeCapture } from "../execution-registry";
 import type {
   TCursorAgentServiceMethod,
   TCursorDecodeBlock,
@@ -401,7 +401,7 @@ export const buildCursorCaptureChildEnv = (args: {
 };
 
 /**
- * Whether Cursor declares a serve-activated `bridge-capture` route.
+ * Whether Cursor registers a capture-capable `acp` variant.
  */
 export const isCursorBridgeRequestCaptureEnabled = (): boolean =>
   providerDeclaresBridgeCapture("cursor");
