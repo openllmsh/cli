@@ -49,7 +49,7 @@ import {
   validateAntigravityCallback,
   writeAntigravityBrowserHelper,
 } from "../native-runtime/antigravity-acp";
-import { AcpClient } from "../native-runtime/cursor-acp";
+import { AcpClient, AcpRpcError } from "../native-runtime/cursor-acp";
 import {
   clearPendingAuth,
   getPendingAuth,
@@ -227,6 +227,9 @@ const connect = (): Promise<TConnectResult> =>
       }, 200);
 
       let finished = false;
+      // The classified authenticate failure, surfaced by connect() when the
+      // attempt settles without a token.
+      let settledFailure: string | null = null;
       const finish = (result: {
         readonly ok: boolean;
         readonly message?: string;
@@ -292,13 +295,16 @@ const connect = (): Promise<TConnectResult> =>
           finish({ ok: true });
         } catch (error) {
           const failure = classifyAntigravityFailure(error);
+          settledFailure =
+            failure.cooldown === "payment"
+              ? failure.reason.includes("verify the account")
+                ? "Google needs to verify this account before it can use Antigravity. Verify it with Google, then sign in again."
+                : "Google requires an eligible Antigravity subscription for this account."
+              : failure.reason;
           finish({
             ok: false,
-            message:
-              failure.cooldown === "payment"
-                ? "Google requires an eligible Antigravity subscription for this account."
-                : failure.reason,
-            timedOut: /timed out/.test(failure.reason),
+            message: settledFailure,
+            timedOut: error instanceof AcpRpcError && error.kind === "timeout",
           });
         }
       })();
@@ -326,13 +332,16 @@ const connect = (): Promise<TConnectResult> =>
         if (tokenPresent()) {
           return { connected: true, detail: wiring.connectedDetail };
         }
-        logError(
-          "antigravity-connect",
-          safeDiagnosticMessage`no Google sign-in URL surfaced from the agent`,
-        );
+        if (first === "timeout") {
+          logError(
+            "antigravity-connect",
+            safeDiagnosticMessage`no Google sign-in URL surfaced from the agent`,
+          );
+        }
         return {
           connected: false,
           detail:
+            settledFailure ??
             "Couldn't start Google sign-in. Retry from the Providers page.",
         };
       }
