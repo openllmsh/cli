@@ -1420,6 +1420,16 @@ install_antigravity_release() {
 # Launch the tracked Antigravity install when this host can take it. Skips
 # (with no progress record — nothing was started) on an unsupported platform
 # or a host without `unzip`.
+# OPENLLM_ONLY_VENDOR_CLIS — comma-separated subscription slugs to provision
+# (e.g. claude_code,chatgpt). Unset/empty selects every vendor.
+vendor_cli_selected() {
+  [ -z "${OPENLLM_ONLY_VENDOR_CLIS:-}" ] && return 0
+  case ",${OPENLLM_ONLY_VENDOR_CLIS}," in
+    *",$1,"*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 provision_antigravity() {
   local run_path="$1" curl_bin="$2"
   local name="Google Antigravity" dest="$ANTIGRAVITY_DIR/current/$ANTIGRAVITY_EXE"
@@ -1486,14 +1496,7 @@ provision_clis() {
   local spec name cmd slug dest url
   for spec in "${specs[@]}"; do
     IFS='|' read -r name cmd slug dest url <<<"$spec"
-    # OPENLLM_ONLY_VENDOR_CLIS — comma-separated subscription slugs to provision
-    # (e.g. claude_code,chatgpt). Unset/empty keeps every vendor.
-    if [ -n "${OPENLLM_ONLY_VENDOR_CLIS:-}" ]; then
-      case ",${OPENLLM_ONLY_VENDOR_CLIS}," in
-        *",${slug},"*) ;;
-        *) continue ;;
-      esac
-    fi
+    vendor_cli_selected "$slug" || continue
     if has_command "$cmd" || [ -x "$dest" ]; then
       echo "  $name CLI: already installed."
       # Mirror the skip into the log too — previously only the backgrounded
@@ -1513,7 +1516,7 @@ provision_clis() {
     1) touch "$OPENLLM_DIR/antigravity-enabled" 2>/dev/null || true ;;
     0) rm -f "$OPENLLM_DIR/antigravity-enabled" 2>/dev/null || true ;;
   esac
-  if [ -f "$OPENLLM_DIR/antigravity-enabled" ]; then
+  if [ -f "$OPENLLM_DIR/antigravity-enabled" ] && vendor_cli_selected antigravity; then
     provision_antigravity "$run_path" "$curl_bin" || true
   fi
 }
