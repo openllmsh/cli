@@ -22,6 +22,11 @@
 #                          an explicit or already-persisted port is never
 #                          probed or changed)
 #   OPENLLM_DAEMON_PTY_SESSIONS  enable remote terminal sessions (1/true; default off)
+#   OPENLLM_SKIP_SHELL_SETUP     set to skip `openllm setup` + completion install
+#                                (PATH symlinks / shell rc / completion stay untouched)
+#   OPENLLM_SKIP_VENDOR_CLIS     set to skip background vendor CLI provisioning
+#   OPENLLM_ONLY_VENDOR_CLIS     comma-separated subscription slugs to provision
+#                                (e.g. claude_code,chatgpt); unset = all vendors
 #
 # This is the ONLY shell installer. It also background-provisions
 # any missing vendor subscription CLIs (claude / codex / kimi / grok / cursor-agent / muse) via each
@@ -613,8 +618,12 @@ write_env_file
 # First-install only: a manual update must not touch PATH symlinks, the shell
 # rc block, or completion — those are the user's environment, already wired.
 if [ "$INSTALL_MODE" != update ]; then
-  "$BIN_DIR/openllm" setup || echo "  note: run '$BIN_DIR/openllm setup' yourself to finish shell setup"
-  "$BIN_DIR/openllm" daemon completion install >/dev/null 2>&1 || true
+  # OPENLLM_SKIP_SHELL_SETUP — leave PATH symlinks, shell rc, and completion alone
+  # (useful for CI / non-interactive hosts that already manage the environment).
+  if [ -z "${OPENLLM_SKIP_SHELL_SETUP:-}" ]; then
+    "$BIN_DIR/openllm" setup || echo "  note: run '$BIN_DIR/openllm setup' yourself to finish shell setup"
+    "$BIN_DIR/openllm" daemon completion install >/dev/null 2>&1 || true
+  fi
 fi
 
 # --- start the service -----------------------------------------------------
@@ -692,17 +701,26 @@ fi
 # `$ENV_FILE.lock` so installer concurrency never contends with config writes.
 vendor_cli_now_ms() {
   # Bash 3.2 / macOS date has no %N — second resolution * 1000 is enough.
-  echo $(($(date +%s) * 1000))
+  # Inline arithmetic avoids a nested `$(date)` subshell on top of the caller's.
+  local _secs
+  _secs="$(date +%s)"
+  echo $((_secs * 1000))
 }
 
 vendor_cli_json_escape() {
   # Values we emit are attempt ids / stages / ps lstart — keep escaping tight.
-  printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g'
+  # Pure parameter expansion (no sed fork) — hot path during progress writes.
+  local s="$1"
+  s="${s//\\/\\\\}"
+  s="${s//\"/\\\"}"
+  printf '%s' "$s"
 }
 
 vendor_cli_attempt_id() {
   # This id reaches the cloud; process identity belongs only in local fields.
-  printf 'vci-%s-%s-%s-%s-%s' "$(date +%s)" \
+  local _secs
+  _secs="$(date +%s)"
+  printf 'vci-%s-%s-%s-%s-%s' "$_secs" \
     "${RANDOM:-0}" "${RANDOM:-0}" "${RANDOM:-0}" "${RANDOM:-0}"
 }
 
@@ -714,10 +732,13 @@ vendor_cli_cleanup_attempt_files() {
 }
 
 vendor_cli_process_start() {
-  local pid="$1"
+  local pid="$1" raw
   # Portable PID-reuse guard (same idea as daemon child-supervisor lstart).
   # Locale/TZ pinned: daemon processStartTime compares this from another env.
-  LC_ALL=C TZ=UTC ps -o lstart= -p "$pid" 2>/dev/null | sed 's/^[[:space:]]*//;s/[[:space:]]*$//'
+  raw="$(LC_ALL=C TZ=UTC ps -o lstart= -p "$pid" 2>/dev/null)" || return 0
+  raw="${raw#"${raw%%[![:space:]]*}"}"
+  raw="${raw%"${raw##*[![:space:]]}"}"
+  printf '%s' "$raw"
 }
 
 vendor_cli_pid_live() {
@@ -732,8 +753,27 @@ vendor_cli_pid_live() {
   return 0
 }
 
+# Cached once per process — every progress write used to re-printf + re-mkdir.
+VENDOR_CLI_STATE_DIR=""
+VENDOR_CLI_STATE_DIR_READY=0
 vendor_cli_state_dir() {
-  printf '%s' "$OPENLLM_DIR/vendor-cli-install"
+  if [ -z "$VENDOR_CLI_STATE_DIR" ]; then
+    VENDOR_CLI_STATE_DIR="$OPENLLM_DIR/vendor-cli-install"
+  fi
+  printf '%s' "$VENDOR_CLI_STATE_DIR"
+}
+
+vendor_cli_ensure_state_dir() {
+  local dir
+  dir="$(vendor_cli_state_dir)"
+  if [ "$VENDOR_CLI_STATE_DIR_READY" = 1 ] && [ -d "$dir" ]; then
+    printf '%s' "$dir"
+    return 0
+  fi
+  mkdir -p "$dir" || return 1
+  chmod 700 "$dir" 2>/dev/null || true
+  VENDOR_CLI_STATE_DIR_READY=1
+  printf '%s' "$dir"
 }
 
 # Atomic JSON replace for one provider. Returns nonzero on any write failure.
@@ -742,9 +782,7 @@ vendor_cli_state_dir() {
 vendor_cli_write_state() {
   local slug="$1" json="$2"
   local dir tmp final saved_umask
-  dir="$(vendor_cli_state_dir)"
-  mkdir -p "$dir" || return 1
-  chmod 700 "$dir" 2>/dev/null || true
+  dir="$(vendor_cli_ensure_state_dir)" || return 1
   final="$dir/${slug}.json"
   saved_umask="$(umask)"
   umask 077
@@ -757,7 +795,7 @@ vendor_cli_write_state() {
     rm -f "$tmp"
     return 1
   fi
-  chmod 600 "$tmp" 2>/dev/null || true
+  # umask 077 already makes the tmp 0600 — skip an extra chmod fork.
   if ! mv -f "$tmp" "$final"; then
     umask "$saved_umask"
     rm -f "$tmp"
@@ -795,9 +833,9 @@ vendor_cli_active_worker() {
 # Per-provider launch lock via mkdir (atomic). Ownership is the `owner` file
 # inside the lock dir (pid + lstart + token). Incomplete/missing owner is
 # treated as INITIALIZING for a bounded mtime grace — never immediate reclaim
-# (that stole locks during OPENLLM_TEST_VENDOR_LOCK_PAUSE). Stale reclaim takes
-# an inner `reclaim/` mkdir sublock, re-validates owner+grace, then `mv`s the
-# whole dir. release must match token.
+# (that stole locks while birth existed but owner was still unwritten). Stale
+# reclaim takes an inner `reclaim/` mkdir sublock, re-validates owner+grace,
+# then `mv`s the whole dir. release must match token.
 VENDOR_CLI_LOCK_INIT_GRACE_SEC=45
 
 vendor_cli_lock_dir() {
@@ -889,9 +927,7 @@ vendor_cli_acquire_lock() {
   local slug="$1" dir lock owner_file attempt=0
   local owner_pid owner_start reclaim age pre_age pre_inode post_inode
   local my_start my_token
-  dir="$(vendor_cli_state_dir)"
-  mkdir -p "$dir" || return 1
-  chmod 700 "$dir" 2>/dev/null || true
+  dir="$(vendor_cli_ensure_state_dir)" || return 1
   lock="$(vendor_cli_lock_dir "$slug")"
   owner_file="$lock/owner"
   my_start="$(vendor_cli_process_start "$$" || true)"
@@ -904,10 +940,6 @@ vendor_cli_acquire_lock() {
         rm -rf "$lock" 2>/dev/null || true
         VENDOR_CLI_LOCK_TOKEN=""
         return 1
-      fi
-      # Optional test hook: widen the window after mkdir before owner exists.
-      if [ -n "${OPENLLM_TEST_VENDOR_LOCK_PAUSE:-}" ]; then
-        sleep 0.2
       fi
       if ! {
         printf '%s\n' "$$"
@@ -1454,6 +1486,14 @@ provision_clis() {
   local spec name cmd slug dest url
   for spec in "${specs[@]}"; do
     IFS='|' read -r name cmd slug dest url <<<"$spec"
+    # OPENLLM_ONLY_VENDOR_CLIS — comma-separated subscription slugs to provision
+    # (e.g. claude_code,chatgpt). Unset/empty keeps every vendor.
+    if [ -n "${OPENLLM_ONLY_VENDOR_CLIS:-}" ]; then
+      case ",${OPENLLM_ONLY_VENDOR_CLIS}," in
+        *",${slug},"*) ;;
+        *) continue ;;
+      esac
+    fi
     if has_command "$cmd" || [ -x "$dest" ]; then
       echo "  $name CLI: already installed."
       # Mirror the skip into the log too — previously only the backgrounded
@@ -1482,7 +1522,11 @@ provision_clis() {
 # Background jobs outlive this script. Skipped on a manual update: rerunning
 # every vendor's installer is a first-install action the user didn't ask for.
 if [ "$INSTALL_MODE" != update ]; then
-  provision_clis || true
+  # OPENLLM_SKIP_VENDOR_CLIS — install only the openllm binary; skip background
+  # vendor CLI downloads (claude / codex / kimi / grok / cursor-agent / muse).
+  if [ -z "${OPENLLM_SKIP_VENDOR_CLIS:-}" ]; then
+    provision_clis || true
+  fi
 fi
 
 if [ "$INSTALL_MODE" = update ]; then
