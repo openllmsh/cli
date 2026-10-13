@@ -46,6 +46,7 @@ import { planCacheEnabled } from "./config";
 import { notePresenceActivity } from "./control-channel";
 import { corsHeaders, errorJson, isPreflight, preflightResponse } from "./cors";
 import { isSubscriptionSlug } from "./delegation";
+import { runEmbeddings } from "./embeddings-walker";
 import { isLocalServerSlug } from "./local-servers";
 import { passthroughToOrigin } from "./forward";
 import { runImageEditWalker, runImageWalker } from "./image-walker";
@@ -130,6 +131,7 @@ export const handleInference = async (req: Request): Promise<Response> => {
   // Normalize the optional `/api` prefix once; reused for video routing + the
   // recorded `endpoint`.
   const normalizedPath = url.pathname.replace(/^\/api(?=\/v1\/)/, "");
+  const isEmbeddings = normalizedPath === "/v1/embeddings";
 
   // Model listing is not an inference surface — the daemon holds no local
   // catalog, so a `GET /v1/models[...]` is passed straight through to the
@@ -290,6 +292,10 @@ export const handleInference = async (req: Request): Promise<Response> => {
     } else if (isTranscriptions || isSpeech) {
       // no-op — the audio walker validates its own shape (either JSON or
       // multipart for transcriptions; JSON-only for speech).
+    } else if (isEmbeddings) {
+      // Embeddings keep a minimal body (`model` + `input`); the embeddings
+      // walker validates what's needed and must not go through the chat
+      // completion schema (which would 400 a valid embeddings request).
     } else if (surface === "messages") parseAnthropicRequest(rawBody);
     else if (surface === "responses") parseResponsesRequest(rawBody);
     else parseOpenAIRequest(rawBody);
@@ -451,40 +457,55 @@ export const handleInference = async (req: Request): Promise<Response> => {
       if (outcome === "throw") throw err;
       if (outcome !== "passthrough") return outcome;
     }
+    // Embeddings against an explicit `local_*` model can be served on-device
+    // without a cloud plan (local rows are device-live). Fall through to
+    // `runEmbeddings` instead of origin-passthrough when the plan is missing
+    // or not daemon-only.
+    const embeddingsLocalFallback =
+      isEmbeddings &&
+      isLocalServerSlug(explicitAlias.split("/")[0] ?? "");
     if (fetched === null) {
-      return withCors(req, await passthroughToOrigin(req, rawBytes));
-    }
-    const fetchedContextOverflowStrategy =
-      fetched.context_overflow_strategy ?? null;
-    const verified = planSignatureOk(
-      fetched.plan,
-      fetched.pmids,
-      fetched.origin,
-      fetchedContextOverflowStrategy,
-      fetched.sig,
-    );
-    const hasDaemonOnlyHop =
-      verified &&
-      parsePlan(fetched.plan).some((entry) => {
-        const provider = entry.split("/")[0] ?? "";
-        return isSubscriptionSlug(provider) || isLocalServerSlug(provider);
-      });
-    if (!verified || !hasDaemonOnlyHop) {
-      return withCors(req, await passthroughToOrigin(req, rawBytes));
-    }
-    planParam = fetched.plan;
-    pmidsParam = fetched.pmids;
-    originParam = fetched.origin;
-    contextOverflowStrategy = fetchedContextOverflowStrategy;
-    sigParam = fetched.sig;
-    if (planCacheEnabled() && planCacheKey !== null) {
-      storePlan(planCacheKey, {
-        planParam,
-        pmidsParam,
-        originParam,
-        contextOverflowStrategy,
-        sigParam,
-      });
+      if (embeddingsLocalFallback) {
+        // leave planParam null — runEmbeddings serves from the body model
+      } else {
+        return withCors(req, await passthroughToOrigin(req, rawBytes));
+      }
+    } else {
+      const fetchedContextOverflowStrategy =
+        fetched.context_overflow_strategy ?? null;
+      const verified = planSignatureOk(
+        fetched.plan,
+        fetched.pmids,
+        fetched.origin,
+        fetchedContextOverflowStrategy,
+        fetched.sig,
+      );
+      const hasDaemonOnlyHop =
+        verified &&
+        parsePlan(fetched.plan).some((entry) => {
+          const provider = entry.split("/")[0] ?? "";
+          return isSubscriptionSlug(provider) || isLocalServerSlug(provider);
+        });
+      if (!verified || !hasDaemonOnlyHop) {
+        if (!embeddingsLocalFallback) {
+          return withCors(req, await passthroughToOrigin(req, rawBytes));
+        }
+      } else {
+        planParam = fetched.plan;
+        pmidsParam = fetched.pmids;
+        originParam = fetched.origin;
+        contextOverflowStrategy = fetchedContextOverflowStrategy;
+        sigParam = fetched.sig;
+        if (planCacheEnabled() && planCacheKey !== null) {
+          storePlan(planCacheKey, {
+            planParam,
+            pmidsParam,
+            originParam,
+            contextOverflowStrategy,
+            sigParam,
+          });
+        }
+      }
     }
   } else if (
     planParam === null &&
@@ -683,6 +704,8 @@ export const handleInference = async (req: Request): Promise<Response> => {
                       ? runAudioTranscriptionWalker(walkArgs, multipart)
                       : isSpeech
                         ? runAudioSpeechWalker(walkArgs)
-                        : runWalker(walkArgs)),
+                        : isEmbeddings
+                          ? runEmbeddings(walkArgs)
+                          : runWalker(walkArgs)),
   );
 };
