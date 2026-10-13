@@ -25,7 +25,7 @@ type TQuotaBaseline = {
 const quotaKey = (slug: string, accountHash: string | undefined): string =>
   `${slug}\0${accountHash ?? "-"}`;
 
-const isSubscriptionProviderSlug = (
+const isOAuthProviderSlug = (
   slug: string,
 ): slug is TDaemonQuotaStatusReached["slug"] =>
   slug === "claude_code" ||
@@ -114,7 +114,7 @@ const noteConnections = (
   for (const connection of connections) {
     const usage = connection.usage;
     if (
-      !isSubscriptionProviderSlug(connection.provider) ||
+      !isOAuthProviderSlug(connection.provider) ||
       usage?.kind !== "quota" ||
       usage.stale === true
     )

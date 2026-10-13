@@ -31,7 +31,7 @@ import {
   GROK_TTS_OUTPUT_FORMATS,
   GROK_TTS_VOICES,
   isLocalServerSlug,
-  isSubscriptionProviderSlug,
+  isOAuthProviderSlug,
   MEDIA_PERSISTENCE_BROWSER,
   MEDIA_PERSISTENCE_REQUEST_HEADER,
   MEDIA_PERSISTENCE_RESPONSE_HEADER,
@@ -411,7 +411,7 @@ export const runAudioTranscriptionWalker = async (
       hop.provider,
     )?.credentialForTranscription;
     if (
-      isSubscriptionProviderSlug(hop.provider) &&
+      isOAuthProviderSlug(hop.provider) &&
       transcribeHook === undefined
     ) {
       lastError = errorJson(
@@ -440,7 +440,7 @@ export const runAudioTranscriptionWalker = async (
       if (!last) continue;
       return stamp(lastError, hop.modelId);
     }
-    if (!isSubscriptionProviderSlug(hop.provider)) {
+    if (!isOAuthProviderSlug(hop.provider)) {
       attempted.push(hop.modelId);
       const forwarded = await forwardMediaHopToCloud(args, hop.modelId);
       if (forwarded.ok) return stamp(forwarded, hop.modelId);
@@ -911,7 +911,7 @@ export const runAudioSpeechWalker = async (
       if (!last) continue;
       return stamp(lastError, hop.modelId);
     }
-    if (!isSubscriptionProviderSlug(hop.provider)) {
+    if (!isOAuthProviderSlug(hop.provider)) {
       attempted.push(hop.modelId);
       const forwarded = await forwardMediaHopToCloud(args, hop.modelId);
       if (forwarded.ok) return stamp(forwarded, hop.modelId);

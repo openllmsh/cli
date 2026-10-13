@@ -276,7 +276,7 @@ const SETTLED_BY_PROVIDER_CALLER: Record<
   },
 };
 
-const isSubscriptionProviderSlug = (
+const isOAuthProviderSlug = (
   slug: string,
 ): slug is TSubscriptionProviderSlug =>
   Object.hasOwn(SETTLED_BY_PROVIDER, slug);
@@ -285,7 +285,7 @@ const settledDoctorMessage = (
   slug: string,
   caller: TRefreshCaller | null,
 ): TSafeDiagnosticMessage => {
-  if (!isSubscriptionProviderSlug(slug)) return SETTLED_FALLBACK;
+  if (!isOAuthProviderSlug(slug)) return SETTLED_FALLBACK;
   if (caller === null) return SETTLED_BY_PROVIDER[slug];
   return SETTLED_BY_PROVIDER_CALLER[slug][caller];
 };

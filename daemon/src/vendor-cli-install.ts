@@ -10,7 +10,7 @@ import { readFileSync, realpathSync, statSync } from "node:fs";
 import { basename, dirname, isAbsolute, join, resolve, sep } from "node:path";
 import type { TVendorCliInstall } from "@openllmsh/protocol";
 import {
-  isSubscriptionProviderSlug,
+  isOAuthProviderSlug,
   VENDOR_CLI_DETECTION_GRACE_MS,
   VENDOR_CLI_INSTALL_STALE_MS,
   VendorCliInstall,
@@ -37,7 +37,7 @@ const vendorCliInstallRoot = (): string =>
   join(stateDir(), "vendor-cli-install");
 
 const isSafeSlugFile = (slug: string, filePath: string): boolean => {
-  if (!isSubscriptionProviderSlug(slug)) return false;
+  if (!isOAuthProviderSlug(slug)) return false;
   if (slug.includes("/") || slug.includes("\\") || slug.includes("..")) {
     return false;
   }
@@ -75,7 +75,7 @@ const parseLocalRecord = (raw: unknown): TLocalRecord | null => {
   }
   if (obj.attempt_id.length > 128) return null;
   if (typeof obj.provider !== "string") return null;
-  if (!isSubscriptionProviderSlug(obj.provider)) return null;
+  if (!isOAuthProviderSlug(obj.provider)) return null;
   if (
     obj.stage !== "installing" &&
     obj.stage !== "awaiting_detection" &&
@@ -155,7 +155,7 @@ const toWire = (record: TVendorCliInstall): TVendorCliInstall | undefined => {
 };
 
 const readRawRecord = (slug: string): TLocalRecord | null => {
-  if (!isSubscriptionProviderSlug(slug)) return null;
+  if (!isOAuthProviderSlug(slug)) return null;
   const filePath = join(vendorCliInstallRoot(), `${slug}.json`);
   if (!isSafeSlugFile(slug, filePath)) return null;
   let st: ReturnType<typeof statSync>;

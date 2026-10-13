@@ -14,7 +14,7 @@ import {
   encodeVideoId,
   isAllowedMediaOption,
   isLocalServerSlug,
-  isSubscriptionProviderSlug,
+  isOAuthProviderSlug,
   MEDIA_ERROR_RESPONSE_HEADER,
   MEDIA_URL_RESPONSE_HEADER,
   matchDeclaredAspectRatio,
@@ -118,7 +118,7 @@ const followVideoJob = async (
   args: TWalkArgs,
   payload: TVideoIdPayload,
 ): Promise<Response | TVideoUpstream> => {
-  if (!isSubscriptionProviderSlug(payload.p)) {
+  if (!isOAuthProviderSlug(payload.p)) {
     return passthroughToOrigin(args.req, EMPTY_BODY, { pinModel: payload.m });
   }
   const hop = hopForVideoJob(args, payload);
@@ -453,7 +453,7 @@ export const runVideoCreate = async (args: TWalkArgs): Promise<Response> => {
       if (!last) continue;
       return stamp(lastError, hop.modelId);
     }
-    if (!isSubscriptionProviderSlug(hop.provider)) {
+    if (!isOAuthProviderSlug(hop.provider)) {
       attempted.push(hop.modelId);
       const forwarded = await forwardMediaHopToCloud(args, hop.modelId);
       if (forwarded.ok) return stamp(forwarded, hop.modelId);
