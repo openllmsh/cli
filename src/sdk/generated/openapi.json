@@ -24436,6 +24436,35 @@
                             },
                             "additionalProperties": false
                           },
+                          "included_usage": {
+                            "type": "object",
+                            "required": [
+                              "free",
+                              "trial",
+                              "pro"
+                            ],
+                            "properties": {
+                              "free": {
+                                "type": "integer",
+                                "description": "a non-negative number",
+                                "title": "nonNegative",
+                                "minimum": 0
+                              },
+                              "trial": {
+                                "type": "integer",
+                                "description": "a non-negative number",
+                                "title": "nonNegative",
+                                "minimum": 0
+                              },
+                              "pro": {
+                                "type": "integer",
+                                "description": "a non-negative number",
+                                "title": "nonNegative",
+                                "minimum": 0
+                              }
+                            },
+                            "additionalProperties": false
+                          },
                           "deprecated": {
                             "type": "boolean"
                           },
@@ -25022,6 +25051,7 @@
                     "free_tier_cap",
                     "free_tier_tokens_used",
                     "free_tier_period",
+                    "included_usage",
                     "device_cap",
                     "device_count"
                   ],
@@ -25170,6 +25200,92 @@
                     },
                     "free_tier_period": {
                       "type": "string"
+                    },
+                    "included_usage": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "required": [
+                          "model_id",
+                          "display_name",
+                          "allowance",
+                          "input_tokens_used",
+                          "cached_input_tokens_used",
+                          "output_tokens_used"
+                        ],
+                        "properties": {
+                          "model_id": {
+                            "type": "string"
+                          },
+                          "display_name": {
+                            "type": "string"
+                          },
+                          "allowance": {
+                            "type": "object",
+                            "required": [
+                              "free",
+                              "trial",
+                              "pro"
+                            ],
+                            "properties": {
+                              "free": {
+                                "type": "integer",
+                                "description": "a non-negative number",
+                                "title": "nonNegative",
+                                "minimum": 0
+                              },
+                              "trial": {
+                                "type": "integer",
+                                "description": "a non-negative number",
+                                "title": "nonNegative",
+                                "minimum": 0
+                              },
+                              "pro": {
+                                "type": "integer",
+                                "description": "a non-negative number",
+                                "title": "nonNegative",
+                                "minimum": 0
+                              }
+                            },
+                            "additionalProperties": false
+                          },
+                          "pricing": {
+                            "type": "object",
+                            "required": [],
+                            "properties": {
+                              "input_per_million": {
+                                "type": "number"
+                              },
+                              "output_per_million": {
+                                "type": "number"
+                              },
+                              "cache_read_per_million": {
+                                "type": "number"
+                              },
+                              "cache_write_per_million": {
+                                "type": "number"
+                              },
+                              "image_input_per_unit": {
+                                "type": "number"
+                              },
+                              "audio_input_per_minute": {
+                                "type": "number"
+                              }
+                            },
+                            "additionalProperties": false
+                          },
+                          "input_tokens_used": {
+                            "type": "number"
+                          },
+                          "cached_input_tokens_used": {
+                            "type": "number"
+                          },
+                          "output_tokens_used": {
+                            "type": "number"
+                          }
+                        },
+                        "additionalProperties": false
+                      }
                     },
                     "device_cap": {
                       "type": "number"
