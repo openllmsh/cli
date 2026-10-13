@@ -47,9 +47,9 @@ import { notePresenceActivity } from "./control-channel";
 import { corsHeaders, errorJson, isPreflight, preflightResponse } from "./cors";
 import { isOAuthSlug } from "./delegation";
 import { runEmbeddings } from "./embeddings-walker";
-import { isLocalServerSlug } from "./local-servers";
 import { passthroughToOrigin } from "./forward";
 import { runImageEditWalker, runImageWalker } from "./image-walker";
+import { isLocalServerSlug } from "./local-servers";
 import { logWarn, safeDiagnosticMessage } from "./logger";
 import {
   buildMediaDefaultRequest,
@@ -462,8 +462,7 @@ export const handleInference = async (req: Request): Promise<Response> => {
     // `runEmbeddings` instead of origin-passthrough when the plan is missing
     // or not daemon-only.
     const embeddingsLocalFallback =
-      isEmbeddings &&
-      isLocalServerSlug(explicitAlias.split("/")[0] ?? "");
+      isEmbeddings && isLocalServerSlug(explicitAlias.split("/")[0] ?? "");
     if (fetched === null) {
       if (embeddingsLocalFallback) {
         // leave planParam null — runEmbeddings serves from the body model

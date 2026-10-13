@@ -410,10 +410,7 @@ export const runAudioTranscriptionWalker = async (
     const transcribeHook = getDelegate(
       hop.provider,
     )?.credentialForTranscription;
-    if (
-      isOAuthProviderSlug(hop.provider) &&
-      transcribeHook === undefined
-    ) {
+    if (isOAuthProviderSlug(hop.provider) && transcribeHook === undefined) {
       lastError = errorJson(
         404,
         `No transcription credential available for ${hop.provider}`,

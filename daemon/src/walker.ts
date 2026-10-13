@@ -199,7 +199,6 @@ import {
 } from "./config";
 import { errorJson } from "./cors";
 import { getDelegate, isOAuthSlug } from "./delegation";
-import { isLocalServerSlug, serveLocalHop } from "./local-servers";
 import type { TRefreshErrorClass } from "./delegation/refresh";
 import { authReasonCodeForRefreshError } from "./delegation/refresh";
 import type { TProviderDelegate } from "./delegation/types";
@@ -212,6 +211,7 @@ import {
   peekHopCooldown,
   TRANSIENT_COOLDOWN_REASONS,
 } from "./hop-cooldown";
+import { isLocalServerSlug, serveLocalHop } from "./local-servers";
 import { logWarn, safeDiagnosticMessage } from "./logger";
 import { maybeReportModels } from "./model-report";
 import {
@@ -2664,11 +2664,7 @@ const walkPlan = async (
       // A NEW/changed `auth` mark on a subscription hop: push status now so
       // the dashboard overlay does not wait for the 15s watcher. Repeated
       // identical marks (in-place retry) do not re-arm. Never refresh.
-      if (
-        changed &&
-        cooldownReason === "auth" &&
-        isOAuthSlug(hop.provider)
-      ) {
+      if (changed && cooldownReason === "auth" && isOAuthSlug(hop.provider)) {
         getDelegate(hop.provider)?.invalidateStatusObservation?.();
         args.onAuthCooldownStatusPush?.();
         requestStatusPush();

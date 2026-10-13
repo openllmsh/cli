@@ -276,9 +276,7 @@ const SETTLED_BY_PROVIDER_CALLER: Record<
   },
 };
 
-const isOAuthProviderSlug = (
-  slug: string,
-): slug is TSubscriptionProviderSlug =>
+const isOAuthProviderSlug = (slug: string): slug is TSubscriptionProviderSlug =>
   Object.hasOwn(SETTLED_BY_PROVIDER, slug);
 
 const settledDoctorMessage = (

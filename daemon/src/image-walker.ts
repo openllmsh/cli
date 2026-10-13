@@ -30,13 +30,13 @@ import { Schema } from "effect";
 import { uploadMedia } from "./cloud-client";
 import { errorJson } from "./cors";
 import { getDelegate, isOAuthSlug } from "./delegation";
-import { isLocalServerSlug } from "./local-servers";
 import type { TImageCredential } from "./delegation/types";
 import {
   buildImageEditUpstreamBody,
   ImageProviderUnavailableError,
   isSupportedImageEditReference,
 } from "./image-edit-wire";
+import { isLocalServerSlug } from "./local-servers";
 import { logWarn, safeDiagnosticMessage } from "./logger";
 import { withMediaAttribution } from "./media-attribution";
 import { forwardMediaHopToCloud } from "./media-cloud-forward";

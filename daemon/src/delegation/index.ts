@@ -30,9 +30,8 @@ export const DELEGATES: Readonly<Record<string, TProviderDelegate>> = {
 /**
  * Check if a provider slug is an OAuth/vendor-CLI provider served by the daemon.
  */
-export const isOAuthSlug = (
-  slug: string,
-): slug is TSubscriptionProviderSlug => Object.hasOwn(DELEGATES, slug);
+export const isOAuthSlug = (slug: string): slug is TSubscriptionProviderSlug =>
+  Object.hasOwn(DELEGATES, slug);
 
 /**
  * @deprecated Use isOAuthSlug instead. Kept for backward compatibility.
