@@ -13,6 +13,7 @@ import {
   describeAllowed,
   encodeVideoId,
   isAllowedMediaOption,
+  isLocalServerSlug,
   isSubscriptionProviderSlug,
   MEDIA_ERROR_RESPONSE_HEADER,
   MEDIA_URL_RESPONSE_HEADER,
@@ -441,6 +442,17 @@ export const runVideoCreate = async (args: TWalkArgs): Promise<Response> => {
     const hop = hops[i];
     if (hop === undefined) continue;
     const last = i === hops.length - 1;
+    if (isLocalServerSlug(hop.provider)) {
+      attempted.push(hop.modelId);
+      lastError = errorJson(
+        400,
+        `local provider "${hop.provider}" does not support video`,
+        "invalid_request_error",
+        "local_surface_unsupported",
+      );
+      if (!last) continue;
+      return stamp(lastError, hop.modelId);
+    }
     if (!isSubscriptionProviderSlug(hop.provider)) {
       attempted.push(hop.modelId);
       const forwarded = await forwardMediaHopToCloud(args, hop.modelId);

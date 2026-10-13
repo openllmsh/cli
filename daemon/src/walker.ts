@@ -199,6 +199,7 @@ import {
 } from "./config";
 import { errorJson } from "./cors";
 import { getDelegate, isSubscriptionSlug } from "./delegation";
+import { isLocalServerSlug, serveLocalHop } from "./local-servers";
 import type { TRefreshErrorClass } from "./delegation/refresh";
 import { authReasonCodeForRefreshError } from "./delegation/refresh";
 import type { TProviderDelegate } from "./delegation/types";
@@ -500,6 +501,7 @@ export const planSignatureOk = (
  */
 export const canWalkPlan = (hops: ReadonlyArray<THop>): boolean => {
   for (const hop of hops) {
+    if (isLocalServerSlug(hop.provider)) continue; // local OpenAI-wire passthrough
     if (!isSubscriptionSlug(hop.provider)) continue; // API-key → forwardable
     if (isNativeRuntimeProvider(hop.provider)) continue; // native runtime path (incl. bridge-only cursor)
     if (UPSTREAM_WIRE[hop.provider] === undefined) return false;
@@ -3288,6 +3290,27 @@ const walkPlan = async (
         reason: lastError,
       });
       continue;
+    }
+    if (isLocalServerSlug(hop.provider)) {
+      dialedHops.add(`${hop.provider}|${hop.modelId}`);
+      const localResp = await serveLocalHop(
+        hop,
+        {
+          surface: args.surface,
+          rawBody: args.rawBody,
+          req: args.req,
+          startedAt: args.startedAt,
+          endpoint: args.endpoint,
+          originParam: args.originParam,
+        },
+        finalHop,
+      );
+      if (localResp === null) {
+        lastError = `local hop ${hop.modelId} unavailable on this device`;
+        addHopFailure(hop, lastError);
+        continue;
+      }
+      return withHopTrailHeaders(localResp, hop);
     }
     if (isSubscriptionSlug(hop.provider)) {
       // Record the DIALLED identity before serving so the recovery pass can

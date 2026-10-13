@@ -72,6 +72,7 @@ import {
 import { buildHealth } from "./health";
 import { handleInference } from "./listener";
 import { handleLocalAuth } from "./local-auth";
+import { startLocalServerDiscovery } from "./local-servers";
 import { flushLogs, logError, logInfo, safeDiagnosticMessage } from "./logger";
 import { observeLoginModelReports } from "./model-report";
 import { ptySessionsEnabled } from "./pty-sessions-pref";
@@ -239,6 +240,9 @@ export const main = async (): Promise<void> => {
   // with nothing to fall back to). See `usage-cache.ts`.
   enableUsagePersistence(stateDir());
   observeLoginModelReports();
+  // Probe well-known local model-server ports (Ollama, LM Studio, …) and
+  // keep the snapshot fresh for status + /v1/models fleet merge.
+  startLocalServerDiscovery();
 
   // Pull the catalog + routing config. This NEVER throws — when there's
   // no API key yet (the daemon installs keyless; the dashboard sets the

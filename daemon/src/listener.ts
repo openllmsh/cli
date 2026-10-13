@@ -46,6 +46,7 @@ import { planCacheEnabled } from "./config";
 import { notePresenceActivity } from "./control-channel";
 import { corsHeaders, errorJson, isPreflight, preflightResponse } from "./cors";
 import { isSubscriptionSlug } from "./delegation";
+import { isLocalServerSlug } from "./local-servers";
 import { passthroughToOrigin } from "./forward";
 import { runImageEditWalker, runImageWalker } from "./image-walker";
 import { logWarn, safeDiagnosticMessage } from "./logger";
@@ -462,12 +463,13 @@ export const handleInference = async (req: Request): Promise<Response> => {
       fetchedContextOverflowStrategy,
       fetched.sig,
     );
-    const hasSubscriptionHop =
+    const hasDaemonOnlyHop =
       verified &&
-      parsePlan(fetched.plan).some((entry) =>
-        isSubscriptionSlug(entry.split("/")[0] ?? ""),
-      );
-    if (!verified || !hasSubscriptionHop) {
+      parsePlan(fetched.plan).some((entry) => {
+        const provider = entry.split("/")[0] ?? "";
+        return isSubscriptionSlug(provider) || isLocalServerSlug(provider);
+      });
+    if (!verified || !hasDaemonOnlyHop) {
       return withCors(req, await passthroughToOrigin(req, rawBytes));
     }
     planParam = fetched.plan;

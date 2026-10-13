@@ -30,6 +30,7 @@ import {
   GROK_STT_INPUT_FORMATS,
   GROK_TTS_OUTPUT_FORMATS,
   GROK_TTS_VOICES,
+  isLocalServerSlug,
   isSubscriptionProviderSlug,
   MEDIA_PERSISTENCE_BROWSER,
   MEDIA_PERSISTENCE_REQUEST_HEADER,
@@ -427,6 +428,17 @@ export const runAudioTranscriptionWalker = async (
         continue;
       }
       return stamp(lastError);
+    }
+    if (isLocalServerSlug(hop.provider)) {
+      attempted.push(hop.modelId);
+      lastError = errorJson(
+        400,
+        `local provider "${hop.provider}" does not support transcription`,
+        "invalid_request_error",
+        "local_surface_unsupported",
+      );
+      if (!last) continue;
+      return stamp(lastError, hop.modelId);
     }
     if (!isSubscriptionProviderSlug(hop.provider)) {
       attempted.push(hop.modelId);
@@ -888,6 +900,17 @@ export const runAudioSpeechWalker = async (
     const hop = hops[i];
     if (hop === undefined) continue;
     const last = i === hops.length - 1;
+    if (isLocalServerSlug(hop.provider)) {
+      attempted.push(hop.modelId);
+      lastError = errorJson(
+        400,
+        `local provider "${hop.provider}" does not support speech`,
+        "invalid_request_error",
+        "local_surface_unsupported",
+      );
+      if (!last) continue;
+      return stamp(lastError, hop.modelId);
+    }
     if (!isSubscriptionProviderSlug(hop.provider)) {
       attempted.push(hop.modelId);
       const forwarded = await forwardMediaHopToCloud(args, hop.modelId);

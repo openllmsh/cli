@@ -30,6 +30,7 @@ import { Schema } from "effect";
 import { uploadMedia } from "./cloud-client";
 import { errorJson } from "./cors";
 import { getDelegate, isSubscriptionSlug } from "./delegation";
+import { isLocalServerSlug } from "./local-servers";
 import type { TImageCredential } from "./delegation/types";
 import {
   buildImageEditUpstreamBody,
@@ -591,6 +592,18 @@ export const runImageWalker = async (args: TWalkArgs): Promise<Response> => {
     const hop = hops[i];
     if (hop === undefined) continue;
     const last = i === hops.length - 1;
+    if (isLocalServerSlug(hop.provider)) {
+      // Local model servers are chat/embeddings only in v1 — refuse cleanly.
+      attempted.push(hop.modelId);
+      lastError = errorJson(
+        400,
+        `local provider "${hop.provider}" does not support image generation`,
+        "invalid_request_error",
+        "local_surface_unsupported",
+      );
+      if (!last) continue;
+      return stamp(lastError, hop.modelId);
+    }
     if (isSubscriptionSlug(hop.provider)) {
       // Recorded the moment this hop is UNDERTAKEN, not once it has been
       // dispatched. Everything below can refuse before a byte leaves the
@@ -1026,6 +1039,17 @@ export const runImageEditWalker = async (
     const hop = hops[i];
     if (hop === undefined) continue;
     const last = i === hops.length - 1;
+    if (isLocalServerSlug(hop.provider)) {
+      attempted.push(hop.modelId);
+      lastError = errorJson(
+        400,
+        `local provider "${hop.provider}" does not support image edit`,
+        "invalid_request_error",
+        "local_surface_unsupported",
+      );
+      if (!last) continue;
+      return stamp(lastError, hop.modelId);
+    }
     if (!isSubscriptionSlug(hop.provider)) {
       // A BYOK hop is the cloud's to serve; this walker never attempts one,
       // so it must not appear in the chain it reports.

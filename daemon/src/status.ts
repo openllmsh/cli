@@ -41,6 +41,7 @@ import { daemonPort, hasApiKey } from "./env";
 import { authCooldownForProvider } from "./hop-cooldown";
 import { hasIdentityConflict } from "./identity-state";
 import { daemonPublicKey } from "./keypair";
+import { currentLocalServerStates } from "./local-servers";
 import { logWarn, safeDiagnosticMessage } from "./logger";
 import { currentDaemonCaps } from "./mux-host";
 import {
@@ -781,6 +782,8 @@ const computeStatusFreshInner = async (
     // PTY, and the sessions it currently holds (live/dormant).
     pty_supported: ptySupported(),
     sessions: await sessionStatusReport(),
+    // Device-discovered local model servers (has_key only — never the key).
+    local_servers: currentLocalServerStates(),
   };
 };
 

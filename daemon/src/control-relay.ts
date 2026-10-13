@@ -28,6 +28,11 @@ import {
 } from "./delegation/login-flow";
 import { daemonApiKeyId } from "./env";
 import { openSealed } from "./keypair";
+import {
+  rescanLocalPort,
+  rescanLocalServers,
+  setLocalKey,
+} from "./local-servers";
 import { clampLimit, readLocalSessions } from "./local-sessions";
 import { logError } from "./logger";
 import { maybeReportModels, resetModelReportThrottle } from "./model-report";
@@ -519,6 +524,46 @@ export const runCommandInner = async (
           id: cmd.id,
           status: "done",
           result: { auto_update: persisted },
+        };
+      }
+      // Re-probe well-known (+ OPENLLM_LOCAL_PORTS) local model-server ports.
+      // Result is the current TLocalServerState[] (has_key only — never keys).
+      case "local_rescan": {
+        const states = await rescanLocalServers();
+        return {
+          id: cmd.id,
+          status: "done",
+          result: { local_servers: states },
+        };
+      }
+      // Set or clear a per-port local API key. Sealed to this daemon's X25519
+      // pubkey (same posture as submit_login_code); empty sealed clears.
+      case "set_local_key": {
+        const port = cmd.payload.port;
+        let plaintext = "";
+        if (cmd.payload.sealed !== "") {
+          const opened = openSealed(cmd.payload.sealed);
+          if (opened === null) {
+            return {
+              id: cmd.id,
+              status: "error",
+              result: { error: "could not open sealed local key" },
+            };
+          }
+          plaintext = opened;
+        }
+        if (!setLocalKey(port, plaintext)) {
+          return {
+            id: cmd.id,
+            status: "error",
+            result: { error: "failed to persist local key" },
+          };
+        }
+        const state = await rescanLocalPort(port);
+        return {
+          id: cmd.id,
+          status: "done",
+          result: { local_server: state },
         };
       }
       default: {
