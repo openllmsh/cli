@@ -13,12 +13,27 @@ import {
 import type { TAtomicWrite } from "./files";
 import { atomicWriteText, doctorStatePath, readTextFile } from "./files";
 
-let cachedToken: string | null = null;
-/** This boot's mint failed after bind — do not honor a leftover file token. */
-let mintFailedClosed = false;
-
 export const doctorCapabilityPath = (): string =>
   doctorStatePath(DOCTOR_LOCAL_CAPABILITY_FILENAME);
+
+/**
+ * This process's view of the capability at one path. `failedClosed`: this
+ * boot's mint failed after bind — do not honor a leftover file token. Scoped to
+ * the path so a re-pointed state dir never inherits another dir's token.
+ */
+type TCapabilityState = {
+  readonly path: string;
+  readonly token: string | null;
+  readonly failedClosed: boolean;
+};
+
+let capabilityState: TCapabilityState | null = null;
+
+const currentState = (): TCapabilityState => {
+  const path = doctorCapabilityPath();
+  if (capabilityState?.path === path) return capabilityState;
+  return { path, token: null, failedClosed: false };
+};
 
 export const doctorCapabilityHeaderName = (): string =>
   DOCTOR_LOCAL_CAPABILITY_HEADER;
@@ -38,13 +53,12 @@ export const mintDoctorCapability = (
       ? { write: options.atomicWrite }
       : {}),
   });
+  const path = doctorCapabilityPath();
   if (!wrote) {
-    cachedToken = null;
-    mintFailedClosed = true;
+    capabilityState = { path, token: null, failedClosed: true };
     return false;
   }
-  mintFailedClosed = false;
-  cachedToken = token;
+  capabilityState = { path, token, failedClosed: false };
   return true;
 };
 
@@ -61,13 +75,14 @@ export const onDoctorListenAttempt = (
 };
 
 export const readDoctorCapability = (): string | null => {
-  if (mintFailedClosed) return null;
-  if (cachedToken !== null) return cachedToken;
+  const state = currentState();
+  if (state.failedClosed) return null;
+  if (state.token !== null) return state.token;
   const raw = readTextFile(doctorCapabilityPath());
   if (raw === null) return null;
   const token = raw.trim();
   if (token.length < 16) return null;
-  cachedToken = token;
+  capabilityState = { path: state.path, token, failedClosed: false };
   return token;
 };
 
@@ -103,9 +118,4 @@ export const readOwnerDoctorCapability = (): string | null => {
   } finally {
     if (fd !== undefined) closeSync(fd);
   }
-};
-
-export const clearDoctorCapabilityCache = (): void => {
-  cachedToken = null;
-  mintFailedClosed = false;
 };

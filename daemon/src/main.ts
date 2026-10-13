@@ -72,7 +72,7 @@ import {
 import { buildHealth } from "./health";
 import { handleInference } from "./listener";
 import { handleLocalAuth } from "./local-auth";
-import { logError, logInfo, safeDiagnosticMessage } from "./logger";
+import { flushLogs, logError, logInfo, safeDiagnosticMessage } from "./logger";
 import { observeLoginModelReports } from "./model-report";
 import { ptySessionsEnabled } from "./pty-sessions-pref";
 import type { TLocalRealtimeSocketData } from "./realtime-handler";
@@ -103,10 +103,6 @@ const BOOTSTRAP_RETRY_MS = 5 * 1000;
 const BOOT_AT = Date.now();
 
 export const main = async (): Promise<void> => {
-  const { installCredentialReset } = await import("./env");
-  const { resetDaemonCredentialState } = await import("./process-reset");
-  installCredentialReset(resetDaemonCredentialState);
-
   // `daemonPort()` loads the env file, so the kill-switch / opt-in vars are
   // resolved before the sandbox decision.
   const port = daemonPort();
@@ -335,6 +331,8 @@ export const main = async (): Promise<void> => {
     // Durable local session hosts are detached from this daemon. The supervisor
     // tracks only disposable children, leaving their PTYs alone.
     await drainDisposableChildren();
+    // Queued async appends would otherwise be dropped by process.exit.
+    await flushLogs();
     process.exit(signal === "SIGINT" ? 130 : 143);
   };
   const shutdown = (signal: NodeJS.Signals): void => {

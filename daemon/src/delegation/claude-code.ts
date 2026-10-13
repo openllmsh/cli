@@ -481,10 +481,10 @@ const admitInnerAuthLate = (opts: {
 
 /**
  * Drop cached idle status. Called on every auth MUTATION (login, logout,
- * native refresh) so a state change is visible immediately. Exported for tests
- * that drive login/logout out of band.
+ * native refresh) so a state change is visible immediately. Also the
+ * delegate's `invalidateStatusObservation` hook.
  */
-export const clearAuthStatusCache = (): void => {
+const clearAuthStatusCache = (): void => {
   claudeStatusCache.invalidate();
   noteAuthStoreIdentityChange(PROVIDER);
 };

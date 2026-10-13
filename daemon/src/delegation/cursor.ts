@@ -334,7 +334,7 @@ let statusAccessInFlight: {
 
 /** Drop cached Cursor status presence. Login/logout/native refresh/auth
  *  mutations call this so the next status tick re-reads the store. */
-export const clearCursorStatusObservationCache = (): void => {
+const clearCursorStatusObservationCache = (): void => {
   cursorStatusCache.invalidate();
   clearCursorNativeModels();
   noteAuthStoreIdentityChange(PROVIDER);

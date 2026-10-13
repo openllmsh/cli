@@ -776,36 +776,33 @@ const buildSessionHostClient = (
 };
 
 /**
- * Build a session-host client. Calling this also installs the client as the
- * process-wide default used by the thin module exports (`discoverSessionHosts`,
- * `spawnSessionHostProc`, …) so production call sites and tests that exercise
- * status/reap through those exports share one configured instance. A fresh
- * call replaces the previous client (clears in-flight discovery, probe slots,
- * and last-known hosts).
+ * Build a session-host client. Pure: returns an independent instance (its own
+ * in-flight discovery, probe slots and last-known hosts) and installs nothing.
+ * The module exports below use {@link defaultSessionHostClient}.
  */
 export const createSessionHostClient = (
   deps: TSessionHostClientDeps = {},
-): TSessionHostClient => {
-  const client = buildSessionHostClient(deps);
-  activeClient = client;
-  return client;
-};
+): TSessionHostClient => buildSessionHostClient(deps);
 
-let activeClient: TSessionHostClient = buildSessionHostClient();
+/** The process's session-host client, built once from production defaults. */
+export const defaultSessionHostClient: TSessionHostClient =
+  buildSessionHostClient();
 
 /** Scan, validate, and reap stale durable session-host registry entries. */
 export const discoverSessionHosts = async (): Promise<
   readonly TLiveSessionHost[]
-> => activeClient.discoverSessionHosts();
+> => defaultSessionHostClient.discoverSessionHosts();
 
 export const findSessionHost = async (
   id: string,
-): Promise<TLiveSessionHost | null> => activeClient.findSessionHost(id);
+): Promise<TLiveSessionHost | null> =>
+  defaultSessionHostClient.findSessionHost(id);
 
 /** Spawn a detached sibling session host and wait for its private control socket. */
 export const spawnSessionHostProc = async (
   args: TSpawnSessionHostProc,
-): Promise<string | null> => activeClient.spawnSessionHostProc(args);
+): Promise<string | null> =>
+  defaultSessionHostClient.spawnSessionHostProc(args);
 
 /**
  * Attach to a durable session by spawning `openllm sessions attach --pipe`.
@@ -815,4 +812,5 @@ export const spawnSessionHostProc = async (
  */
 export const attachSessionHostViaCli = (
   open: TSessionStreamOpenPayload,
-): TSessionStream | null => activeClient.attachSessionHostViaCli(open);
+): TSessionStream | null =>
+  defaultSessionHostClient.attachSessionHostViaCli(open);

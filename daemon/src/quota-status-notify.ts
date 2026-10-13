@@ -22,9 +22,6 @@ type TQuotaBaseline = {
   readonly resetEpoch: number | undefined;
 };
 
-/** Last `(status, resetEpoch)` actually emitted for each provider account. */
-const lastQuotaStatus = new Map<string, TQuotaBaseline>();
-
 const quotaKey = (slug: string, accountHash: string | undefined): string =>
   `${slug}\0${accountHash ?? "-"}`;
 
@@ -94,7 +91,22 @@ const samePostedPair = (
  * against duplicate devices. De-escalation (`rejected → allowed_warning`)
  * and epoch flap are NOT filtered here — the cloud owns those policies.
  */
-export const noteConnectionsForQuota = (
+export type TQuotaStatusTracker = (
+  connections: ReadonlyArray<TDaemonProviderConnection>,
+) => ReadonlyArray<TDaemonQuotaStatusReached>;
+
+/**
+ * A tracker with its own baselines — one per daemon process (a restart starts
+ * cold, as the cold-start rule above expects).
+ */
+export const createQuotaStatusTracker = (): TQuotaStatusTracker => {
+  /** Last `(status, resetEpoch)` actually emitted for each provider account. */
+  const lastQuotaStatus = new Map<string, TQuotaBaseline>();
+  return (connections) => noteConnections(lastQuotaStatus, connections);
+};
+
+const noteConnections = (
+  lastQuotaStatus: Map<string, TQuotaBaseline>,
   connections: ReadonlyArray<TDaemonProviderConnection>,
 ): ReadonlyArray<TDaemonQuotaStatusReached> => {
   const transitions: TDaemonQuotaStatusReached[] = [];
@@ -140,7 +152,6 @@ export const noteConnectionsForQuota = (
   return transitions;
 };
 
-/** Clear posted quota-status baselines (daemon restart / identity rebind). */
-export const clearQuotaStatusTracker = (): void => {
-  lastQuotaStatus.clear();
-};
+/** This process's tracker. */
+export const noteConnectionsForQuota: TQuotaStatusTracker =
+  createQuotaStatusTracker();

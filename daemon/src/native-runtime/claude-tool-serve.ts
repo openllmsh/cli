@@ -110,7 +110,7 @@ export type TClaudeToolServeParams = {
   /** Optional, backward-compatible continuation capability sent by the client. */
   readonly continuationToken?: string | null;
   readonly continuationIdentity?: TToolContinuationIdentity;
-  /** Test seam: inject a fake SDK query iterator (default = the real SDK). */
+  /** SDK query iterator factory (default = the real SDK). */
   readonly makeIterator?: TIteratorFactory;
 };
 

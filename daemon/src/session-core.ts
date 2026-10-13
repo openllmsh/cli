@@ -179,11 +179,6 @@ const bunPtySpawner: TPtySpawner = (args) => {
   };
 };
 
-let spawner: TPtySpawner = bunPtySpawner;
-export const setPtySpawner = (fn: TPtySpawner | null): void => {
-  spawner = fn ?? bunPtySpawner;
-};
-
 export const ptySupported = (): boolean => process.platform !== "win32";
 
 // ─── session state ───────────────────────────────────────────────────
@@ -242,6 +237,8 @@ export type TSession = {
   lastExitReason: "evicted" | "reaped" | "done" | "killed" | null;
   /** Child status, when Bun's PTY-backed process supplied one. */
   exitCode: number | null;
+  /** True when the PTY is Bun's real spawner (owns an OS process tree). */
+  realPty: boolean;
 };
 
 const sessions = new Map<string, TSession>();
@@ -264,24 +261,15 @@ export const setSessionLifecycleHooks = (
   lifecycleHooks = hooks ?? { onSpawn: () => {}, onEnd: () => {} };
 };
 
-type TActivityProbe = (rootPids: ReadonlySet<number>) => Promise<Set<number>>;
-let activityProbe: TActivityProbe | null = null;
-let activityHook: (() => void) | null = null;
+/** Resolves which of the given root pids have a busy process tree. */
+export type TActivityProbe = (
+  rootPids: ReadonlySet<number>,
+) => Promise<Set<number>>;
 
-export const setActivityProbe = (probe: TActivityProbe | null): void => {
-  activityProbe = probe;
-};
-
-/** Optional hook fired when a detached session transitions busy → quiet.
- *  Used for status push refresh. */
-export const setSessionActivityHook = (hook: (() => void) | null): void => {
-  activityHook = hook;
-};
-
-const probeActivity = async (
+/** Production probe: one `ps` snapshot of the whole process table. */
+const psActivityProbe: TActivityProbe = async (
   rootPids: ReadonlySet<number>,
 ): Promise<Set<number>> => {
-  if (activityProbe !== null) return activityProbe(rootPids);
   const proc = Bun.spawn(["ps", "-Ao", "pid=,ppid=,pcpu="], {
     stdout: "pipe",
     stderr: "ignore",
@@ -373,7 +361,10 @@ const reapIdleSession = (session: TSession): void => {
 };
 
 /** Poll detached process trees and reap only detached, output-quiet, non-busy sessions. */
-export const pollSessionActivity = async (now = Date.now()): Promise<void> => {
+export const pollSessionActivity = async (
+  now = Date.now(),
+  probeActivity: TActivityProbe = psActivityProbe,
+): Promise<void> => {
   const dormant = [...sessions.values()].filter(
     (session) => session.pty !== null && !isAttached(session),
   );
@@ -409,7 +400,6 @@ export const pollSessionActivity = async (now = Date.now()): Promise<void> => {
     if (session.pid === null) continue; // already marked busy above
     const isBusy = busyPids.has(session.pid);
     if (isBusy) session.lastBusyAtMs = now;
-    if (session.busy && !isBusy) activityHook?.();
     session.busy = isBusy;
     if (
       timeoutMs > 0 &&
@@ -527,6 +517,7 @@ const argvFor = (
   dangerous: boolean,
   vendorSessionId: string | null,
   vendorArgs: readonly string[] = [],
+  realPty = true,
 ): ReadonlyArray<string> => {
   if (cli === "shell") {
     const shell =
@@ -539,10 +530,10 @@ const argvFor = (
   const clientId = openllmClientId(cli);
   const bin = openllmBin();
   const canDangerous = dangerous && sessionSupportsDangerous(cli);
-  // Preferred path: openllm wrapper when installed. An injected (test) spawner
+  // Preferred path: openllm wrapper when installed. A caller-supplied spawner
   // never execs the argv, so it stands in for the missing binary — the real
   // spawner is gated on an installed CLI at the call site.
-  if (bin === null && spawner === bunPtySpawner) {
+  if (bin === null && realPty) {
     // A direct vendor launch would bypass OpenLLM's gateway/catalog/config
     // overlay. Callers reject the missing CLI binary before this can run.
     throw new Error("OpenLLM CLI is not installed");
@@ -882,10 +873,10 @@ const cancelWinch = (id: string): void => {
 };
 
 /** Queue a coalesced SIGWINCH fan-out for this session. Only the real Bun PTY
- *  spawner needs it — an injected test spawner owns no OS process tree, and
+ *  spawner needs it — a caller-supplied spawner owns no OS process tree, and
  *  signalling its synthetic pids could hit unrelated processes. */
 const scheduleWinch = (session: TSession): void => {
-  if (spawner !== bunPtySpawner || !ptySupported()) return;
+  if (!session.realPty || !ptySupported()) return;
   if (session.pid === null || winchTimers.has(session.id)) return;
   const timer = setTimeout(() => {
     winchTimers.delete(session.id);
@@ -1120,6 +1111,8 @@ export type TOpenSessionOptions = {
   readonly vendorArgs?: readonly string[];
   readonly onSessionReady?: (session: TSession) => void;
   readonly onAck: (ack: TSessionOpenAck) => void;
+  /** PTY spawner for a fresh spawn; defaults to Bun's built-in PTY. */
+  readonly spawner?: TPtySpawner;
 };
 
 export const openSession = (
@@ -1127,6 +1120,8 @@ export const openSession = (
   options: TOpenSessionOptions,
 ): void => {
   const { vendorArgs, onSessionReady, onAck } = options;
+  const spawner = options.spawner ?? bunPtySpawner;
+  const realPty = spawner === bunPtySpawner;
   const nack = (
     error:
       | "pty_unsupported"
@@ -1248,8 +1243,8 @@ export const openSession = (
 
     // Device sessions must launch through the OpenLLM CLI so the gateway,
     // catalog, config, and environment overlay is always applied. Only enforce
-    // this for the real spawner — injected test spawners never exec a binary.
-    if (cli !== "shell" && spawner === bunPtySpawner && openllmBin() === null) {
+    // this for the real spawner — a caller-supplied spawner never execs a binary.
+    if (cli !== "shell" && realPty && openllmBin() === null) {
       nack("cli_not_installed");
       return;
     }
@@ -1289,10 +1284,12 @@ export const openSession = (
       generation: 0,
       lastExitReason: null,
       exitCode: null,
+      realPty,
     };
     // Refresh resume metadata on every spawn/continue.
     s.cwd = cwd;
     s.vendorSessionId = vendorSessionId;
+    s.realPty = realPty;
     if (frame.title !== undefined) s.title = frame.title;
     sessions.set(s.id, s);
     evictStaleDeadSessions();
@@ -1304,6 +1301,7 @@ export const openSession = (
         frame.dangerous === true,
         vendorSessionId,
         vendorArgs,
+        realPty,
       );
       logDebug("session", "session open started", {
         id: s.id,
@@ -1411,6 +1409,8 @@ export const bindSessionStream = (
   opts: {
     readonly vendorArgs?: readonly string[];
     readonly onExit?: (code: number) => void;
+    /** PTY spawner for a spawn open; defaults to Bun's built-in PTY. */
+    readonly spawner?: TPtySpawner;
   } = {},
 ): void => {
   const consumer: TAttachedConsumer = {
@@ -1481,6 +1481,7 @@ export const bindSessionStream = (
   let boundSession: TSession | undefined;
   openSession(open, {
     vendorArgs: opts.vendorArgs,
+    ...(opts.spawner === undefined ? {} : { spawner: opts.spawner }),
     onAck,
     onSessionReady: (session) => {
       boundSession = session;
@@ -1532,14 +1533,4 @@ export const bindSessionStream = (
   if (!session.consumers.has(consumer)) {
     for (const unsubscribe of consumer.unsubscribe) unsubscribe();
   }
-};
-
-/** Tear down every live session (daemon shutdown / identity rebind). */
-export const clearSessions = (): void => {
-  for (const s of sessions.values()) {
-    cancelWinch(s.id);
-    s.pty?.kill();
-    lifecycleHooks.onEnd(s);
-  }
-  sessions.clear();
 };

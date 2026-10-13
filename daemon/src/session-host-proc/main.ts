@@ -27,7 +27,11 @@ import {
 import { decodeJsonPayload, encodeJsonPayload } from "@openllmsh/tunnel/codec";
 import { Schema as S } from "effect";
 import { stateDir } from "../env";
-import type { TSessionStream } from "../session-core";
+import type {
+  TActivityProbe,
+  TPtySpawner,
+  TSessionStream,
+} from "../session-core";
 import {
   bindSessionStream,
   closeSession,
@@ -342,11 +346,15 @@ const parseAttachOpen = (
 };
 
 export type TSessionHostOptions = {
-  /** Test seam: production exits after cleanup, tests retain the process. */
+  /** Exit after cleanup; defaults to process exit. An in-process embedder keeps its process. */
   readonly exit?: (code: number) => void;
+  /** PTY spawner for the session; defaults to Bun's built-in PTY. */
+  readonly ptySpawner?: TPtySpawner;
+  /** Detached-activity probe; defaults to a `ps` snapshot. */
+  readonly activityProbe?: TActivityProbe;
 };
 
-/** Start one durable session host. Kept exportable so tests can use its fake PTY seam. */
+/** Start one durable session host. */
 export const runSessionHost = (
   args: TSessionHostArgs,
   options: TSessionHostOptions = {},
@@ -478,6 +486,9 @@ export const runSessionHost = (
     },
     {
       vendorArgs: args.vendorArgs,
+      ...(options.ptySpawner === undefined
+        ? {}
+        : { spawner: options.ptySpawner }),
       onAck: (ack) => {
         if (!ack.ok) spawnFailed = true;
       },
@@ -562,7 +573,7 @@ export const runSessionHost = (
   }
 
   activityTimer = setInterval(
-    () => void pollSessionActivity(),
+    () => void pollSessionActivity(Date.now(), options.activityProbe),
     ACTIVITY_POLL_MS,
   );
   activityTimer.unref?.();

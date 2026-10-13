@@ -131,8 +131,7 @@ export type TNativeServeOverrides = {
     typeof runCursorNativeCapture
   >[0]["runAcp"];
   /**
-   * Hermetic-test-only capture destination override (e.g. loopback fake
-   * upstream). Production omits → {@link runCursorNativeCapture}'s own
+   * Capture destination override (e.g. a loopback upstream). Omitted → {@link runCursorNativeCapture}'s own
    * strict default (official Cursor hosts only).
    */
   readonly cursorCaptureDestinationPolicy?: Parameters<
@@ -246,40 +245,6 @@ export const nativeResumeStats = (): Record<
   muse: { ...resumeStats.muse },
   antigravity: { ...resumeStats.antigravity },
 });
-
-/** Reset the counters (tests). */
-export const resetNativeResumeStats = (): void => {
-  resumeStats.claude_code = {
-    firstTurn: 0,
-    resumeHit: 0,
-    resumeMiss: 0,
-    captureCold: 0,
-  };
-  resumeStats.chatgpt = {
-    firstTurn: 0,
-    resumeHit: 0,
-    resumeMiss: 0,
-    captureCold: 0,
-  };
-  resumeStats.cursor = {
-    firstTurn: 0,
-    resumeHit: 0,
-    resumeMiss: 0,
-    captureCold: 0,
-  };
-  resumeStats.muse = {
-    firstTurn: 0,
-    resumeHit: 0,
-    resumeMiss: 0,
-    captureCold: 0,
-  };
-  resumeStats.antigravity = {
-    firstTurn: 0,
-    resumeHit: 0,
-    resumeMiss: 0,
-    captureCold: 0,
-  };
-};
 
 /**
  * Record one correlation outcome and log it. A MISS logs at `warn` with the

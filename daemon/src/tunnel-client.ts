@@ -128,8 +128,8 @@ const tunnelToPeerLive: TTunnelToPeer = async (args) => {
  * Tunnel one request to the fleet peer serving `keyId`. Resolves once the
  * response head arrives (body streams thereafter); rejects when neither RTC
  * nor mux is available, or when the stream fails. Pass `transport` to override
- * the live RTC→mux ladder for a single call (tests only — production always
- * uses the live ladder).
+ * the live RTC→mux ladder for a single call; omitted, the live ladder is
+ * used.
  */
 export const tunnelToPeer: TTunnelToPeer = (args) => {
   const transport = args.transport ?? tunnelToPeerLive;

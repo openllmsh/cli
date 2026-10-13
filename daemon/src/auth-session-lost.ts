@@ -44,12 +44,6 @@ export type TAuthLossEdge = {
 /** Consecutive unknown ticks that escalate to `auth.liveness.degraded`. */
 export const UNKNOWN_ESCALATION_TICKS = 3;
 
-/** Last observed auth-status literal per subscription slug. */
-const lastStatus = new Map<string, TAuthStatusBaseline>();
-
-/** Consecutive `observation === "unknown"` ticks per slug. */
-const unknownStreak = new Map<string, number>();
-
 /**
  * Map free-form `conn.detail` to a bounded diagnostic code. Never returns
  * the input string — unknown / empty details fall back to `unclassified`.
@@ -135,83 +129,95 @@ export const detectAuthLossEdge = (
  * `connected → disconnected` with no in-flight login. Best-effort: `emitAuth`
  * is a no-op when the control channel is not running.
  */
-const wasLastKnownConnected = (slug: string): boolean =>
-  lastStatus.get(slug)?.status === "connected";
-
-const noteUnknownLiveness = (conn: TDaemonProviderConnection): void => {
-  const slug = conn.provider;
-  if (!isSubscriptionSlug(slug)) return;
-  const normalized = normalizeProviderConnection(conn);
-  // Login overlays `unknown` + preserved `connected`. Counting those ticks
-  // would fire `auth.liveness.degraded` mid-login. Drop the streak (not the
-  // last-known connected baseline) so a long pending cannot inherit 1–2
-  // pre-login unknowns and emit on the first tick after the slot clears.
-  if (loginSlot(slug).inFlight() || normalized.pending) {
-    unknownStreak.delete(slug);
-    return;
-  }
-  if (normalized.observation === "unknown") {
-    if (!wasLastKnownConnected(slug)) return;
-    const consecutive = (unknownStreak.get(slug) ?? 0) + 1;
-    unknownStreak.set(slug, consecutive);
-    if (consecutive !== UNKNOWN_ESCALATION_TICKS) return;
-    logWarn(
-      "auth-session-lost",
-      safeDiagnosticMessage`Provider liveness degraded.`,
-      undefined,
-      { timings: { unknown_probe_streak: consecutive } },
-    );
-    emitAuth({
-      event: "auth.liveness.degraded",
-      key_id: daemonApiKeyId() ?? "local",
-      slug,
-      consecutive_unknown: consecutive,
-      ...(normalized.reason_code !== undefined
-        ? { reason_code: normalized.reason_code }
-        : {}),
-    });
-    return;
-  }
-  unknownStreak.delete(slug);
-};
-
-export const noteConnectionsForSessionLost = (
+export type TSessionLostTracker = (
   connections: ReadonlyArray<TDaemonProviderConnection>,
-): void => {
-  for (const conn of connections) {
-    noteUnknownLiveness(conn);
-    const edge = detectAuthLossEdge(lastStatus.get(conn.provider), conn);
-    if (edge === null) continue;
-    if (edge.lost) {
-      const diagnostic_code = edge.diagnostic_code ?? "unclassified";
+) => void;
 
+/** A tracker with its own baselines — one per daemon process. */
+export const createSessionLostTracker = (): TSessionLostTracker => {
+  /** Last observed auth-status literal per subscription slug. */
+  const lastStatus = new Map<string, TAuthStatusBaseline>();
+  /** Consecutive `observation === "unknown"` ticks per slug. */
+  const unknownStreak = new Map<string, number>();
+
+  const wasLastKnownConnected = (slug: string): boolean =>
+    lastStatus.get(slug)?.status === "connected";
+
+  const noteUnknownLiveness = (conn: TDaemonProviderConnection): void => {
+    const slug = conn.provider;
+    if (!isSubscriptionSlug(slug)) return;
+    const normalized = normalizeProviderConnection(conn);
+    // Login overlays `unknown` + preserved `connected`. Counting those ticks
+    // would fire `auth.liveness.degraded` mid-login. Drop the streak (not the
+    // last-known connected baseline) so a long pending cannot inherit 1–2
+    // pre-login unknowns and emit on the first tick after the slot clears.
+    if (loginSlot(slug).inFlight() || normalized.pending) {
+      unknownStreak.delete(slug);
+      return;
+    }
+    if (normalized.observation === "unknown") {
+      if (!wasLastKnownConnected(slug)) return;
+      const consecutive = (unknownStreak.get(slug) ?? 0) + 1;
+      unknownStreak.set(slug, consecutive);
+      if (consecutive !== UNKNOWN_ESCALATION_TICKS) return;
       logWarn(
         "auth-session-lost",
-        safeDiagnosticMessage`subscription session lost`,
-        {
+        safeDiagnosticMessage`Provider liveness degraded.`,
+        undefined,
+        { timings: { unknown_probe_streak: consecutive } },
+      );
+      emitAuth({
+        event: "auth.liveness.degraded",
+        key_id: daemonApiKeyId() ?? "local",
+        slug,
+        consecutive_unknown: consecutive,
+        ...(normalized.reason_code !== undefined
+          ? { reason_code: normalized.reason_code }
+          : {}),
+      });
+      return;
+    }
+    unknownStreak.delete(slug);
+  };
+
+  const noteConnections = (
+    connections: ReadonlyArray<TDaemonProviderConnection>,
+  ): void => {
+    for (const conn of connections) {
+      noteUnknownLiveness(conn);
+      const edge = detectAuthLossEdge(lastStatus.get(conn.provider), conn);
+      if (edge === null) continue;
+      if (edge.lost) {
+        const diagnostic_code = edge.diagnostic_code ?? "unclassified";
+
+        logWarn(
+          "auth-session-lost",
+          safeDiagnosticMessage`subscription session lost`,
+          {
+            slug: edge.slug,
+            diagnostic_code,
+            ...(edge.account_hash !== undefined
+              ? { account_hash: edge.account_hash }
+              : {}),
+          },
+        );
+        emitAuth({
+          event: "auth.session.lost",
+          key_id: daemonApiKeyId() ?? "local",
           slug: edge.slug,
           diagnostic_code,
           ...(edge.account_hash !== undefined
             ? { account_hash: edge.account_hash }
             : {}),
-        },
-      );
-      emitAuth({
-        event: "auth.session.lost",
-        key_id: daemonApiKeyId() ?? "local",
-        slug: edge.slug,
-        diagnostic_code,
-        ...(edge.account_hash !== undefined
-          ? { account_hash: edge.account_hash }
-          : {}),
-      });
+        });
+      }
+      lastStatus.set(edge.slug, edge.next);
     }
-    lastStatus.set(edge.slug, edge.next);
-  }
+  };
+
+  return noteConnections;
 };
 
-/** Clear session-lost baselines (daemon restart / identity rebind). */
-export const clearSessionLostTracker = (): void => {
-  lastStatus.clear();
-  unknownStreak.clear();
-};
+/** This process's tracker. */
+export const noteConnectionsForSessionLost: TSessionLostTracker =
+  createSessionLostTracker();

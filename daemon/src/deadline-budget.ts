@@ -2,7 +2,8 @@
  * One monotonic operation budget for daemon-local external process work
  * (status owner, keychain `security` lane, login/PTY child lifecycle).
  *
- * Timebase is {@link deadlineNowMs} (`performance.now()` in production).
+ * Timebase is `performance.now()` + `setTimeout` ({@link defaultDeadlineTimebase});
+ * callers that own a different clock pass it per budget via `deps`.
  * Expiry is typed unavailability, never auth truth. Observer cancellation must
  * not be passed as `parent` of a producer budget the observer does not own.
  */
@@ -50,15 +51,9 @@ export const createDeadlineTimebase = (
   schedule: deps.schedule ?? defaultSchedule,
 });
 
-let activeTimebase: TDeadlineTimebase = createDeadlineTimebase();
-
-/** Replace the process-wide deadline timebase (tests / embedding hosts). */
-export const installDeadlineTimebase = (timebase: TDeadlineTimebase): void => {
-  activeTimebase = timebase;
-};
-
-/** Monotonic now for deadline budgets (and callers that must share the clock). */
-export const deadlineNowMs = (): number => activeTimebase.nowMs();
+/** The production timebase every budget uses unless `deps` override it. */
+export const defaultDeadlineTimebase: TDeadlineTimebase =
+  createDeadlineTimebase();
 
 export const budgetFromSignal = (
   signal: AbortSignal | undefined,
@@ -70,9 +65,9 @@ export const createDeadlineBudget = (
   parent?: AbortSignal,
   deps?: TDeadlineBudgetDeps,
 ): TDeadlineBudget => {
-  const nowMs = deps?.nowMs ?? activeTimebase.nowMs;
+  const nowMs = deps?.nowMs ?? defaultDeadlineTimebase.nowMs;
   const schedule: TDeadlineBudgetScheduler =
-    deps?.schedule ?? activeTimebase.schedule;
+    deps?.schedule ?? defaultDeadlineTimebase.schedule;
   const cap = Math.max(0, durationMs);
   const expiresAt = nowMs() + cap;
   const ac = new AbortController();
@@ -161,7 +156,7 @@ export const firstOfBudget = async <T>(
 
 /**
  * How late a `setTimeout(delayMs)` callback ran relative to arming, using the
- * same {@link deadlineNowMs} clock as {@link createDeadlineBudget}. Negative
+ * same clock as {@link createDeadlineBudget}. Negative
  * (early fire) is preserved; callers must not treat this as host-sleep proof.
  */
 export const timeoutCallbackLatenessMs = (

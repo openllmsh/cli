@@ -37,11 +37,6 @@ import { logError } from "./logger";
 const privFile = (): string => join(stateDir(), "x25519-priv");
 const HKDF_INFO = Buffer.from("openllm-cred-seal-v1");
 
-let cachedPriv: KeyObject | null = null;
-/** True iff `cachedPriv` was loaded from disk or written this run. */
-let cachedPersisted = false;
-let cachedPubB64: string | null = null;
-
 const isErrnoException = (err: unknown): err is NodeJS.ErrnoException => {
   if (!(err instanceof Error)) return false;
   return (
@@ -97,28 +92,35 @@ export type TIdentityKey = {
   readonly persisted: boolean;
 };
 
-const publicKeyB64Of = (privateKey: KeyObject): string => {
-  if (cachedPubB64 !== null) return cachedPubB64;
-  cachedPubB64 = Buffer.from(
+const publicKeyB64Of = (privateKey: KeyObject): string =>
+  Buffer.from(
     createPublicKey(privateKey).export({ format: "der", type: "spki" }),
   ).toString("base64");
-  return cachedPubB64;
+
+type TLoadedKey = {
+  readonly privateKey: KeyObject;
+  /** True iff the key was loaded from disk or written by this load. */
+  readonly persisted: boolean;
 };
 
-const cacheEphemeral = (privateKey: KeyObject): KeyObject => {
-  cachedPriv = privateKey;
-  cachedPersisted = false;
-  return privateKey;
-};
+const ephemeral = (privateKey: KeyObject): TLoadedKey => ({
+  privateKey,
+  persisted: false,
+});
 
-/** The daemon's own X25519 private key, generated + persisted on first use. */
-const ownPrivate = (): KeyObject => {
-  if (cachedPriv !== null) return cachedPriv;
-  const path = privFile();
+/** Read (or mint + persist) the X25519 private key at `path`. */
+const readOrMintKey = (path: string, dir: string): TLoadedKey => {
   try {
     const der = readFileSync(path);
     try {
-      cachedPriv = createPrivateKey({ key: der, format: "der", type: "pkcs8" });
+      return {
+        privateKey: createPrivateKey({
+          key: der,
+          format: "der",
+          type: "pkcs8",
+        }),
+        persisted: true,
+      };
     } catch (err) {
       // File exists but is not a usable PKCS#8 key — never overwrite it.
       logIdentityFailure(
@@ -127,10 +129,8 @@ const ownPrivate = (): KeyObject => {
         err,
         path,
       );
-      return cacheEphemeral(generateKeyPairSync("x25519").privateKey);
+      return ephemeral(generateKeyPairSync("x25519").privateKey);
     }
-    cachedPersisted = true;
-    return cachedPriv;
   } catch (err) {
     if (!isAbsentIdentityFile(err)) {
       // Existing file we cannot read (EACCES, EISDIR, …) — never overwrite.
@@ -140,13 +140,13 @@ const ownPrivate = (): KeyObject => {
         err,
         path,
       );
-      return cacheEphemeral(generateKeyPairSync("x25519").privateKey);
+      return ephemeral(generateKeyPairSync("x25519").privateKey);
     }
   }
   const { privateKey } = generateKeyPairSync("x25519");
   const tmpPath = `${path}.${process.pid}.tmp`;
   try {
-    mkdirSync(stateDir(), { recursive: true });
+    mkdirSync(dir, { recursive: true });
     writeFileSync(
       tmpPath,
       privateKey.export({ format: "der", type: "pkcs8" }),
@@ -156,20 +156,19 @@ const ownPrivate = (): KeyObject => {
     // dest that appeared after the ENOENT read (first-boot race) or an
     // unreadable existing identity.
     linkSync(tmpPath, path);
-    cachedPersisted = true;
+    return { privateKey, persisted: true };
   } catch (err) {
-    cachedPersisted = false;
     if (isErrnoException(err) && err.code === "EEXIST") {
       try {
         const der = readFileSync(path);
-        cachedPriv = createPrivateKey({
-          key: der,
-          format: "der",
-          type: "pkcs8",
-        });
-        cachedPersisted = true;
-        cachedPubB64 = null;
-        return cachedPriv;
+        return {
+          privateKey: createPrivateKey({
+            key: der,
+            format: "der",
+            type: "pkcs8",
+          }),
+          persisted: true,
+        };
       } catch (readErr) {
         logIdentityFailure(
           "identity private key exists but is unreadable — using ephemeral key, skip publishIdentity this run",
@@ -177,7 +176,7 @@ const ownPrivate = (): KeyObject => {
           readErr,
           path,
         );
-        return cacheEphemeral(privateKey);
+        return ephemeral(privateKey);
       }
     }
     logIdentityFailure(
@@ -193,17 +192,47 @@ const ownPrivate = (): KeyObject => {
       // Best-effort: the tmp file may never have been created.
     }
   }
-  cachedPriv = privateKey;
-  return privateKey;
+  return ephemeral(privateKey);
 };
 
-export const loadIdentityKey = (): TIdentityKey => {
-  const privateKey = ownPrivate();
+export type TIdentityKeyStore = {
+  /** The identity for the current state dir, loaded at most once per dir. */
+  readonly load: () => TIdentityKey;
+  /** The private key behind {@link load}. */
+  readonly privateKey: () => KeyObject;
+};
+
+/**
+ * A memo of identities keyed by their file path, so a re-pointed state dir
+ * gets its own identity and nothing ever needs clearing. A fresh store reads
+ * the disk again — what a new process does.
+ */
+export const createIdentityKeyStore = (): TIdentityKeyStore => {
+  const loaded = new Map<
+    string,
+    TLoadedKey & { readonly publicKeyB64: string }
+  >();
+  const entry = (): TLoadedKey & { readonly publicKeyB64: string } => {
+    const path = privFile();
+    const hit = loaded.get(path);
+    if (hit !== undefined) return hit;
+    const key = readOrMintKey(path, stateDir());
+    const next = { ...key, publicKeyB64: publicKeyB64Of(key.privateKey) };
+    loaded.set(path, next);
+    return next;
+  };
   return {
-    publicKeyB64: publicKeyB64Of(privateKey),
-    persisted: cachedPersisted,
+    load: (): TIdentityKey => {
+      const { publicKeyB64, persisted } = entry();
+      return { publicKeyB64, persisted };
+    },
+    privateKey: (): KeyObject => entry().privateKey,
   };
 };
+
+const identityKeys = createIdentityKeyStore();
+
+export const loadIdentityKey = (): TIdentityKey => identityKeys.load();
 
 /**
  * Whether the long-lived private key is on disk. False means skip
@@ -213,13 +242,6 @@ export const identityKeyPersisted = (): boolean => loadIdentityKey().persisted;
 
 /** This daemon's public key (SPKI DER, base64) — in-memory even if not persisted. */
 export const daemonPublicKey = (): string => loadIdentityKey().publicKeyB64;
-
-/** Drop the memoized identity key (state-dir change / shutdown / rebind). */
-export const clearIdentityKeyCache = (): void => {
-  cachedPriv = null;
-  cachedPersisted = false;
-  cachedPubB64 = null;
-};
 
 const deriveKey = (shared: Buffer): Buffer =>
   Buffer.from(hkdfSync("sha256", shared, Buffer.alloc(0), HKDF_INFO, 32));
@@ -279,7 +301,7 @@ export const openSealedWith = (
 
 /** Open a sealed blob with this daemon's long-lived private key. */
 export const openSealed = (sealedB64: string): string | null =>
-  openSealedWith(ownPrivate(), sealedB64);
+  openSealedWith(identityKeys.privateKey(), sealedB64);
 
 /** Seal plaintext to a recipient daemon's public key (SPKI DER, base64). */
 export const sealTo = (recipientPubB64: string, plaintext: string): string => {

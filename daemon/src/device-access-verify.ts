@@ -73,7 +73,6 @@ export type TDeviceAccessVerify = {
     pubkey: string | null,
     options?: TSetDeviceAccessPubkeyOptions,
   ) => void;
-  readonly clearDeviceGrantNonces: () => void;
   readonly checkDeviceGrant: (
     envelopeB64: string,
     expect: TCheckDeviceGrantExpect,
@@ -334,23 +333,15 @@ export const createDeviceAccessVerify = (
   return {
     getDeviceAccessPubkey,
     setDeviceAccessPubkey,
-    clearDeviceGrantNonces,
     checkDeviceGrant,
     enforceSeedGate,
     enforceRtcSeedGate,
   };
 };
 
-let active: TDeviceAccessVerify = createDeviceAccessVerify({
+const active: TDeviceAccessVerify = createDeviceAccessVerify({
   nonceLruCap: parseDeviceGrantNonceCapEnv() ?? DEFAULT_NONCE_LRU_CAP,
 });
-
-/** Replace the process-wide device-access verifier (tests / env wiring). */
-export const installDeviceAccessVerify = (
-  instance: TDeviceAccessVerify,
-): void => {
-  active = instance;
-};
 
 export const getDeviceAccessPubkey = (): string | null =>
   active.getDeviceAccessPubkey();
@@ -359,9 +350,6 @@ export const setDeviceAccessPubkey = (
   pubkey: string | null,
   options?: TSetDeviceAccessPubkeyOptions,
 ): void => active.setDeviceAccessPubkey(pubkey, options);
-
-export const clearDeviceGrantNonces = (): void =>
-  active.clearDeviceGrantNonces();
 
 export const checkDeviceGrant = (
   envelopeB64: string,

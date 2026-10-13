@@ -33,10 +33,7 @@ import {
   providerAuthOperationActive,
   providerLogoutActive,
 } from "./delegation/login-flow";
-import {
-  clearStoreIdentityEpochs,
-  storeIdentityEpoch,
-} from "./delegation/observation-cache";
+import { storeIdentityEpoch } from "./delegation/observation-cache";
 import { DEFAULT_CAPTURE_TIMEOUT_MS } from "./delegation/spawn";
 import { STATUS_CHECK_FAILED_DETAIL } from "./delegation/util";
 import { getCliState } from "./device-state";
@@ -58,6 +55,7 @@ import { getPendingAuth, pendingAuthWire } from "./pending-auth";
 import { ptySessionsEnabled } from "./pty-sessions-pref";
 import { sandboxState } from "./sandbox/landlock";
 import { ptySupported, sessionStatusReport } from "./session-host";
+import { stateScoped } from "./state-scoped";
 import type {
   TStatusPublishQueueSnapshot,
   TStatusPublishTrigger,
@@ -96,27 +94,44 @@ if (DELEGATE_STATUS_TIMEOUT_MS < DEFAULT_CAPTURE_TIMEOUT_MS) {
 // revoked. Preserve the last complete observation when this daemon has one;
 // otherwise omit the unknown installation state rather than serializing it as
 // a definitive `false` to the cloud.
-const lastKnownConnections = new Map<string, TDaemonProviderConnection>();
 
-/** User-initiated logout, sticky until the next successful login (or a
- *  failed logout that never actually signed out). Set at command receipt. */
-const signedOutByUser = new Set<string>();
+/** What this daemon has observed about its providers (see {@link stateScoped}). */
+type TDaemonStatusState = {
+  readonly lastKnownConnections: Map<string, TDaemonProviderConnection>;
+  /** User-initiated logout, sticky until the next successful login (or a
+   *  failed logout that never actually signed out). Set at command receipt. */
+  readonly signedOutByUser: Set<string>;
+  /** One-shot: publish the verified login row without a passive probe. */
+  readonly pendingVerifiedPublish: Set<string>;
+  /** Last verified login `flow_id` per slug — not last-known observation. */
+  readonly admittedLoginFlow: Map<string, string>;
+  readonly probeBackoff: Map<string, TProbeBackoff>;
+  readonly inFlightSlugProbes: Map<string, TSlugProbe>;
+  inFlightStatus: Promise<TDaemonStatus> | null;
+};
+
+const daemonStatusState = stateScoped(
+  (): TDaemonStatusState => ({
+    lastKnownConnections: new Map(),
+    signedOutByUser: new Set(),
+    pendingVerifiedPublish: new Set(),
+    admittedLoginFlow: new Map(),
+    probeBackoff: new Map(),
+    inFlightSlugProbes: new Map(),
+    inFlightStatus: null,
+  }),
+);
 
 /** Mark `slug` signed-out at logout command receipt, before `delegate.logout()`. */
 export const markProviderSignedOut = (slug: string): void => {
-  signedOutByUser.add(slug);
-  pendingVerifiedPublish.delete(slug);
-  admittedLoginFlow.delete(slug);
+  daemonStatusState().signedOutByUser.add(slug);
+  daemonStatusState().pendingVerifiedPublish.delete(slug);
+  daemonStatusState().admittedLoginFlow.delete(slug);
 };
-
-/** One-shot: publish the verified login row without a passive probe. */
-const pendingVerifiedPublish = new Set<string>();
-/** Last verified login `flow_id` per slug — not last-known observation. */
-const admittedLoginFlow = new Map<string, string>();
 
 /** Clear sticky signed-out (successful login, or a logout that did not take). */
 export const clearProviderSignedOut = (slug: string): void => {
-  signedOutByUser.delete(slug);
+  daemonStatusState().signedOutByUser.delete(slug);
 };
 
 /**
@@ -153,8 +168,8 @@ export const admitVerifiedLoginObservation = (flow: {
   if (live !== null && slot.wasCancelled()) return false;
   if (live === null && slot.inFlight()) return false;
   if (live === null && providerSignedOutByUser(slug)) return false;
-  const previous = lastKnownConnections.get(slug);
-  signedOutByUser.delete(slug);
+  const previous = daemonStatusState().lastKnownConnections.get(slug);
+  daemonStatusState().signedOutByUser.delete(slug);
   rememberLastKnownConnection({
     provider: slug,
     status: "connected",
@@ -164,8 +179,8 @@ export const admitVerifiedLoginObservation = (flow: {
       : {}),
     last_login_at_ms: statusNow(),
   });
-  pendingVerifiedPublish.add(slug);
-  admittedLoginFlow.set(slug, flow.flowId);
+  daemonStatusState().pendingVerifiedPublish.add(slug);
+  daemonStatusState().admittedLoginFlow.set(slug, flow.flowId);
   return true;
 };
 
@@ -174,7 +189,8 @@ export const loginAdmittedForCommand = (
   slug: string,
   flowId: string,
 ): boolean =>
-  !providerSignedOutByUser(slug) && admittedLoginFlow.get(slug) === flowId;
+  !providerSignedOutByUser(slug) &&
+  daemonStatusState().admittedLoginFlow.get(slug) === flowId;
 
 setVerifiedLoginAdmitter(admitVerifiedLoginObservation);
 
@@ -188,12 +204,10 @@ type TProbeBackoff = {
   identityEpoch: number;
 };
 
-const probeBackoff = new Map<string, TProbeBackoff>();
-const defaultStatusNow = (): number => Date.now();
-let statusNow: () => number = defaultStatusNow;
+const statusNow = (): number => Date.now();
 
 export const clearProviderProbeBackoff = (slug: string): void => {
-  probeBackoff.delete(slug);
+  daemonStatusState().probeBackoff.delete(slug);
 };
 
 const forceProbeTrigger = (
@@ -202,10 +216,10 @@ const forceProbeTrigger = (
 
 const noteProbeIndeterminate = (slug: string, indeterminate: boolean): void => {
   if (!indeterminate) {
-    probeBackoff.delete(slug);
+    daemonStatusState().probeBackoff.delete(slug);
     return;
   }
-  const prev = probeBackoff.get(slug);
+  const prev = daemonStatusState().probeBackoff.get(slug);
   const consecutiveUnknown = (prev?.consecutiveUnknown ?? 0) + 1;
   let untilMs = prev?.untilMs ?? 0;
   if (consecutiveUnknown >= PROBE_BACKOFF_AFTER) {
@@ -214,7 +228,7 @@ const noteProbeIndeterminate = (slug: string, indeterminate: boolean): void => {
       statusNow() +
       Math.min(PROBE_BACKOFF_BASE_MS * 2 ** shift, PROBE_BACKOFF_MAX_MS);
   }
-  probeBackoff.set(slug, {
+  daemonStatusState().probeBackoff.set(slug, {
     consecutiveUnknown,
     untilMs,
     identityEpoch: storeIdentityEpoch(slug),
@@ -223,10 +237,10 @@ const noteProbeIndeterminate = (slug: string, indeterminate: boolean): void => {
 
 const probeBackoffBlocks = (slug: string, force: boolean): boolean => {
   if (force) return false;
-  const entry = probeBackoff.get(slug);
+  const entry = daemonStatusState().probeBackoff.get(slug);
   if (entry === undefined) return false;
   if (storeIdentityEpoch(slug) !== entry.identityEpoch) {
-    probeBackoff.delete(slug);
+    daemonStatusState().probeBackoff.delete(slug);
     return false;
   }
   return entry.untilMs > statusNow();
@@ -235,7 +249,7 @@ const probeBackoffBlocks = (slug: string, force: boolean): boolean => {
 /** Whether `slug` is sticky-signed-out after an explicit user logout. */
 /** Whether `slug` is sticky-signed-out after an explicit user logout. */
 export const providerSignedOutByUser = (slug: string): boolean =>
-  signedOutByUser.has(slug);
+  daemonStatusState().signedOutByUser.has(slug);
 
 // Prefer the named query everywhere so logout stickiness has one reader.
 
@@ -251,7 +265,7 @@ const applyAuthLiteral = (
       pending_auth: pendingAuthWire(localPending),
     };
   }
-  const last = lastKnownConnections.get(slug);
+  const last = daemonStatusState().lastKnownConnections.get(slug);
   const inFlight = providerAuthOwned(slug);
   const normalized = normalizeProviderConnection(conn);
   const indeterminate =
@@ -272,7 +286,7 @@ const applyAuthLiteral = (
         observation: "signed_out",
       };
     }
-    signedOutByUser.delete(slug);
+    daemonStatusState().signedOutByUser.delete(slug);
     return { ...conn, status: "connected", observation: "connected" };
   }
   if (providerSignedOutByUser(slug) || normalized.signed_out) {
@@ -314,25 +328,20 @@ type TSlugProbe = {
   settled: boolean;
 };
 
-const inFlightSlugProbes = new Map<string, TSlugProbe>();
-let inFlightStatus: Promise<TDaemonStatus> | null = null;
-
 const dropSettledSlugProbes = (): void => {
-  for (const [slug, probe] of inFlightSlugProbes) {
-    if (probe.settled) inFlightSlugProbes.delete(slug);
+  for (const [slug, probe] of daemonStatusState().inFlightSlugProbes) {
+    if (probe.settled) daemonStatusState().inFlightSlugProbes.delete(slug);
   }
 };
 
 const connectionFingerprint = (conn: TDaemonProviderConnection): string =>
   JSON.stringify(conn);
 
-const defaultLateProbePush = (): void => {
+const requestLateProbePush = (): void => {
   void import("./control-channel")
     .then((mod) => mod.pushStatusIfChanged("late-probe"))
     .catch(() => {});
 };
-
-let requestLateProbePush: () => void = defaultLateProbePush;
 
 const emptyPublishQueueSnapshot = (): TStatusPublishQueueSnapshot => ({
   queued_publish_depth: 0,
@@ -351,30 +360,11 @@ export const setStatusPublishQueueSnapshot = (
   readPublishQueueSnapshot = fn ?? emptyPublishQueueSnapshot;
 };
 
-export type TStatusDeps = {
-  /** Wall clock for probe backoff. Defaults to `Date.now`. */
-  readonly nowMs?: (() => number) | null;
-  /** Late-probe status-push hook. Defaults to the control-channel import. */
-  readonly lateProbePush?: (() => void) | null;
-};
-
-/**
- * Install status-service host deps (clock, late-probe push) in one call.
- * Production applies the defaults once at module load; tests install their
- * own fakes and {@link clearLastKnownConnections} restores production
- * defaults between cases.
- */
-export const installStatusDeps = (deps: TStatusDeps = {}): void => {
-  statusNow = deps.nowMs ?? defaultStatusNow;
-  requestLateProbePush = deps.lateProbePush ?? defaultLateProbePush;
-};
-
-installStatusDeps({});
-
 /** Last complete observation for `slug`, if any. Read-only — no probe. */
 export const peekLastKnownConnection = (
   slug: string,
-): TDaemonProviderConnection | undefined => lastKnownConnections.get(slug);
+): TDaemonProviderConnection | undefined =>
+  daemonStatusState().lastKnownConnections.get(slug);
 
 /**
  * Remember a provider connection without running `computeStatus` (hydrate
@@ -383,34 +373,17 @@ export const peekLastKnownConnection = (
 export const rememberLastKnownConnection = (
   conn: TDaemonProviderConnection,
 ): void => {
-  lastKnownConnections.set(conn.provider, conn);
-};
-
-/**
- * Clear last-known connections and the sticky signed-out marks (identity
- * change). Live login/logout ownership is deliberately untouched: a vendor
- * login in flight is not scoped to the OpenLLM key.
- */
-export const clearLastKnownConnections = (): void => {
-  lastKnownConnections.clear();
-  signedOutByUser.clear();
-  clearStoreIdentityEpochs();
-  pendingVerifiedPublish.clear();
-  admittedLoginFlow.clear();
-  probeBackoff.clear();
-  inFlightSlugProbes.clear();
-  inFlightStatus = null;
-  installStatusDeps({});
+  daemonStatusState().lastKnownConnections.set(conn.provider, conn);
 };
 
 const recordLateProbeOutcome = (
   slug: string,
   raw: TDaemonProviderConnection,
 ): void => {
-  const previous = lastKnownConnections.get(slug);
+  const previous = daemonStatusState().lastKnownConnections.get(slug);
   const conn = applyAuthLiteral(slug, raw);
   rememberConnection(slug, raw, conn);
-  const next = lastKnownConnections.get(slug);
+  const next = daemonStatusState().lastKnownConnections.get(slug);
   if (next === undefined) return;
   if (
     previous !== undefined &&
@@ -435,7 +408,7 @@ export const admitLateProviderConnection = (
 };
 
 const statusFailure = (slug: string): TDaemonProviderConnection => {
-  const lastKnown = lastKnownConnections.get(slug);
+  const lastKnown = daemonStatusState().lastKnownConnections.get(slug);
   if (lastKnown !== undefined) {
     return {
       ...lastKnown,
@@ -513,7 +486,7 @@ type TBoundedDelegateStatusOptions = {
 };
 
 const overlayUnknownObservation = (slug: string): TDaemonProviderConnection => {
-  const lastKnown = lastKnownConnections.get(slug);
+  const lastKnown = daemonStatusState().lastKnownConnections.get(slug);
   if (lastKnown !== undefined) {
     return {
       ...lastKnown,
@@ -535,7 +508,7 @@ const boundedDelegateStatus = async (
     if (providerAuthOwned(slug)) {
       return overlayUnknownObservation(slug);
     }
-    const existing = inFlightSlugProbes.get(slug);
+    const existing = daemonStatusState().inFlightSlugProbes.get(slug);
     if (
       existing !== undefined &&
       (options?.reuseSettled === true || !existing.settled)
@@ -559,9 +532,9 @@ const boundedDelegateStatus = async (
       },
     );
     const probe: TSlugProbe = { promise: producer, settled: false };
-    inFlightSlugProbes.set(slug, probe);
+    daemonStatusState().inFlightSlugProbes.set(slug, probe);
     void producer.finally(() => {
-      if (inFlightSlugProbes.get(slug) === probe) {
+      if (daemonStatusState().inFlightSlugProbes.get(slug) === probe) {
         probe.settled = true;
       }
     });
@@ -707,9 +680,9 @@ const computeStatusFreshInner = async (
   const connections = await Promise.all(
     Object.values(DELEGATES).map(async (d) => {
       try {
-        if (pendingVerifiedPublish.has(d.slug)) {
-          pendingVerifiedPublish.delete(d.slug);
-          const seeded = lastKnownConnections.get(d.slug);
+        if (daemonStatusState().pendingVerifiedPublish.has(d.slug)) {
+          daemonStatusState().pendingVerifiedPublish.delete(d.slug);
+          const seeded = daemonStatusState().lastKnownConnections.get(d.slug);
           if (seeded?.observation === "connected") {
             return attachVendorCliInstall(
               attachUpstreamAuthCooldown(d.slug, seeded),
@@ -824,15 +797,16 @@ export const computeStatusFresh = (
 };
 
 export const computeStatus = async (): Promise<TDaemonStatus> => {
-  if (inFlightStatus === null) {
+  const state = daemonStatusState();
+  if (state.inFlightStatus === null) {
     const flight = computeStatusFresh().finally(() => {
-      if (inFlightStatus === flight) {
-        inFlightStatus = null;
+      if (state.inFlightStatus === flight) {
+        state.inFlightStatus = null;
       }
     });
-    inFlightStatus = flight;
+    state.inFlightStatus = flight;
   }
-  return inFlightStatus;
+  return state.inFlightStatus;
 };
 
 /**

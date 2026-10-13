@@ -166,9 +166,9 @@ const appendCombined = (line: string, sync: boolean): boolean => {
 };
 
 /**
- * Await any queued async log appends. TEST-ONLY: production never needs to
- * block on the log tail, but a test that asserts a `logWarn`/`logInfo` landed
- * must first drain the serialized queue.
+ * Await any queued async log appends. Graceful shutdown drains this before
+ * `process.exit` so the last warn/info lines are not lost; any reader that
+ * must observe a just-logged line drains it first too.
  */
 export const flushLogs = (): Promise<void> => appendTail;
 

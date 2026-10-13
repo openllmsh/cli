@@ -60,8 +60,6 @@ const MAX_FILE_BYTES =
     (MAX_PATH_CHARS + CLI_VERSION_OUTPUT_MAX_BYTES);
 
 let persistTmpSeq = 0;
-let persistLocked = false;
-let persistQueued = false;
 
 const envMs = (name: string, fallback: number): number | undefined => {
   const raw = process.env[name];
@@ -95,9 +93,16 @@ type TPersistFile = {
 
 type TMemoryEntry = TPersistRecord;
 
-const memory = new Map<string, TMemoryEntry>();
-const inflight = new Map<string, Promise<string | null>>();
-let persistLoaded = false;
+/** One cache file's state: its memory, in-flight probes and persist lock. */
+type TCacheState = {
+  readonly file: string;
+  readonly dir: string;
+  readonly memory: Map<string, TMemoryEntry>;
+  readonly inflight: Map<string, Promise<string | null>>;
+  persistLoaded: boolean;
+  persistLocked: boolean;
+  persistQueued: boolean;
+};
 
 const identityKey = (path: string, stamp: string): string =>
   `${path}\n${stamp}`;
@@ -142,10 +147,10 @@ const coerceFile = (v: unknown): TPersistRecord[] => {
     .slice(-CLI_VERSION_CACHE_MAX_RECORDS);
 };
 
-const loadPersist = (): void => {
-  if (persistLoaded) return;
-  persistLoaded = true;
-  const path = cliVersionCacheFilePath();
+const loadPersist = (st: TCacheState): void => {
+  if (st.persistLoaded) return;
+  st.persistLoaded = true;
+  const path = st.file;
   try {
     const st = statSync(path);
     if (st.size > MAX_FILE_BYTES) return;
@@ -166,26 +171,29 @@ const loadPersist = (): void => {
     return;
   }
   for (const rec of coerceFile(parsed)) {
-    memory.set(identityKey(rec.path, rec.stamp), rec);
+    st.memory.set(identityKey(rec.path, rec.stamp), rec);
   }
 };
 
-const durableRecordsFromMemory = (): TPersistRecord[] =>
-  [...memory.values()]
+const durableRecordsFromMemory = (st: TCacheState): TPersistRecord[] =>
+  [...st.memory.values()]
     .filter((rec) => rec.output !== null)
     .slice(-CLI_VERSION_CACHE_MAX_RECORDS);
 
-const writePersistAtomic = (records: readonly TPersistRecord[]): void => {
+const writePersistAtomic = (
+  st: TCacheState,
+  records: readonly TPersistRecord[],
+): void => {
   persistTmpSeq += 1;
   const tmp = join(
-    stateDir(),
+    st.dir,
     `.cli-version-cache.json.${process.pid}.${persistTmpSeq}.tmp`,
   );
   const body: TPersistFile = { v: SCHEMA_V, records };
   try {
-    mkdirSync(stateDir(), { recursive: true });
+    mkdirSync(st.dir, { recursive: true });
     writeFileSync(tmp, JSON.stringify(body), { mode: 0o600 });
-    renameSync(tmp, cliVersionCacheFilePath());
+    renameSync(tmp, st.file);
   } catch {
     try {
       rmSync(tmp, { force: true });
@@ -196,25 +204,29 @@ const writePersistAtomic = (records: readonly TPersistRecord[]): void => {
 };
 
 /** Snapshot the in-memory map (no disk RMW). Serialized; unique tmp names. */
-const flushPersist = (): void => {
-  if (persistLocked) {
-    persistQueued = true;
+const flushPersist = (st: TCacheState): void => {
+  if (st.persistLocked) {
+    st.persistQueued = true;
     return;
   }
-  persistLocked = true;
+  st.persistLocked = true;
   try {
     do {
-      persistQueued = false;
-      writePersistAtomic(durableRecordsFromMemory());
-    } while (persistQueued);
+      st.persistQueued = false;
+      writePersistAtomic(st, durableRecordsFromMemory(st));
+    } while (st.persistQueued);
   } finally {
-    persistLocked = false;
+    st.persistLocked = false;
   }
 };
 
-const rememberEntry = (entry: TMemoryEntry, persist: boolean): void => {
+const rememberEntry = (
+  st: TCacheState,
+  entry: TMemoryEntry,
+  persist: boolean,
+): void => {
   const key = identityKey(entry.path, entry.stamp);
-  const existing = memory.get(key);
+  const existing = st.memory.get(key);
   if (
     entry.output === null &&
     existing !== undefined &&
@@ -222,12 +234,12 @@ const rememberEntry = (entry: TMemoryEntry, persist: boolean): void => {
   ) {
     return;
   }
-  memory.set(key, entry);
-  if (memory.size > CLI_VERSION_CACHE_MAX_RECORDS) {
-    const first = memory.keys().next().value;
-    if (first !== undefined && first !== key) memory.delete(first);
+  st.memory.set(key, entry);
+  if (st.memory.size > CLI_VERSION_CACHE_MAX_RECORDS) {
+    const first = st.memory.keys().next().value;
+    if (first !== undefined && first !== key) st.memory.delete(first);
   }
-  if (persist) flushPersist();
+  if (persist) flushPersist(st);
 };
 
 const settleShared = (shared: Promise<string | null>): Promise<string | null> =>
@@ -280,6 +292,7 @@ const probeRaw = async (
 };
 
 const runProbe = async (
+  st: TCacheState,
   bin: string,
   resolved: string,
   stamp: string,
@@ -300,6 +313,7 @@ const runProbe = async (
     return output;
   }
   rememberEntry(
+    st,
     {
       path: resolved,
       stamp,
@@ -315,19 +329,20 @@ const runProbe = async (
  * Stamp-keyed `--version`. Trimmed stdout on success; `null` on completed
  * failure/timeout, missing binary, or observer abort.
  */
-export const cachedCliVersion = (
+const cachedCliVersionIn = (
+  st: TCacheState,
   bin: string,
   env?: Record<string, string>,
   opts?: TCliVersionOpts,
 ): Promise<string | null> => {
-  loadPersist();
+  loadPersist(st);
   const resolved = resolveVersionBinary(bin);
   const stamp = versionBinaryStamp(bin);
   if (resolved === null || stamp === null) {
     return Promise.resolve(null);
   }
   const key = identityKey(resolved, stamp);
-  const hit = memory.get(key);
+  const hit = st.memory.get(key);
   if (hit !== undefined) {
     if (hit.output !== null) {
       return Promise.resolve(hit.output);
@@ -336,22 +351,23 @@ export const cachedCliVersion = (
       return Promise.resolve(null);
     }
   }
-  const existing = inflight.get(key);
+  const existing = st.inflight.get(key);
   if (existing !== undefined) {
     return joinObserver(existing, opts?.signal);
   }
   const shared = withoutCommandReplayContext(() =>
     runProbe(
+      st,
       bin,
       resolved,
       stamp,
       env,
       versionProbeTimeoutMs(opts?.timeoutMs),
     ).finally(() => {
-      inflight.delete(key);
+      st.inflight.delete(key);
     }),
   );
-  inflight.set(key, shared);
+  st.inflight.set(key, shared);
   return joinObserver(shared, opts?.signal);
 };
 
@@ -360,27 +376,71 @@ export const cachedCliVersion = (
  * only when the current entry's path/stamp/output all match. A newer concurrent
  * result or a different vendor identity is left untouched.
  */
-export const invalidateMatchingCliVersionOutput = (
+const invalidateMatchingIn = (
+  st: TCacheState,
   bin: string,
   output: string,
 ): boolean => {
-  loadPersist();
+  loadPersist(st);
   const resolved = resolveVersionBinary(bin);
   const stamp = versionBinaryStamp(bin);
   if (resolved === null || stamp === null) return false;
   const key = identityKey(resolved, stamp);
-  const hit = memory.get(key);
+  const hit = st.memory.get(key);
   if (hit === undefined || hit.output !== output) return false;
-  memory.delete(key);
-  if (hit.output !== null) flushPersist();
+  st.memory.delete(key);
+  if (hit.output !== null) flushPersist(st);
   return true;
 };
 
-/** Drop memory + inflight and re-read persist on the next lookup. */
-export const clearCliVersionCache = (): void => {
-  memory.clear();
-  inflight.clear();
-  persistLoaded = false;
-  persistLocked = false;
-  persistQueued = false;
+export type TCliVersionCache = {
+  /**
+   * Stamp-keyed `--version`. Trimmed stdout on success; `null` on completed
+   * failure/timeout, missing binary, or observer abort.
+   */
+  readonly cachedCliVersion: (
+    bin: string,
+    env?: Record<string, string>,
+    opts?: TCliVersionOpts,
+  ) => Promise<string | null>;
+  /** Compare-and-invalidate one observation (see above). */
+  readonly invalidateMatchingCliVersionOutput: (
+    bin: string,
+    output: string,
+  ) => boolean;
 };
+
+/**
+ * A cache whose state is keyed by its cache file, so a re-pointed state dir
+ * reads its own file and nothing needs clearing. A fresh cache re-reads the
+ * file — what a restarted daemon does.
+ */
+export const createCliVersionCache = (): TCliVersionCache => {
+  const states = new Map<string, TCacheState>();
+  const current = (): TCacheState => {
+    const file = cliVersionCacheFilePath();
+    const existing = states.get(file);
+    if (existing !== undefined) return existing;
+    const st: TCacheState = {
+      file,
+      dir: stateDir(),
+      memory: new Map(),
+      inflight: new Map(),
+      persistLoaded: false,
+      persistLocked: false,
+      persistQueued: false,
+    };
+    states.set(file, st);
+    return st;
+  };
+  return {
+    cachedCliVersion: (bin, env, opts) =>
+      cachedCliVersionIn(current(), bin, env, opts),
+    invalidateMatchingCliVersionOutput: (bin, output) =>
+      invalidateMatchingIn(current(), bin, output),
+  };
+};
+
+/** This process's cache. */
+export const { cachedCliVersion, invalidateMatchingCliVersionOutput } =
+  createCliVersionCache();

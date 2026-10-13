@@ -45,7 +45,6 @@ export type TDoctorRecordDeps = {
 export type TDoctorRecord = {
   readonly diagnosticsLogPath: () => string;
   readonly diagnosticsRotatedPath: () => string;
-  readonly clearDoctorRecordBuffer: () => void;
   readonly recordDoctorObservation: (
     input: TDoctorObservationInput,
   ) => TDoctorReportEvent | null;
@@ -78,11 +77,6 @@ export const createDoctorRecord = (
       // keep appending
     }
     approxBytes = 0;
-  };
-
-  const clearDoctorRecordBuffer = (): void => {
-    approxBytes = 0;
-    seededFor = null;
   };
 
   const recordDoctorObservation = (
@@ -133,24 +127,16 @@ export const createDoctorRecord = (
   return {
     diagnosticsLogPath,
     diagnosticsRotatedPath,
-    clearDoctorRecordBuffer,
     recordDoctorObservation,
   };
 };
 
-let activeDoctorRecord = createDoctorRecord();
-
-export const installDoctorRecord = (record: TDoctorRecord): void => {
-  activeDoctorRecord = record;
-};
+const activeDoctorRecord: TDoctorRecord = createDoctorRecord();
 
 export const diagnosticsLogPath = (): string =>
   activeDoctorRecord.diagnosticsLogPath();
 export const diagnosticsRotatedPath = (): string =>
   activeDoctorRecord.diagnosticsRotatedPath();
-export const clearDoctorRecordBuffer = (): void => {
-  activeDoctorRecord.clearDoctorRecordBuffer();
-};
 export const recordDoctorObservation = (
   input: TDoctorObservationInput,
 ): TDoctorReportEvent | null =>

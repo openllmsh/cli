@@ -446,7 +446,7 @@ export const openCursorCaptureBridge = async (args: {
   readonly tempRoot?: string;
 }): Promise<TCursorCaptureBridge> => {
   // CodeRabbit round 2: production must NOT default to `allowLoopback: true`
-  // — loopback destinations are a hermetic-test-only relaxation. The real
+  // — loopback destinations are an explicit opt-in relaxation. The real
   // production call site (`runCursorNativeCapture`) passes no
   // `destinationPolicy`, so it now gets the STRICT default (official Cursor
   // hosts only via `isOfficialCursorAgentCaptureUrl`); every test that needs

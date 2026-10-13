@@ -3,6 +3,7 @@ import type {
   TCooldownReason,
 } from "@openllmsh/protocol";
 import { cooldownPolicyFor } from "@openllmsh/protocol";
+import { stateScoped } from "./state-scoped";
 
 /**
  * The daemon's LOCAL, synchronous hop cooldown table.
@@ -47,7 +48,8 @@ export type THopCooldownEntry = {
   readonly authReasonCode?: TAuthRefreshCooldownReason;
 };
 
-const marks = new Map<string, THopCooldownEntry>();
+/** This daemon's marks (see {@link stateScoped}). */
+const daemonMarks = stateScoped(() => new Map<string, THopCooldownEntry>());
 
 const key = (provider: string, modelId: string): string =>
   `${provider}|${modelId}`;
@@ -97,6 +99,7 @@ export const markHopCooldown = (
   now: number = Date.now(),
   authReasonCode?: TAuthRefreshCooldownReason,
 ): boolean => {
+  const marks = daemonMarks();
   const policy = cooldownPolicyFor(reason);
   if (policy.action !== "cool_and_advance") return false;
   const k = key(provider, modelId);
@@ -172,6 +175,7 @@ export const isHopCoolingDown = (
   modelId: string,
   now: number = Date.now(),
 ): boolean => {
+  const marks = daemonMarks();
   const k = key(provider, modelId);
   const entry = marks.get(k);
   if (entry === undefined) return false;
@@ -190,6 +194,7 @@ export const peekHopCooldown = (
   modelId: string,
   now: number = Date.now(),
 ): THopCooldownEntry | undefined => {
+  const marks = daemonMarks();
   const k = key(provider, modelId);
   const entry = marks.get(k);
   if (entry === undefined) return undefined;
@@ -205,16 +210,10 @@ export const peekHopCooldown = (
  * actually serves a successful (HTTP 2xx) committed response: a working dial
  * PROVES the hop is healthy, so its stale cooldown must go immediately — sibling
  * walks and the next request then skip the whole exhaust-then-recover detour
- * instead of re-earning quota for the full TTL. (Cf. {@link clearHopCooldowns},
- * the all-clear.)
+ * instead of re-earning quota for the full TTL.
  */
 export const clearHopCooldown = (provider: string, modelId: string): void => {
-  marks.delete(key(provider, modelId));
-};
-
-/** Drop every mark (tests; a credential reconnect that may restore quota). */
-export const clearHopCooldowns = (): void => {
-  marks.clear();
+  daemonMarks().delete(key(provider, modelId));
 };
 
 /** Latest-expiring live `auth` cooldown for any model of `provider`. */
@@ -235,6 +234,7 @@ export const authCooldownForProvider = (
   provider: string,
   now: number = Date.now(),
 ): TAuthCooldownForProvider | null => {
+  const marks = daemonMarks();
   const prefix = `${provider}|`;
   let latest: TAuthCooldownForProvider | null = null;
   for (const [k, entry] of marks) {

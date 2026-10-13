@@ -17,6 +17,7 @@
  */
 
 import type { TSubscriptionProviderSlug } from "@openllmsh/protocol";
+import type { TDeadlineTimebase } from "../deadline-budget";
 import type { TSafeDiagnosticMessage } from "../doctor-report/message";
 import { logDebug, logInfo, logWarn, safeDiagnosticMessage } from "../logger";
 import type { TRefreshCaller } from "../op-context";
@@ -27,6 +28,7 @@ import {
   refreshSpawnBag,
   usageNativeRefreshAllowed,
 } from "../op-context";
+import { stateScoped } from "../state-scoped";
 import type { TNativeAuthProducer, TTimeoutScheduler } from "./spawn";
 import { DEADLINE_CHECK_CAP_MS, spawnLogin, spawnLoginPty } from "./spawn";
 import type { TLoginResult, TStoreRead } from "./util";
@@ -545,6 +547,8 @@ export const spawnRefresh = async (
     readonly operationId?: string;
     /** Forwarded to spawnLogin / onDeadline hang races. */
     readonly scheduleTimeout?: TTimeoutScheduler;
+    /** Forwarded to spawnLogin: the operation budget's clock + scheduler. */
+    readonly timebase?: TDeadlineTimebase;
     /** Hang cap for store observe + onDeadline. Defaults to DEADLINE_CHECK_CAP_MS. */
     readonly deadlineCheckCapMs?: number;
   },
@@ -567,6 +571,7 @@ export const spawnRefresh = async (
     ...(opts?.scheduleTimeout !== undefined
       ? { scheduleTimeout: opts.scheduleTimeout }
       : {}),
+    ...(opts?.timebase !== undefined ? { timebase: opts.timebase } : {}),
     ...(opts?.deadlineCheckCapMs !== undefined
       ? { deadlineCheckCapMs: opts.deadlineCheckCapMs }
       : {}),
@@ -703,6 +708,14 @@ const networkErrno = (err: unknown): string | null =>
  *     or `{ kind: "stale" }` if the trigger rejected (caller keeps the current
  *     token).
  */
+type TRefresherState = {
+  inFlight: Promise<void> | null;
+  lastErrorClass: TRefreshErrorClass | null;
+  cooldownUntil: number;
+  failureBackoffUntil: number;
+  consecutiveFailures: number;
+};
+
 export const makeRefresher = (opts: {
   readonly slug: string;
   readonly label: string;
@@ -715,14 +728,20 @@ export const makeRefresher = (opts: {
   // biome-ignore lint/suspicious/noConfusingVoidType: providers return Promise<void>
   readonly trigger: () => Promise<void | TRefreshSpawnMeta>;
 }): ((expiresAtMs: number | null) => Promise<TRefreshOutcome>) => {
-  let inFlight: Promise<void> | null = null;
-  let lastErrorClass: TRefreshErrorClass | null = null;
-  let cooldownUntil = 0;
-  let failureBackoffUntil = 0;
-  let consecutiveFailures = 0;
+  // The credential store lives under the state dir, so its refresh memory
+  // (in-flight spawn, cooldown, failure backoff) is scoped to it.
+  const refresherState = stateScoped(
+    (): TRefresherState => ({
+      inFlight: null,
+      lastErrorClass: null,
+      cooldownUntil: 0,
+      failureBackoffUntil: 0,
+      consecutiveFailures: 0,
+    }),
+  );
   const cooldownMs = opts.cooldownMs ?? 0;
-  const fire = (): Promise<void> => {
-    if (inFlight === null) {
+  const fire = (st: TRefresherState): Promise<void> => {
+    if (st.inFlight === null) {
       const started = Date.now();
       // Three clocks, not one: `elapsed_ms` is the whole trigger() wall from
       // this first waiter's `started` (queue + spawn). `queued_ms` is
@@ -758,14 +777,14 @@ export const makeRefresher = (opts: {
         meta: TRefreshSpawnMeta | undefined;
         timeoutMs: number | undefined;
       } = { meta: undefined, timeoutMs: undefined };
-      inFlight = refreshSpawnBag
+      st.inFlight = refreshSpawnBag
         .run(bag, () => opts.trigger())
         .then((meta) => {
-          lastErrorClass = null;
+          st.lastErrorClass = null;
           lastRefreshErrorClasses.set(opts.slug, null);
-          consecutiveFailures = 0;
+          st.consecutiveFailures = 0;
           counters.ok++;
-          if (cooldownMs > 0) cooldownUntil = Date.now() + cooldownMs;
+          if (cooldownMs > 0) st.cooldownUntil = Date.now() + cooldownMs;
           const spawn =
             meta !== undefined && meta !== null
               ? {
@@ -809,18 +828,18 @@ export const makeRefresher = (opts: {
           );
         })
         .catch((err: unknown) => {
-          lastErrorClass = classifyRefreshError(err);
-          lastRefreshErrorClasses.set(opts.slug, lastErrorClass);
-          consecutiveFailures++;
+          st.lastErrorClass = classifyRefreshError(err);
+          lastRefreshErrorClasses.set(opts.slug, st.lastErrorClass);
+          st.consecutiveFailures++;
           counters.fail++;
           const triggerError =
             err instanceof RefreshTriggerError ? err : undefined;
           if (triggerError?.abandoned === true) counters.abandoned++;
           const failureBackoffMs = Math.min(
-            REFRESH_FAILURE_BACKOFF_MS * 2 ** (consecutiveFailures - 1),
+            REFRESH_FAILURE_BACKOFF_MS * 2 ** (st.consecutiveFailures - 1),
             MAX_REFRESH_FAILURE_BACKOFF_MS,
           );
-          failureBackoffUntil = Date.now() + failureBackoffMs;
+          st.failureBackoffUntil = Date.now() + failureBackoffMs;
           const spawn: TRefreshSpawnMeta | undefined =
             triggerError === undefined
               ? undefined
@@ -833,14 +852,14 @@ export const makeRefresher = (opts: {
             triggerError?.timeoutMs ?? REFRESH_SPAWN_TIMEOUT_MS;
           patchLast(opts.slug, {
             caller,
-            error_class: lastErrorClass,
+            error_class: st.lastErrorClass,
             exit_code: triggerError?.exitCode ?? null,
             spawn_elapsed_ms: clocks.spawn_elapsed_ms,
             queued_ms: clocks.queued_ms,
             timeout_ms,
             in_flight: false,
           });
-          if (lastErrorClass === "network") {
+          if (st.lastErrorClass === "network") {
             logWarn(
               "refresh",
               safeDiagnosticMessage`Credential refresh failed.`,
@@ -875,7 +894,7 @@ export const makeRefresher = (opts: {
               provider: opts.slug,
               label: opts.label,
               phase: "refresh_trigger",
-              error_class: lastErrorClass,
+              error_class: st.lastErrorClass,
               ...clocks,
               timeout_ms,
               abandoned: triggerError?.abandoned ?? false,
@@ -897,13 +916,14 @@ export const makeRefresher = (opts: {
           );
         })
         .finally(() => {
-          inFlight = null;
+          st.inFlight = null;
           patchLast(opts.slug, { in_flight: false });
         });
     }
-    return inFlight;
+    return st.inFlight;
   };
   return async (expiresAtMs) => {
+    const st = refresherState();
     if (expiresAtMs === null) return "fresh";
     const remaining = expiresAtMs - Date.now();
     // Usage is stored-only unless the manual Refresh-usage ALS is set.
@@ -911,16 +931,16 @@ export const makeRefresher = (opts: {
     // usage() even if a caller forgets the stored-token branch.
     if (currentRefreshCaller() === "usage" && !usageNativeRefreshAllowed()) {
       if (remaining > 0) return "fresh";
-      if (lastErrorClass === null) return "fresh";
+      if (st.lastErrorClass === null) return "fresh";
       counterFor(opts.slug).fallbacks++;
-      return { kind: "stale", reason: lastErrorClass };
+      return { kind: "stale", reason: st.lastErrorClass };
     }
     if (remaining >= opts.leewayMs) return "fresh";
     // A recent spawn already gathered current info — don't spawn again until the
     // cooldown lapses. Serving the current token for at most `cooldownMs` is the
     // right backoff; it never serves a WORSE token than one spawn ago.
     const now = Date.now();
-    if (cooldownMs > 0 && now < cooldownUntil) {
+    if (cooldownMs > 0 && now < st.cooldownUntil) {
       counterFor(opts.slug).cooldown_skips++;
       logDebug("refresh", "native refresh skipped (cooldown)", {
         provider: opts.slug,
@@ -929,7 +949,7 @@ export const makeRefresher = (opts: {
       });
       return "fresh";
     }
-    if (now < failureBackoffUntil) {
+    if (now < st.failureBackoffUntil) {
       counterFor(opts.slug).backoff_skips++;
       logDebug("refresh", "native refresh skipped (failure backoff)", {
         provider: opts.slug,
@@ -938,20 +958,20 @@ export const makeRefresher = (opts: {
       });
       // Still-valid token: serve it, do not re-spawn. Hard-expired: typed stale
       // so the walker cools the hop instead of spending the request on a 401.
-      if (remaining > 0 || lastErrorClass === null) return "fresh";
+      if (remaining > 0 || st.lastErrorClass === null) return "fresh";
       counterFor(opts.slug).fallbacks++;
-      return { kind: "stale", reason: lastErrorClass };
+      return { kind: "stale", reason: st.lastErrorClass };
     }
     if (remaining > 0) {
-      void fire();
+      void fire(st);
       return "kicked";
     }
-    await fire();
-    if (lastErrorClass !== null) {
+    await fire(st);
+    if (st.lastErrorClass !== null) {
       // The caller will serve the stale credential — count it centrally so no
       // delegate has to remember to (they all log `refresh_fallback` already).
       counterFor(opts.slug).fallbacks++;
-      return { kind: "stale", reason: lastErrorClass };
+      return { kind: "stale", reason: st.lastErrorClass };
     }
     return "awaited";
   };

@@ -1697,7 +1697,7 @@ export const encodeExecClientRequestContextResult = (args: {
 /**
  * `ExecClientMessage.mcp_state_exec_result` (field 36) — hermetic
  * test/fixture encoder. Real shape is `McpStateExecResult { success |
- * error | rejected }`; tests only need OPAQUE bytes to prove exact
+ * error | rejected }`; callers supply OPAQUE bytes to prove exact
  * byte-for-byte forwarding (the daemon never decodes this content), so
  * `resultBytes` is accepted as-is rather than modeling the full oneof.
  */

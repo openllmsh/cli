@@ -126,11 +126,6 @@ const releaseRealtimeSession = (): void => {
 /** Live concurrent realtime session count (admission / status). */
 export const activeRealtimeSessionCount = (): number => activeSessions;
 
-/** Drop the admission counter — used on daemon shutdown / identity change. */
-export const clearActiveRealtimeSessions = (): void => {
-  activeSessions = 0;
-};
-
 // ---------------------------------------------------------------------------
 // Injectable upstream transport (production: a real WebSocket to the vendor)
 // ---------------------------------------------------------------------------

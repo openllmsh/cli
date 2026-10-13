@@ -307,8 +307,7 @@ export const replayClaudeSdkFacadeHistory = async (params: {
   readonly reader: ReadableStreamDefaultReader<string>;
   readonly frames: ReadonlyArray<TClaudeSdkFacadeFrame>;
   readonly signal: AbortSignal;
-  /** Override for tests — production omits this and gets
-   *  {@link PRE_COMMIT_TIMEOUT_MS} (same `precommitMs` convention as
+  /** Pre-commit timeout; omitted → {@link PRE_COMMIT_TIMEOUT_MS} (same `precommitMs` convention as
    *  `codex-app-server.ts`/`cursor-acp.ts`). */
   readonly precommitMs?: number;
 }): Promise<TClaudeSdkFacadeReplayResult> => {
@@ -356,8 +355,8 @@ export type TClaudeSdkFacadeParams = {
   readonly providerModelId: string;
   readonly canonical: TChatCompletionRequest;
   readonly signal: AbortSignal;
-  /** Forwarded to {@link replayClaudeSdkFacadeHistory}'s `precommitMs` —
-   *  tests only; production omits this. */
+  /** Forwarded to {@link replayClaudeSdkFacadeHistory}'s `precommitMs`;
+   *  omitted → its default. */
   readonly precommitMs?: number;
 };
 

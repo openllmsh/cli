@@ -38,10 +38,8 @@ import {
 import { cliVersion } from "./delegation/util";
 import type { TSafeDiagnosticMessage } from "./doctor-report/message";
 import { logWarn, safeDiagnosticMessage } from "./logger";
-import {
-  peekManagerResolution,
-  resolveManagerCandidate,
-} from "./manager-resolution";
+import type { TManagerRegistry } from "./manager-resolution";
+import { defaultManagerRegistry } from "./manager-resolution";
 import { isHostCliRunnable } from "./path-utils";
 
 export type TCliInstallState = {
@@ -50,10 +48,6 @@ export type TCliInstallState = {
 };
 
 const cliFailStreak = new Map<string, number>();
-
-export const clearCliInstallDoctorStreak = (): void => {
-  cliFailStreak.clear();
-};
 
 /**
  * Per-provider doctor copy — `safeDiagnosticMessage` forbids interpolation, and
@@ -213,8 +207,9 @@ const linkSidecars = (isolatedBin: string): void => {
  */
 const resolveHostBinary = async (
   provider: TCliProvider,
-  opts?: { readonly demand?: boolean; readonly signal?: AbortSignal },
+  opts?: TCliInstallStateOpts,
 ): Promise<string | undefined> => {
+  const managers = opts?.managers ?? defaultManagerRegistry;
   // Walk every candidate: a PATH-hit shebang whose interpreter is missing
   // (npm `@openai/codex` → `#!/usr/bin/env node` under nvm) must not win over
   // a later native install, and must not count as "installed" when it is the
@@ -224,8 +219,10 @@ const resolveHostBinary = async (
     if (!isHostCliRunnable(candidate)) continue;
     const resolved =
       opts?.demand === true
-        ? await resolveManagerCandidate(candidate, { signal: opts.signal })
-        : peekManagerResolution(candidate);
+        ? await managers.resolveManagerCandidate(candidate, {
+            signal: opts.signal,
+          })
+        : managers.peekManagerResolution(candidate);
     if (resolved === undefined || resolved.kind === "unresolved") {
       continue;
     }
@@ -259,8 +256,8 @@ const resolveHostBinary = async (
  * re-reconcile the isolated link; it never pins or expires a version.
  */
 
-/** Numeric env override (tests only) — returns `fallback` unless the var parses
- *  to a non-negative integer. Lets a test collapse the reconcile TTL. */
+/** Numeric env override — returns `fallback` unless the var parses to a
+ *  non-negative integer. */
 const envMs = (name: string, fallback: number): number => {
   const raw = process.env[name];
   if (raw === undefined) return fallback;
@@ -281,35 +278,26 @@ const CLI_INSTALL_STATE_TTL_MS = envMs("OPENLLM_CLI_STATE_TTL_MS", 30_000);
 const cliVersionProbeTimeoutMs = (): number =>
   envMs("OPENLLM_CLI_VERSION_PROBE_TIMEOUT_MS", 3_000);
 
+/** Throttle / in-flight maps are keyed by the provider's install root, so a
+ *  re-pointed state dir gets its own reconcile instead of a stale one. */
+const installKey = (provider: TCliProvider): string => cliRoot(provider);
+
 /** Per-provider last-reconcile throttle. Version spawns live in `cliVersion`. */
-const cliInstallReconcileUntil = new Map<TCliProvider, number>();
+const cliInstallReconcileUntil = new Map<string, number>();
 
 /** In-flight PASSIVE `cliInstallState` probes — overlapping passive callers
  *  share one reconcile. Kept separate from the demand map below so a demand
  *  caller is never starved behind (or silently downgraded to) a concurrent
  *  passive read that would not spawn a manager subprocess. */
-const cliInstallStateInFlight = new Map<
-  TCliProvider,
-  Promise<TCliInstallState>
->();
+const cliInstallStateInFlight = new Map<string, Promise<TCliInstallState>>();
 
 /** In-flight DEMAND `cliInstallState` probes — overlapping demand callers
  *  (e.g. two near-simultaneous connect attempts) share one manager-adapter
  *  subprocess rather than each spawning their own. */
 const cliInstallStateDemandInFlight = new Map<
-  TCliProvider,
+  string,
   Promise<TCliInstallState>
 >();
-
-/**
- * Clear the reconcile throttle — used by tests that change
- * `OPENLLM_DAEMON_STATE_DIR`. Does NOT drop the shared version-stamp cache.
- */
-export const clearCliInstallStateCache = (): void => {
-  cliInstallReconcileUntil.clear();
-  cliInstallStateInFlight.clear();
-  cliInstallStateDemandInFlight.clear();
-};
 
 const parseVendorVersion = (out: string | null): string | null =>
   out?.match(/\d+\.\d+\.\d+/)?.[0] ?? null;
@@ -328,6 +316,9 @@ export type TCliInstallStateOpts = {
   /** Forwarded to a demand resolution's manager-adapter subprocess. Ignored
    *  on a passive (non-demand) call, since no subprocess runs there. */
   readonly signal?: AbortSignal;
+  /** Manager-shim registry to resolve candidates through. Defaults to the
+   *  production {@link defaultManagerRegistry}. */
+  readonly managers?: TManagerRegistry;
 };
 
 const probeCliInstallState = async (
@@ -352,7 +343,10 @@ const probeCliInstallState = async (
       return { installed: false, version: null };
     }
     await linkIsolatedCli(provider, host);
-    cliInstallReconcileUntil.set(provider, now + CLI_INSTALL_STATE_TTL_MS);
+    cliInstallReconcileUntil.set(
+      installKey(provider),
+      now + CLI_INSTALL_STATE_TTL_MS,
+    );
   } else {
     // The isolated link's OWN immediate target (not the fully-resolved
     // realpath — a resolved manager selection is a plain absolute path to a
@@ -372,11 +366,12 @@ const probeCliInstallState = async (
       immediateTarget = undefined;
     }
     if (immediateTarget !== undefined) {
+      const managers = opts?.managers ?? defaultManagerRegistry;
       const resolved = demand
-        ? await resolveManagerCandidate(immediateTarget, {
+        ? await managers.resolveManagerCandidate(immediateTarget, {
             signal: opts?.signal,
           })
-        : peekManagerResolution(immediateTarget);
+        : managers.peekManagerResolution(immediateTarget);
       if (resolved === undefined) {
         // Recognized as a manager shim but no demand resolution has ever
         // populated the cache for it (passive call, cold cache): fail
@@ -388,7 +383,10 @@ const probeCliInstallState = async (
       if (resolved.kind === "unresolved") {
         // Recognized as a manager shim but it no longer resolves: fail
         // closed rather than falling through to probe the shim unconfined.
-        cliInstallReconcileUntil.set(provider, now + CLI_INSTALL_STATE_TTL_MS);
+        cliInstallReconcileUntil.set(
+          installKey(provider),
+          now + CLI_INSTALL_STATE_TTL_MS,
+        );
         return { installed: false, version: null };
       }
       if (
@@ -410,9 +408,12 @@ const probeCliInstallState = async (
     // spawns on this cadence unless `opts.demand` is set — the TTL only
     // throttles how often this cheap re-derive/re-stat runs, it is never
     // itself a license to query a manager adapter.
-    const until = cliInstallReconcileUntil.get(provider);
+    const until = cliInstallReconcileUntil.get(installKey(provider));
     if (until === undefined || until <= now) {
-      cliInstallReconcileUntil.set(provider, now + CLI_INSTALL_STATE_TTL_MS);
+      cliInstallReconcileUntil.set(
+        installKey(provider),
+        now + CLI_INSTALL_STATE_TTL_MS,
+      );
       const host = await resolveHostBinary(provider, opts);
       if (host !== undefined) {
         try {
@@ -448,8 +449,11 @@ const probeCliInstallState = async (
   }
 
   linkSidecars(bin);
-  if (!cliInstallReconcileUntil.has(provider)) {
-    cliInstallReconcileUntil.set(provider, now + CLI_INSTALL_STATE_TTL_MS);
+  if (!cliInstallReconcileUntil.has(installKey(provider))) {
+    cliInstallReconcileUntil.set(
+      installKey(provider),
+      now + CLI_INSTALL_STATE_TTL_MS,
+    );
   }
 
   // Agents with install metadata never pay a launch just to read a version.
@@ -475,6 +479,7 @@ export const cliInstallState = async (
   provider: TCliProvider,
   opts?: TCliInstallStateOpts,
 ): Promise<TCliInstallState> => {
+  const key = installKey(provider);
   if (opts?.demand === true) {
     // A caller carrying its OWN AbortSignal must never join (or replace) the
     // shared no-signal demand promise: aborting one signaled caller would
@@ -485,23 +490,23 @@ export const cliInstallState = async (
     if (opts.signal !== undefined) {
       return probeCliInstallState(provider, opts);
     }
-    const existingDemand = cliInstallStateDemandInFlight.get(provider);
+    const existingDemand = cliInstallStateDemandInFlight.get(key);
     if (existingDemand !== undefined) return existingDemand;
     const pending = probeCliInstallState(provider, opts).finally(() => {
-      if (cliInstallStateDemandInFlight.get(provider) === pending) {
-        cliInstallStateDemandInFlight.delete(provider);
+      if (cliInstallStateDemandInFlight.get(key) === pending) {
+        cliInstallStateDemandInFlight.delete(key);
       }
     });
-    cliInstallStateDemandInFlight.set(provider, pending);
+    cliInstallStateDemandInFlight.set(key, pending);
     return pending;
   }
-  const existing = cliInstallStateInFlight.get(provider);
+  const existing = cliInstallStateInFlight.get(key);
   if (existing !== undefined) return existing;
   const pending = probeCliInstallState(provider, opts).finally(() => {
-    if (cliInstallStateInFlight.get(provider) === pending) {
-      cliInstallStateInFlight.delete(provider);
+    if (cliInstallStateInFlight.get(key) === pending) {
+      cliInstallStateInFlight.delete(key);
     }
   });
-  cliInstallStateInFlight.set(provider, pending);
+  cliInstallStateInFlight.set(key, pending);
   return pending;
 };

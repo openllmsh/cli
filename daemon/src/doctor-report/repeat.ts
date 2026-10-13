@@ -1,4 +1,6 @@
 /** Local repeat suppression with a hard key cap. Not an event map. */
+import { stateScoped } from "../state-scoped";
+
 const COOLDOWN_MS = 60_000;
 const MAX_KEYS = 32;
 
@@ -7,9 +9,10 @@ type TBucket = {
   lastAt: number;
 };
 
-const buckets = new Map<string, TBucket>();
+/** This daemon's windows (see {@link stateScoped}). */
+const daemonBuckets = stateScoped(() => new Map<string, TBucket>());
 
-const evictOldest = (): void => {
+const evictOldest = (buckets: Map<string, TBucket>): void => {
   let oldestKey: string | undefined;
   let oldestAt = Number.POSITIVE_INFINITY;
   for (const [key, bucket] of buckets) {
@@ -29,9 +32,10 @@ export const takeRepeatWindow = (
   key: string,
   now = Date.now(),
 ): number | null => {
+  const buckets = daemonBuckets();
   const prev = buckets.get(key);
   if (prev === undefined) {
-    if (buckets.size >= MAX_KEYS) evictOldest();
+    if (buckets.size >= MAX_KEYS) evictOldest(buckets);
     buckets.set(key, { count: 0, lastAt: now });
     return 1;
   }
@@ -42,9 +46,3 @@ export const takeRepeatWindow = (
   prev.count = 0;
   return n;
 };
-
-export const clearDoctorRepeatBuckets = (): void => {
-  buckets.clear();
-};
-
-export const doctorRepeatKeyCount = (): number => buckets.size;

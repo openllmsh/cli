@@ -16,6 +16,8 @@
  * cancels whichever flow is live. Provider atoms are injected — no delegate import.
  */
 
+import type { TChildSupervisor } from "../child-supervisor/supervisor";
+import type { TDeadlineTimebase } from "../deadline-budget";
 import { pendingAuthDetail } from "../pending-auth";
 import { unwrapKeychainSpawn } from "../sandbox/policy";
 import type {
@@ -78,8 +80,12 @@ export type TPasteBackConfig = {
   readonly submitSuccessDetail: () => Promise<string>;
   /** File-store identity hint after child exit (not Darwin keychain). */
   readonly waitStoreHint?: (signal: AbortSignal) => Promise<void>;
-  /** Whole-operation safety budget forwarded to paste-back spawn (tests inject). */
+  /** Whole-operation safety budget forwarded to the paste-back spawn. */
   readonly timeoutMs?: number;
+  /** Clock + scheduler for that budget. Defaults to the daemon's. */
+  readonly timebase?: TDeadlineTimebase;
+  /** Supervisor that owns the login child. Defaults to the daemon's. */
+  readonly supervisor?: TChildSupervisor;
 };
 
 export type TPasteBackDevice = {
@@ -227,6 +233,10 @@ export const makePasteBackDevice = (
             signal: abort.signal,
             ...(cfg.timeoutMs !== undefined
               ? { timeoutMs: cfg.timeoutMs }
+              : {}),
+            ...(cfg.timebase !== undefined ? { timebase: cfg.timebase } : {}),
+            ...(cfg.supervisor !== undefined
+              ? { supervisor: cfg.supervisor }
               : {}),
             onSpawned: () => {
               if (!abort.signal.aborted) emitLoginStarted(flow);

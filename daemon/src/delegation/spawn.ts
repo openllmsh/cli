@@ -7,16 +7,18 @@
  * off-box. These helpers feed the LOCAL runner + the local usage panel
  * only.
  */
-import { existsSync, realpathSync } from "node:fs";
+import { existsSync } from "node:fs";
 import { rm } from "node:fs/promises";
 import { platform } from "node:os";
 import { join } from "node:path";
 import type { TDoctorEventTimings } from "@openllmsh/protocol";
 import type { TReapOutcome, TSuperviseSpawnOptions } from "../child-supervisor";
 import { superviseSpawn } from "../child-supervisor";
+import type { TChildSupervisor } from "../child-supervisor/supervisor";
 import type { TCliVersionOpts } from "../cli-version-cache";
 import { cachedCliVersion } from "../cli-version-cache";
 import { spawnCommand } from "../command";
+import type { TDeadlineTimebase } from "../deadline-budget";
 import {
   budgetFromSignal,
   createDeadlineBudget,
@@ -87,17 +89,9 @@ export const spawnCwd = (
   // Reject `/` explicitly: it "exists", so an env with `HOME=/` (or a daemon
   // whose HOME wasn't isolated) would otherwise pass the existsSync check and
   // re-introduce the exact root-cwd bug this helper exists to prevent.
-  const raw =
-    home !== undefined && home.length > 0 && home !== "/" && existsSync(home)
-      ? home
-      : daemonTempDir();
-  // Physical path so a symlinked state/tmp dir yields the same $PWD and
-  // MISE_CEILING_PATHS (realpath'd at the call site) under every host.
-  try {
-    return realpathSync(raw);
-  } catch {
-    return raw;
-  }
+  if (home !== undefined && home.length > 0 && home !== "/" && existsSync(home))
+    return home;
+  return daemonTempDir();
 };
 
 /**
@@ -720,6 +714,11 @@ const spawnStamp = (proc: {
 });
 
 export type TSpawnLoginOpts = {
+  /** Clock + scheduler for the operation budget when no parent budget rides
+   *  on `signal`. Defaults to the daemon's monotonic timebase. */
+  readonly timebase?: TDeadlineTimebase;
+  /** Supervisor that owns the login child. Defaults to the daemon's. */
+  readonly supervisor?: TChildSupervisor;
   /** Hard ceiling: kill the child after this and return what was captured.
    *  A browser OAuth needs the user to sign in, so it's generous. */
   readonly timeoutMs?: number;
@@ -843,9 +842,9 @@ export const spawnLogin = async (
   const parentBudget = budgetFromSignal(loginOpts?.signal);
   const budget =
     parentBudget?.child(timeoutMs) ??
-    createDeadlineBudget(timeoutMs, loginOpts?.signal);
+    createDeadlineBudget(timeoutMs, loginOpts?.signal, loginOpts?.timebase);
   const remainingAtSpawn = budget.remainingMs();
-  const child = superviseSpawn(
+  const child = (loginOpts?.supervisor?.superviseSpawn ?? superviseSpawn)(
     sandboxSpawnArgs(argv, { probe: loginOpts?.probe }),
     {
       kind: "login",
@@ -1369,9 +1368,9 @@ export const spawnLoginPty = async (
   const parentBudget = budgetFromSignal(opts?.signal);
   const budget =
     parentBudget?.child(timeoutMs) ??
-    createDeadlineBudget(timeoutMs, opts?.signal);
+    createDeadlineBudget(timeoutMs, opts?.signal, opts?.timebase);
   try {
-    const child = superviseSpawn(
+    const child = (opts?.supervisor?.superviseSpawn ?? superviseSpawn)(
       sandboxSpawnArgs(scriptArgv, { probe: opts?.probe }),
       {
         kind: "login",

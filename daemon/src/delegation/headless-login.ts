@@ -19,6 +19,8 @@ import { mkdir } from "node:fs/promises";
 import { join } from "node:path";
 import type { TReapOutcome, TSupervisedChild } from "../child-supervisor";
 import { superviseSpawn } from "../child-supervisor";
+import type { TChildSupervisor } from "../child-supervisor/supervisor";
+import type { TDeadlineTimebase } from "../deadline-budget";
 import { createDeadlineBudget, splitReapBudget } from "../deadline-budget";
 import { sandboxSpawnArgs } from "../sandbox/exec";
 import { daemonTempDir } from "../sandbox/working-set";
@@ -74,6 +76,10 @@ export type THeadlessLoginOpts = {
   readonly signal?: AbortSignal;
   /** Fired immediately after a supervised child exists (before URL wait). */
   readonly onSpawned?: (child: TSupervisedChild) => void;
+  /** Clock + scheduler for the operation budget. Defaults to the daemon's. */
+  readonly timebase?: TDeadlineTimebase;
+  /** Supervisor that owns the login child. Defaults to the daemon's. */
+  readonly supervisor?: TChildSupervisor;
 };
 
 const writeStdin = (
@@ -146,15 +152,18 @@ export const spawnHeadlessLogin = async (
 
   const timeoutMs =
     opts?.timeoutMs ?? opts?.urlTimeoutMs ?? DEFAULT_LOGIN_TIMEOUT_MS;
-  const budget = createDeadlineBudget(timeoutMs, opts?.signal);
-  const child = superviseSpawn(sandboxSpawnArgs(argv, { probe: opts?.probe }), {
-    kind: "login",
-    stdin: "pipe",
-    stdout: "pipe",
-    stderr: "pipe",
-    cwd: spawnCwd(env),
-    env: childEnv,
-  });
+  const budget = createDeadlineBudget(timeoutMs, opts?.signal, opts?.timebase);
+  const child = (opts?.supervisor?.superviseSpawn ?? superviseSpawn)(
+    sandboxSpawnArgs(argv, { probe: opts?.probe }),
+    {
+      kind: "login",
+      stdin: "pipe",
+      stdout: "pipe",
+      stderr: "pipe",
+      cwd: spawnCwd(env),
+      env: childEnv,
+    },
+  );
   opts?.onSpawned?.(child);
 
   const proc = child.subprocess;

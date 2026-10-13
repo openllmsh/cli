@@ -55,6 +55,7 @@ export type TGateway = {
  *  settled result is never reused — a later call re-checks, so a daemon that
  *  starts or stops mid-process is seen. */
 const probes = new Map<number, Promise<boolean>>();
+const clearDaemonProbeCache = (): void => probes.clear();
 let lastProbedPort: number | null = null;
 
 /** Is a local daemon reachable right now? */
@@ -71,9 +72,6 @@ export const daemonReachable = (port: number): Promise<boolean> => {
   probes.set(port, probe);
   return probe;
 };
-
-/** Drop in-flight daemon reachability probes (e.g. after a port change). */
-export const clearDaemonProbeCache = (): void => probes.clear();
 
 const probeDaemon = async (port: number): Promise<boolean> => {
   try {

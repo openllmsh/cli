@@ -150,54 +150,59 @@ function tunneledRequest(
   } as RequestInit);
 }
 
-/** The request dispatcher — `handleInference` in production; injectable so
- *  tests exercise the tunnel state machine without a walker/cloud. */
-type TDispatch = (req: Request) => Promise<Response>;
-let dispatch: TDispatch = (req) => handleInference(req);
-export const setTunnelDispatcher = (fn: TDispatch | null): void => {
-  dispatch = fn ?? ((req) => handleInference(req));
-};
+/** The request dispatcher a mux tunnel server hands each tunneled request to. */
+export type TTunnelDispatch = (req: Request) => Promise<Response>;
 
 /** Admission remains daemon-owned so concurrent mux tunnels share one cap. */
 export const admitMuxTunnel = (): "tunnel_busy" | null =>
   muxServedCount >= MAX_SERVED_TUNNELS ? "tunnel_busy" : null;
 
-/** Daemon adapter for the generic mux serving seam. */
-export const serveMuxTunnel: TServeTunnel = async (open, body, signal) => {
-  muxServedCount += 1;
-  beginRequest();
-  let completed = false;
-  const complete = (): void => {
-    if (completed) return;
-    completed = true;
-    signal.removeEventListener("abort", complete);
-    muxServedCount -= 1;
-    endRequest();
-  };
-  // Dispatch can still be awaiting a provider when the relay dies. Release
-  // daemon-owned admission and self-update fencing immediately; completion is
-  // idempotent if a late response subsequently reaches the generic streamer.
-  signal.addEventListener("abort", complete, { once: true });
-  if (signal.aborted) {
-    complete();
-    throw new Error("mux tunnel aborted before dispatch");
-  }
-  try {
-    const response = await dispatch(tunneledRequest(open, body, signal));
-    return {
-      status: response.status,
-      headers: tunnelResponseHeadersFromHttp(response.headers),
-      body: response.body,
-      onComplete: complete,
+/**
+ * Build a mux tunnel server over `dispatch`. Pure: returns a serving function
+ * and installs nothing. Admission + self-update fencing stay daemon-wide.
+ */
+export const createMuxTunnelServer =
+  (dispatch: TTunnelDispatch): TServeTunnel =>
+  async (open, body, signal) => {
+    muxServedCount += 1;
+    beginRequest();
+    let completed = false;
+    const complete = (): void => {
+      if (completed) return;
+      completed = true;
+      signal.removeEventListener("abort", complete);
+      muxServedCount -= 1;
+      endRequest();
     };
-  } catch (error) {
-    complete();
-    if (!signal.aborted) {
-      logWarn(
-        "tunnel",
-        `mux dispatch failed: ${error instanceof Error ? error.message : String(error)}`,
-      );
+    // Dispatch can still be awaiting a provider when the relay dies. Release
+    // daemon-owned admission and self-update fencing immediately; completion is
+    // idempotent if a late response subsequently reaches the generic streamer.
+    signal.addEventListener("abort", complete, { once: true });
+    if (signal.aborted) {
+      complete();
+      throw new Error("mux tunnel aborted before dispatch");
     }
-    throw error;
-  }
-};
+    try {
+      const response = await dispatch(tunneledRequest(open, body, signal));
+      return {
+        status: response.status,
+        headers: tunnelResponseHeadersFromHttp(response.headers),
+        body: response.body,
+        onComplete: complete,
+      };
+    } catch (error) {
+      complete();
+      if (!signal.aborted) {
+        logWarn(
+          "tunnel",
+          `mux dispatch failed: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+      throw error;
+    }
+  };
+
+/** Daemon adapter for the generic mux serving seam (dispatches to the walker). */
+export const serveMuxTunnel: TServeTunnel = createMuxTunnelServer((req) =>
+  handleInference(req),
+);

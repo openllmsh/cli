@@ -282,7 +282,7 @@ export const createManagerRegistry = (
 // mise adapter (A3)
 // ---------------------------------------------------------------------------
 
-/** Numeric env override (tests only) — mirrors `cli-install.ts`'s `envMs`. */
+/** Numeric env override (operator knob) — mirrors `cli-install.ts`'s `envMs`. */
 const envMsLocal = (name: string, fallback: number): number => {
   const raw = process.env[name];
   if (raw === undefined) return fallback;
@@ -291,7 +291,7 @@ const envMsLocal = (name: string, fallback: number): number => {
 };
 
 /** Bounded deadline for the `mise which <cmd>` explicit-argv query. Resolved
- *  lazily (per-call) so a test can override it without a module reload. */
+ *  lazily (per-call) so a `.env`-loaded override applies. */
 const miseResolveTimeoutMs = (): number =>
   envMsLocal("OPENLLM_MISE_RESOLVE_TIMEOUT_MS", 2_000);
 
@@ -544,28 +544,7 @@ export const createMiseManagerAdapter = (
  */
 export const miseManagerAdapter: TManagerAdapter = createMiseManagerAdapter();
 
-let active: TManagerRegistry = createManagerRegistry();
-
-/** Replace the process-wide manager registry (tests / embedding hosts). */
-export const installManagerRegistry = (registry: TManagerRegistry): void => {
-  active = registry;
-};
-
-export const registerManagerAdapter = (adapter: TManagerAdapter): void =>
-  active.registerManagerAdapter(adapter);
-
-export const setManagerAdapters = (next: readonly TManagerAdapter[]): void =>
-  active.setManagerAdapters(next);
-
-export const listManagerAdapters = (): readonly TManagerAdapter[] =>
-  active.listManagerAdapters();
-
-export const resolveManagerCandidate = (
-  candidate: string,
-  opts?: TResolveManagerCandidateOpts,
-): Promise<TManagerResolution> =>
-  active.resolveManagerCandidate(candidate, opts);
-
-export const peekManagerResolution = (
-  candidate: string,
-): TManagerResolution | undefined => active.peekManagerResolution(candidate);
+/** The production registry (default adapters). Callers that need a different
+ *  adapter set build their own with {@link createManagerRegistry} and pass it
+ *  through `TCliInstallStateOpts.managers`. */
+export const defaultManagerRegistry: TManagerRegistry = createManagerRegistry();

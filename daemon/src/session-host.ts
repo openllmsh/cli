@@ -7,7 +7,8 @@
  */
 
 import type { TDeviceSessionCli } from "@openllmsh/protocol";
-import { discoverSessionHosts } from "./session-host-proc";
+import type { TSessionHostClient } from "./session-host-proc";
+import { defaultSessionHostClient } from "./session-host-proc";
 
 /**
  * Adopt live durable session-host directories and reap stale entries. Discovery
@@ -17,15 +18,20 @@ import { discoverSessionHosts } from "./session-host-proc";
  * until the socket exists. Expiry returns the last complete scan for status
  * and stops starting probes — it does not keep reaping in the background.
  */
-export const reapOrphanSessionProcs = async (): Promise<void> => {
-  await discoverSessionHosts();
+export const reapOrphanSessionProcs = async (
+  client: TSessionHostClient = defaultSessionHostClient,
+): Promise<void> => {
+  await client.discoverSessionHosts();
 };
 
 /** Reconcile without touching live sibling session-host processes. */
-export const reconcileSessionHostsAtBoot = reapOrphanSessionProcs;
+export const reconcileSessionHostsAtBoot = (): Promise<void> =>
+  reapOrphanSessionProcs();
 
 /** Durable discovery rows for compatibility consumers and picker merges. */
-export const sessionStatusReport = async (): Promise<
+export const sessionStatusReport = async (
+  client: TSessionHostClient = defaultSessionHostClient,
+): Promise<
   Array<{
     id: string;
     cli: TDeviceSessionCli;
@@ -37,7 +43,7 @@ export const sessionStatusReport = async (): Promise<
     vendor_session_id?: string | null;
   }>
 > =>
-  (await discoverSessionHosts()).map((host) => ({
+  (await client.discoverSessionHosts()).map((host) => ({
     id: host.id,
     cli: host.cli,
     started_at_ms: host.startedAtMs,
@@ -50,7 +56,9 @@ export const sessionStatusReport = async (): Promise<
       : { vendor_session_id: host.vendorSessionId }),
   }));
 
-export const deviceSessionsForList = async (): Promise<
+export const deviceSessionsForList = async (
+  client: TSessionHostClient = defaultSessionHostClient,
+): Promise<
   ReadonlyArray<{
     readonly id: string;
     readonly cli: TDeviceSessionCli;
@@ -61,7 +69,7 @@ export const deviceSessionsForList = async (): Promise<
     readonly started_at_ms: number;
   }>
 > =>
-  (await discoverSessionHosts()).map((host) => ({
+  (await client.discoverSessionHosts()).map((host) => ({
     id: host.id,
     cli: host.cli,
     live: true,

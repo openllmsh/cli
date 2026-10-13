@@ -24,12 +24,8 @@ import {
 
 export const isLoopbackDoctorHost = isLoopbackLocalHost;
 
-import {
-  applyLocalPreferenceAndMaybePurge,
-  flushDoctorReport,
-  reportingScope,
-  reportingStatus,
-} from "./engine";
+import type { TDoctorEngine } from "./engine";
+import { defaultDoctorEngine } from "./engine";
 import type { TWriteLocalPreferenceOptions } from "./preference";
 import { writeLocalPreference } from "./preference";
 
@@ -78,16 +74,22 @@ export const isDoctorLocalPath = (pathname: string): boolean =>
   pathname === DOCTOR_LOCAL_STATUS_PATH ||
   pathname === DOCTOR_LOCAL_PREFERENCE_PATH;
 
+export type THandleDoctorLocalOptions = TWriteLocalPreferenceOptions & {
+  /** Engine serving the routes; the daemon's default engine when omitted. */
+  readonly engine?: TDoctorEngine;
+};
+
 export const handleDoctorLocal = async (
   req: Request,
-  options?: TWriteLocalPreferenceOptions,
+  options?: THandleDoctorLocalOptions,
 ): Promise<Response> => {
+  const engine = options?.engine ?? defaultDoctorEngine;
   const url = new URL(req.url);
   const denied = authorizeLocalDoctor(req, url.pathname);
   if (denied !== null) return denied;
   if (url.pathname === DOCTOR_LOCAL_STATUS_PATH) {
     if (req.method !== "GET") return json(405, { error: "method_not_allowed" });
-    return json(200, reportingStatus());
+    return json(200, engine.reportingStatus());
   }
   if (url.pathname === DOCTOR_LOCAL_REPORT_PATH) {
     if (req.method !== "POST")
@@ -100,7 +102,7 @@ export const handleDoctorLocal = async (
     } catch {
       return json(400, { error: "invalid" });
     }
-    const result = await flushDoctorReport({
+    const result = await engine.flushDoctorReport({
       dryRun: parsed.dry_run,
       ...(parsed.reporter_cli_version !== undefined
         ? { reporterCliVersion: parsed.reporter_cli_version }
@@ -120,7 +122,7 @@ export const handleDoctorLocal = async (
     } catch {
       return json(400, { error: "invalid" });
     }
-    const scope = reportingScope();
+    const scope = engine.reportingScope();
     const scoped = {
       ...parsed,
       origin_scope: scope.originScope,
@@ -134,7 +136,7 @@ export const handleDoctorLocal = async (
     if (!writeLocalPreference(scoped, options)) {
       return json(500, { error: "persist_failed" });
     }
-    applyLocalPreferenceAndMaybePurge(scoped.enabled);
+    engine.applyLocalPreferenceAndMaybePurge(scoped.enabled);
     return json(200, scoped);
   }
   return json(404, { error: "not found" });

@@ -110,7 +110,7 @@ import { captureOwnershipFromSession, PRE_COMMIT_TIMEOUT_MS } from "./types";
  *     did not pin which transport app-server chose for either attempt).
  *
  * Classification (do not collapse these):
- * - HERMETIC: fixture/wrapper contract proven in tests only.
+ * - HERMETIC: fixture/wrapper contract proven against fixtures alone.
  * - LIVE: proven for the exact scope above against the real vendor backend.
  * Production planning uses LIVE. Fixtures alone are never sufficient to flip
  * `CODEX_STRUCTURED_INJECT_LIVE_PROVEN` — this flip required the two live
@@ -283,14 +283,14 @@ export type TCodexCaptureToolTurnParams = TCodexNativeParams & {
    * wants to test the pre-proof fallback path).
    */
   readonly structuredInjectProven?: boolean;
-  /** Test seam: remap chatgpt.com → loopback fake upstream without global patch. */
+  /** Upstream fetch; omitted → the global `fetch`. */
   readonly fetchImpl?: (
     input: RequestInfo | URL,
     init?: RequestInit,
   ) => Promise<Response>;
   /**
-   * Hermetic/tests only. Production omits — routes come from forwarded
-   * `/wham/accounts/check`. Empty memory fails closed.
+   * Pre-seeded workspace route memory. Omitted → routes come from the
+   * forwarded `/wham/accounts/check`. Empty memory fails closed.
    */
   readonly captureWorkspaceRoutes?: TCodexWorkspaceRouteMemory;
 };

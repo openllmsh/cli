@@ -292,7 +292,7 @@ const ChatGptStreamEventSchema: Schema.Schema<TChatGptStreamEvent> =
 
 export type TWalkArgs = {
   readonly req: Request;
-  /** Test seam for local walker fetches; production uses the global fetch. */
+  /** Fetch for local walker hops; omitted → the global fetch. */
   readonly fetchImpl?: typeof fetch;
   readonly surface: "chat_completions" | "messages" | "responses";
   readonly endpoint: string;
@@ -336,7 +336,7 @@ export type TWalkArgs = {
   readonly tunnelToPeer?: TTunnelToPeer;
   /**
    * Fired when a subscription hop's NEW/changed `auth` cooldown triggers an
-   * immediate status push (so observers can count / react without a test-only
+   * immediate status push (so observers can count / react without a
    * module counter).
    */
   readonly onAuthCooldownStatusPush?: () => void;

@@ -125,51 +125,23 @@ export type TChildSupervisor = {
   ) => Promise<void>;
   readonly notifySupervisedProcessExit: (pid: number) => void;
   readonly isChildTracked: (pid: number) => boolean;
-  /**
-   * Ops/safety toggle for process-group signal delivery on THIS instance.
-   * `kill(-pgid, 0)` existence probes still run when disabled; only
-   * TERM/KILL delivery is withheld. A real maintenance/dry-run knob, not a
-   * test seam — it mutates one instance, never module-global state.
-   */
-  readonly setSignalDelivery: (deliver: boolean) => void;
-  /**
-   * Replace the `kill(-pgid, 0)` existence probe on THIS instance, e.g. to
-   * model a watched process group's real external state changing over the
-   * life of a long-running case. `null` restores the live POSIX probe.
-   */
-  readonly setGroupExistsProbe: (
-    probe: ((pgid: number) => boolean) | null,
-  ) => void;
 };
 
 /**
- * Build one child supervisor instance. Production uses a SINGLE instance
- * ({@link installChildSupervisor} with production defaults — the common
- * case needs no call at all); tests construct their own instance with fake
- * deps (exit wait, group-existence probe, signal delivery, scheduler) rather
- * than mutating shared module state.
+ * Build one child supervisor instance. Pure: it never touches module state.
+ * Production uses the module's single default instance (built from real
+ * defaults); a caller that needs different deps holds its own instance and
+ * calls its methods directly.
  */
 export const createChildSupervisor = (
   deps: TChildSupervisorDeps = {},
 ): TChildSupervisor => {
   const trackedChildren = new Map<number, TTrackedChild>();
   const unconfirmedWatchAbort = new Map<number, AbortController>();
-  // Mutable copy of this instance's deps. The only runtime mutator is
-  // `setSignalDelivery` (a real ops/dry-run toggle) — it mutates only the
-  // instance that owns it, never shared module state.
-  const liveDeps: TChildSupervisorDeps = { ...deps };
-  let deliver = liveDeps.deliverTerminationSignals ?? true;
-  const setSignalDelivery = (next: boolean): void => {
-    deliver = next;
-  };
-  let groupExistsProbe = liveDeps.processGroupExists ?? null;
-  const setGroupExistsProbe = (
-    probe: ((pgid: number) => boolean) | null,
-  ): void => {
-    groupExistsProbe = probe;
-  };
+  const deliver = deps.deliverTerminationSignals ?? true;
+  const groupExistsProbe = deps.processGroupExists ?? null;
   const startTimeHelperSpawn =
-    liveDeps.processStartTimeHelperSpawn ?? defaultProcessStartTimeHelperSpawn;
+    deps.processStartTimeHelperSpawn ?? defaultProcessStartTimeHelperSpawn;
 
   const childIsTracked = (pid: number): boolean => trackedChildren.has(pid);
 
@@ -191,7 +163,7 @@ export const createChildSupervisor = (
   };
 
   const waitChildExited = (child: TSupervisedChild): Promise<void> =>
-    liveDeps.exitWait !== undefined ? liveDeps.exitWait(child) : exited(child);
+    deps.exitWait !== undefined ? deps.exitWait(child) : exited(child);
 
   const raceExitOrBudget = async (
     child: TSupervisedChild,
@@ -251,7 +223,7 @@ export const createChildSupervisor = (
         return;
       }
       const schedule =
-        liveDeps.unconfirmedWatchScheduler ?? defaultUnconfirmedWatchScheduler;
+        deps.unconfirmedWatchScheduler ?? defaultUnconfirmedWatchScheduler;
       const timer = schedule(resolve, ms);
       signal.addEventListener(
         "abort",
@@ -378,8 +350,8 @@ export const createChildSupervisor = (
         if (outcome === "exited") outcome = "terminated";
       }
       const reported =
-        liveDeps.mapReapOutcome !== undefined
-          ? liveDeps.mapReapOutcome(outcome)
+        deps.mapReapOutcome !== undefined
+          ? deps.mapReapOutcome(outcome)
           : outcome;
       tracked.lastReap = reported;
       forgetChild(tracked, reported);
@@ -597,20 +569,11 @@ export const createChildSupervisor = (
     sweepStaleChildrenOnBoot,
     notifySupervisedProcessExit,
     isChildTracked,
-    setSignalDelivery,
-    setGroupExistsProbe,
   };
 };
 
-// Module-wide default instance with production deps. Tests construct their
-// own instance via {@link createChildSupervisor} rather than mutating this
-// one, for isolation — there is no global configure/reset.
-let active: TChildSupervisor = createChildSupervisor();
-
-/** Install the active child-supervisor instance (production uses the default). */
-export const installChildSupervisor = (instance: TChildSupervisor): void => {
-  active = instance;
-};
+// The production instance, built once from real defaults. Not replaceable.
+const active: TChildSupervisor = createChildSupervisor();
 
 export const superviseSpawn: TChildSupervisor["superviseSpawn"] = (...args) =>
   active.superviseSpawn(...args);
@@ -624,9 +587,3 @@ export const notifySupervisedProcessExit: TChildSupervisor["notifySupervisedProc
   (...args) => active.notifySupervisedProcessExit(...args);
 export const isChildTracked: TChildSupervisor["isChildTracked"] = (...args) =>
   active.isChildTracked(...args);
-export const setSignalDelivery: TChildSupervisor["setSignalDelivery"] = (
-  ...args
-) => active.setSignalDelivery(...args);
-export const setGroupExistsProbe: TChildSupervisor["setGroupExistsProbe"] = (
-  ...args
-) => active.setGroupExistsProbe(...args);

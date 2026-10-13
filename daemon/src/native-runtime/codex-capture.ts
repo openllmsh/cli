@@ -293,7 +293,7 @@ export type TCodexWorkspaceRouteMemory = {
   /** Record routes from an accounts/check JSON body (pass-through; no mutation). */
   recordFromAccountsCheckBody(body: unknown): void;
   /**
-   * Hermetic/tests: mark one account as explicitly unconstrained
+   * Mark one account as explicitly unconstrained
    * (`workspace_backend_origin = NO_CONSTRAINT`). Not a silent global default.
    */
   recordUnconstrained(accountId: string): void;
@@ -1451,8 +1451,8 @@ export const formatCodexCaptureDiagnostics = (
  */
 export type TCodexCaptureTextTurnParams = TCodexNativeParams & {
   /**
-   * Hermetic/tests only. Production omits — routes come from forwarded
-   * `/wham/accounts/check`. Empty memory fails closed.
+   * Pre-seeded workspace route memory. Omitted → routes come from the
+   * forwarded `/wham/accounts/check`. Empty memory fails closed.
    */
   readonly captureWorkspaceRoutes?: TCodexWorkspaceRouteMemory;
 };

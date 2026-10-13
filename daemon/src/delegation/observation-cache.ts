@@ -168,11 +168,6 @@ export const bumpStoreIdentityEpoch = (slug: string): void => {
   storeIdentityEpochs.set(slug, storeIdentityEpoch(slug) + 1);
 };
 
-/** Clear per-slug store identity epochs (identity change / process reset). */
-export const clearStoreIdentityEpochs = (): void => {
-  storeIdentityEpochs.clear();
-};
-
 export const createPassiveObservationCache = <
   T,
 >(): TPassiveObservationCache<T> => {

@@ -1175,7 +1175,7 @@ export type TMuseTurnDirs = {
 };
 
 export type TAllocateMuseTurnDirsOptions = {
-  /** Test seam for synthetic mkdir failures — production omits this. */
+  /** Directory creator; omitted → `fs/promises` `mkdir`. */
   readonly mkdir?: typeof mkdir;
 };
 

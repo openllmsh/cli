@@ -15,6 +15,7 @@ import {
 import { decodeJsonPayload, encodeJsonPayload } from "@openllmsh/tunnel/codec";
 import type { TDuplex, TMuxChannel } from "@openllmsh/tunnel/mux";
 import { createChannel } from "@openllmsh/tunnel/mux";
+import type { TServeTunnel } from "@openllmsh/tunnel/streams";
 import { serveStream } from "@openllmsh/tunnel/streams";
 import { enforceSeedGate, getDeviceAccessPubkey } from "./device-access-verify";
 import { daemonApiKeyId } from "./env";
@@ -23,11 +24,8 @@ import { logInfo, logWarn, safeDiagnosticMessage } from "./logger";
 import { ptySessionsEnabled } from "./pty-sessions-pref";
 import { serveMuxRealtime } from "./realtime-handler";
 import type { TSessionStream } from "./session-core";
-import {
-  attachSessionHostViaCli,
-  findSessionHost,
-  spawnSessionHostProc,
-} from "./session-host-proc";
+import type { TSessionHostClient } from "./session-host-proc";
+import { defaultSessionHostClient } from "./session-host-proc";
 import { admitMuxTunnel, serveMuxTunnel } from "./tunnel-server";
 
 /**
@@ -222,11 +220,6 @@ configureMuxChannelIdleTtl(
 );
 configureMuxAckTimeout(readPositiveMsEnv("OPENLLM_MUX_ACK_TIMEOUT_MS"));
 
-/** Drop remembered mux open failures (e.g. after presence replacement). */
-export const clearMuxFailureCache = (): void => {
-  failedUntil.clear();
-};
-
 /** Latest relay-advertised peer caps, used by the fleet RTC path. */
 export const getMuxPeerCaps = (
   keyId: string,
@@ -241,10 +234,16 @@ export const updateMuxPeerCaps = (
   failedUntil.delete(keyId);
 };
 
+/**
+ * Replace every peer's caps with a relay snapshot. A snapshot is the relay's
+ * whole current view, so open failures remembered against the previous view
+ * go with it — the next open re-asks instead of waiting out a stale cache.
+ */
 export const replaceMuxPeerCaps = (
   caps: Readonly<Record<string, readonly string[]>> | undefined,
 ): void => {
   peerCaps.clear();
+  failedUntil.clear();
   if (caps === undefined) return;
   for (const [keyId, values] of Object.entries(caps))
     updateMuxPeerCaps(keyId, values);
@@ -406,7 +405,7 @@ const registerChannel = (
               stream.reset(encodeJsonPayload({ code: "unauthorized" }));
               return;
             }
-            serveMuxOnStream(stream, open);
+            (streamHandler ?? serveMuxOnStream)(stream, open);
           },
         }
       : {}),
@@ -445,11 +444,16 @@ export const relayDuplex = (
   close: () => registerOnBytes(() => {}),
 });
 
+let streamHandler: typeof serveMuxOnStream | null = null;
+
 export const configureMuxHost = (options: {
   readonly send: (frame: TRelayFrame) => void;
   readonly sendBytes: (bytes: Uint8Array) => void;
+  /** Stream handler for relay mux channels; defaults to {@link serveMuxOnStream}. */
+  readonly onStream?: typeof serveMuxOnStream;
 }): void => {
   sendFrame = options.send;
+  streamHandler = options.onStream ?? null;
   sendBinary = options.sendBytes;
   // The reaper lives with the host lifecycle, not the relay socket: the shared
   // persistent relay sandbox keeps sockets up for days, so relay-socket death
@@ -511,62 +515,84 @@ const pipeSessionStreams = (
   });
 };
 
-/** Browser mux streams are attach clients; durable hosts own every PTY. */
-export const serveMuxOnStream = serveStream({
-  // Keep the tunnel-server import lazy: its production dispatcher reaches the
-  // control channel, which imports this host during daemon initialization.
-  tunnel: (open, body, signal) => serveMuxTunnel(open, body, signal),
-  realtime: (stream, open) => serveMuxRealtime(stream, open),
-  session: async (stream, open) => {
-    if (!ptySessionsEnabled()) {
-      logInfo("session", "remote session open refused: sessions disabled", {
-        id: open.session_id,
-      });
-      stream.reset(
-        encodeJsonPayload({
-          code: "sessions_disabled",
-          message:
-            "remote terminal sessions are disabled on this device — run: openllmd sessions on",
-        }),
-      );
-      return;
-    }
-    // Spawn (if needed) then attach via a CLI pipe child. The CLI owns the
-    // unix-socket dial; the daemon never opens a session socket itself.
-    if (open.mode !== "attach") {
-      const socketPath = await spawnSessionHostProc({
-        id: open.session_id,
-        cli: open.cli,
-        cols: open.cols,
-        rows: open.rows,
-        ...(open.cwd === undefined ? {} : { cwd: open.cwd }),
-        ...(open.title === undefined ? {} : { title: open.title }),
-        ...(open.dangerous === undefined ? {} : { dangerous: open.dangerous }),
-        ...(open.resume_session_id === undefined
-          ? {}
-          : { resume: open.resume_session_id }),
-      });
-      if (socketPath === null) {
-        stream.reset(encodeJsonPayload({ code: "spawn_failed" }));
+/**
+ * Build the daemon's mux stream handler over a tunnel server. Pure — the
+ * production handler is {@link serveMuxOnStream}. Browser mux streams are
+ * attach clients; durable hosts own every PTY.
+ */
+export const createMuxOnStream = ({
+  tunnel,
+  sessionHosts = defaultSessionHostClient,
+}: {
+  readonly tunnel: TServeTunnel;
+  readonly sessionHosts?: TSessionHostClient;
+}): ReturnType<typeof serveStream> =>
+  serveStream({
+    tunnel,
+    realtime: (stream, open) => serveMuxRealtime(stream, open),
+    session: async (stream, open) => {
+      if (!ptySessionsEnabled()) {
+        logInfo("session", "remote session open refused: sessions disabled", {
+          id: open.session_id,
+        });
+        stream.reset(
+          encodeJsonPayload({
+            code: "sessions_disabled",
+            message:
+              "remote terminal sessions are disabled on this device — run: openllmd sessions on",
+          }),
+        );
         return;
       }
-    } else if ((await findSessionHost(open.session_id)) === null) {
-      stream.reset(encodeJsonPayload({ code: "session_not_found" }));
-      return;
-    }
-    const host = attachSessionHostViaCli({ ...open, mode: "attach" });
-    if (host === null) {
-      stream.reset(
-        encodeJsonPayload({
-          code: open.mode === "attach" ? "session_not_found" : "spawn_failed",
-        }),
-      );
-      return;
-    }
-    pipeSessionStreams(stream, host);
-  },
-  admitTunnel: () => admitMuxTunnel(),
-  invalidOpenCode: "invalid_tunnel",
+      // Spawn (if needed) then attach via a CLI pipe child. The CLI owns the
+      // unix-socket dial; the daemon never opens a session socket itself.
+      if (open.mode !== "attach") {
+        const socketPath = await sessionHosts.spawnSessionHostProc({
+          id: open.session_id,
+          cli: open.cli,
+          cols: open.cols,
+          rows: open.rows,
+          ...(open.cwd === undefined ? {} : { cwd: open.cwd }),
+          ...(open.title === undefined ? {} : { title: open.title }),
+          ...(open.dangerous === undefined
+            ? {}
+            : { dangerous: open.dangerous }),
+          ...(open.resume_session_id === undefined
+            ? {}
+            : { resume: open.resume_session_id }),
+        });
+        if (socketPath === null) {
+          stream.reset(encodeJsonPayload({ code: "spawn_failed" }));
+          return;
+        }
+      } else if (
+        (await sessionHosts.findSessionHost(open.session_id)) === null
+      ) {
+        stream.reset(encodeJsonPayload({ code: "session_not_found" }));
+        return;
+      }
+      const host = sessionHosts.attachSessionHostViaCli({
+        ...open,
+        mode: "attach",
+      });
+      if (host === null) {
+        stream.reset(
+          encodeJsonPayload({
+            code: open.mode === "attach" ? "session_not_found" : "spawn_failed",
+          }),
+        );
+        return;
+      }
+      pipeSessionStreams(stream, host);
+    },
+    admitTunnel: () => admitMuxTunnel(),
+    invalidOpenCode: "invalid_tunnel",
+  });
+
+export const serveMuxOnStream = createMuxOnStream({
+  // Keep the tunnel-server reference lazy: its production dispatcher reaches
+  // the control channel, which imports this host during daemon initialization.
+  tunnel: (open, body, signal) => serveMuxTunnel(open, body, signal),
 });
 
 /**

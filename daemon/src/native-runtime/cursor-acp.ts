@@ -1350,7 +1350,7 @@ export type TCursorNativeCaptureParams = {
   readonly rpcTimeoutMs?: number;
   /**
    * Production omits → {@link defaultCursorCaptureSender} (HTTP/2 via
-   * `node:http2`, HTTP/1 via fetch). Injected senders are tests only.
+   * `node:http2`, HTTP/1 via fetch).
    */
   readonly sender?: TCursorTransactionSender;
   /**
@@ -1364,7 +1364,7 @@ export type TCursorNativeCaptureParams = {
    * own STRICT default (official Cursor hosts only). Hermetic local tests
    * that dispatch against a `127.0.0.1` fake upstream pass
    * `cursorCaptureDestinationPolicy({ allowLoopback: true })` explicitly —
-   * this is a test-only override, never a production relaxation.
+   * the production call site never relaxes it.
    */
   readonly destinationPolicy?: TCaptureDestinationPolicy;
 };

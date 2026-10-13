@@ -10,8 +10,8 @@
  *
  * DEV mode (`OPENLLM_DAEMON_DEV=1`) is ISOLATED: `envFilePath()` resolves
  * `<stateDir>/.dev.env` instead, so a source-run dev daemon never clobbers
- * the installed daemon's config — all dev writes (`setApiKey`,
- * `setCloudOrigin`, the minted device id, the auto-update pref) land in
+ * the installed daemon's config — all dev writes (the API key,
+ * the minted device id, the auto-update pref) land in
  * `.dev.env`, the default port is `8788` (vs prod `8787`), the cloud origin
  * defaults to the local Next server, and `.dev.env` overrides inherited process
  * env values (except the dev-mode / env-file / state-dir selectors) so Bun's
@@ -23,12 +23,11 @@
  * The keys the env file holds:
  *
  * - `OPENLLM_API_KEY`     — the user's `sk-llm-...` key. Authenticates
- *                            every cloud control-plane call. OPTIONAL at
- *                            boot: the daemon installs WITHOUT a key and
- *                            the dashboard sets it afterwards via the
- *                            control surface (`POST /config/api-key`).
- *                            Persisted to the env file so it survives
- *                            restarts / HMR. Never leaves the box.
+ *                            every cloud control-plane call. Saved by the
+ *                            credential gate at `openllm daemon start` /
+ *                            install (`credential-gate.ts`) before the
+ *                            service boots; a supervised boot without one
+ *                            exits. Never leaves the box.
  * - `OPENLLM_DEVICE_ID`   — stable opaque per-machine UUID, minted into
  *                            the env file on first boot. Carries no PII.
  * - `OPENLLM_CLOUD_ORIGIN`— openllm.sh origin for config pull + request
@@ -80,7 +79,6 @@ import {
   DEV_DEFAULT_DAEMON_PORT,
   isOpenllmDevMode,
 } from "../../src/runtime-contracts";
-import { logWarn, safeDiagnosticMessage } from "./logger";
 
 export type TDaemonEnv = {
   /** The user's `sk-llm-...` key, or null until the dashboard sets it. */
@@ -593,16 +591,34 @@ const loadApiKey = (): string | null => {
   return null;
 };
 
-let cached: TDaemonEnv | null = null;
+/** The process-env inputs {@link daemonEnv} is derived from. */
+const daemonEnvInputs = (): string =>
+  JSON.stringify([
+    process.env.OPENLLM_CLOUD_ORIGIN,
+    process.env.OPENLLM_DASHBOARD_ORIGIN,
+    process.env.OPENLLM_API_KEY,
+    process.env.OPENLLM_DAEMON_DEV,
+    process.env.OPENLLM_DAEMON_ENV_FILE,
+    process.env.OPENLLM_DAEMON_STATE_DIR,
+    process.env.HOME,
+  ]);
 
+let cached: TDaemonEnv | null = null;
+let cachedInputs: string | null = null;
+
+/**
+ * Resolved daemon env, memoized on its process-env inputs: a change to any of
+ * them (an identity rebind, a credential applied elsewhere, a re-pointed state
+ * dir) re-reads the env file instead of serving a stale origin or key.
+ */
 export const daemonEnv = (): TDaemonEnv => {
-  if (cached !== null) return cached;
+  if (cached !== null && cachedInputs === daemonEnvInputs()) return cached;
   loadEnvFile();
   // In dev, default the cloud origin to the local Next server rather than
   // the compiled-in production origin.
   const originDefault = isDevMode() ? DEV_CLOUD_ORIGIN : compiledCloudOrigin();
   // Precedence: an explicit env var (the installed prod daemon sets it, and a
-  // dev-adopted origin persists here via `setCloudOrigin`) wins; then the
+  // persisted `OPENLLM_CLOUD_ORIGIN` in the env file) wins; then the
   // default.
   const cloudOrigin = (
     process.env.OPENLLM_CLOUD_ORIGIN ?? originDefault
@@ -614,34 +630,16 @@ export const daemonEnv = (): TDaemonEnv => {
       process.env.OPENLLM_DASHBOARD_ORIGIN ?? cloudOrigin
     ).replace(/\/+$/, ""),
   };
+  cachedInputs = daemonEnvInputs();
   return cached;
 };
 
 /**
- * Clear the memoized {@link daemonEnv} cache so the next call re-reads
- * `process.env` (after credential/env-file changes or an identity rebind).
+ * Apply a credential only after its durable env-file write has succeeded.
+ * {@link daemonEnv} re-derives on the changed `OPENLLM_API_KEY` input.
  */
-export const clearDaemonEnvCache = (): void => {
-  cached = null;
-};
-
-type TCredentialReset = () => void;
-let credentialReset: TCredentialReset = (): void => {};
-
-/**
- * Composition-root hook: main installs the identity-scoped cache clearer so a
- * key change cannot leave another account's usage/status/keypair state behind.
- */
-export const installCredentialReset = (fn: TCredentialReset): void => {
-  credentialReset = fn;
-};
-
-/** Apply a credential only after its durable env-file write has succeeded. */
 export const applyPersistedApiKey = (key: string): void => {
   process.env.OPENLLM_API_KEY = key;
-  const current = daemonEnv();
-  cached = { ...current, apiKey: key };
-  if (current.apiKey !== key) credentialReset();
 };
 
 /** Read one value from an exact env file without merging it into process state. */
@@ -656,47 +654,4 @@ export const envFileValue = (
   }
 };
 
-/**
- * Persist a new API key (set from the dashboard) into the env file (`0600`) and
- * update the in-memory cache so the next cloud call uses it immediately. Pass
- * `null`/empty to clear it. The env file is the single source.
- */
-export const setApiKey = (key: string | null): void => {
-  const trimmed = key?.trim() ?? "";
-  writeEnvFileVars({ OPENLLM_API_KEY: trimmed });
-  process.env.OPENLLM_API_KEY = trimmed;
-  // Refresh the cache in place so callers don't need to re-resolve env.
-  const current = daemonEnv();
-  const next = trimmed.length > 0 ? trimmed : null;
-  cached = { ...current, apiKey: next };
-  // Only a different key is an identity change; re-saving the same one is not.
-  if (current.apiKey !== next) credentialReset();
-};
-
 export const hasApiKey = (): boolean => daemonEnv().apiKey !== null;
-
-/**
- * Re-point the daemon's cloud origin at runtime (DEV only — gated by the
- * caller in `control.ts`). PERSISTS the choice (so it survives a restart)
- * and updates the in-memory cache so the next bootstrap, usage record, and
- * API-key-hop forward target the new origin. Lets one local dev daemon serve
- * whichever deployment's dashboard it last followed (a preview, prod, or
- * localhost) without a reinstall. No-op on an empty origin.
- */
-export const setCloudOrigin = (origin: string): void => {
-  const trimmed = origin.replace(/\/+$/, "");
-  if (trimmed.length === 0) return;
-  // Persist into the shared env file (single source; `loadEnvFile` is source-aware
-  // in dev), so mirror into process.env too. A failed write is surfaced but
-  // non-fatal — the in-memory update below still applies for this process; only
-  // restart durability is lost.
-  if (!writeEnvFileVars({ OPENLLM_CLOUD_ORIGIN: trimmed })) {
-    logWarn(
-      "env",
-      safeDiagnosticMessage`failed to persist OPENLLM_CLOUD_ORIGIN to the env file`,
-    );
-  }
-  process.env.OPENLLM_CLOUD_ORIGIN = trimmed;
-  const current = daemonEnv();
-  cached = { ...current, cloudOrigin: trimmed, dashboardOrigin: trimmed };
-};

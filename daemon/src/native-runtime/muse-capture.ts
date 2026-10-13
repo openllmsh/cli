@@ -942,7 +942,7 @@ export const openMuseBridgeCaptureHandle = (opts: {
     // some future bug ever fed an unremapped/loopback URL into
     // `captureSend`; keeping it `false` fails that closed instead of
     // silently accepting it. (The hermetic `runMuseHermeticCaptureRoundTrip`
-    // below is a different, test-only session that legitimately dispatches
+    // below is a different, fixture session that legitimately dispatches
     // to a loopback mock and keeps `allowLoopback: true`.)
     destinationPolicy: museCaptureDestinationPolicy({ allowLoopback: false }),
     signal: opts.signal,

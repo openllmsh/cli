@@ -52,11 +52,12 @@ import type {
   TDoctorStoreStage,
 } from "@openllmsh/protocol";
 import { superviseSpawn } from "../child-supervisor";
-import type { TDeadlineBudget } from "../deadline-budget";
+import type { TChildSupervisor } from "../child-supervisor/supervisor";
+import type { TDeadlineBudget, TDeadlineTimebase } from "../deadline-budget";
 import {
   budgetFromSignal,
   createDeadlineBudget,
-  deadlineNowMs,
+  defaultDeadlineTimebase,
   splitReapBudget,
   waitUntilExpired,
 } from "../deadline-budget";
@@ -412,8 +413,12 @@ export type TKeychainRuntimeDeps = {
     callback: () => void,
     delayMs: number,
   ) => ReturnType<typeof setTimeout>;
-  /** Runs after superviseSpawn, before the timeout is armed. Production unused. */
-  readonly afterSpawn?: () => Promise<void> | void;
+  /** Clock + budget scheduler for every `security` budget and lane-wait
+   *  measurement. Defaults to {@link defaultDeadlineTimebase}. */
+  readonly timebase?: TDeadlineTimebase;
+  /** Supervised spawner for `security` children. Defaults to the daemon's
+   *  process-wide child supervisor. */
+  readonly superviseSpawn?: TChildSupervisor["superviseSpawn"];
 };
 
 export type TKeychainRuntime = {
@@ -451,27 +456,20 @@ export type TKeychainRuntime = {
 };
 
 /**
- * Build a keychain runtime. Calling this also installs it as the process-wide
- * default used by the thin module exports (`ensureKeychainReady`, …), matching
- * {@link createSessionHostClient}: a fresh call replaces the previous runtime
- * (clears in-flight maps, counters, and spawn deps).
+ * Build an independent keychain runtime (own lane, in-flight maps, caches and
+ * counters). It never touches the process-wide default behind the module
+ * exports (`ensureKeychainReady`, …), which is built once from real defaults.
  */
 export const createKeychainRuntime = (
-  deps: TKeychainRuntimeDeps = {},
-): TKeychainRuntime => {
-  const runtime = buildKeychainRuntime(deps);
-  defaultKeychainRuntime = runtime;
-  return runtime;
-};
-
-const buildKeychainRuntime = (
   deps: TKeychainRuntimeDeps = {},
 ): TKeychainRuntime => {
   const scheduleTimeout =
     deps.scheduleTimeout ??
     ((callback: () => void, delayMs: number): ReturnType<typeof setTimeout> =>
       setTimeout(callback, delayMs));
-  const afterSpawn = deps.afterSpawn;
+  const timebase = deps.timebase ?? defaultDeadlineTimebase;
+  const nowMs = timebase.nowMs;
+  const spawnSupervised = deps.superviseSpawn ?? superviseSpawn;
 
   let keychainCounters = emptyKeychainCounters();
   let lastWatcherSnapshot = emptyKeychainCounters();
@@ -630,14 +628,13 @@ const buildKeychainRuntime = (
       return { ...FAILED_SPAWN, timedOut: true, aborted: false };
     }
     const verb = securityVerb(argv);
-    // Share {@link deadlineNowMs} with the budget clock so tests can drive
-    // lane wait + remaining with one injected monotonic timebase.
-    const laneWaitMs = Math.max(0, deadlineNowMs() - queuedAtMs);
+    // Lane wait + remaining share the budget's monotonic timebase.
+    const laneWaitMs = Math.max(0, nowMs() - queuedAtMs);
     const remainingAtSpawn = budget.remainingMs();
     const configuredTimeoutMs = securitySpawnTimeoutMs();
-    const preSpawnMs = deadlineNowMs();
+    const preSpawnMs = nowMs();
     try {
-      const child = superviseSpawn(
+      const child = spawnSupervised(
         sandboxSpawnArgs(["security", ...argv], {
           probe: unwrapKeychainSpawn(),
         }),
@@ -650,10 +647,7 @@ const buildKeychainRuntime = (
           env: { ...process.env, HOME: home },
         },
       );
-      if (afterSpawn !== undefined) {
-        await afterSpawn();
-      }
-      const spawnedAtMs = deadlineNowMs();
+      const spawnedAtMs = nowMs();
       const spawnSetupMs = spawnedAtMs - preSpawnMs;
       keychainCounters.attempts++;
       noteKeychainVerb(verb);
@@ -685,7 +679,7 @@ const buildKeychainRuntime = (
           }),
         );
         void complete.catch(() => {});
-        // Setup (Bun.spawn + test hook) is part of the absolute 4 s budget.
+        // Setup (supervised spawn) is part of the absolute 4 s budget.
         // Arm from remaining *after* spawn so a slow spawn cannot extend the
         // deadline. Pre-spawn remaining stays in telemetry only.
         const remainingAfterSpawn = budget.remainingMs();
@@ -740,7 +734,7 @@ const buildKeychainRuntime = (
                 lane_wait_ms: laneWaitMs,
                 budget_remaining_ms_at_spawn: remainingAtSpawn,
                 spawn_setup_ms: spawnSetupMs,
-                spawn_elapsed_ms: deadlineNowMs() - spawnedAtMs,
+                spawn_elapsed_ms: nowMs() - spawnedAtMs,
                 verb,
                 child_pid: child.pid,
                 tick_id: currentTickId(),
@@ -780,8 +774,8 @@ const buildKeychainRuntime = (
     const parentBudget = budgetFromSignal(opts.signal);
     const budget =
       parentBudget?.child(securitySpawnTimeoutMs()) ??
-      createDeadlineBudget(securitySpawnTimeoutMs(), opts.signal);
-    const queuedAtMs = deadlineNowMs();
+      createDeadlineBudget(securitySpawnTimeoutMs(), opts.signal, timebase);
+    const queuedAtMs = nowMs();
     const skippedSpawn = (reason: "expired" | "floor"): TSecurityResult => {
       if (opts.signal?.aborted === true) {
         keychainCounters.aborted++;
@@ -2365,7 +2359,7 @@ const buildKeychainRuntime = (
   };
 };
 
-let defaultKeychainRuntime: TKeychainRuntime = buildKeychainRuntime();
+const defaultKeychainRuntime: TKeychainRuntime = createKeychainRuntime();
 
 export const ensureKeychainReady: TKeychainRuntime["ensureKeychainReady"] = (
   ...args

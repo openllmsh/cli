@@ -38,7 +38,7 @@ const CODEX_READY: TBridgeCaptureReadiness = {
   ready: true,
   mode: "capture",
   reason:
-    "Codex text + first-turn dynamicTools capture serve-wired (isolated app-server); multi-turn tool/reasoning history refuses until thread/inject_items is LIVE-proven (hermetic inject is test-only)",
+    "Codex text + first-turn dynamicTools capture serve-wired (isolated app-server); multi-turn tool/reasoning history refuses until thread/inject_items is LIVE-proven (hermetic inject is fixture-proven only)",
 };
 
 const CURSOR_READY: TBridgeCaptureReadiness = {

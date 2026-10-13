@@ -292,7 +292,7 @@ let museNativeModels: TMuseNativeModelCache | null = null;
 
 export const museNativeModelGeneration = (): number => museNativeGeneration;
 
-export const clearMuseNativeModels = (): void => {
+const clearMuseNativeModels = (): void => {
   museNativeModels = null;
   museNativeGeneration += 1;
 };

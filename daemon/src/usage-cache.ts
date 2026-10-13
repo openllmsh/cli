@@ -267,13 +267,12 @@ export type TUsageCache = {
     accountHash?: string,
   ) => void;
   readonly clearRequestUsageSamples: () => void;
-  readonly clearUsageCache: () => void;
   readonly invalidateUsage: (slug?: string, accountHash?: string) => void;
 };
 
 /**
  * Build one usage cache instance. Production creates a SINGLE instance at
- * boot with the state dir ({@link installUsageCache}); tests construct their
+ * boot with the state dir ({@link enableUsagePersistence}); tests construct their
  * own instance (in-memory, or a temp dir) rather than mutating shared globals.
  */
 export const createUsageCache = (deps: TUsageCacheDeps = {}): TUsageCache => {
@@ -683,17 +682,6 @@ export const createUsageCache = (deps: TUsageCacheDeps = {}): TUsageCache => {
   };
 
   /**
-   * Drop the in-memory usage cache and request samples. Does not delete the
-   * on-disk snapshot file — the next instance created with the same
-   * `persistenceDir` hydrates from it.
-   */
-  const clearUsageCache = (): void => {
-    cache.clear();
-    generations.clear();
-    clearRequestUsageSamples();
-  };
-
-  /**
    * Drop the cached snapshot so the next {@link cachedUsage} call re-hits
    * the vendor LIVE — the deliberate override behind a manual refresh. With
    * no `slug`, clears every provider (the dashboard's whole-daemon refresh).
@@ -730,28 +718,19 @@ export const createUsageCache = (deps: TUsageCacheDeps = {}): TUsageCache => {
     sampleUsageAfterRequest,
     sampleUsageOnExhaustion,
     clearRequestUsageSamples,
-    clearUsageCache,
     invalidateUsage,
   };
 };
 
-// Module-wide default instance — in-memory until the daemon installs a
-// persistence-backed one at boot. Tests construct their own instance via
-// {@link createUsageCache} instead of mutating this one, for isolation.
+// Module-wide default instance — in-memory until daemon boot calls
+// {@link enableUsagePersistence}. Callers needing isolation construct their own
+// instance via {@link createUsageCache}.
 let active: TUsageCache = createUsageCache();
 
-/**
- * Install the production usage-cache instance. Call ONCE at daemon boot with
- * a disk-backed instance ({@link createUsageCache}`({ persistenceDir })`) so
- * the last good snapshot survives a restart.
- */
-export const installUsageCache = (instance: TUsageCache): void => {
-  active = instance;
-};
-
-/** Opt this process into disk-backed usage persistence at the given dir. */
+/** Opt this process into disk-backed usage persistence at the given dir. Call
+ *  ONCE at daemon boot so the last good snapshot survives a restart. */
 export const enableUsagePersistence = (dir: string): void => {
-  installUsageCache(createUsageCache({ persistenceDir: dir }));
+  active = createUsageCache({ persistenceDir: dir });
 };
 
 export const cachedUsage: TUsageCache["cachedUsage"] = (...args) =>
@@ -769,7 +748,5 @@ export const sampleUsageOnExhaustion: TUsageCache["sampleUsageOnExhaustion"] = (
 ) => active.sampleUsageOnExhaustion(...args);
 export const clearRequestUsageSamples: TUsageCache["clearRequestUsageSamples"] =
   () => active.clearRequestUsageSamples();
-export const clearUsageCache: TUsageCache["clearUsageCache"] = () =>
-  active.clearUsageCache();
 export const invalidateUsage: TUsageCache["invalidateUsage"] = (...args) =>
   active.invalidateUsage(...args);

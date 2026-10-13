@@ -291,7 +291,7 @@ export const resolveChatgptAuth = (
 };
 
 /** Install / refresh the launcher. Does not start ChatGPT. */
-export const installChatgpt = async (opts?: {
+const installChatgpt = async (opts?: {
   readonly args?: readonly string[];
 }): Promise<number> => {
   if (!macOk()) {
