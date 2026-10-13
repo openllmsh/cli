@@ -244,7 +244,15 @@
                             "type": "string",
                             "enum": [
                               "subscription",
-                              "api_key"
+                              "api_key",
+                              "local"
+                            ]
+                          },
+                          "provider_variant": {
+                            "type": "string",
+                            "enum": [
+                              "oauth",
+                              "local"
                             ]
                           },
                           "default_tiers": {
@@ -24524,7 +24532,15 @@
                             "type": "string",
                             "enum": [
                               "subscription",
-                              "api_key"
+                              "api_key",
+                              "local"
+                            ]
+                          },
+                          "provider_variant": {
+                            "type": "string",
+                            "enum": [
+                              "oauth",
+                              "local"
                             ]
                           }
                         },

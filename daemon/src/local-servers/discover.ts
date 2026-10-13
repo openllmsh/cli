@@ -203,14 +203,16 @@ export const fingerprintSlug = (
   return localPortSlug(port);
 };
 
-/** Test-only port list override — when set, replaces the preset+env set. */
-let portsOverrideForTest: ReadonlyArray<number> | null = null;
-
-/** Ports to probe: presets (deduped) + `OPENLLM_LOCAL_PORTS` extras. */
+/** Ports to probe: presets (deduped) + `OPENLLM_LOCAL_PORTS` extras.
+ *  Callers may pass an explicit `ports` list (e.g. a single port after a
+ *  key change) instead of the env/preset set. */
 export const portsToProbe = (
   env: NodeJS.ProcessEnv = process.env,
+  opts?: { readonly ports?: ReadonlyArray<number> },
 ): ReadonlyArray<number> => {
-  if (portsOverrideForTest !== null) return [...portsOverrideForTest];
+  if (opts?.ports !== undefined) {
+    return [...opts.ports].sort((a, b) => a - b);
+  }
   const ports = new Set<number>();
   for (const preset of LOCAL_SERVER_PRESETS) {
     ports.add(preset.defaultPort);
@@ -367,14 +369,15 @@ const pushLocalModels = async (): Promise<void> => {
 
 /**
  * Run one full scan (single-flight). Updates status + pushes models when
- * the snapshot changes.
+ * the snapshot changes. Optional `ports` narrows the probe set (used after
+ * a key change / manual rescan of a single port's peers).
  */
-export const rescanLocalServers = async (): Promise<
-  ReadonlyArray<TLocalServerState>
-> => {
+export const rescanLocalServers = async (opts?: {
+  readonly ports?: ReadonlyArray<number>;
+}): Promise<ReadonlyArray<TLocalServerState>> => {
   if (inFlight !== null) return inFlight;
   inFlight = (async () => {
-    const ports = portsToProbe();
+    const ports = portsToProbe(process.env, opts);
     const states = await Promise.all(ports.map((port) => probeOne(port)));
     // Deduplicate colliding 8080 presets: keep the fingerprinted winner;
     // drop a second row that shares the same port under another slug.
@@ -438,8 +441,8 @@ export const startLocalServerDiscovery = (): void => {
   }
 };
 
-/** Test-only: stop the interval and reset in-memory state. */
-export const resetLocalServerDiscoveryForTest = (): void => {
+/** Stop the periodic scan and clear the in-memory snapshot (shutdown). */
+export const stopLocalServerDiscovery = (): void => {
   if (scanTimer !== null) {
     clearInterval(scanTimer);
     scanTimer = null;
@@ -449,19 +452,15 @@ export const resetLocalServerDiscoveryForTest = (): void => {
   lastStates = [];
   activeProbes = 0;
   probeWaiters.splice(0);
-  portsOverrideForTest = null;
 };
 
-/** Test-only: seed the in-memory snapshot. */
-export const setLocalServerStatesForTest = (
+/**
+ * Replace the in-memory discovery snapshot. Production uses this after a
+ * successful scan; callers that already know the live set (e.g. a single
+ * port refresh that merges into the prior snapshot) can also write it.
+ */
+export const replaceLocalServerSnapshot = (
   states: ReadonlyArray<TLocalServerState>,
 ): void => {
-  lastStates = states;
-};
-
-/** Test-only: restrict the probe set (avoids waiting on every preset port). */
-export const setPortsToProbeForTest = (
-  ports: ReadonlyArray<number> | null,
-): void => {
-  portsOverrideForTest = ports;
+  lastStates = [...states].sort((a, b) => a.port - b.port);
 };
