@@ -198,7 +198,7 @@ import {
   planSigningKey,
 } from "./config";
 import { errorJson } from "./cors";
-import { getDelegate, isSubscriptionSlug } from "./delegation";
+import { getDelegate, isOAuthSlug } from "./delegation";
 import { isLocalServerSlug, serveLocalHop } from "./local-servers";
 import type { TRefreshErrorClass } from "./delegation/refresh";
 import { authReasonCodeForRefreshError } from "./delegation/refresh";
@@ -502,7 +502,7 @@ export const planSignatureOk = (
 export const canWalkPlan = (hops: ReadonlyArray<THop>): boolean => {
   for (const hop of hops) {
     if (isLocalServerSlug(hop.provider)) continue; // local OpenAI-wire passthrough
-    if (!isSubscriptionSlug(hop.provider)) continue; // API-key → forwardable
+    if (!isOAuthSlug(hop.provider)) continue; // API-key → forwardable
     if (isNativeRuntimeProvider(hop.provider)) continue; // native runtime path (incl. bridge-only cursor)
     if (UPSTREAM_WIRE[hop.provider] === undefined) return false;
   }
@@ -774,7 +774,7 @@ export const report = (
   void recordRequest(recordedRow, origin);
   if (
     recordedRow.status !== "success" ||
-    !isSubscriptionSlug(recordedRow.provider) ||
+    !isOAuthSlug(recordedRow.provider) ||
     recordedRow.tokens_in + recordedRow.tokens_out <= 0
   ) {
     return;
@@ -1022,7 +1022,7 @@ export const coolHopAfterStaleRefresh = (
     Date.now(),
     authReasonCode,
   );
-  if (changed && isSubscriptionSlug(hop.provider)) {
+  if (changed && isOAuthSlug(hop.provider)) {
     getDelegate(hop.provider)?.invalidateStatusObservation?.();
     requestStatusPush();
   }
@@ -2667,7 +2667,7 @@ const walkPlan = async (
       if (
         changed &&
         cooldownReason === "auth" &&
-        isSubscriptionSlug(hop.provider)
+        isOAuthSlug(hop.provider)
       ) {
         getDelegate(hop.provider)?.invalidateStatusObservation?.();
         args.onAuthCooldownStatusPush?.();
@@ -3260,7 +3260,7 @@ const walkPlan = async (
       // recovery pass (API-key hops cool via the cloud — excluded). A transient
       // sibling-set cooldown may be bypassable once the authoritative usage
       // floor confirms the shared account still has quota.
-      if (isSubscriptionSlug(hop.provider)) cooldownSkipped.push(hop);
+      if (isOAuthSlug(hop.provider)) cooldownSkipped.push(hop);
       continue;
     }
     // ── Context gate, per hop (shared with the cloud chain —
@@ -3312,7 +3312,7 @@ const walkPlan = async (
       }
       return withHopTrailHeaders(localResp, hop);
     }
-    if (isSubscriptionSlug(hop.provider)) {
+    if (isOAuthSlug(hop.provider)) {
       // Record the DIALLED identity before serving so the recovery pass can
       // never re-dial it, independent of the (sibling-overwritable) setter key.
       dialedHops.add(`${hop.provider}|${hop.modelId}`);

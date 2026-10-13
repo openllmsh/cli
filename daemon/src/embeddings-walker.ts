@@ -9,7 +9,7 @@
 
 import { LOCAL_REQUIRES_DAEMON_ERROR_CODE } from "@openllmsh/protocol";
 import { errorJson } from "./cors";
-import { isSubscriptionSlug } from "./delegation";
+import { isOAuthSlug } from "./delegation";
 import { passthroughToOrigin } from "./forward";
 import { isLocalServerSlug, serveLocalEmbeddings } from "./local-servers";
 import {
@@ -88,7 +88,7 @@ export const runEmbeddings = async (args: TWalkArgs): Promise<Response> => {
         continue;
       }
       // OAuth subscription hops have no embeddings surface in v1.
-      if (isSubscriptionSlug(hop.provider)) continue;
+      if (isOAuthSlug(hop.provider)) continue;
       // Remaining API-key hop: cloud owns credentials + registry.
       return passthroughToOrigin(args.req, args.rawBytes);
     }

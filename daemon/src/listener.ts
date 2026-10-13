@@ -45,7 +45,7 @@ import {
 import { planCacheEnabled } from "./config";
 import { notePresenceActivity } from "./control-channel";
 import { corsHeaders, errorJson, isPreflight, preflightResponse } from "./cors";
-import { isSubscriptionSlug } from "./delegation";
+import { isOAuthSlug } from "./delegation";
 import { runEmbeddings } from "./embeddings-walker";
 import { isLocalServerSlug } from "./local-servers";
 import { passthroughToOrigin } from "./forward";
@@ -484,7 +484,7 @@ export const handleInference = async (req: Request): Promise<Response> => {
         verified &&
         parsePlan(fetched.plan).some((entry) => {
           const provider = entry.split("/")[0] ?? "";
-          return isSubscriptionSlug(provider) || isLocalServerSlug(provider);
+          return isOAuthSlug(provider) || isLocalServerSlug(provider);
         });
       if (!verified || !hasDaemonOnlyHop) {
         if (!embeddingsLocalFallback) {

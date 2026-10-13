@@ -40,7 +40,7 @@ import {
   REALTIME_SESSION_MAX_LIFETIME_MS,
 } from "@openllmsh/protocol";
 import { fetchPlan } from "./cloud-client";
-import { getDelegate, isSubscriptionSlug } from "./delegation";
+import { getDelegate, isOAuthSlug } from "./delegation";
 import { logWarn } from "./logger";
 import { parsePlan, planSignatureOk, report } from "./walker";
 
@@ -98,7 +98,7 @@ const authorizeRealtimeOpenViaCloudPlan = async (
   // `protocol/realtime.ts`'s closed provider/model literals).
   const hops = parsePlan(fetched.plan);
   if (hops[0] !== `${open.provider}/${open.model}`) return { ok: false };
-  if (!isSubscriptionSlug(open.provider)) return { ok: false };
+  if (!isOAuthSlug(open.provider)) return { ok: false };
   return { ok: true, origin: fetched.origin };
 };
 

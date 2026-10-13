@@ -22,7 +22,7 @@ import type {
 } from "@openllmsh/protocol";
 import { normalizeProviderConnection } from "@openllmsh/protocol";
 import { emitAuth } from "./auth-events";
-import { isSubscriptionSlug } from "./delegation";
+import { isOAuthSlug } from "./delegation";
 import { loginSlot } from "./delegation/login-flow";
 import { STATUS_CHECK_FAILED_DETAIL } from "./delegation/util";
 import { daemonApiKeyId } from "./env";
@@ -100,7 +100,7 @@ export const detectAuthLossEdge = (
   conn: TDaemonProviderConnection,
 ): TAuthLossEdge | null => {
   const slug = conn.provider;
-  if (!isSubscriptionSlug(slug)) return null;
+  if (!isOAuthSlug(slug)) return null;
   if (loginSlot(slug).inFlight()) return null;
   const normalized = normalizeProviderConnection(conn);
   if (normalized.observation === "unknown" || normalized.pending) return null;
@@ -145,7 +145,7 @@ export const createSessionLostTracker = (): TSessionLostTracker => {
 
   const noteUnknownLiveness = (conn: TDaemonProviderConnection): void => {
     const slug = conn.provider;
-    if (!isSubscriptionSlug(slug)) return;
+    if (!isOAuthSlug(slug)) return;
     const normalized = normalizeProviderConnection(conn);
     // Login overlays `unknown` + preserved `connected`. Counting those ticks
     // would fire `auth.liveness.degraded` mid-login. Drop the streak (not the

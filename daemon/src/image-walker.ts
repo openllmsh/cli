@@ -29,7 +29,7 @@ import { originatorHeadersFrom } from "@openllmsh/wire/lib/forwarded-headers";
 import { Schema } from "effect";
 import { uploadMedia } from "./cloud-client";
 import { errorJson } from "./cors";
-import { getDelegate, isSubscriptionSlug } from "./delegation";
+import { getDelegate, isOAuthSlug } from "./delegation";
 import { isLocalServerSlug } from "./local-servers";
 import type { TImageCredential } from "./delegation/types";
 import {
@@ -604,7 +604,7 @@ export const runImageWalker = async (args: TWalkArgs): Promise<Response> => {
       if (!last) continue;
       return stamp(lastError, hop.modelId);
     }
-    if (isSubscriptionSlug(hop.provider)) {
+    if (isOAuthSlug(hop.provider)) {
       // Recorded the moment this hop is UNDERTAKEN, not once it has been
       // dispatched. Everything below can refuse before a byte leaves the
       // box — an option this wire cannot map, a provider with no local
@@ -1050,7 +1050,7 @@ export const runImageEditWalker = async (
       if (!last) continue;
       return stamp(lastError, hop.modelId);
     }
-    if (!isSubscriptionSlug(hop.provider)) {
+    if (!isOAuthSlug(hop.provider)) {
       // A BYOK hop is the cloud's to serve; this walker never attempts one,
       // so it must not appear in the chain it reports.
       continue;

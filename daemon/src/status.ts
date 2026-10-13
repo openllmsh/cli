@@ -26,7 +26,7 @@ import {
   timeoutCallbackLatenessMs,
   waitUntilExpired,
 } from "./deadline-budget";
-import { DELEGATES, getDelegate, isSubscriptionSlug } from "./delegation";
+import { DELEGATES, getDelegate, isOAuthSlug } from "./delegation";
 import {
   loginOwnershipPending,
   loginSlot,
@@ -146,7 +146,7 @@ export {
 } from "./delegation/login-flow";
 
 const providerAuthOwned = (slug: string): boolean =>
-  isSubscriptionSlug(slug) && providerAuthOperationActive(slug);
+  isOAuthSlug(slug) && providerAuthOperationActive(slug);
 
 export const lateProviderAdmitBlocked = (slug: string): boolean =>
   providerSignedOutByUser(slug) || providerAuthOwned(slug);
@@ -625,7 +625,7 @@ const attachUpstreamAuthCooldown = (
   slug: string,
   conn: TDaemonProviderConnection,
 ): TDaemonProviderConnection => {
-  if (!isSubscriptionSlug(slug)) return conn;
+  if (!isOAuthSlug(slug)) return conn;
   const cooldown = authCooldownForProvider(slug);
   if (cooldown === null) return conn;
   return { ...conn, upstream_auth_cooldown: cooldown };
