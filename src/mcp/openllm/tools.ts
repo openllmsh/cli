@@ -19,7 +19,7 @@ import {
 import generatedSpec from "../../sdk/generated/openapi.json";
 import type { TApiOperation } from "../../sdk/generated/operations";
 import { API_OPERATIONS } from "../../sdk/generated/operations";
-import { SUBSCRIPTION_PROVIDER_SLUGS } from "../../sdk/generated/subscription-providers";
+import { OAUTH_PROVIDER_SLUGS } from "../../sdk/generated/subscription-providers";
 import type { TToolResult } from "../types";
 import { MODELS_TOOL_NAME } from "./model-priority";
 
@@ -209,7 +209,7 @@ export const openllmToolDefs = API_OPERATIONS.filter(isMcpExposed).map(
     if (def.name === MODELS_TOOL_NAME) {
       return {
         ...def,
-        description: `${def.description} Subscription providers: ${SUBSCRIPTION_PROVIDER_SLUGS.join(", ")}. Direct subscription provider/model IDs are listed first. Use exact returned IDs and check capabilities, audio formats, limits, and provider_type. Media inference may omit model (catalog-ranked chain; runtime fallback after a failed unaccepted attempt). Aliases are configurable fallback chains and may invoke API-key providers; they are not subscription guarantees. This is configured availability, not live readiness or remaining quota.`,
+        description: `${def.description} Subscription providers: ${OAUTH_PROVIDER_SLUGS.join(", ")}. Direct subscription provider/model IDs are listed first. Use exact returned IDs and check capabilities, audio formats, limits, and provider_type. Media inference may omit model (catalog-ranked chain; runtime fallback after a failed unaccepted attempt). Aliases are configurable fallback chains and may invoke API-key providers; they are not subscription guarantees. This is configured availability, not live readiness or remaining quota.`,
       };
     }
     if (def.name !== TRANSCRIPTION_TOOL_NAME) return def;

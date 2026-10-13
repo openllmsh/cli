@@ -16,9 +16,10 @@
  *     path/query params, request-body presence, summary). The MCP layer
  *     derives its native-API tools from this table, so tool coverage tracks
  *     the spec automatically — no hand-picked subset.
- *   - `subscription-providers.ts` — subscription slugs copied from
- *     `SubscriptionProviderSlug.literals` (protocol SSOT). No handwritten
- *     duplicate list in the CLI.
+ *   - `subscription-providers.ts` — OAuth provider slugs copied from
+ *     `OAuthProviderSlug.literals` (protocol SSOT). Exports
+ *     `OAUTH_PROVIDER_SLUGS` plus deprecated `SUBSCRIPTION_PROVIDER_SLUGS`
+ *     alias. No handwritten duplicate list in the CLI.
  *
  * A drift test (`tests/cli/sdk-drift.test.ts`) regenerates in-memory and
  * fails when the committed artifacts are stale — same spirit as the
@@ -34,7 +35,7 @@ import {
   OPENLLM_CHAIN_HEADER,
   OPENLLM_RESOLVED_MODEL_HEADER,
 } from "../../protocol/inference-headers";
-import { SubscriptionProviderSlug } from "../../protocol/subscription-provider";
+import { OAuthProviderSlug } from "../../protocol/local-provider";
 
 const PKG_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const OUT_DIR = join(PKG_ROOT, "src", "sdk", "generated");
@@ -149,10 +150,16 @@ export const subscriptionProvidersSource = (slugs: readonly string[]): string =>
 // \`bun run --cwd packages/cli generate:sdk\` and commit the diff; the drift
 // test (tests/cli/sdk-drift.test.ts) fails when this file is stale.
 
-export const SUBSCRIPTION_PROVIDER_SLUGS = ${JSON.stringify(slugs)} as const;
+export const OAUTH_PROVIDER_SLUGS = ${JSON.stringify(slugs)} as const;
 
-export type TGeneratedSubscriptionProviderSlug =
-  (typeof SUBSCRIPTION_PROVIDER_SLUGS)[number];
+export type TGeneratedOAuthProviderSlug =
+  (typeof OAUTH_PROVIDER_SLUGS)[number];
+
+/** @deprecated Prefer {@link OAUTH_PROVIDER_SLUGS}. */
+export const SUBSCRIPTION_PROVIDER_SLUGS = OAUTH_PROVIDER_SLUGS;
+
+/** @deprecated Prefer {@link TGeneratedOAuthProviderSlug}. */
+export type TGeneratedSubscriptionProviderSlug = TGeneratedOAuthProviderSlug;
 `;
 
 const inferenceHeadersSource = (): string => `/**
@@ -181,7 +188,7 @@ export const generateArtifacts = (): {
     doctorReportCliTs: renderDoctorReportCliArtifact(),
     localAuthTs: localAuthSource(),
     subscriptionProvidersTs: subscriptionProvidersSource(
-      SubscriptionProviderSlug.literals,
+      OAuthProviderSlug.literals,
     ),
     inferenceHeadersTs: inferenceHeadersSource(),
   };

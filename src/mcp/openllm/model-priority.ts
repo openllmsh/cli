@@ -3,26 +3,24 @@
  * Reorder is MCP-side only — the HTTP catalog is unchanged.
  */
 
-import { SUBSCRIPTION_PROVIDER_SLUGS } from "../../sdk/generated/subscription-providers";
+import { OAUTH_PROVIDER_SLUGS } from "../../sdk/generated/subscription-providers";
 import type { TToolResult, TToolResultContent } from "../types";
 
 /** MCP tool name for GET /v1/models (`v1Models.list`). */
 export const MODELS_TOOL_NAME = "api_v1Models_list";
 
-const SUBSCRIPTION_SLUGS: ReadonlySet<string> = new Set(
-  SUBSCRIPTION_PROVIDER_SLUGS,
-);
+const OAUTH_SLUGS: ReadonlySet<string> = new Set(OAUTH_PROVIDER_SLUGS);
 
 const compactSubscriptionId = (id: string): boolean => {
   const slash = id.indexOf("/");
   if (slash <= 0 || slash === id.length - 1) return false;
-  return SUBSCRIPTION_SLUGS.has(id.slice(0, slash));
+  return OAUTH_SLUGS.has(id.slice(0, slash));
 };
 
 const isDirectSubscriptionId = (rec: Record<string, unknown>): boolean =>
   typeof rec.provider === "string" &&
   rec.provider !== "fallback-chain" &&
-  SUBSCRIPTION_SLUGS.has(rec.provider) &&
+  OAUTH_SLUGS.has(rec.provider) &&
   typeof rec.id === "string" &&
   rec.id.startsWith(`${rec.provider}/`) &&
   rec.id.length > rec.provider.length + 1;
