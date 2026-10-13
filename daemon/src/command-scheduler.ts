@@ -81,6 +81,7 @@ export const commandLaneOf = (cmd: TDaemonCommand): TCommandLane => {
       return "usage";
     case "status":
     case "list_local_sessions":
+    case "local_rescan":
       return "observe";
     case "update":
       return "apply";
@@ -89,6 +90,8 @@ export const commandLaneOf = (cmd: TDaemonCommand): TCommandLane => {
     case "refresh_models_due":
     case "set_auto_update":
       return "global";
+    case "set_local_key":
+      return "mutation";
   }
 };
 
