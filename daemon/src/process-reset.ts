@@ -7,7 +7,6 @@
 import { clearSessionLostTracker } from "./auth-session-lost";
 import { clearCliInstallDoctorStreak } from "./cli-install";
 import { clearCliVersionCache } from "./cli-version-cache";
-import { clearProviderAuthOperations } from "./delegation/login-flow";
 import { clearStoreIdentityEpochs } from "./delegation/observation-cache";
 import { clearIdentityKeyCache } from "./keypair";
 import { clearQuotaStatusTracker } from "./quota-status-notify";
@@ -22,13 +21,15 @@ const run = (fn: () => void): void => {
   }
 };
 
-/** Drop identity-scoped in-process caches after the API key changes. */
+/**
+ * Drop identity-scoped in-process caches after the API key changes. Never
+ * touches live login/logout ownership — a vendor login is not key-scoped.
+ */
 export const resetDaemonCredentialState = (): void => {
   run(() => clearUsageCache());
   run(() => clearLastKnownConnections());
   run(() => clearQuotaStatusTracker());
   run(() => clearSessionLostTracker());
-  run(() => clearProviderAuthOperations());
   run(() => clearStoreIdentityEpochs());
   run(() => clearCliInstallDoctorStreak());
   run(() => clearCliVersionCache());

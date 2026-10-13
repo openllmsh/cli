@@ -28,7 +28,6 @@ import {
 } from "./deadline-budget";
 import { DELEGATES, getDelegate, isSubscriptionSlug } from "./delegation";
 import {
-  clearProviderAuthOperations,
   loginOwnershipPending,
   loginSlot,
   providerAuthOperationActive,
@@ -388,13 +387,13 @@ export const rememberLastKnownConnection = (
 };
 
 /**
- * Clear last-known connections and related in-process status state (identity
- * change / suite isolation). Also resets sticky logout and probe backoff.
+ * Clear last-known connections and the sticky signed-out marks (identity
+ * change). Live login/logout ownership is deliberately untouched: a vendor
+ * login in flight is not scoped to the OpenLLM key.
  */
 export const clearLastKnownConnections = (): void => {
   lastKnownConnections.clear();
   signedOutByUser.clear();
-  clearProviderAuthOperations();
   clearStoreIdentityEpochs();
   pendingVerifiedPublish.clear();
   admittedLoginFlow.clear();

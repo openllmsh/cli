@@ -285,15 +285,6 @@ export const providerAuthOperationActive = (slug: string): boolean =>
 export const providerLogoutActive = (slug: string): boolean =>
   logoutOps.has(slug);
 
-/** Drop in-flight login/logout ownership (identity change / process reset). */
-export const clearProviderAuthOperations = (): void => {
-  logoutOps.clear();
-  applyHeld = false;
-  for (const slot of slots.values()) {
-    slot.end();
-  }
-};
-
 /** Wrap logout (or other auth mutation) so observers see an active operation. */
 export const runWithAuthOperation = async <T>(
   slug: string,

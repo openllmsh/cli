@@ -641,7 +641,7 @@ export const applyPersistedApiKey = (key: string): void => {
   process.env.OPENLLM_API_KEY = key;
   const current = daemonEnv();
   cached = { ...current, apiKey: key };
-  credentialReset();
+  if (current.apiKey !== key) credentialReset();
 };
 
 /** Read one value from an exact env file without merging it into process state. */
@@ -667,8 +667,10 @@ export const setApiKey = (key: string | null): void => {
   process.env.OPENLLM_API_KEY = trimmed;
   // Refresh the cache in place so callers don't need to re-resolve env.
   const current = daemonEnv();
-  cached = { ...current, apiKey: trimmed.length > 0 ? trimmed : null };
-  credentialReset();
+  const next = trimmed.length > 0 ? trimmed : null;
+  cached = { ...current, apiKey: next };
+  // Only a different key is an identity change; re-saving the same one is not.
+  if (current.apiKey !== next) credentialReset();
 };
 
 export const hasApiKey = (): boolean => daemonEnv().apiKey !== null;
