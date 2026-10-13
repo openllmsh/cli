@@ -4,10 +4,10 @@
 > single source-free compiled `openllm` binary (coreless: built from
 > `@openllmsh/wire` + `@openllmsh/protocol` + `@openllmsh/tunnel`, NOT
 > `@openllm/core`). A plain folder of `packages/cli` — its dependencies are
-> declared in `packages/cli/package.json` — that
-> runs the **subscription** data plane on the user's
-> machine. It delegates to the official vendor CLIs' own credentials +
-> identity (never minting, storing, or forging a subscription token),
+> declared in `packages/cli/package.json` — that runs the **local-provider**
+> data plane on the user's machine: oauth subscription hops (vendor-CLI
+> credentials + identity — never minting, storing, or forging a subscription
+> token) **and** discovered loopback model servers (`local-servers/`). It
 > records request metadata to the cloud, and accepts management commands from
 > the dashboard over the relay or from owner-authorized local CLI/MCP control.
 >
@@ -151,6 +151,11 @@ daemon/
     status.ts               computeStatus() — shared snapshot for relay status_push (cheap local store/metadata; not token refresh)
     usage-cache.ts          per-provider TTL cache over delegate.usage() (rate-limit safe)
     model-report.ts         demand-driven live catalog POST: login/`refresh_models` via listModels; auto/`refresh_models_due` via discoverModels — never idle bootstrap
+    local-servers/          loopback model-server discovery + per-port keys + chat/embeddings serve
+      presets.ts            re-exports protocol `LOCAL_SERVER_PRESETS` (never fork the port table)
+      keys.ts               `OPENLLM_LOCAL_KEY_<PORT>` in `~/.openllm/.env` (0600); status exposes `has_key` only
+      discover.ts           probe `http://127.0.0.1:<port>/v1/models` (presets + `OPENLLM_LOCAL_PORTS`); push `local_entries` + `local_servers` on status
+      serve.ts              `serveLocalHop` / `serveLocalEmbeddings` — OpenAI-wire passthrough, no delegate/CLI
     events.ts               /events SSE: push status on change (replaces polling)
     cors.ts                 shared CORS + PNA preflight for both surfaces
     cli-paths.ts            isolated-CLI paths + per-provider run env
@@ -218,7 +223,7 @@ is a cloud-signed `<provider/model,…>` tuple from `GET /api/daemon/plan`
 (see [`coreless-daemon-passthrough.md`](../../docs/proposals/coreless-daemon-passthrough.md));
 there is no URL-carried plan and no 307 arrival path. Whether a request comes
 from a local client or over a relay tunnel (browser, fleet peer, or the origin
-handing over a subscription hop), `listener.ts` first reuses a valid cached
+handing over a daemon-only hop), `listener.ts` first reuses a valid cached
 plan or fetches one from the cloud without sending the request body; a pure
 BYOK plan, or a failed explicit-model plan fetch, is forwarded to the cloud.
 **Model-less media** (image, image edit, transcription, speech, video create)
@@ -253,13 +258,45 @@ pin-forward GET to the cloud — never the first Grok hop. API-key media hops
 rewrite JSON/multipart `model` to the current hop before `forwardToCloud`.
 
 The walker makes **zero** routing decisions — the cloud already resolved the
-alias + cooldowns — it walks the ordered plan, serving each subscription hop
-locally (delegate credential injected, vendor called directly) and forwarding
-each API-key hop to the cloud (`forward.ts`, pinned). Every non-abort candidate failure before commitment
+alias + cooldowns — it walks the ordered plan, serving each oauth subscription
+hop locally (delegate credential injected, vendor called directly), each
+`local_*` / `local_port_*` hop via `serveLocalHop` (plain HTTP to the
+discovered loopback server), and forwarding each API-key hop to the cloud
+(`forward.ts`, pinned). Every non-abort candidate failure before commitment
 walks via the same `@openllmsh/wire/lib/error-class` policy as the cloud;
 routing never depends on provider-specific status/message allow-lists. The
 walker commits on first output, after which switching models is intentionally
 unsafe. On chain exhaustion the final hop's real upstream response is preserved.
+
+### Local model servers (`local-servers/`)
+
+Device-discovered OpenAI-compatible loopback servers — the `local` variant of
+the local-provider path. No vault, no DEK, no `TProviderDelegate`.
+
+- **Discovery** (`discover.ts`): on start, every 60 s, and on `local_rescan`,
+  probe preset ports (Ollama 11434, LM Studio 1234, llama.cpp/LocalAI 8080,
+  vLLM 8000, Jan 1337, text-generation-webui 5000) plus optional
+  `OPENLLM_LOCAL_PORTS`. Literal `http://127.0.0.1:<port>/v1/models` only —
+  no hostnames, so no DNS. `redirect: "manual"` (any 3xx → unreachable),
+  1 MB body cap, 2 s timeout, concurrency 4, single-flight scan. Auth header
+  is **omitted** when keyless (blank Bearer breaks several servers). 401/403
+  → `needs_key` with no models; with a stored key the port is re-probed with
+  `Authorization: Bearer`. Fingerprint preset from headers/models when
+  possible; else `local_port_<port>`. Snapshot rides `DaemonStatus.local_servers`
+  (`has_key` only) and is pushed as `local_entries` on `POST /api/daemon/models`
+  (replace semantics for this device key).
+- **Keys** (`keys.ts` + control `set_local_key`): sealed in the browser to the
+  daemon's X25519 pubkey (same posture as `submit_login_code`); plaintext
+  never crosses the relay. Persisted as `OPENLLM_LOCAL_KEY_<PORT>` in the
+  daemon env file; empty sealed clears. Status never carries the secret.
+- **Serve** (`serve.ts`): chat completions / messages / responses via shared
+  wire transforms; embeddings as a single-shot. Preflight the port, refuse
+  redirects, attach the stored key if any, record usage (tokens, cost 0).
+  Model gone / port dead → `null` so the walker advances (or
+  `local_requires_daemon` when nothing remains).
+- **Media refuses local.** `image-walker` / `audio-walker` / `video-walker`
+  skip `local_*` hops with `local_surface_unsupported` (chat + embeddings
+  only in v1) and continue the chain.
 
 **The manual mini-runner serves four subscription providers + cross-wire**
 (§9(a)) — it is built from the `@openllmsh/wire` transforms:
