@@ -108,29 +108,12 @@ type TUsageEntry = {
   inFlight: Promise<TProviderUsageSnapshot> | null;
 };
 
-const cache = new Map<string, TUsageEntry>();
-const generations = new Map<string, number>();
-
 /** Stable cache partition for a provider identity, preserving legacy slug keys. */
 export const usageCacheKey = (slug: string, accountHash?: string): string =>
   accountHash === undefined ? slug : `${slug}#${accountHash}`;
 
-const generationFor = (key: string): number => generations.get(key) ?? 0;
-
-const bumpGeneration = (key: string): void => {
-  generations.set(key, generationFor(key) + 1);
-};
-
 const matchesSlug = (key: string, slug: string): boolean =>
   key === slug || key.startsWith(`${slug}#`);
-
-const clearRequestSamples = (matches: (key: string) => boolean): void => {
-  for (const [key, sample] of requestSamples.entries()) {
-    if (!matches(key)) continue;
-    if (sample.timer !== null) clearTimeout(sample.timer);
-    requestSamples.delete(key);
-  }
-};
 
 type TRequestSample = {
   fetcher: () => Promise<TProviderUsageSnapshot>;
@@ -138,8 +121,6 @@ type TRequestSample = {
   lastSampleAtMs: number;
   generation: number;
 };
-
-const requestSamples = new Map<string, TRequestSample>();
 
 const isUsable = (s: TProviderUsageSnapshot): boolean =>
   s.kind !== "unavailable";
@@ -251,439 +232,544 @@ type TPersistedEntry = {
   lastAttemptAtMs: number;
 };
 
-// Directory the cache file lives in, or null when persistence is disabled
-// (the default — keeps this module hermetic for unit tests that import it
-// directly). The daemon sets it once via enableUsagePersistence().
-let persistDir: string | null = null;
-// The cache FILE is dev-namespaced, exactly like `openllmd.dev.log` — a
-// source-run dev daemon shares the state dir (`~/.openllm`) with the installed
-// prod daemon most developers also run, and an undifferentiated
-// `usage-cache.json` would let the two fight over one file: prod (an older
-// binary that never read the subscription tier) writes a tier-less snapshot,
-// dev hydrates it and serves it back for the freshness window, so a tier the
-// dev build DOES compute never appears. Separate files keep dev and prod
-// caches fully independent.
-const cacheFile = (): string =>
-  join(
-    persistDir as string,
-    isDevMode() ? "usage-cache.dev.json" : "usage-cache.json",
-  );
+export type TUsageCacheDeps = {
+  /**
+   * Disk directory for last-good snapshots, or `null`/omitted for an
+   * in-memory-only cache (the default — keeps a freshly-created instance
+   * hermetic for unit tests). A non-null dir hydrates immediately.
+   */
+  readonly persistenceDir?: string | null;
+};
 
-/**
- * Opt this process into disk-backed survival of the last good usage snapshot
- * across restarts. Call ONCE at daemon boot with the state dir. Immediately
- * hydrates the in-memory cache from any prior file so the first status push
- * after a restart already has figures to serve. No-op'd in unit tests (they
- * never call this), keeping the cache purely in-memory there.
- */
-export const enableUsagePersistence = (dir: string): void => {
-  persistDir = dir;
-  hydrate();
+export type TUsageCache = {
+  readonly cachedUsage: (
+    slug: string,
+    fetcher: () => Promise<TProviderUsageSnapshot>,
+    options?: TCachedUsageOptions,
+  ) => Promise<TProviderUsageSnapshot>;
+  readonly peekUsage: (
+    slug: string,
+    accountHash?: string,
+  ) => TProviderUsageSnapshot | null;
+  readonly peekUsageForQuotaGate: (
+    slug: string,
+    accountHash?: string,
+    revalidate?: () => Promise<TProviderUsageSnapshot>,
+  ) => TProviderUsageSnapshot | null;
+  readonly sampleUsageAfterRequest: (
+    slug: string,
+    fetcher: () => Promise<TProviderUsageSnapshot>,
+    accountHash?: string,
+  ) => void;
+  readonly sampleUsageOnExhaustion: (
+    slug: string,
+    fetcher: () => Promise<TProviderUsageSnapshot>,
+    accountHash?: string,
+  ) => void;
+  readonly clearRequestUsageSamples: () => void;
+  readonly clearUsageCache: () => void;
+  readonly invalidateUsage: (slug?: string, accountHash?: string) => void;
 };
 
 /**
- * Test-only: opt this process back OUT of disk persistence so a case that
- * enabled it (via a temp dir) can't leak a `persistDir` into later in-memory
- * cases. Never called by the daemon itself.
+ * Build one usage cache instance. Production creates a SINGLE instance at
+ * boot with the state dir ({@link installUsageCache}); tests construct their
+ * own instance (in-memory, or a temp dir) rather than mutating shared globals.
  */
-export const disableUsagePersistenceForTest = (): void => {
-  persistDir = null;
-};
+export const createUsageCache = (deps: TUsageCacheDeps = {}): TUsageCache => {
+  const cache = new Map<string, TUsageEntry>();
+  const generations = new Map<string, number>();
+  const requestSamples = new Map<string, TRequestSample>();
+  const persistDir: string | null = deps.persistenceDir ?? null;
 
-// Load persisted good snapshots into the in-memory cache. Never clobbers a
-// slug that already has live state. Best-effort: a missing/corrupt file just
-// starts the cache cold.
-const hydrate = (): void => {
-  if (persistDir === null) return;
-  try {
-    const parsed = JSON.parse(readFileSync(cacheFile(), "utf-8")) as Record<
-      string,
-      TPersistedEntry
-    >;
-    for (const [slug, e] of Object.entries(parsed)) {
-      if (cache.has(slug)) continue;
-      if (e?.good?.snapshot === undefined) continue;
-      const atMs = e.good.atMs;
-      cache.set(slug, {
-        // Legacy files may omit `as_of_ms`. Provenance is the persisted
-        // observation time, never wall-clock "now" — hydrating an old
-        // snapshot must not look like a fresh vendor read.
-        good: {
-          snapshot: stampObservation(e.good.snapshot, atMs),
-          atMs,
-        },
-        failure: null,
-        lastAttemptAtMs:
-          typeof e.lastAttemptAtMs === "number" ? e.lastAttemptAtMs : 0,
-        inFlight: null,
-      });
+  const generationFor = (key: string): number => generations.get(key) ?? 0;
+  const bumpGeneration = (key: string): void => {
+    generations.set(key, generationFor(key) + 1);
+  };
+  const clearRequestSamples = (matches: (key: string) => boolean): void => {
+    for (const [key, sample] of requestSamples.entries()) {
+      if (!matches(key)) continue;
+      if (sample.timer !== null) clearTimeout(sample.timer);
+      requestSamples.delete(key);
     }
-  } catch {
-    // no / unreadable cache file — start cold
-  }
-};
+  };
 
-// Write the current good snapshots back to disk (failures + in-flight promises
-// are runtime-only). Best-effort; a write failure just means the next restart
-// starts cold for that provider.
-const persist = (): void => {
-  if (persistDir === null) return;
-  const out: Record<string, TPersistedEntry> = {};
-  for (const [slug, e] of cache.entries()) {
-    if (e.good !== null) {
-      out[slug] = {
-        good: {
-          snapshot: stripRefreshFailure(e.good.snapshot),
-          atMs: e.good.atMs,
-        },
-        lastAttemptAtMs: e.lastAttemptAtMs,
-      };
-    }
-  }
-  try {
-    mkdirSync(persistDir, { recursive: true });
-    writeFileSync(cacheFile(), JSON.stringify(out), { mode: 0o600 });
-  } catch {
-    // best-effort — losing the cache only costs a cold start next time
-  }
-};
-
-// Stamp a snapshot served as a FALLBACK with its age so the UI can render a
-// "cached · updated Xm ago" badge instead of presenting old figures as live.
-// A fresh read (age < FRESH_TTL_MS) keeps its observation time and is not
-// marked stale — it IS current.
-const stampStale = (
-  snapshot: TProviderUsageSnapshot,
-  atMs: number,
-  now: number,
-): TProviderUsageSnapshot => {
-  const observed = stampObservation(snapshot, atMs);
-  if (observed.kind !== "quota" || now - atMs < FRESH_TTL_MS) return observed;
-  return { ...observed, as_of_ms: observed.as_of_ms ?? atMs, stale: true };
-};
-
-// What to serve right now without calling the vendor: the last good figures if
-// still within STALE_TTL_MS (stamped stale once past the freshness window),
-// otherwise the last failure (or a loading placeholder before the first
-// attempt completes).
-const servable = (entry: TUsageEntry, now: number): TProviderUsageSnapshot => {
-  if (entry.good !== null && now - entry.good.atMs < STALE_TTL_MS) {
-    return withRefreshFailure(
-      stampStale(entry.good.snapshot, entry.good.atMs, now),
-      entry.failure,
-      entry.lastAttemptAtMs,
+  // The cache FILE is dev-namespaced, exactly like `openllmd.dev.log` — a
+  // source-run dev daemon shares the state dir (`~/.openllm`) with the installed
+  // prod daemon most developers also run, and an undifferentiated
+  // `usage-cache.json` would let the two fight over one file: prod (an older
+  // binary that never read the subscription tier) writes a tier-less snapshot,
+  // dev hydrates it and serves it back for the freshness window, so a tier the
+  // dev build DOES compute never appears. Separate files keep dev and prod
+  // caches fully independent.
+  const cacheFile = (): string =>
+    join(
+      persistDir as string,
+      isDevMode() ? "usage-cache.dev.json" : "usage-cache.json",
     );
-  }
-  return entry.failure ?? { kind: "unavailable", reason: "loading" };
-};
 
-/**
- * Return this provider's usage snapshot, calling `fetcher` at most once per
- * {@link FRESH_TTL_MS} whether the previous call succeeded or failed. A failed
- * read falls back to the last good snapshot (within {@link STALE_TTL_MS});
- * never throws.
- */
-export const cachedUsage = async (
-  slug: string,
-  fetcher: () => Promise<TProviderUsageSnapshot>,
-  options: TCachedUsageOptions = {},
-): Promise<TProviderUsageSnapshot> => {
-  const key = usageCacheKey(slug, options.accountHash);
-  const generation = generationFor(key);
-  const now = Date.now();
-  const entry = cache.get(key);
-  if (entry !== undefined) {
-    // Once-per-reset: last SUCCESS must predate a passed deadline. A later
-    // success that still reports the same expired reset must not bypass again.
-    // Failures keep the ordinary success/failure backoff (never a 20s special
-    // window while good is still servable).
-    const resetExpiredBypass =
-      options.resetExpired === true &&
-      options.force !== true &&
-      entry.failure === null &&
-      entry.good !== null &&
-      hasUnobservedPassedReset(entry.good.snapshot, entry.good.atMs, now);
+  // Load persisted good snapshots into the in-memory cache. Never clobbers a
+  // slug that already has live state. Best-effort: a missing/corrupt file just
+  // starts the cache cold.
+  const hydrate = (): void => {
+    if (persistDir === null) return;
+    try {
+      const parsed = JSON.parse(readFileSync(cacheFile(), "utf-8")) as Record<
+        string,
+        TPersistedEntry
+      >;
+      for (const [slug, e] of Object.entries(parsed)) {
+        if (cache.has(slug)) continue;
+        if (e?.good?.snapshot === undefined) continue;
+        const atMs = e.good.atMs;
+        cache.set(slug, {
+          // Legacy files may omit `as_of_ms`. Provenance is the persisted
+          // observation time, never wall-clock "now" — hydrating an old
+          // snapshot must not look like a fresh vendor read.
+          good: {
+            snapshot: stampObservation(e.good.snapshot, atMs),
+            atMs,
+          },
+          failure: null,
+          lastAttemptAtMs:
+            typeof e.lastAttemptAtMs === "number" ? e.lastAttemptAtMs : 0,
+          inFlight: null,
+        });
+      }
+    } catch {
+      // no / unreadable cache file — start cold
+    }
+  };
+  if (persistDir !== null) hydrate();
 
-    // Fresh, usable snapshot — serve it with no upstream call, unless a
-    // newly-passed reset has not yet been observed after that deadline.
-    if (
-      !options.force &&
-      !resetExpiredBypass &&
-      entry.good !== null &&
-      now - entry.good.atMs < FRESH_TTL_MS &&
-      isUsable(entry.good.snapshot)
-    ) {
+  // Write the current good snapshots back to disk (failures + in-flight
+  // promises are runtime-only). Best-effort; a write failure just means the
+  // next restart starts cold for that provider.
+  const persist = (): void => {
+    if (persistDir === null) return;
+    const out: Record<string, TPersistedEntry> = {};
+    for (const [slug, e] of cache.entries()) {
+      if (e.good !== null) {
+        out[slug] = {
+          good: {
+            snapshot: stripRefreshFailure(e.good.snapshot),
+            atMs: e.good.atMs,
+          },
+          lastAttemptAtMs: e.lastAttemptAtMs,
+        };
+      }
+    }
+    try {
+      mkdirSync(persistDir, { recursive: true });
+      writeFileSync(cacheFile(), JSON.stringify(out), { mode: 0o600 });
+    } catch {
+      // best-effort — losing the cache only costs a cold start next time
+    }
+  };
+
+  // Stamp a snapshot served as a FALLBACK with its age so the UI can render a
+  // "cached · updated Xm ago" badge instead of presenting old figures as live.
+  // A fresh read (age < FRESH_TTL_MS) keeps its observation time and is not
+  // marked stale — it IS current.
+  const stampStale = (
+    snapshot: TProviderUsageSnapshot,
+    atMs: number,
+    now: number,
+  ): TProviderUsageSnapshot => {
+    const observed = stampObservation(snapshot, atMs);
+    if (observed.kind !== "quota" || now - atMs < FRESH_TTL_MS) return observed;
+    return { ...observed, as_of_ms: observed.as_of_ms ?? atMs, stale: true };
+  };
+
+  // What to serve right now without calling the vendor: the last good figures
+  // if still within STALE_TTL_MS (stamped stale once past the freshness
+  // window), otherwise the last failure (or a loading placeholder before the
+  // first attempt completes).
+  const servable = (
+    entry: TUsageEntry,
+    now: number,
+  ): TProviderUsageSnapshot => {
+    if (entry.good !== null && now - entry.good.atMs < STALE_TTL_MS) {
       return withRefreshFailure(
-        entry.good.snapshot,
+        stampStale(entry.good.snapshot, entry.good.atMs, now),
         entry.failure,
         entry.lastAttemptAtMs,
       );
     }
-    // A refresh is already running — share it (refresh-token rotation and rate
-    // limits make parallel fetches actively harmful).
-    if (entry.inFlight !== null) return entry.inFlight;
-    // We hit the vendor recently (success or fail). Back off rather than hammer.
-    // The window depends on what we can serve: with a usable GOOD snapshot, hold
-    // it for the full FRESH_TTL (the figures are fine for minutes). With ONLY a
-    // failure (or nothing fetched yet), back off for just FAILURE_RETRY_MS so an
-    // on-demand refresh recovers fast once a transient failure clears — without
-    // this, a single failed read (e.g. a momentarily-expired token) stuck the UI
-    // on the error for 5 min even after the token refreshed.
-    // The long back-off applies only while there's a SERVABLE good snapshot to
-    // show meanwhile (within STALE_TTL_MS — what `servable()` actually returns);
-    // once the good has aged out, fall back to the short retry so a failed
-    // refresh recovers sooner instead of sitting on FRESH_TTL.
-    const goodServable =
-      entry.good !== null && now - entry.good.atMs < STALE_TTL_MS;
-    const backoff = goodServable ? FRESH_TTL_MS : FAILURE_RETRY_MS;
-    if (
-      !options.force &&
-      !resetExpiredBypass &&
-      now - entry.lastAttemptAtMs < backoff
-    ) {
-      return servable(entry, now);
-    }
-  }
-
-  const run = withoutCommandReplayContext(
-    async (): Promise<TProviderUsageSnapshot> => {
-      let next: TProviderUsageSnapshot;
-      try {
-        next = await fetcher();
-      } catch {
-        next = {
-          kind: "unavailable",
-          reason: GENERIC_FETCH_FAILURE,
-        };
-      }
-      const at = Date.now();
-      if (generationFor(key) !== generation) {
-        return { kind: "unavailable", reason: "usage cache invalidated" };
-      }
-      const prev = cache.get(key);
-      const observed = isUsable(next)
-        ? stampLiveFetch(stripRefreshFailure(next), at)
-        : next;
-      const updated: TUsageEntry = {
-        good: isUsable(observed)
-          ? { snapshot: observed, atMs: at }
-          : (prev?.good ?? null),
-        failure: isUsable(next) ? null : next,
-        lastAttemptAtMs: at,
-        inFlight: null,
-      };
-      cache.set(key, updated);
-      // Persist the good snapshot (+ attempt time) so a daemon restart can serve
-      // it instead of going dark when the post-restart read is rate-limited.
-      persist();
-      return servable(updated, at);
-    },
-  );
-
-  // Publish the in-flight promise so a concurrent caller shares this fetch,
-  // preserving the prior good/failure/attempt state for the fallback path.
-  cache.set(key, {
-    good: entry?.good ?? null,
-    failure: entry?.failure ?? null,
-    lastAttemptAtMs: entry?.lastAttemptAtMs ?? 0,
-    inFlight: run,
-  });
-  return run;
-};
-
-/**
- * PASSIVE read — return this provider's cached usage snapshot WITHOUT ever
- * calling the vendor. `computeStatus()` uses this on every background status
- * push so a push never triggers a usage read (usage is on-demand only — see the
- * module header). Returns the last good figures stamped `stale` once past the
- * freshness window, including past {@link STALE_TTL_MS} (the card stays filled
- * and honestly aged). With no good snapshot, returns the last failure, else
- * `null` when nothing has ever been fetched for this provider (the daemon
- * booted but no one has demanded usage yet) — the card then simply shows no
- * quota until a `refresh` populates it.
- */
-export const peekUsage = (
-  slug: string,
-  accountHash?: string,
-): TProviderUsageSnapshot | null => {
-  const entry = cache.get(usageCacheKey(slug, accountHash));
-  if (entry === undefined) return null;
-  const now = Date.now();
-  if (entry.good !== null) {
-    return withRefreshFailure(
-      stampStale(entry.good.snapshot, entry.good.atMs, now),
-      entry.failure,
-      entry.lastAttemptAtMs,
-    );
-  }
-  return entry.failure;
-};
-
-/**
- * PASSIVE routing read — retains a long-aged quota snapshot only when an
- * exhausted window or extra pool has a known reset still ahead. Unlike the UI
- * display reader, that skip is still the immediate routing decision regardless
- * of snapshot age. An external upgrade is the exception: capacity may return
- * before the cached reset, so a demand revalidate is scheduled when the
- * snapshot is exhausted past {@link FRESH_TTL_MS} even with a future reset.
- * All other cases preserve {@link peekUsage}'s exact display-TTL behavior.
- *
- * A passed reset proves the cached quota is expired and uses the
- * `resetExpired` cache mode (success freshness bypassed once per reset). An
- * exhausted snapshot past {@link FRESH_TTL_MS} is demand-driven recovery even
- * when the reset is still in the future (an external upgrade may have restored
- * capacity) and still uses ordinary freshness. When a fetcher is supplied,
- * schedule one detached, provider/account-scoped cache read; `cachedUsage`
- * supplies in-flight sharing, generation fencing, and failure retry. The
- * reader returns the cached routing decision immediately and never lets a
- * vendor failure throw.
- */
-export const peekUsageForQuotaGate = (
-  slug: string,
-  accountHash?: string,
-  revalidate?: () => Promise<TProviderUsageSnapshot>,
-): TProviderUsageSnapshot | null => {
-  const entry = cache.get(usageCacheKey(slug, accountHash));
-  if (entry === undefined) return null;
-  const now = Date.now();
-  if (entry.good === null) return entry.failure;
-
-  const snapshot = entry.good.snapshot;
-  if (snapshot.kind !== "quota") return peekUsage(slug, accountHash);
-  const pools = quotaPools(snapshot);
-  const resetPassed = pools.some(
-    (pool) => pool.reset_at_ms !== null && now >= pool.reset_at_ms,
-  );
-  const exhaustedPastFresh =
-    now - entry.good.atMs >= FRESH_TTL_MS &&
-    pools.some((pool) => pool.percent_used >= 100);
-  if (revalidate !== undefined && (resetPassed || exhaustedPastFresh)) {
-    // Detached: TTL / backoff / single-flight stay inside cachedUsage.
-    // Catch so a vendor rejection cannot surface as an unhandled promise.
-    void cachedUsage(slug, revalidate, {
-      accountHash,
-      resetExpired: resetPassed,
-    }).catch(() => {});
-  }
-  if (now - entry.good.atMs < STALE_TTL_MS) {
-    return withRefreshFailure(
-      stampStale(snapshot, entry.good.atMs, now),
-      entry.failure,
-      entry.lastAttemptAtMs,
-    );
-  }
-  if (
-    pools.some(
-      (pool) =>
-        pool.percent_used >= 100 &&
-        pool.reset_at_ms !== null &&
-        now < pool.reset_at_ms,
-    )
-  ) {
-    return withRefreshFailure(
-      stampStale(snapshot, entry.good.atMs, now),
-      entry.failure,
-      entry.lastAttemptAtMs,
-    );
-  }
-  return entry.failure;
-};
-
-/**
- * Schedule one detached usage refresh after a burst of successful real user
- * requests. This never awaits, retries, or changes the request itself; it only
- * improves the next passive calibration boundary when the vendor allows it.
- */
-export const sampleUsageAfterRequest = (
-  slug: string,
-  fetcher: () => Promise<TProviderUsageSnapshot>,
-  accountHash?: string,
-): void => {
-  const key = usageCacheKey(slug, accountHash);
-  const current = requestSamples.get(key);
-  const sample: TRequestSample = current ?? {
-    fetcher,
-    timer: null,
-    lastSampleAtMs: 0,
-    generation: generationFor(key),
+    return entry.failure ?? { kind: "unavailable", reason: "loading" };
   };
-  sample.fetcher = fetcher;
-  if (sample.timer !== null) clearTimeout(sample.timer);
-  sample.timer = setTimeout(() => {
-    sample.timer = null;
-    if (generationFor(key) !== sample.generation) return;
+
+  /**
+   * Return this provider's usage snapshot, calling `fetcher` at most once per
+   * {@link FRESH_TTL_MS} whether the previous call succeeded or failed. A
+   * failed read falls back to the last good snapshot (within
+   * {@link STALE_TTL_MS}); never throws.
+   */
+  const cachedUsage = async (
+    slug: string,
+    fetcher: () => Promise<TProviderUsageSnapshot>,
+    options: TCachedUsageOptions = {},
+  ): Promise<TProviderUsageSnapshot> => {
+    const key = usageCacheKey(slug, options.accountHash);
+    const generation = generationFor(key);
     const now = Date.now();
-    if (now - sample.lastSampleAtMs < REQUEST_SAMPLE_MIN_INTERVAL_MS) return;
-    sample.lastSampleAtMs = now;
-    // Request-driven sampling intentionally asks for a fresh boundary while
-    // preserving the prior good snapshot as a fallback if the read is limited.
-    void cachedUsage(slug, sample.fetcher, { force: true, accountHash });
-  }, REQUEST_SAMPLE_DEBOUNCE_MS);
-  requestSamples.set(key, sample);
-};
+    const entry = cache.get(key);
+    if (entry !== undefined) {
+      // Once-per-reset: last SUCCESS must predate a passed deadline. A later
+      // success that still reports the same expired reset must not bypass
+      // again. Failures keep the ordinary success/failure backoff (never a
+      // 20s special window while good is still servable).
+      const resetExpiredBypass =
+        options.resetExpired === true &&
+        options.force !== true &&
+        entry.failure === null &&
+        entry.good !== null &&
+        hasUnobservedPassedReset(entry.good.snapshot, entry.good.atMs, now);
 
-/**
- * Sample usage IMMEDIATELY on a quota exhaustion signal — no debounce, no
- * per-request min-interval floor. Unlike {@link sampleUsageAfterRequest} (the
- * success path, which coalesces a burst and waits), an exhausted account emits
- * no successful request, so nothing else would ever re-sample it; we want the
- * rejected snapshot in the cache NOW so the quota gate can route on it for the
- * rest of the window. Still safe: `cachedUsage`'s in-flight single-flight check
- * precedes its force/freshness logic, so a concurrent herd of exhaustion signals
- * collapses to ONE vendor read. Fire-and-forget; never throws.
- */
-export const sampleUsageOnExhaustion = (
-  slug: string,
-  fetcher: () => Promise<TProviderUsageSnapshot>,
-  accountHash?: string,
-): void => {
-  // Fire-and-forget: attach a rejection handler so a `persist()` failure that
-  // escapes `cachedUsage`'s internal catch can never surface as an unhandled
-  // rejection — the documented "never throws" contract holds.
-  void cachedUsage(slug, fetcher, { force: true, accountHash }).catch(() => {});
-};
+      // Fresh, usable snapshot — serve it with no upstream call, unless a
+      // newly-passed reset has not yet been observed after that deadline.
+      if (
+        !options.force &&
+        !resetExpiredBypass &&
+        entry.good !== null &&
+        now - entry.good.atMs < FRESH_TTL_MS &&
+        isUsable(entry.good.snapshot)
+      ) {
+        return withRefreshFailure(
+          entry.good.snapshot,
+          entry.failure,
+          entry.lastAttemptAtMs,
+        );
+      }
+      // A refresh is already running — share it (refresh-token rotation and
+      // rate limits make parallel fetches actively harmful).
+      if (entry.inFlight !== null) return entry.inFlight;
+      // We hit the vendor recently (success or fail). Back off rather than
+      // hammer. The window depends on what we can serve: with a usable GOOD
+      // snapshot, hold it for the full FRESH_TTL (the figures are fine for
+      // minutes). With ONLY a failure (or nothing fetched yet), back off for
+      // just FAILURE_RETRY_MS so an on-demand refresh recovers fast once a
+      // transient failure clears — without this, a single failed read (e.g.
+      // a momentarily-expired token) stuck the UI on the error for 5 min even
+      // after the token refreshed. The long back-off applies only while
+      // there's a SERVABLE good snapshot to show meanwhile (within
+      // STALE_TTL_MS — what `servable()` actually returns); once the good has
+      // aged out, fall back to the short retry so a failed refresh recovers
+      // sooner instead of sitting on FRESH_TTL.
+      const goodServable =
+        entry.good !== null && now - entry.good.atMs < STALE_TTL_MS;
+      const backoff = goodServable ? FRESH_TTL_MS : FAILURE_RETRY_MS;
+      if (
+        !options.force &&
+        !resetExpiredBypass &&
+        now - entry.lastAttemptAtMs < backoff
+      ) {
+        return servable(entry, now);
+      }
+    }
 
-/** Test-only cleanup for the module-global request sampler. */
-export const clearRequestUsageSamples = (): void => {
-  for (const sample of requestSamples.values()) {
+    const run = withoutCommandReplayContext(
+      async (): Promise<TProviderUsageSnapshot> => {
+        let next: TProviderUsageSnapshot;
+        try {
+          next = await fetcher();
+        } catch {
+          next = {
+            kind: "unavailable",
+            reason: GENERIC_FETCH_FAILURE,
+          };
+        }
+        const at = Date.now();
+        if (generationFor(key) !== generation) {
+          return { kind: "unavailable", reason: "usage cache invalidated" };
+        }
+        const prev = cache.get(key);
+        const observed = isUsable(next)
+          ? stampLiveFetch(stripRefreshFailure(next), at)
+          : next;
+        const updated: TUsageEntry = {
+          good: isUsable(observed)
+            ? { snapshot: observed, atMs: at }
+            : (prev?.good ?? null),
+          failure: isUsable(next) ? null : next,
+          lastAttemptAtMs: at,
+          inFlight: null,
+        };
+        cache.set(key, updated);
+        // Persist the good snapshot (+ attempt time) so a daemon restart can
+        // serve it instead of going dark when the post-restart read is
+        // rate-limited.
+        persist();
+        return servable(updated, at);
+      },
+    );
+
+    // Publish the in-flight promise so a concurrent caller shares this fetch,
+    // preserving the prior good/failure/attempt state for the fallback path.
+    cache.set(key, {
+      good: entry?.good ?? null,
+      failure: entry?.failure ?? null,
+      lastAttemptAtMs: entry?.lastAttemptAtMs ?? 0,
+      inFlight: run,
+    });
+    return run;
+  };
+
+  /**
+   * PASSIVE read — return this provider's cached usage snapshot WITHOUT ever
+   * calling the vendor. `computeStatus()` uses this on every background
+   * status push so a push never triggers a usage read (usage is on-demand
+   * only — see the module header). Returns the last good figures stamped
+   * `stale` once past the freshness window, including past
+   * {@link STALE_TTL_MS} (the card stays filled and honestly aged). With no
+   * good snapshot, returns the last failure, else `null` when nothing has
+   * ever been fetched for this provider (the daemon booted but no one has
+   * demanded usage yet) — the card then simply shows no quota until a
+   * `refresh` populates it.
+   */
+  const peekUsage = (
+    slug: string,
+    accountHash?: string,
+  ): TProviderUsageSnapshot | null => {
+    const entry = cache.get(usageCacheKey(slug, accountHash));
+    if (entry === undefined) return null;
+    const now = Date.now();
+    if (entry.good !== null) {
+      return withRefreshFailure(
+        stampStale(entry.good.snapshot, entry.good.atMs, now),
+        entry.failure,
+        entry.lastAttemptAtMs,
+      );
+    }
+    return entry.failure;
+  };
+
+  /**
+   * PASSIVE routing read — retains a long-aged quota snapshot only when an
+   * exhausted window or extra pool has a known reset still ahead. Unlike the
+   * UI display reader, that skip is still the immediate routing decision
+   * regardless of snapshot age. An external upgrade is the exception:
+   * capacity may return before the cached reset, so a demand revalidate is
+   * scheduled when the snapshot is exhausted past {@link FRESH_TTL_MS} even
+   * with a future reset. All other cases preserve {@link peekUsage}'s exact
+   * display-TTL behavior.
+   *
+   * A passed reset proves the cached quota is expired and uses the
+   * `resetExpired` cache mode (success freshness bypassed once per reset). An
+   * exhausted snapshot past {@link FRESH_TTL_MS} is demand-driven recovery
+   * even when the reset is still in the future (an external upgrade may have
+   * restored capacity) and still uses ordinary freshness. When a fetcher is
+   * supplied, schedule one detached, provider/account-scoped cache read;
+   * `cachedUsage` supplies in-flight sharing, generation fencing, and failure
+   * retry. The reader returns the cached routing decision immediately and
+   * never lets a vendor failure throw.
+   */
+  const peekUsageForQuotaGate = (
+    slug: string,
+    accountHash?: string,
+    revalidate?: () => Promise<TProviderUsageSnapshot>,
+  ): TProviderUsageSnapshot | null => {
+    const entry = cache.get(usageCacheKey(slug, accountHash));
+    if (entry === undefined) return null;
+    const now = Date.now();
+    if (entry.good === null) return entry.failure;
+
+    const snapshot = entry.good.snapshot;
+    if (snapshot.kind !== "quota") return peekUsage(slug, accountHash);
+    const pools = quotaPools(snapshot);
+    const resetPassed = pools.some(
+      (pool) => pool.reset_at_ms !== null && now >= pool.reset_at_ms,
+    );
+    const exhaustedPastFresh =
+      now - entry.good.atMs >= FRESH_TTL_MS &&
+      pools.some((pool) => pool.percent_used >= 100);
+    if (revalidate !== undefined && (resetPassed || exhaustedPastFresh)) {
+      // Detached: TTL / backoff / single-flight stay inside cachedUsage.
+      // Catch so a vendor rejection cannot surface as an unhandled promise.
+      void cachedUsage(slug, revalidate, {
+        accountHash,
+        resetExpired: resetPassed,
+      }).catch(() => {});
+    }
+    if (now - entry.good.atMs < STALE_TTL_MS) {
+      return withRefreshFailure(
+        stampStale(snapshot, entry.good.atMs, now),
+        entry.failure,
+        entry.lastAttemptAtMs,
+      );
+    }
+    if (
+      pools.some(
+        (pool) =>
+          pool.percent_used >= 100 &&
+          pool.reset_at_ms !== null &&
+          now < pool.reset_at_ms,
+      )
+    ) {
+      return withRefreshFailure(
+        stampStale(snapshot, entry.good.atMs, now),
+        entry.failure,
+        entry.lastAttemptAtMs,
+      );
+    }
+    return entry.failure;
+  };
+
+  /**
+   * Schedule one detached usage refresh after a burst of successful real
+   * user requests. This never awaits, retries, or changes the request
+   * itself; it only improves the next passive calibration boundary when the
+   * vendor allows it.
+   */
+  const sampleUsageAfterRequest = (
+    slug: string,
+    fetcher: () => Promise<TProviderUsageSnapshot>,
+    accountHash?: string,
+  ): void => {
+    const key = usageCacheKey(slug, accountHash);
+    const current = requestSamples.get(key);
+    const sample: TRequestSample = current ?? {
+      fetcher,
+      timer: null,
+      lastSampleAtMs: 0,
+      generation: generationFor(key),
+    };
+    sample.fetcher = fetcher;
     if (sample.timer !== null) clearTimeout(sample.timer);
-  }
-  requestSamples.clear();
+    sample.timer = setTimeout(() => {
+      sample.timer = null;
+      if (generationFor(key) !== sample.generation) return;
+      const now = Date.now();
+      if (now - sample.lastSampleAtMs < REQUEST_SAMPLE_MIN_INTERVAL_MS) return;
+      sample.lastSampleAtMs = now;
+      // Request-driven sampling intentionally asks for a fresh boundary
+      // while preserving the prior good snapshot as a fallback if the read
+      // is limited.
+      void cachedUsage(slug, sample.fetcher, { force: true, accountHash });
+    }, REQUEST_SAMPLE_DEBOUNCE_MS);
+    requestSamples.set(key, sample);
+  };
+
+  /**
+   * Sample usage IMMEDIATELY on a quota exhaustion signal — no debounce, no
+   * per-request min-interval floor. Unlike {@link sampleUsageAfterRequest}
+   * (the success path, which coalesces a burst and waits), an exhausted
+   * account emits no successful request, so nothing else would ever
+   * re-sample it; we want the rejected snapshot in the cache NOW so the
+   * quota gate can route on it for the rest of the window. Still safe:
+   * `cachedUsage`'s in-flight single-flight check precedes its
+   * force/freshness logic, so a concurrent herd of exhaustion signals
+   * collapses to ONE vendor read. Fire-and-forget; never throws.
+   */
+  const sampleUsageOnExhaustion = (
+    slug: string,
+    fetcher: () => Promise<TProviderUsageSnapshot>,
+    accountHash?: string,
+  ): void => {
+    // Fire-and-forget: attach a rejection handler so a `persist()` failure
+    // that escapes `cachedUsage`'s internal catch can never surface as an
+    // unhandled rejection — the documented "never throws" contract holds.
+    void cachedUsage(slug, fetcher, { force: true, accountHash }).catch(
+      () => {},
+    );
+  };
+
+  /** Cancel pending request-usage sample timers and drop in-memory samples. */
+  const clearRequestUsageSamples = (): void => {
+    for (const sample of requestSamples.values()) {
+      if (sample.timer !== null) clearTimeout(sample.timer);
+    }
+    requestSamples.clear();
+  };
+
+  /**
+   * Drop the in-memory usage cache and request samples. Does not delete the
+   * on-disk snapshot file — the next instance created with the same
+   * `persistenceDir` hydrates from it.
+   */
+  const clearUsageCache = (): void => {
+    cache.clear();
+    generations.clear();
+    clearRequestUsageSamples();
+  };
+
+  /**
+   * Drop the cached snapshot so the next {@link cachedUsage} call re-hits
+   * the vendor LIVE — the deliberate override behind a manual refresh. With
+   * no `slug`, clears every provider (the dashboard's whole-daemon refresh).
+   *
+   * Safe mid-refresh: an in-flight fetch repopulates the entry when it
+   * settles, so a concurrent caller still gets a result; this only
+   * guarantees the NEXT read bypasses the back-off / freshness window.
+   */
+  const invalidateUsage = (slug?: string, accountHash?: string): void => {
+    const matches =
+      slug === undefined
+        ? (): boolean => true
+        : accountHash === undefined
+          ? (key: string): boolean => matchesSlug(key, slug)
+          : (key: string): boolean => key === usageCacheKey(slug, accountHash);
+    const keys = new Set([
+      ...cache.keys(),
+      ...generations.keys(),
+      ...requestSamples.keys(),
+    ]);
+    for (const key of keys) {
+      if (!matches(key)) continue;
+      bumpGeneration(key);
+      cache.delete(key);
+    }
+    clearRequestSamples(matches);
+    persist();
+  };
+
+  return {
+    cachedUsage,
+    peekUsage,
+    peekUsageForQuotaGate,
+    sampleUsageAfterRequest,
+    sampleUsageOnExhaustion,
+    clearRequestUsageSamples,
+    clearUsageCache,
+    invalidateUsage,
+  };
 };
 
-/** Test-only volatile cache reset; intentionally preserves persisted snapshots. */
-export const resetUsageCacheForTest = (): void => {
-  cache.clear();
-  generations.clear();
-  clearRequestUsageSamples();
-};
+// Module-wide default instance — in-memory until the daemon installs a
+// persistence-backed one at boot. Tests construct their own instance via
+// {@link createUsageCache} instead of mutating this one, for isolation.
+let active: TUsageCache = createUsageCache();
 
 /**
- * Drop the cached snapshot so the next {@link cachedUsage} call re-hits the
- * vendor LIVE — the deliberate override behind a manual refresh. With no
- * `slug`, clears every provider (the dashboard's whole-daemon refresh).
- *
- * Safe mid-refresh: an in-flight fetch repopulates the entry when it settles,
- * so a concurrent caller still gets a result; this only guarantees the NEXT
- * read bypasses the back-off / freshness window.
+ * Install the production usage-cache instance. Call ONCE at daemon boot with
+ * a disk-backed instance ({@link createUsageCache}`({ persistenceDir })`) so
+ * the last good snapshot survives a restart.
  */
-export const invalidateUsage = (slug?: string, accountHash?: string): void => {
-  const matches =
-    slug === undefined
-      ? (): boolean => true
-      : accountHash === undefined
-        ? (key: string): boolean => matchesSlug(key, slug)
-        : (key: string): boolean => key === usageCacheKey(slug, accountHash);
-  const keys = new Set([
-    ...cache.keys(),
-    ...generations.keys(),
-    ...requestSamples.keys(),
-  ]);
-  for (const key of keys) {
-    if (!matches(key)) continue;
-    bumpGeneration(key);
-    cache.delete(key);
-  }
-  clearRequestSamples(matches);
-  persist();
+export const installUsageCache = (instance: TUsageCache): void => {
+  active = instance;
 };
+
+/** Opt this process into disk-backed usage persistence at the given dir. */
+export const enableUsagePersistence = (dir: string): void => {
+  installUsageCache(createUsageCache({ persistenceDir: dir }));
+};
+
+export const cachedUsage: TUsageCache["cachedUsage"] = (...args) =>
+  active.cachedUsage(...args);
+export const peekUsage: TUsageCache["peekUsage"] = (...args) =>
+  active.peekUsage(...args);
+export const peekUsageForQuotaGate: TUsageCache["peekUsageForQuotaGate"] = (
+  ...args
+) => active.peekUsageForQuotaGate(...args);
+export const sampleUsageAfterRequest: TUsageCache["sampleUsageAfterRequest"] = (
+  ...args
+) => active.sampleUsageAfterRequest(...args);
+export const sampleUsageOnExhaustion: TUsageCache["sampleUsageOnExhaustion"] = (
+  ...args
+) => active.sampleUsageOnExhaustion(...args);
+export const clearRequestUsageSamples: TUsageCache["clearRequestUsageSamples"] =
+  () => active.clearRequestUsageSamples();
+export const clearUsageCache: TUsageCache["clearUsageCache"] = () =>
+  active.clearUsageCache();
+export const invalidateUsage: TUsageCache["invalidateUsage"] = (...args) =>
+  active.invalidateUsage(...args);

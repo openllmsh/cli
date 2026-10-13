@@ -36,6 +36,7 @@ import { InvalidApiKeyError, NoApiKeyError } from "../cloud-client";
 import { getReportingPolicy, getReportingPolicyRevision } from "../config";
 import { daemonApiKeyId, daemonEnv, hasApiKey } from "../env";
 import { DAEMON_VERSION } from "../version";
+import type { TAtomicWrite } from "./files";
 import {
   atomicWriteText,
   doctorStatePath,
@@ -49,7 +50,7 @@ import {
   diagnosticsRotatedPath,
   recordDoctorObservation,
 } from "./record";
-import { resetDoctorRepeatForTests } from "./repeat";
+import { clearDoctorRepeatBuckets } from "./repeat";
 
 type TFileId = {
   readonly dev: number;
@@ -106,6 +107,7 @@ let clearTimer: (t: ReturnType<typeof setTimeout>) => void = clearTimeout;
 let uploadImpl: ((report: TDoctorReport) => Promise<TUploadResult>) | null =
   null;
 let notifyObservation: ((event: TDoctorReportEvent) => void) | null = null;
+let atomicWriteImpl: TAtomicWrite | undefined;
 let lastAttemptAtMs: number | null = null;
 let lastAttemptOutcome: TDoctorUploadAttemptOutcome | null = null;
 let lastAttemptOriginScope: string | null = null;
@@ -115,41 +117,73 @@ let lastAttemptGeneration: string | null = null;
 const cursorPath = (): string => doctorStatePath("doctor-report.cursor.json");
 const pendingPath = (): string => doctorStatePath("doctor-report.pending.json");
 
-export const setDoctorEngineClockForTests = (
-  fn: (() => number) | null,
-): void => {
-  clock = fn ?? ((): number => Date.now());
+export type TDoctorEngineScheduler = {
+  readonly schedule: (
+    fn: () => void,
+    ms: number,
+  ) => ReturnType<typeof setTimeout>;
+  readonly clear: (t: ReturnType<typeof setTimeout>) => void;
 };
 
-export const setDoctorSchedulerForTests = (
-  impl: {
-    readonly schedule: (
-      fn: () => void,
-      ms: number,
-    ) => ReturnType<typeof setTimeout>;
-    readonly clear: (t: ReturnType<typeof setTimeout>) => void;
-  } | null,
-): void => {
-  if (impl === null) {
-    scheduleTimer = setTimeout;
-    clearTimer = clearTimeout;
-    return;
+export type TDoctorEngineDeps = {
+  /** `null` restores `Date.now`; omit to leave the current clock untouched. */
+  readonly clock?: (() => number) | null;
+  /** `null` restores `setTimeout`/`clearTimeout`; omit to leave untouched. */
+  readonly scheduler?: TDoctorEngineScheduler | null;
+  readonly upload?: ((report: TDoctorReport) => Promise<TUploadResult>) | null;
+  readonly observationListener?: ((event: TDoctorReportEvent) => void) | null;
+  /** Durable write for cursor/pending state; defaults to the real fs path. */
+  readonly atomicWrite?: TAtomicWrite | null;
+};
+
+const defaultDoctorEngineDeps = (): {
+  readonly clock: () => number;
+  readonly scheduler: TDoctorEngineScheduler;
+} => ({
+  clock: (): number => Date.now(),
+  scheduler: { schedule: setTimeout, clear: clearTimeout },
+});
+
+/**
+ * Reset every doctor-engine dep to its production default (real clock,
+ * real timers, no upload transport, no observation listener, real fs write).
+ */
+const resetDoctorEngineDeps = (): void => {
+  const fallback = defaultDoctorEngineDeps();
+  clock = fallback.clock;
+  scheduleTimer = fallback.scheduler.schedule;
+  clearTimer = fallback.scheduler.clear;
+  uploadImpl = null;
+  notifyObservation = null;
+  atomicWriteImpl = undefined;
+};
+
+/**
+ * Merge a doctor-engine host configuration (clock, timer, upload transport,
+ * live observation fan-out, durable write) onto the module's mutable deps.
+ * Only the provided keys change — an omitted key keeps its current value, so
+ * a test that first installs a fake scheduler and later installs just a fake
+ * upload does not lose the scheduler. Pass `null` for a field to explicitly
+ * restore ITS production default without touching the others; call with no
+ * args (or see {@link resetDoctorEngineDeps} via {@link clearDoctorEngine})
+ * for a full reset.
+ */
+export const installDoctorEngineDeps = (deps: TDoctorEngineDeps = {}): void => {
+  const fallback = defaultDoctorEngineDeps();
+  if (deps.clock !== undefined) clock = deps.clock ?? fallback.clock;
+  if (deps.scheduler !== undefined) {
+    scheduleTimer = deps.scheduler?.schedule ?? fallback.scheduler.schedule;
+    clearTimer = deps.scheduler?.clear ?? fallback.scheduler.clear;
   }
-  scheduleTimer = impl.schedule;
-  clearTimer = impl.clear;
+  if (deps.upload !== undefined) uploadImpl = deps.upload;
+  if (deps.observationListener !== undefined) {
+    notifyObservation = deps.observationListener;
+  }
+  if (deps.atomicWrite !== undefined)
+    atomicWriteImpl = deps.atomicWrite ?? undefined;
 };
 
-export const setDoctorUploadForTests = (
-  fn: ((report: TDoctorReport) => Promise<TUploadResult>) | null,
-): void => {
-  uploadImpl = fn;
-};
-
-export const setDoctorObservationListenerForTests = (
-  fn: ((event: TDoctorReportEvent) => void) | null,
-): void => {
-  notifyObservation = fn;
-};
+resetDoctorEngineDeps();
 
 export const reportingScope = (): {
   originScope: string;
@@ -191,7 +225,9 @@ const readCursor = (): TCursor | null => {
 };
 
 const writeCursor = (cursor: TCursor): boolean =>
-  atomicWriteText(cursorPath(), `${JSON.stringify(cursor)}\n`);
+  atomicWriteText(cursorPath(), `${JSON.stringify(cursor)}\n`, {
+    ...(atomicWriteImpl !== undefined ? { write: atomicWriteImpl } : {}),
+  });
 
 const readPending = (): TPending | null => {
   const raw = readTextFile(pendingPath());
@@ -207,7 +243,9 @@ const readPending = (): TPending | null => {
 const writePending = (pending: TPending): boolean => {
   const body = `${JSON.stringify(pending)}\n`;
   if (Buffer.byteLength(body) > DOCTOR_REPORT_MAX_SPOOL_BYTES) return false;
-  return atomicWriteText(pendingPath(), body);
+  return atomicWriteText(pendingPath(), body, {
+    ...(atomicWriteImpl !== undefined ? { write: atomicWriteImpl } : {}),
+  });
 };
 
 export const purgePendingReports = (): void => {
@@ -1091,7 +1129,13 @@ export const onBootstrapReportingPolicy = (
   if (hasEligibleUnconsumedWork()) scheduleDoctorFlush();
 };
 
-export const resetDoctorEngineForTests = (): void => {
+/**
+ * Drop in-process doctor-engine state: timers, upload bookkeeping, and the
+ * repeat-window dedup buckets. Production uses this on credential change
+ * (a new identity must not inherit another account's suppression state or
+ * in-flight upload bookkeeping) and tests use it for isolation.
+ */
+export const clearDoctorEngine = (): void => {
   if (debounceTimer !== null) clearTimer(debounceTimer);
   if (backoffTimer !== null) clearTimer(backoffTimer);
   debounceTimer = null;
@@ -1102,12 +1146,8 @@ export const resetDoctorEngineForTests = (): void => {
   cloudSuspended = false;
   revokedAtPolicyRevision = null;
   transitionRevision = 0;
-  scheduleTimer = setTimeout;
-  clearTimer = clearTimeout;
   chain = Promise.resolve();
-  uploadImpl = null;
-  notifyObservation = null;
-  clock = (): number => Date.now();
   clearAttemptMemory();
-  resetDoctorRepeatForTests();
+  clearDoctorRepeatBuckets();
+  resetDoctorEngineDeps();
 };

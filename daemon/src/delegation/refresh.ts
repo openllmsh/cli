@@ -27,7 +27,7 @@ import {
   refreshSpawnBag,
   usageNativeRefreshAllowed,
 } from "../op-context";
-import type { TNativeAuthProducer } from "./spawn";
+import type { TNativeAuthProducer, TTimeoutScheduler } from "./spawn";
 import { DEADLINE_CHECK_CAP_MS, spawnLogin, spawnLoginPty } from "./spawn";
 import type { TLoginResult, TStoreRead } from "./util";
 
@@ -74,12 +74,15 @@ export const REFRESH_STORE_OBSERVE_CAP_MS = DEADLINE_CHECK_CAP_MS;
 
 const observeRefreshStore = async (
   read: () => Promise<TRefreshCredentialSnapshot | null>,
+  capMs: number = DEADLINE_CHECK_CAP_MS,
 ): Promise<TRefreshCredentialSnapshot | null> => {
   try {
     return await Promise.race([
       read(),
       new Promise<TRefreshCredentialSnapshot | null>((resolve) => {
-        setTimeout(() => resolve(null), REFRESH_STORE_OBSERVE_CAP_MS);
+        // Shares the hang cap with `awaitOnDeadline` so hermetic hung-readStore
+        // tests can pass a shorter cap via spawnRefresh opts.
+        setTimeout(() => resolve(null), capMs);
       }),
     ]);
   } catch {
@@ -540,15 +543,20 @@ export const spawnRefresh = async (
     readonly persistenceGraceMs?: number;
     readonly producer?: TNativeAuthProducer;
     readonly operationId?: string;
+    /** Forwarded to spawnLogin / onDeadline hang races. */
+    readonly scheduleTimeout?: TTimeoutScheduler;
+    /** Hang cap for store observe + onDeadline. Defaults to DEADLINE_CHECK_CAP_MS. */
+    readonly deadlineCheckCapMs?: number;
   },
 ): Promise<void> => {
   const run = opts?.pty === true ? spawnLoginPty : spawnLogin;
   const timeoutMs = opts?.timeoutMs ?? REFRESH_SPAWN_TIMEOUT_MS;
   const graceMs = opts?.persistenceGraceMs ?? REFRESH_PERSISTENCE_GRACE_MS;
+  const observeCapMs = opts?.deadlineCheckCapMs ?? DEADLINE_CHECK_CAP_MS;
   const prior =
     opts?.readStore === undefined
       ? null
-      : await observeRefreshStore(opts.readStore);
+      : await observeRefreshStore(opts.readStore, observeCapMs);
   const result = await run([...argv], env, {
     timeoutMs,
     probe: opts?.probe,
@@ -556,13 +564,19 @@ export const spawnRefresh = async (
     ...(opts?.operationId !== undefined
       ? { operationId: opts.operationId }
       : {}),
+    ...(opts?.scheduleTimeout !== undefined
+      ? { scheduleTimeout: opts.scheduleTimeout }
+      : {}),
+    ...(opts?.deadlineCheckCapMs !== undefined
+      ? { deadlineCheckCapMs: opts.deadlineCheckCapMs }
+      : {}),
     ...(opts?.readStore !== undefined
       ? {
           persistenceGraceMs: graceMs,
           onDeadline: async (): Promise<boolean> => {
             const readStore = opts.readStore;
             if (readStore === undefined) return false;
-            const next = await observeRefreshStore(readStore);
+            const next = await observeRefreshStore(readStore, observeCapMs);
             return isVerifiedRefreshPersist(prior, next);
           },
         }
@@ -573,7 +587,7 @@ export const spawnRefresh = async (
   // makeRefresher cannot record a killed rotation as a clean success — unless
   // a fenced store re-read proves a newer complete credential.
   if (result.abandoned && opts?.readStore !== undefined) {
-    const next = await observeRefreshStore(opts.readStore);
+    const next = await observeRefreshStore(opts.readStore, observeCapMs);
     if (isVerifiedRefreshPersist(prior, next)) {
       const bagOk = refreshSpawnBag.getStore();
       if (bagOk !== undefined) {

@@ -4,6 +4,7 @@ import {
   DOCTOR_LOCAL_OPT_OUT_FILENAME,
   parseDoctorLocalPreference,
 } from "@openllmsh/protocol";
+import type { TAtomicWrite } from "./files";
 import {
   atomicWriteText,
   doctorStatePath,
@@ -24,8 +25,20 @@ export const readLocalPreference = (): TDoctorLocalPreference | null => {
   }
 };
 
-export const writeLocalPreference = (pref: TDoctorLocalPreference): boolean =>
-  atomicWriteText(doctorLocalPreferencePath(), `${JSON.stringify(pref)}\n`);
+export type TWriteLocalPreferenceOptions = {
+  /** Override the durable write (fs-failure fixtures); defaults to the real fs path. */
+  readonly atomicWrite?: TAtomicWrite;
+};
+
+export const writeLocalPreference = (
+  pref: TDoctorLocalPreference,
+  options?: TWriteLocalPreferenceOptions,
+): boolean =>
+  atomicWriteText(doctorLocalPreferencePath(), `${JSON.stringify(pref)}\n`, {
+    ...(options?.atomicWrite !== undefined
+      ? { write: options.atomicWrite }
+      : {}),
+  });
 
 export const clearLocalPreference = (): void => {
   removeFile(doctorLocalPreferencePath());

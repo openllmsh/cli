@@ -18,15 +18,72 @@ const DRAIN_POLL_MS = 250;
 // every later update attempt.
 const DOWNLOAD_TIMEOUT_MS = 60_000;
 
+export type TDrainTiming = {
+  readonly maxMs: number;
+  readonly pollMs: number;
+};
+
+export type TWaitUntilIdleOpts = {
+  readonly timing?: Partial<TDrainTiming>;
+  readonly now?: () => number;
+  readonly sleep?: (ms: number) => Promise<void>;
+};
+
+const defaultDrainTiming = (): TDrainTiming => ({
+  maxMs: DRAIN_MAX_MS,
+  pollMs: DRAIN_POLL_MS,
+});
+
+const defaultNow = (): number => Date.now();
+const defaultSleep = (ms: number): Promise<void> =>
+  new Promise((resolve) => setTimeout(resolve, ms));
+
 // ─── In-flight `/v1` request tracking (for wait-until-idle restart) ──────────
-let inFlightCount = 0;
+
+export type TInFlightTracker = {
+  readonly beginRequest: () => void;
+  readonly endRequest: () => void;
+  readonly inFlight: () => number;
+  readonly waitUntilIdle: (opts?: TWaitUntilIdleOpts) => Promise<boolean>;
+};
+
+/** Build an in-flight counter + idle wait. Production uses the singleton below. */
+export const createInFlightTracker = (): TInFlightTracker => {
+  let inFlightCount = 0;
+  const beginRequest = (): void => {
+    inFlightCount += 1;
+  };
+  const endRequest = (): void => {
+    if (inFlightCount > 0) inFlightCount -= 1;
+  };
+  const inFlight = (): number => inFlightCount;
+  const waitUntilIdle = async (
+    opts: TWaitUntilIdleOpts = {},
+  ): Promise<boolean> => {
+    const defaults = defaultDrainTiming();
+    const timing: TDrainTiming = {
+      maxMs: opts.timing?.maxMs ?? defaults.maxMs,
+      pollMs: opts.timing?.pollMs ?? defaults.pollMs,
+    };
+    const now = opts.now ?? defaultNow;
+    const sleep = opts.sleep ?? defaultSleep;
+    const deadline = now() + timing.maxMs;
+    while (inFlight() > 0 && now() < deadline) {
+      await sleep(timing.pollMs);
+    }
+    return inFlight() === 0;
+  };
+  return { beginRequest, endRequest, inFlight, waitUntilIdle };
+};
+
+const defaultInFlightTracker = createInFlightTracker();
 export const beginRequest = (): void => {
-  inFlightCount += 1;
+  defaultInFlightTracker.beginRequest();
 };
 export const endRequest = (): void => {
-  if (inFlightCount > 0) inFlightCount -= 1;
+  defaultInFlightTracker.endRequest();
 };
-export const inFlight = (): number => inFlightCount;
+export const inFlight = (): number => defaultInFlightTracker.inFlight();
 
 /**
  * Wrap a streaming response body so `onDone` fires EXACTLY once when the stream
@@ -124,18 +181,14 @@ export const fetchDigest = async (url: string): Promise<string> => {
 
 /** Wait (bounded) for in-flight `/v1` requests to finish. Returns whether the
  *  daemon actually went idle — a caller restarting the daemon defers on false
- *  rather than cut a request off. */
-export const waitUntilIdle = async (): Promise<boolean> => {
-  const deadline = Date.now() + DRAIN_MAX_MS;
-  while (inFlight() > 0 && Date.now() < deadline) {
-    await new Promise((r) => setTimeout(r, DRAIN_POLL_MS));
-  }
-  return inFlight() === 0;
-};
+ *  rather than cut a request off. Delegates to the process-wide tracker. */
+export const waitUntilIdle = (
+  opts: TWaitUntilIdleOpts = {},
+): Promise<boolean> => defaultInFlightTracker.waitUntilIdle(opts);
 
 /**
  * Exclusive apply lease for a daemon swap. `alreadyHeld` is the explicit
- * `update` command (scheduler apply lane). Passive/catch-up acquire here or
+ * `update` command (scheduler apply lane). Tick/catch-up acquire here or
  * skip when auth/apply already owns the process. Successful `process.exit`
  * never reaches the release.
  */

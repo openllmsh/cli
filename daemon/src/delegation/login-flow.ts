@@ -191,6 +191,11 @@ export const loginSlot = (provider: string): TLoginSlot => {
       startedAtMs = 0;
     },
     cancelAll: () => {
+      // Cancelling an idle provider is a no-op. Marking it cancelled anyway
+      // would outlive this call: the NEXT start() would see the flag, kill its
+      // own not-yet-spawned process and register no canceler, leaving that
+      // login uncancellable until it timed out.
+      if (!inFlight) return 0;
       cancelled = true;
       const n = cancelers.size;
       for (const fn of cancelers) {
@@ -280,7 +285,8 @@ export const providerAuthOperationActive = (slug: string): boolean =>
 export const providerLogoutActive = (slug: string): boolean =>
   logoutOps.has(slug);
 
-export const resetProviderAuthOperationsForTests = (): void => {
+/** Drop in-flight login/logout ownership (identity change / process reset). */
+export const clearProviderAuthOperations = (): void => {
   logoutOps.clear();
   applyHeld = false;
   for (const slot of slots.values()) {
@@ -774,8 +780,33 @@ export const guard = async (
 /** Verification watchdog after child exit — matches Claude `AUTH_STATUS_TIMEOUT_MS`. */
 export const LOGIN_VERIFY_WATCHDOG_MS = 4_000;
 
+/** Production grace after prompt EOF while waiting for a self-exiting child. */
+const DEFAULT_EXIT_GRACE_MS = 2_000;
+/** Production safety cap while draining the non-prompt stream after settle/exit. */
+const DEFAULT_STREAM_DRAIN_MS = 200;
+
 const sleep = (ms: number): Promise<void> =>
   new Promise((resolve) => setTimeout(resolve, ms));
+
+/**
+ * Await `done` (typically a stream drain), racing a safety cap so a hung pipe
+ * cannot stall forever. Real EOF wins as soon as it settles; the timeout only
+ * fires when `done` is still pending.
+ */
+const awaitWithSafetyCap = async (
+  done: Promise<void>,
+  timeoutMs: number,
+): Promise<"ended" | "timed_out"> => {
+  let settled = false;
+  const ended = done.then(() => {
+    settled = true;
+    return "ended" as const;
+  });
+  const timedOut = sleep(timeoutMs).then(() =>
+    settled ? ("ended" as const) : ("timed_out" as const),
+  );
+  return Promise.race([ended, timedOut]);
+};
 
 /** Typed login observation: never collapse timeout/throw to signed-out. */
 export type TLoginVerify = {
@@ -861,8 +892,14 @@ export const finishInBackground = async (opts: {
    * background generics unless a provider opts in.
    */
   readonly backgroundCrashDetail?: TStreamLoginCrashDetail;
+  /**
+   * The flow this background exit belongs to. A caller that started the flow
+   * passes it so a late exit can never adopt a NEWER flow that took the slot
+   * after this one was cancelled. Defaults to the slot's current flow.
+   */
+  readonly flow?: TLoginFlowCtx | null;
 }): Promise<void> => {
-  const flow = opts.slot.flow();
+  const flow = opts.flow !== undefined ? opts.flow : opts.slot.flow();
   const flowId = flow?.flowId;
   const stillThisFlow = (): boolean =>
     flowId !== undefined && opts.slot.flow()?.flowId === flowId;
@@ -1070,6 +1107,16 @@ export type TStreamLoginOpts<T> = {
    * the shared generic public message — do NOT reuse pre-prompt crashDetail.
    */
   readonly backgroundCrashDetail?: TStreamLoginCrashDetail;
+  /**
+   * Safety cap (ms) while draining the non-prompt stream after settle/exit.
+   * Default {@link DEFAULT_STREAM_DRAIN_MS}. Real EOF still wins immediately.
+   */
+  readonly streamDrainMs?: number;
+  /**
+   * Safety cap (ms) after prompt EOF while waiting for a self-exiting child.
+   * Default {@link DEFAULT_EXIT_GRACE_MS}.
+   */
+  readonly exitGraceMs?: number;
 };
 
 /**
@@ -1303,9 +1350,13 @@ export const spawnStreamLogin = async <T>(
     })();
   });
 
+  const drainMs = opts.streamDrainMs ?? DEFAULT_STREAM_DRAIN_MS;
+  const graceMs = opts.exitGraceMs ?? DEFAULT_EXIT_GRACE_MS;
+
   if (found === null) {
     // Pull any remaining other-fd bytes so inner EPERM isn't dropped.
-    await Promise.race([otherDone, sleep(200)]);
+    // Prefer real EOF; the cap only guards a hung pipe.
+    await awaitWithSafetyCap(otherDone, drainMs);
     const captured = combined();
     const cancelled = opts.slot.wasCancelled();
     if (!timedOut) {
@@ -1313,10 +1364,9 @@ export const spawnStreamLogin = async <T>(
       // already exited, so this resolves at once. Guard the rare case where the
       // fd closed but the process lingers: race a short grace and kill on
       // expiry, so a wedged child can't hang the connect indefinitely.
-      const EXIT_GRACE_MS = 2_000;
       const exitCode = await Promise.race([
         child.exited,
-        sleep(EXIT_GRACE_MS).then(() => null),
+        sleep(graceMs).then(() => null),
       ]);
       if (exitCode === null) {
         try {
@@ -1375,14 +1425,21 @@ export const spawnStreamLogin = async <T>(
   void child.exited.then(async (exitCode) => {
     clearTimeout(reaper);
     const finalExit = reaped ? 0 : exitCode;
+    // Capture consumers (onBackgroundExit diagnostics, and the crash-detail
+    // mapper for a real crash) need the complete non-prompt stream, so wait
+    // for its EOF (capped for a hung pipe). Flows with no such consumer keep
+    // releasing the slot at child exit: a killed child's grandchild can hold
+    // the pipe open, and the cap would only delay the next login.
+    const needsCapture =
+      opts.onBackgroundExit !== undefined ||
+      (opts.backgroundCrashDetail !== undefined && !reaped && finalExit !== 0);
+    if (needsCapture) await awaitWithSafetyCap(otherDone, drainMs);
+    const captured = combined();
     if (opts.onBackgroundExit !== undefined) {
-      // Only opted-in diagnostics wait for the non-prompt stream remainder.
-      // Existing providers keep their original completion timing.
-      await Promise.race([otherDone, sleep(200)]);
       try {
         opts.onBackgroundExit({
           exitCode: finalExit,
-          captured: combined(),
+          captured,
           reaped,
         });
       } catch {
@@ -1392,12 +1449,13 @@ export const spawnStreamLogin = async <T>(
     return finishInBackground({
       provider: opts.provider,
       slot: opts.slot,
+      flow,
       verify: opts.verify,
       waitStoreHint: opts.waitStoreHint,
       verifyWatchdogMs: opts.verifyWatchdogMs,
       onConnected: opts.onConnected,
       exitCode: finalExit,
-      captured: combined(),
+      captured,
       backgroundCrashDetail: opts.backgroundCrashDetail,
     });
   });

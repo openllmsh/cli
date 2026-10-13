@@ -22,7 +22,19 @@ type TObservation = {
   readonly entries: ReadonlyArray<TProviderModelEntry>;
 };
 
-let observation: TObservation | null = null;
+export type TAntigravityModelObservationStore = {
+  readonly record: (
+    geminiHome: string,
+    rows: ReadonlyArray<{
+      readonly value: string;
+      readonly name: string | null;
+    }>,
+  ) => void;
+  readonly read: (
+    geminiHome: string,
+  ) => ReadonlyArray<TProviderModelEntry> | null;
+  readonly clear: () => void;
+};
 
 /** Stable identity of the current sign-in, or null when not signed in. */
 export const antigravitySignInIdentity = (
@@ -41,32 +53,64 @@ export const antigravitySignInIdentity = (
   }
 };
 
+export const createAntigravityModelObservationStore =
+  (): TAntigravityModelObservationStore => {
+    let observation: TObservation | null = null;
+
+    const clear = (): void => {
+      observation = null;
+    };
+
+    const record = (
+      geminiHome: string,
+      rows: ReadonlyArray<{
+        readonly value: string;
+        readonly name: string | null;
+      }>,
+    ): void => {
+      const identity = antigravitySignInIdentity(geminiHome);
+      if (identity === null) {
+        clear();
+        return;
+      }
+      if (rows.length === 0) return;
+      observation = {
+        identity,
+        entries: rows.map((row) => ({
+          provider_model_id: row.value,
+          ...(row.name !== null ? { display_name: row.name } : {}),
+        })),
+      };
+    };
+
+    const read = (
+      geminiHome: string,
+    ): ReadonlyArray<TProviderModelEntry> | null => {
+      if (observation === null) return null;
+      const identity = antigravitySignInIdentity(geminiHome);
+      if (identity === null) {
+        clear();
+        return null;
+      }
+      return identity === observation.identity ? observation.entries : null;
+    };
+
+    return { record, read, clear };
+  };
+
+const defaultStore = createAntigravityModelObservationStore();
+
 /** Record the selector rows from a `session/new` result. */
 export const recordAntigravityModels = (
   geminiHome: string,
   rows: ReadonlyArray<{ readonly value: string; readonly name: string | null }>,
 ): void => {
-  const identity = antigravitySignInIdentity(geminiHome);
-  if (identity === null || rows.length === 0) return;
-  observation = {
-    identity,
-    entries: rows.map((row) => ({
-      provider_model_id: row.value,
-      ...(row.name !== null ? { display_name: row.name } : {}),
-    })),
-  };
+  defaultStore.record(geminiHome, rows);
 };
 
 /** The observed list for the CURRENT sign-in, or null (never observed). */
 export const readAntigravityModels = (
   geminiHome: string,
 ): ReadonlyArray<TProviderModelEntry> | null => {
-  if (observation === null) return null;
-  const identity = antigravitySignInIdentity(geminiHome);
-  return identity === observation.identity ? observation.entries : null;
-};
-
-/** Test-only reset. */
-export const resetAntigravityModelsForTest = (): void => {
-  observation = null;
+  return defaultStore.read(geminiHome);
 };

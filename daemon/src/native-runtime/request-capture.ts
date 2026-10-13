@@ -707,9 +707,15 @@ export const createRequestCaptureSession = (
         ) {
           throw new RequestCaptureError("not_captured", ended.reason);
         }
+        // Caller abort also aborts the budget signal (`createDeadlineBudget`
+        // parents onto `opts.signal`), so `budget.expired()` is true for BOTH
+        // a real deadline and a caller cancel. Prefer the caller's abort so we
+        // never report "capture timed out after Nms" when the user cancelled.
+        const callerAborted = opts.signal?.aborted === true;
+        const timedOut = !callerAborted && budget.expired();
         throw new RequestCaptureError(
-          budget.expired() ? "timeout" : "aborted",
-          budget.expired()
+          timedOut ? "timeout" : "aborted",
+          timedOut
             ? `capture timed out after ${captureTimeoutMs}ms`
             : "capture aborted before envelope",
         );

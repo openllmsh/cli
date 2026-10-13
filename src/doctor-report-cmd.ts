@@ -180,23 +180,17 @@ const localKillSwitchOn = (): boolean => {
     : pref.enabled === false;
 };
 
-let fsyncImpl: typeof fsyncSync = fsyncSync;
-
-/** Test-only: inject fsync to cover durable-write failure vs unsupported dir fsync. */
-export const setDoctorLocalFsyncForTests = (
-  impl: typeof fsyncSync | null,
-): void => {
-  fsyncImpl = impl ?? fsyncSync;
-};
-
 /** Directory fsync is not portable; only treat these as unsupported, never EPERM/ENOENT. */
 const UNSUPPORTED_DIR_FSYNC = new Set(["EISDIR", "EINVAL", "ENOTSUP"]);
 
-const fsyncParentDir = (dir: string): void => {
+const fsyncParentDir = (
+  dir: string,
+  fsync: typeof fsyncSync = fsyncSync,
+): void => {
   let fd: number | null = null;
   try {
     fd = openSync(dir, "r");
-    fsyncImpl(fd);
+    fsync(fd);
   } catch (error) {
     const code = (error as NodeJS.ErrnoException).code;
     if (code !== undefined && UNSUPPORTED_DIR_FSYNC.has(code)) return;
@@ -206,7 +200,15 @@ const fsyncParentDir = (dir: string): void => {
   }
 };
 
-const writeLocalPreferenceFile = (record: TLocalPreference): boolean => {
+/**
+ * Write the local preference file durably. `fsync` is injectable so tests can
+ * exercise fsync-failure paths without touching the real syscall; production
+ * callers never pass it and get the real `fsyncSync`.
+ */
+const writeLocalPreferenceFile = (
+  record: TLocalPreference,
+  fsync: typeof fsyncSync = fsyncSync,
+): boolean => {
   const target = localPreferencePath();
   mkdirSync(dirname(target), { recursive: true, mode: 0o700 });
   const temp = join(
@@ -220,13 +222,13 @@ const writeLocalPreferenceFile = (record: TLocalPreference): boolean => {
     });
     const fd = openSync(temp, "r");
     try {
-      fsyncImpl(fd);
+      fsync(fd);
     } finally {
       closeSync(fd);
     }
     renameSync(temp, target);
     chmodSync(target, 0o600);
-    fsyncParentDir(dirname(target));
+    fsyncParentDir(dirname(target), fsync);
     return true;
   } catch {
     try {
@@ -372,7 +374,9 @@ const runReport = async (args: readonly string[]): Promise<number> => {
   return 0;
 };
 
-const stickyDisable = (): TLocalPreference | null => {
+const stickyDisable = (
+  fsync: typeof fsyncSync = fsyncSync,
+): TLocalPreference | null => {
   const prior = readLocalPreferenceFile();
   const origin = originScopeOf();
   const originChanged =
@@ -385,12 +389,14 @@ const stickyDisable = (): TLocalPreference | null => {
     origin_scope: origin ?? asOpaqueId(prior?.origin_scope),
     generation: originChanged ? undefined : asOpaqueId(prior?.generation),
   };
-  if (!writeLocalPreferenceFile(record)) return null;
+  if (!writeLocalPreferenceFile(record, fsync)) return null;
   return record;
 };
 
-const runOptOut = async (): Promise<number> => {
-  const record = stickyDisable();
+const runOptOut = async (
+  fsync: typeof fsyncSync = fsyncSync,
+): Promise<number> => {
+  const record = stickyDisable(fsync);
   if (record === null) {
     process.stderr.write("Could not write the local disable file.\n");
     return 1;
@@ -402,7 +408,12 @@ const runOptOut = async (): Promise<number> => {
   }
   const accountOk = await patchCloudPreference(false);
   if (accountOk) {
-    if (!writeLocalPreferenceFile({ ...record, pending_account_sync: false })) {
+    if (
+      !writeLocalPreferenceFile(
+        { ...record, pending_account_sync: false },
+        fsync,
+      )
+    ) {
       process.stdout.write(`${OFFLINE_ACCOUNT_PENDING}\n`);
       return 0;
     }
@@ -423,7 +434,10 @@ Uploads still require acceptance of the current analytics-cookie policy.
 Re-enabling starts from the current tail and does not replay prior history.
 Pass --yes to confirm.`;
 
-const runOptIn = async (args: readonly string[]): Promise<number> => {
+const runOptIn = async (
+  args: readonly string[],
+  fsync: typeof fsyncSync = fsyncSync,
+): Promise<number> => {
   if (!args.includes("--yes")) {
     process.stderr.write(`${OPT_IN_DISCLOSURE}\n`);
     return 2;
@@ -434,14 +448,19 @@ const runOptIn = async (args: readonly string[]): Promise<number> => {
     origin_scope: originScopeOf(),
     account_scope: accountScopeOf(),
   };
-  if (!writeLocalPreferenceFile(record)) {
+  if (!writeLocalPreferenceFile(record, fsync)) {
     process.stderr.write("Could not write the local preference file.\n");
     return 1;
   }
   await localFetch("POST", C.localPreferencePath, record);
   const accountOk = await patchCloudPreference(true);
   if (accountOk) {
-    if (!writeLocalPreferenceFile({ ...record, pending_account_sync: false })) {
+    if (
+      !writeLocalPreferenceFile(
+        { ...record, pending_account_sync: false },
+        fsync,
+      )
+    ) {
       process.stdout.write(
         "Enabled on this machine; account-wide update pending. Uploads still require acceptance of the current analytics-cookie policy and a fresh account policy.\n",
       );
@@ -531,9 +550,17 @@ const runStatus = async (): Promise<number> => {
   return 0;
 };
 
+export type TRunDoctorReportCommandOptions = {
+  /** Durability fsync for local preference writes. Tests inject a fake to
+   *  exercise fsync-failure paths; production never passes this. */
+  readonly fsync?: typeof fsyncSync;
+};
+
 export const runDoctorReportCommand = async (
   args: readonly string[],
+  options?: TRunDoctorReportCommandOptions,
 ): Promise<number> => {
+  const fsync = options?.fsync ?? fsyncSync;
   const verb = args[0];
   if (verb === undefined || !isDoctorReportingVerb(verb)) {
     process.stderr.write(DOCTOR_REPORT_USAGE);
@@ -550,8 +577,8 @@ export const runDoctorReportCommand = async (
       process.stderr.write(DOCTOR_REPORT_USAGE);
       return 2;
     }
-    return runOptOut();
+    return runOptOut(fsync);
   }
-  if (verb === "opt-in") return runOptIn(rest);
+  if (verb === "opt-in") return runOptIn(rest, fsync);
   return runStatus();
 };

@@ -43,8 +43,8 @@ export const takeRepeatWindow = (
   return n;
 };
 
-export const resetDoctorRepeatForTests = (): void => {
+export const clearDoctorRepeatBuckets = (): void => {
   buckets.clear();
 };
 
-export const doctorRepeatKeyCountForTests = (): number => buckets.size;
+export const doctorRepeatKeyCount = (): number => buckets.size;

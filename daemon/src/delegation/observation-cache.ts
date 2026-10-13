@@ -55,11 +55,21 @@ export const fileStoreIdentity = (path: string): TFileStoreIdentity => {
 };
 
 /**
+ * Poll cadence for {@link waitFileStoreHint}. `fs.watch` is the fast path;
+ * under load (esp. Darwin FSEvents + atomic rename) events can be coalesced
+ * or dropped, so identity is also re-checked on this interval until abort.
+ * Not a wall-clock deadline — the caller's verify watchdog owns that.
+ */
+const FILE_STORE_HINT_POLL_MS = 100;
+
+/**
  * File-store lifecycle hint for login verify. Resolves when inode/mtime/size
  * identity changes (create, write, or atomic replace). A watcher event is never
- * truth — callers must re-read and validate identity. Cancellation closes
- * watchers. Platforms that cannot watch (or Darwin keychain stores) should omit
- * this and keep the finite verify watchdog.
+ * truth — callers must re-read and validate identity. Watchers are the fast
+ * path; a short poll re-checks identity so a missed rename/create still
+ * resolves. Cancellation closes watchers and the poll. Platforms that cannot
+ * watch (or Darwin keychain stores) should omit this and keep the finite
+ * verify watchdog.
  */
 export const waitFileStoreHint = (
   path: string,
@@ -74,10 +84,12 @@ export const waitFileStoreHint = (
     const name = basename(path);
     const watchers: FSWatcher[] = [];
     let settled = false;
+    let poll: ReturnType<typeof setInterval> | undefined;
     const finish = (): void => {
       if (settled) return;
       settled = true;
       signal.removeEventListener("abort", onAbort);
+      if (poll !== undefined) clearInterval(poll);
       for (const watcher of watchers) {
         try {
           watcher.close();
@@ -108,15 +120,18 @@ export const waitFileStoreHint = (
           check();
         });
         watcher.on("error", () => {
-          // Keep waiting for abort/watchdog; do not treat watch errors as persist.
+          // Keep waiting for abort/poll/watchdog; do not treat watch errors as persist.
         });
         watchers.push(watcher);
       } catch {
-        // Unsupported target — watchdog in the caller is the fallback.
+        // Unsupported target — poll + caller watchdog cover the miss.
       }
     };
     attach(dirname(path), name);
     attach(path);
+    // Reliability net: missed watch events (atomic replace under load) still
+    // surface via identity re-check. Cleared in finish().
+    poll = setInterval(check, FILE_STORE_HINT_POLL_MS);
     check();
   });
 
@@ -153,7 +168,8 @@ export const bumpStoreIdentityEpoch = (slug: string): void => {
   storeIdentityEpochs.set(slug, storeIdentityEpoch(slug) + 1);
 };
 
-export const resetStoreIdentityEpochsForTests = (): void => {
+/** Clear per-slug store identity epochs (identity change / process reset). */
+export const clearStoreIdentityEpochs = (): void => {
   storeIdentityEpochs.clear();
 };
 

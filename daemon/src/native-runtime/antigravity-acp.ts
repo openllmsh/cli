@@ -710,6 +710,8 @@ export type TAntigravityNativeParams = {
   readonly turnTimeoutMs?: number;
   readonly authTimeoutMs?: number;
   readonly warmIdleTtlMs?: number;
+  /** Cancel→SIGTERM grace override for {@link AcpClient.cancelAndDispose}. */
+  readonly cancelDisposeGraceMs?: number;
 };
 
 /**
@@ -788,8 +790,8 @@ export const runAntigravityNative = async (
   let sessionId: string | null = null;
   let ended = false;
   let cleaned = false;
-  let idleTimer: ReturnType<typeof setInterval> | undefined;
-  let lastActivityAt = Date.now();
+  let idleTimer: ReturnType<typeof setTimeout> | undefined;
+  let rearmIdleWatchdog: (() => void) | null = null;
   let mcp: TCursorMcpServer | null = null;
   const ourMcpCalls = createMcpCallTracker();
   const allowedMcpTools: ReadonlySet<string> = new Set(
@@ -801,7 +803,8 @@ export const runAntigravityNative = async (
   const cleanup = (settle: TSettle): void => {
     if (cleaned) return;
     cleaned = true;
-    clearInterval(idleTimer);
+    clearTimeout(idleTimer);
+    rearmIdleWatchdog = null;
     params.signal.removeEventListener("abort", abort);
     // Settle the process FIRST: `mcp.stop()` force-closes connections and,
     // called from inside the MCP tool handler, can run other JS before it
@@ -855,7 +858,7 @@ export const runAntigravityNative = async (
       | { readonly sessionId?: unknown; readonly update?: unknown }
       | undefined;
     if (sessionId === null || notif?.sessionId !== sessionId) return;
-    lastActivityAt = Date.now();
+    rearmIdleWatchdog?.();
     if (isNativeToolUpdate(notif.update) && !ourMcpCalls.admits(notif.update)) {
       // The agent tried one of ITS tools — never let it run.
       failStream(new Error("antigravity attempted a native tool"));
@@ -898,6 +901,9 @@ export const runAntigravityNative = async (
           probe: false,
           exactEnv: true,
           cwd: procCwd,
+          ...(params.cancelDisposeGraceMs !== undefined
+            ? { cancelDisposeGraceMs: params.cancelDisposeGraceMs }
+            : {}),
         },
       );
     } catch (error) {
@@ -1045,7 +1051,6 @@ export const runAntigravityNative = async (
   if (owned === null || sessionId === null) {
     return failSetup(new DOMException("client aborted", "AbortError"));
   }
-  lastActivityAt = Date.now();
   void owned.client
     .request(
       "session/prompt",
@@ -1080,12 +1085,17 @@ export const runAntigravityNative = async (
       failStream(new Error(failure.reason), failure.cooldown);
     });
 
+  // Deadline timer (reset on activity) — short test `idleMs` fires exactly
+  // instead of waiting out a 1s poll cadence. Production 60s budget unchanged.
   const idleBudget = params.idleMs ?? ANTIGRAVITY_IDLE_TIMEOUT_MS;
-  idleTimer = setInterval(() => {
-    if (Date.now() - lastActivityAt > idleBudget) {
+  const armIdleWatchdog = (): void => {
+    clearTimeout(idleTimer);
+    idleTimer = setTimeout(() => {
       failStream(new Error("antigravity turn idle timeout"));
-    }
-  }, 1_000);
+    }, idleBudget);
+  };
+  rearmIdleWatchdog = armIdleWatchdog;
+  armIdleWatchdog();
 
   const nextItem = async (): Promise<TQueueItem> => {
     for (;;) {

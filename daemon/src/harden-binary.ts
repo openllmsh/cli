@@ -9,11 +9,21 @@
  * signature is missing/invalid, so a future real (notarized) signature is
  * preserved. No-op off darwin. Best-effort: never throws into the caller.
  */
-import { execFileSync } from "node:child_process";
+import { execFileSync as defaultExecFileSync } from "node:child_process";
 import { logWarn } from "./logger";
 
-export const hardenMacBinary = (path: string): void => {
-  if (process.platform !== "darwin") return;
+export type THardenMacBinaryDeps = {
+  readonly platform?: NodeJS.Platform;
+  readonly execFileSync?: typeof defaultExecFileSync;
+};
+
+export const hardenMacBinary = (
+  path: string,
+  deps: THardenMacBinaryDeps = {},
+): void => {
+  const platform = deps.platform ?? process.platform;
+  const execFileSync = deps.execFileSync ?? defaultExecFileSync;
+  if (platform !== "darwin") return;
   try {
     execFileSync("xattr", ["-dr", "com.apple.quarantine", path], {
       stdio: "ignore",

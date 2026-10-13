@@ -415,12 +415,12 @@ export const createAcpTurnState = (params: {
 
 /** Which ACP agent an {@link AcpClient} spawns. Defaults to `cursor-agent acp`. */
 export type TAcpClientSpawn = {
-  /** Full argv (binary first). */
-  readonly argv: ReadonlyArray<string>;
+  /** Full argv (binary first). Defaults to `[bin, "acp"]`. */
+  readonly argv?: ReadonlyArray<string>;
   /** Human label used in error messages (`cursor-agent acp`, …). */
-  readonly label: string;
+  readonly label?: string;
   /** Run unconfined (`sandboxSpawnArgs` probe flag). */
-  readonly probe: boolean;
+  readonly probe?: boolean;
   /** Non-JSON stdout lines (agents may print sign-in prompts there). */
   readonly onNonJsonLine?: (line: string) => void;
   /** When set, `env` is the FINAL child env (already scrubbed) — it is not
@@ -428,6 +428,9 @@ export type TAcpClientSpawn = {
   readonly exactEnv?: boolean;
   /** Child cwd override (default `spawnCwd(env)`). */
   readonly cwd?: string;
+  /** Cancel→SIGTERM grace override (default
+   *  {@link DEFAULT_ACP_CANCEL_DISPOSE_GRACE_MS}). Tests pass a short value. */
+  readonly cancelDisposeGraceMs?: number;
 };
 
 /**
@@ -436,6 +439,10 @@ export type TAcpClientSpawn = {
  * caller kills it via `dispose()` when the turn (or the model-list probe)
  * completes. No dependency — ~80 lines beats shipping a protocol package.
  */
+/** Default cancel→SIGTERM grace. Long enough for a real child to drain the
+ *  just-flushed `session/cancel` off stdin before kill. */
+const DEFAULT_ACP_CANCEL_DISPOSE_GRACE_MS = 1_000;
+
 export class AcpClient {
   private nextId: TJsonRpcId = 1;
   private readonly pending = new Map<
@@ -453,6 +460,7 @@ export class AcpClient {
   private cancelTimer: ReturnType<typeof setTimeout> | undefined;
   private readonly label: string;
   private readonly onNonJsonLine: ((line: string) => void) | undefined;
+  private readonly cancelDisposeGraceMs: number;
   readonly rpcCounts: Record<string, number> = {};
 
   constructor(
@@ -473,6 +481,10 @@ export class AcpClient {
     const argv = spawn?.argv ?? [bin, "acp"];
     this.label = spawn?.label ?? "cursor-agent acp";
     this.onNonJsonLine = spawn?.onNonJsonLine;
+    this.cancelDisposeGraceMs = Math.max(
+      0,
+      spawn?.cancelDisposeGraceMs ?? DEFAULT_ACP_CANCEL_DISPOSE_GRACE_MS,
+    );
     this.proc = Bun.spawn(
       sandboxSpawnArgs(argv, {
         probe: spawn?.probe ?? unwrapKeychainSpawn("cursor"),
@@ -560,7 +572,10 @@ export class AcpClient {
   cancelAndDispose(sessionId: string): void {
     if (this.disposed || this.cancelTimer !== undefined) return;
     this.notify("session/cancel", { sessionId });
-    this.cancelTimer = setTimeout(() => this.dispose(), 1_000);
+    this.cancelTimer = setTimeout(
+      () => this.dispose(),
+      this.cancelDisposeGraceMs,
+    );
   }
 
   /** True while the child runs and nothing has disposed it — a reusable
@@ -872,6 +887,8 @@ export type TCursorNativeParams = {
    * builder before companions are collected or dispose the bridge.
    */
   readonly serveOwnedCapture?: boolean;
+  /** Cancel→SIGTERM grace override for {@link AcpClient.cancelAndDispose}. */
+  readonly cancelDisposeGraceMs?: number;
 };
 
 /**
@@ -927,8 +944,9 @@ export const runCursorNative = async (
   let sessionId: string | null = null;
   let ended = false;
   let cleaned = false;
-  let idleTimer: ReturnType<typeof setInterval> | undefined;
-  let lastActivityAt = Date.now();
+  let idleTimer: ReturnType<typeof setTimeout> | undefined;
+  /** Set once the idle deadline helper is armed; notification handler rearms it. */
+  let rearmIdleWatchdog: (() => void) | null = null;
   const endWith = (
     chunks: ReadonlyArray<TChatCompletionChunk>,
     outcome: "completed" | "tool_handoff",
@@ -978,12 +996,15 @@ export const runCursorNative = async (
           | { readonly sessionId?: unknown; readonly update?: unknown }
           | undefined;
         if (sessionId === null || notif?.sessionId !== sessionId) return;
-        lastActivityAt = Date.now();
+        rearmIdleWatchdog?.();
         const chunk = turn.handleUpdate(notif.update);
         if (turn.sawOutput()) mark("first_output_ms");
         if (chunk !== null) push(chunk);
       },
       handleCursorServerRequest,
+      params.cancelDisposeGraceMs !== undefined
+        ? { cancelDisposeGraceMs: params.cancelDisposeGraceMs }
+        : undefined,
     );
   } catch (error) {
     return setupDecline(error, params.signal);
@@ -1060,7 +1081,8 @@ export const runCursorNative = async (
   const cleanup = (cancel: boolean): void => {
     if (cleaned) return;
     cleaned = true;
-    clearInterval(idleTimer);
+    clearTimeout(idleTimer);
+    rearmIdleWatchdog = null;
     params.signal.removeEventListener("abort", abort);
     if (cancel && sessionId !== null) client.cancelAndDispose(sessionId);
     else client.dispose();
@@ -1186,7 +1208,6 @@ export const runCursorNative = async (
 
   mark("model_ready_ms");
   // ── The prompt turn ────────────────────────────────────────────────
-  lastActivityAt = Date.now();
   mark("prompt_submitted_ms");
   const turnBudget = params.turnTimeoutMs ?? CURSOR_TURN_TIMEOUT_MS;
   const promptDone = client
@@ -1226,13 +1247,18 @@ export const runCursorNative = async (
   void promptDone;
 
   // Idle-chunk watchdog: no session/update (or terminal) within the idle
-  // budget kills the turn. The hard turn budget rides the RPC timeout above.
+  // budget kills the turn. Armed as a single deadline timer (reset on every
+  // activity) so a short test `idleMs` fires exactly, not on a 1s poll cadence.
+  // The hard turn budget rides the RPC timeout above.
   const idleBudget = params.idleMs ?? CURSOR_IDLE_TIMEOUT_MS;
-  idleTimer = setInterval(() => {
-    if (Date.now() - lastActivityAt > idleBudget) {
+  const armIdleWatchdog = (): void => {
+    clearTimeout(idleTimer);
+    idleTimer = setTimeout(() => {
       failStream(new Error("cursor native turn idle timeout"));
-    }
-  }, 1_000);
+    }, idleBudget);
+  };
+  rearmIdleWatchdog = armIdleWatchdog;
+  armIdleWatchdog();
 
   const nextItem = async (): Promise<TQueueItem> => {
     for (;;) {
@@ -2663,6 +2689,9 @@ export type TCursorNativeImageInput = {
   readonly idleMs?: number;
   readonly turnTimeoutMs?: number;
   readonly rpcTimeoutMs?: number;
+  /** Cancel→SIGTERM grace override (default
+   *  {@link DEFAULT_ACP_CANCEL_DISPOSE_GRACE_MS}). */
+  readonly cancelDisposeGraceMs?: number;
 };
 
 export type TCursorNativeImageUsageEstimate = {
@@ -2820,19 +2849,21 @@ export const runCursorNativeImage = async (
       noteUpdate(notif.update);
     },
     handleCursorImageServerRequest,
+    params.cancelDisposeGraceMs !== undefined
+      ? { cancelDisposeGraceMs: params.cancelDisposeGraceMs }
+      : undefined,
   );
 
-  /** Cancel-then-kill grace: `dispose()` sends SIGTERM immediately, which can
-   *  race the child's own event loop reading the just-flushed `session/cancel`
-   *  notification off stdin and kill it before it ever sees the message —
-   *  silently defeating the one cancellation this path relies on. A short
-   *  delay before the kill does not change the bounded-decline guarantees
-   *  (callers never await it), it only gives the notify a real chance to
-   *  land. */
-  const CANCEL_GRACE_MS = 75;
+  /** Cancel-then-kill grace: same policy as {@link AcpClient.cancelAndDispose}. */
   const cancelAndDispose = (): void => {
     if (sessionId !== null) client.notify("session/cancel", { sessionId });
-    setTimeout(() => client.dispose(), CANCEL_GRACE_MS);
+    setTimeout(
+      () => client.dispose(),
+      Math.max(
+        0,
+        params.cancelDisposeGraceMs ?? DEFAULT_ACP_CANCEL_DISPOSE_GRACE_MS,
+      ),
+    );
   };
 
   const abort = (): void => {

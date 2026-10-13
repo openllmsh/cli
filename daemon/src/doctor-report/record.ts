@@ -38,85 +38,120 @@ export type TDoctorObservationInput = {
   readonly observed_at_ms?: number;
 } & TDoctorOutcomeLedger;
 
-let nowMs = (): number => Date.now();
-let approxBytes = 0;
-let seededFor: string | null = null;
+export type TDoctorRecordDeps = {
+  readonly nowMs?: () => number;
+};
 
-export const setDoctorRecordClockForTests = (
-  fn: (() => number) | null,
-): void => {
-  nowMs = fn ?? ((): number => Date.now());
+export type TDoctorRecord = {
+  readonly diagnosticsLogPath: () => string;
+  readonly diagnosticsRotatedPath: () => string;
+  readonly clearDoctorRecordBuffer: () => void;
+  readonly recordDoctorObservation: (
+    input: TDoctorObservationInput,
+  ) => TDoctorReportEvent | null;
+};
+
+export const createDoctorRecord = (
+  deps: TDoctorRecordDeps = {},
+): TDoctorRecord => {
+  const nowMs = deps.nowMs ?? ((): number => Date.now());
+  let approxBytes = 0;
+  let seededFor: string | null = null;
+
+  const diagnosticsLogPath = (): string =>
+    doctorStatePath(DIAGNOSTICS_BASENAME);
+  const diagnosticsRotatedPath = (): string => `${diagnosticsLogPath()}.1`;
+
+  const rotateIfBig = (file: string): void => {
+    if (seededFor !== file) {
+      try {
+        approxBytes = statSync(file).size;
+      } catch {
+        approxBytes = 0;
+      }
+      seededFor = file;
+    }
+    if (approxBytes <= MAX_DIAGNOSTICS_BYTES) return;
+    try {
+      renameSync(file, `${file}.1`);
+    } catch {
+      // keep appending
+    }
+    approxBytes = 0;
+  };
+
+  const clearDoctorRecordBuffer = (): void => {
+    approxBytes = 0;
+    seededFor = null;
+  };
+
+  const recordDoctorObservation = (
+    input: TDoctorObservationInput,
+  ): TDoctorReportEvent | null => {
+    const platform = doctorPlatform();
+    const architecture = doctorArchitecture();
+    if (platform === null || architecture === null) return null;
+    const event: TDoctorReportEvent = {
+      event_id: randomUUID(),
+      observed_at_ms: input.observed_at_ms ?? nowMs(),
+      daemon_version: DAEMON_VERSION,
+      platform,
+      architecture,
+      severity: input.severity,
+      scope: sanitizeDoctorScope(input.scope),
+      message: diagnosticMessageText(input.message, input.severity),
+      ...(opaqueDoctorCorrelation(input.correlation_id) !== undefined
+        ? { correlation_id: input.correlation_id }
+        : {}),
+      ...(isReplaySessionId(input.replay_session_id)
+        ? { replay_session_id: input.replay_session_id }
+        : {}),
+      ...(input.timings !== undefined
+        ? { timings: projectDoctorTimings(input.timings) }
+        : {}),
+      ...projectDoctorOutcomeLedger({ ...input, ...doctorOsStamp() }),
+    };
+    let parsed: TDoctorReportEvent;
+    try {
+      parsed = parseDoctorReportEvent(event);
+    } catch {
+      return null;
+    }
+    const line = `${JSON.stringify(parsed)}\n`;
+    try {
+      mkdirSync(doctorStateDir(), { recursive: true, mode: 0o700 });
+      const file = diagnosticsLogPath();
+      rotateIfBig(file);
+      appendFileSync(file, line, { mode: 0o600 });
+      approxBytes += Buffer.byteLength(line);
+    } catch {
+      return parsed;
+    }
+    return parsed;
+  };
+
+  return {
+    diagnosticsLogPath,
+    diagnosticsRotatedPath,
+    clearDoctorRecordBuffer,
+    recordDoctorObservation,
+  };
+};
+
+let activeDoctorRecord = createDoctorRecord();
+
+export const installDoctorRecord = (record: TDoctorRecord): void => {
+  activeDoctorRecord = record;
 };
 
 export const diagnosticsLogPath = (): string =>
-  doctorStatePath(DIAGNOSTICS_BASENAME);
-
-export const diagnosticsRotatedPath = (): string => `${diagnosticsLogPath()}.1`;
-
-const rotateIfBig = (file: string): void => {
-  if (seededFor !== file) {
-    try {
-      approxBytes = statSync(file).size;
-    } catch {
-      approxBytes = 0;
-    }
-    seededFor = file;
-  }
-  if (approxBytes <= MAX_DIAGNOSTICS_BYTES) return;
-  try {
-    renameSync(file, `${file}.1`);
-  } catch {
-    // keep appending
-  }
-  approxBytes = 0;
+  activeDoctorRecord.diagnosticsLogPath();
+export const diagnosticsRotatedPath = (): string =>
+  activeDoctorRecord.diagnosticsRotatedPath();
+export const clearDoctorRecordBuffer = (): void => {
+  activeDoctorRecord.clearDoctorRecordBuffer();
 };
-
-export const resetDoctorRecordForTests = (): void => {
-  approxBytes = 0;
-  seededFor = null;
-};
-
 export const recordDoctorObservation = (
   input: TDoctorObservationInput,
-): TDoctorReportEvent | null => {
-  const platform = doctorPlatform();
-  const architecture = doctorArchitecture();
-  if (platform === null || architecture === null) return null;
-  const event: TDoctorReportEvent = {
-    event_id: randomUUID(),
-    observed_at_ms: input.observed_at_ms ?? nowMs(),
-    daemon_version: DAEMON_VERSION,
-    platform,
-    architecture,
-    severity: input.severity,
-    scope: sanitizeDoctorScope(input.scope),
-    message: diagnosticMessageText(input.message, input.severity),
-    ...(opaqueDoctorCorrelation(input.correlation_id) !== undefined
-      ? { correlation_id: input.correlation_id }
-      : {}),
-    ...(isReplaySessionId(input.replay_session_id)
-      ? { replay_session_id: input.replay_session_id }
-      : {}),
-    ...(input.timings !== undefined
-      ? { timings: projectDoctorTimings(input.timings) }
-      : {}),
-    ...projectDoctorOutcomeLedger({ ...input, ...doctorOsStamp() }),
-  };
-  let parsed: TDoctorReportEvent;
-  try {
-    parsed = parseDoctorReportEvent(event);
-  } catch {
-    return null;
-  }
-  const line = `${JSON.stringify(parsed)}\n`;
-  try {
-    mkdirSync(doctorStateDir(), { recursive: true, mode: 0o700 });
-    const file = diagnosticsLogPath();
-    rotateIfBig(file);
-    appendFileSync(file, line, { mode: 0o600 });
-    approxBytes += Buffer.byteLength(line);
-  } catch {
-    return parsed;
-  }
-  return parsed;
-};
+): TDoctorReportEvent | null =>
+  activeDoctorRecord.recordDoctorObservation(input);

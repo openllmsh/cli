@@ -46,25 +46,13 @@ export type TTunnelToPeerArgs = {
   anthropicBeta?: string | null;
   userAgent?: string | null;
   signal: AbortSignal;
+  /** Optional transport override (harness / instrumented host). */
+  transport?: TTunnelToPeer;
 };
 
-type TTunnelToPeerImpl = (args: TTunnelToPeerArgs) => Promise<Response>;
+export type TTunnelToPeer = (args: TTunnelToPeerArgs) => Promise<Response>;
 
-/**
- * Test-only override for {@link tunnelToPeer}. Production always uses the
- * real RTC→mux ladder; walker fleet-tunnel unit tests inject a stub so they
- * can assert peer selection without standing up a second daemon.
- */
-let tunnelToPeerOverride: TTunnelToPeerImpl | null = null;
-
-/** Install (or clear with `null`) a test-only tunnelToPeer implementation. */
-export const setTunnelToPeerForTest = (
-  impl: TTunnelToPeerImpl | null,
-): void => {
-  tunnelToPeerOverride = impl;
-};
-
-const tunnelToPeerLive: TTunnelToPeerImpl = async (args) => {
+const tunnelToPeerLive: TTunnelToPeer = async (args) => {
   const headers = {
     content_type: "application/json" as const,
     accept: args.accept,
@@ -139,11 +127,11 @@ const tunnelToPeerLive: TTunnelToPeerImpl = async (args) => {
 /**
  * Tunnel one request to the fleet peer serving `keyId`. Resolves once the
  * response head arrives (body streams thereafter); rejects when neither RTC
- * nor mux is available, or when the stream fails.
+ * nor mux is available, or when the stream fails. Pass `transport` to override
+ * the live RTC→mux ladder for a single call (tests only — production always
+ * uses the live ladder).
  */
-export const tunnelToPeer = async (
-  args: TTunnelToPeerArgs,
-): Promise<Response> =>
-  tunnelToPeerOverride !== null
-    ? tunnelToPeerOverride(args)
-    : tunnelToPeerLive(args);
+export const tunnelToPeer: TTunnelToPeer = (args) => {
+  const transport = args.transport ?? tunnelToPeerLive;
+  return transport({ ...args, transport: undefined });
+};

@@ -28,14 +28,14 @@ import {
 } from "./deadline-budget";
 import { DELEGATES, getDelegate, isSubscriptionSlug } from "./delegation";
 import {
+  clearProviderAuthOperations,
   loginOwnershipPending,
   loginSlot,
   providerAuthOperationActive,
   providerLogoutActive,
-  resetProviderAuthOperationsForTests,
 } from "./delegation/login-flow";
 import {
-  resetStoreIdentityEpochsForTests,
+  clearStoreIdentityEpochs,
   storeIdentityEpoch,
 } from "./delegation/observation-cache";
 import { DEFAULT_CAPTURE_TIMEOUT_MS } from "./delegation/spawn";
@@ -134,7 +134,7 @@ const providerAuthOwned = (slug: string): boolean =>
   isSubscriptionSlug(slug) && providerAuthOperationActive(slug);
 
 export const lateProviderAdmitBlocked = (slug: string): boolean =>
-  signedOutByUser.has(slug) || providerAuthOwned(slug);
+  providerSignedOutByUser(slug) || providerAuthOwned(slug);
 
 /**
  * Seed last-known Connected from a still-owned verified login. Does not probe,
@@ -153,10 +153,10 @@ export const admitVerifiedLoginObservation = (flow: {
   if (live !== null && live.flowId !== flow.flowId) return false;
   if (live !== null && slot.wasCancelled()) return false;
   if (live === null && slot.inFlight()) return false;
-  if (live === null && signedOutByUser.has(slug)) return false;
+  if (live === null && providerSignedOutByUser(slug)) return false;
   const previous = lastKnownConnections.get(slug);
   signedOutByUser.delete(slug);
-  lastKnownConnections.set(slug, {
+  rememberLastKnownConnection({
     provider: slug,
     status: "connected",
     observation: "connected",
@@ -175,7 +175,7 @@ export const loginAdmittedForCommand = (
   slug: string,
   flowId: string,
 ): boolean =>
-  !signedOutByUser.has(slug) && admittedLoginFlow.get(slug) === flowId;
+  !providerSignedOutByUser(slug) && admittedLoginFlow.get(slug) === flowId;
 
 setVerifiedLoginAdmitter(admitVerifiedLoginObservation);
 
@@ -190,12 +190,8 @@ type TProbeBackoff = {
 };
 
 const probeBackoff = new Map<string, TProbeBackoff>();
-let statusNow = (): number => Date.now();
-
-/** Test-only clock for probe backoff. Pass `null` to restore. */
-export const setStatusClockForTests = (fn: (() => number) | null): void => {
-  statusNow = fn ?? (() => Date.now());
-};
+const defaultStatusNow = (): number => Date.now();
+let statusNow: () => number = defaultStatusNow;
 
 export const clearProviderProbeBackoff = (slug: string): void => {
   probeBackoff.delete(slug);
@@ -237,9 +233,12 @@ const probeBackoffBlocks = (slug: string, force: boolean): boolean => {
   return entry.untilMs > statusNow();
 };
 
-/** Test-only: sticky logout flag after late-admit attempts. */
-export const providerSignedOutByUserForTests = (slug: string): boolean =>
+/** Whether `slug` is sticky-signed-out after an explicit user logout. */
+/** Whether `slug` is sticky-signed-out after an explicit user logout. */
+export const providerSignedOutByUser = (slug: string): boolean =>
   signedOutByUser.has(slug);
+
+// Prefer the named query everywhere so logout stickiness has one reader.
 
 const applyAuthLiteral = (
   slug: string,
@@ -267,7 +266,7 @@ const applyAuthLiteral = (
     // read connected until `delegate.logout()` finishes. Only a rising
     // edge (fresh connected, last-known was not connected) is a login
     // by any path and clears the flag.
-    if (signedOutByUser.has(slug) && last?.status === "connected") {
+    if (providerSignedOutByUser(slug) && last?.status === "connected") {
       return {
         ...conn,
         status: "signed_out",
@@ -277,7 +276,7 @@ const applyAuthLiteral = (
     signedOutByUser.delete(slug);
     return { ...conn, status: "connected", observation: "connected" };
   }
-  if (signedOutByUser.has(slug) || normalized.signed_out) {
+  if (providerSignedOutByUser(slug) || normalized.signed_out) {
     return { ...conn, status: "signed_out", observation: "signed_out" };
   }
   if (!determinate) {
@@ -353,43 +352,56 @@ export const setStatusPublishQueueSnapshot = (
   readPublishQueueSnapshot = fn ?? emptyPublishQueueSnapshot;
 };
 
-/** Test-only: intercept the late-probe status push. Pass `null` to restore. */
-export const setLateProbeStatusPushForTests = (
-  fn: (() => void) | null,
-): void => {
-  requestLateProbePush = fn ?? defaultLateProbePush;
+export type TStatusDeps = {
+  /** Wall clock for probe backoff. Defaults to `Date.now`. */
+  readonly nowMs?: (() => number) | null;
+  /** Late-probe status-push hook. Defaults to the control-channel import. */
+  readonly lateProbePush?: (() => void) | null;
 };
+
+/**
+ * Install status-service host deps (clock, late-probe push) in one call.
+ * Production applies the defaults once at module load; tests install their
+ * own fakes and {@link clearLastKnownConnections} restores production
+ * defaults between cases.
+ */
+export const installStatusDeps = (deps: TStatusDeps = {}): void => {
+  statusNow = deps.nowMs ?? defaultStatusNow;
+  requestLateProbePush = deps.lateProbePush ?? defaultLateProbePush;
+};
+
+installStatusDeps({});
 
 /** Last complete observation for `slug`, if any. Read-only — no probe. */
 export const peekLastKnownConnection = (
   slug: string,
 ): TDaemonProviderConnection | undefined => lastKnownConnections.get(slug);
 
-/** Test-only: last-known is process-global and otherwise unreadable. */
-export const lastKnownConnectionForTests = (
-  slug: string,
-): TDaemonProviderConnection | undefined => peekLastKnownConnection(slug);
-
-/** Test-only: seed last-known without running `computeStatus`. */
-export const seedLastKnownConnectionForTests = (
+/**
+ * Remember a provider connection without running `computeStatus` (hydrate
+ * from disk / prior push, or seed before the next probe).
+ */
+export const rememberLastKnownConnection = (
   conn: TDaemonProviderConnection,
 ): void => {
   lastKnownConnections.set(conn.provider, conn);
 };
 
-/** Test-only: the last-known map is process-global and leaks across suites. */
-export const resetLastKnownConnectionsForTests = (): void => {
+/**
+ * Clear last-known connections and related in-process status state (identity
+ * change / suite isolation). Also resets sticky logout and probe backoff.
+ */
+export const clearLastKnownConnections = (): void => {
   lastKnownConnections.clear();
   signedOutByUser.clear();
-  resetProviderAuthOperationsForTests();
-  resetStoreIdentityEpochsForTests();
+  clearProviderAuthOperations();
+  clearStoreIdentityEpochs();
   pendingVerifiedPublish.clear();
   admittedLoginFlow.clear();
   probeBackoff.clear();
   inFlightSlugProbes.clear();
   inFlightStatus = null;
-  requestLateProbePush = defaultLateProbePush;
-  statusNow = () => Date.now();
+  installStatusDeps({});
 };
 
 const recordLateProbeOutcome = (
@@ -627,7 +639,7 @@ const rememberConnection = (
     // next connected tick would look like a login rising edge.
     !(conn.status === "signed_out" && raw.status === "connected")
   ) {
-    lastKnownConnections.set(slug, conn);
+    rememberLastKnownConnection(conn);
   }
 };
 

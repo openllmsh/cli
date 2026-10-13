@@ -308,5 +308,7 @@ export type TProviderDelegate = {
    * unreadable, or the vendor logout timed out / failed with remaining
    * credentials. Unreadable verification is never treated as signed out.
    */
-  logout: () => Promise<{ readonly ok: boolean; readonly detail?: string }>;
+  logout: (opts?: {
+    readonly timeoutMs?: number;
+  }) => Promise<{ readonly ok: boolean; readonly detail?: string }>;
 };

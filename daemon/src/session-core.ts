@@ -216,6 +216,9 @@ export type TSession = {
   /** Shared source-of-truth screen (the canonical-size emulator). Created
    *  lazily on first PTY spawn; disposed on PTY exit. Null on no-PTY paths. */
   emulator: Terminal | null;
+  /** Resolves when every queued `emulator.write` has applied — attach paint
+   *  awaits this so serialize cannot race xterm's async buffer. */
+  emulatorWriteTail: Promise<void>;
   /** Canonical size — == the primary consumer's size == PTY winsize ==
    *  shared emulator size. */
   canonicalCols: number;
@@ -692,14 +695,27 @@ const paintInitialScreen = (
   session: TSession,
   consumer: TAttachedConsumer,
 ): void => {
-  if (session.emulator === null) {
-    // Legacy / no-PTY path: raw scrollback replay at capture width.
-    writeConsumer(session, consumer, new TextEncoder().encode("\x1b[2J\x1b[H"));
-    for (const chunk of session.scrollback)
-      writeConsumer(session, consumer, chunk);
-    return;
-  }
-  writeConsumer(session, consumer, serializeScreenBytes(session.emulator));
+  const paint = (): void => {
+    if (session.emulator === null) {
+      // Legacy / no-PTY path: raw scrollback replay at capture width.
+      writeConsumer(
+        session,
+        consumer,
+        new TextEncoder().encode("\x1b[2J\x1b[H"),
+      );
+      for (const chunk of session.scrollback)
+        writeConsumer(session, consumer, chunk);
+      return;
+    }
+    writeConsumer(session, consumer, serializeScreenBytes(session.emulator));
+  };
+  // Serialize only after pending xterm writes have applied — otherwise a
+  // just-fanned-out chunk can be missing from the attach replay.
+  consumer.writeTail = consumer.writeTail
+    .then(() => session.emulatorWriteTail)
+    .then(() => {
+      paint();
+    });
 };
 
 /**
@@ -1257,6 +1273,7 @@ export const openSession = (
       scrollback: [],
       scrollbackBytes: 0,
       emulator: null,
+      emulatorWriteTail: Promise.resolve(),
       canonicalCols: frame.cols,
       canonicalRows: frame.rows,
       primaryConsumer: null,
@@ -1302,15 +1319,22 @@ export const openSession = (
         // Keep raw scrollback for the no-stream fallback path, and feed the
         // shared emulator that backs per-consumer reflow + attach replay.
         pushScrollback(s, chunk);
-        s.emulator?.write(chunk);
+        // xterm `write` applies asynchronously; chain a flush so attach
+        // serialize waits for every chunk that already fanned out live.
+        const term = s.emulator;
+        if (term !== null) {
+          const applied = new Promise<void>((resolve) => {
+            term.write(chunk, () => resolve());
+          });
+          s.emulatorWriteTail = s.emulatorWriteTail.then(() => applied);
+        }
         if (!ptyReady) {
           pendingOutput.push(chunk);
           return;
         }
         sendOut(s, chunk);
       };
-      // Shared source-of-truth screen, born at the consumer's real size. Fed
-      // synchronously (fire-and-forget) as bytes arrive; xterm queues writes.
+      // Shared source-of-truth screen, born at the consumer's real size.
       s.emulator = new Terminal({
         cols: frame.cols,
         rows: frame.rows,
@@ -1510,8 +1534,8 @@ export const bindSessionStream = (
   }
 };
 
-/** Test-only: reset all session state. */
-export const resetSessionsForTest = (): void => {
+/** Tear down every live session (daemon shutdown / identity rebind). */
+export const clearSessions = (): void => {
   for (const s of sessions.values()) {
     cancelWinch(s.id);
     s.pty?.kill();

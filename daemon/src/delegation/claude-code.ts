@@ -126,14 +126,6 @@ const AUTH_STATUS_TIMEOUT_MS = 4_000;
  * probe and not the 5s capture default — that default killed legitimate logout.
  */
 export const AUTH_LOGOUT_TIMEOUT_MS = 30_000;
-let logoutTimeoutMsForTests: number | null = null;
-
-export const setAuthLogoutTimeoutMsForTests = (ms: number | null): void => {
-  logoutTimeoutMsForTests = ms;
-};
-
-const logoutTimeoutMs = (): number =>
-  logoutTimeoutMsForTests ?? AUTH_LOGOUT_TIMEOUT_MS;
 const OAUTH_BETA = "oauth-2025-04-20";
 // Usage endpoint LEAF path — the host is derived from the captured inference
 // endpoint (`resolveProviderUrl`), so a vendor host migration is auto-tracked.
@@ -1240,8 +1232,10 @@ export const claudeCodeDelegate: TProviderDelegate = {
       };
     }),
 
-  logout: async () => {
-    const budget = createDeadlineBudget(logoutTimeoutMs());
+  logout: async (opts?: { readonly timeoutMs?: number }) => {
+    const budget = createDeadlineBudget(
+      opts?.timeoutMs ?? AUTH_LOGOUT_TIMEOUT_MS,
+    );
     const correlation = currentLoginCommandCorrelation();
     const lifecycle = createNativeAuthLifecycle({
       scope: "logout",

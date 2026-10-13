@@ -429,10 +429,16 @@ const chooseRunningSession = async (args: {
  * Run a session client: interactive local sessions get a detached durable host;
  * all other invocations retain the direct, inherited-stdio launch contract.
  */
+export type TRunSessionClientOptions = {
+  /** Override the child launcher; production uses {@link execClient}. */
+  readonly execClient?: TExecClient;
+};
+
 export const runSessionClient = async (
   client: TClient,
   userArgs: readonly string[],
   flags: TClientFlags,
+  options?: TRunSessionClientOptions,
 ): Promise<number> => {
   // `-d` must fail loudly on a client with no equivalent: silently launching
   // WITH approval prompts after the user asked to skip them is the wrong
@@ -566,7 +572,8 @@ export const runSessionClient = async (
       }),
     );
 
-    code = await execClient(
+    const launch = options?.execClient ?? execClient;
+    code = await launch(
       bin,
       [...plan.args, ...dangerous, ...forwarded],
       env,
@@ -608,18 +615,20 @@ export const mergeSessionEnv = (
   return output;
 };
 
+export type TExecClient = (
+  bin: string,
+  args: readonly string[],
+  env: Readonly<Record<string, string>>,
+  unsetEnv?: readonly string[],
+) => Promise<number>;
+
 /**
  * Spawn the client with inherited stdio (so it owns the TTY) and forward
  * signals, resolving to the exit code the child produced. A signal-terminated
  * child maps to the conventional 128+signo so shell callers see the same thing
  * they would from a direct invocation.
  */
-export const execClient = (
-  bin: string,
-  args: readonly string[],
-  env: Readonly<Record<string, string>>,
-  unsetEnv: readonly string[] = [],
-): Promise<number> =>
+const defaultExecClient: TExecClient = (bin, args, env, unsetEnv = []) =>
   new Promise((resolve) => {
     const child = spawn(bin, args, {
       stdio: "inherit",
@@ -661,3 +670,14 @@ export const execClient = (
       resolve(exitCode ?? 0);
     });
   });
+
+/**
+ * Build an exec-client. Production uses the default spawn implementation;
+ * callers (and tests) may supply a recording or alternate launcher.
+ */
+export const createExecClient = (
+  impl: TExecClient = defaultExecClient,
+): TExecClient => impl;
+
+/** Production child launcher used by {@link runSessionClient} and Hermes. */
+export const execClient: TExecClient = createExecClient();

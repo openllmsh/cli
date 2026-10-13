@@ -214,8 +214,8 @@ export const identityKeyPersisted = (): boolean => loadIdentityKey().persisted;
 /** This daemon's public key (SPKI DER, base64) — in-memory even if not persisted. */
 export const daemonPublicKey = (): string => loadIdentityKey().publicKeyB64;
 
-/** Drop memoized identity so a test can switch `OPENLLM_DAEMON_STATE_DIR`. */
-export const resetIdentityKeyCacheForTests = (): void => {
+/** Drop the memoized identity key (state-dir change / shutdown / rebind). */
+export const clearIdentityKeyCache = (): void => {
   cachedPriv = null;
   cachedPersisted = false;
   cachedPubB64 = null;

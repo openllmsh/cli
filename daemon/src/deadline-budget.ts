@@ -2,9 +2,9 @@
  * One monotonic operation budget for daemon-local external process work
  * (status owner, keychain `security` lane, login/PTY child lifecycle).
  *
- * Timebase is `performance.now()`. Expiry is typed unavailability, never auth
- * truth. Observer cancellation must not be passed as `parent` of a producer
- * budget the observer does not own.
+ * Timebase is {@link deadlineNowMs} (`performance.now()` in production).
+ * Expiry is typed unavailability, never auth truth. Observer cancellation must
+ * not be passed as `parent` of a producer budget the observer does not own.
  */
 import {
   DEFAULT_FINAL_REAP_MS,
@@ -22,6 +22,44 @@ export type TDeadlineBudget = {
 
 const attached = new WeakMap<AbortSignal, TDeadlineBudget>();
 
+export type TDeadlineBudgetScheduler = (
+  callback: () => void,
+  delayMs: number,
+) => ReturnType<typeof setTimeout>;
+
+export type TDeadlineBudgetDeps = {
+  readonly nowMs?: () => number;
+  readonly schedule?: TDeadlineBudgetScheduler;
+};
+
+export type TDeadlineTimebase = {
+  readonly nowMs: () => number;
+  readonly schedule: TDeadlineBudgetScheduler;
+};
+
+const defaultSchedule: TDeadlineBudgetScheduler = (
+  callback: () => void,
+  delayMs: number,
+): ReturnType<typeof setTimeout> => setTimeout(callback, delayMs);
+
+/** Build a deadline clock/scheduler pair (production defaults: performance.now + setTimeout). */
+export const createDeadlineTimebase = (
+  deps: TDeadlineBudgetDeps = {},
+): TDeadlineTimebase => ({
+  nowMs: deps.nowMs ?? ((): number => performance.now()),
+  schedule: deps.schedule ?? defaultSchedule,
+});
+
+let activeTimebase: TDeadlineTimebase = createDeadlineTimebase();
+
+/** Replace the process-wide deadline timebase (tests / embedding hosts). */
+export const installDeadlineTimebase = (timebase: TDeadlineTimebase): void => {
+  activeTimebase = timebase;
+};
+
+/** Monotonic now for deadline budgets (and callers that must share the clock). */
+export const deadlineNowMs = (): number => activeTimebase.nowMs();
+
 export const budgetFromSignal = (
   signal: AbortSignal | undefined,
 ): TDeadlineBudget | undefined =>
@@ -30,12 +68,19 @@ export const budgetFromSignal = (
 export const createDeadlineBudget = (
   durationMs: number,
   parent?: AbortSignal,
+  deps?: TDeadlineBudgetDeps,
 ): TDeadlineBudget => {
+  const nowMs = deps?.nowMs ?? activeTimebase.nowMs;
+  const schedule: TDeadlineBudgetScheduler =
+    deps?.schedule ?? activeTimebase.schedule;
   const cap = Math.max(0, durationMs);
-  const expiresAt = performance.now() + cap;
+  const expiresAt = nowMs() + cap;
   const ac = new AbortController();
 
-  const remainingMs = (): number => Math.max(0, expiresAt - performance.now());
+  // Once aborted/released, remaining is zero even if a host-injected clock
+  // is frozen — callers (reap splits, child budgets) must not see a live budget.
+  const remainingMs = (): number =>
+    ac.signal.aborted ? 0 : Math.max(0, expiresAt - nowMs());
   const expired = (): boolean => remainingMs() === 0 || ac.signal.aborted;
 
   let timer: ReturnType<typeof setTimeout> | null = null;
@@ -51,7 +96,7 @@ export const createDeadlineBudget = (
   if (cap === 0) {
     abortFromDeadline();
   } else {
-    timer = setTimeout(abortFromDeadline, cap);
+    timer = schedule(abortFromDeadline, cap);
   }
 
   if (parent !== undefined) {
@@ -60,12 +105,20 @@ export const createDeadlineBudget = (
       parent.addEventListener("abort", abortFromDeadline, { once: true });
   }
 
+  const childDeps: TDeadlineBudgetDeps = {
+    nowMs,
+    schedule,
+  };
   const budget: TDeadlineBudget = {
     signal: ac.signal,
     remainingMs,
     expired,
     child(maxMs: number): TDeadlineBudget {
-      return createDeadlineBudget(Math.min(Math.max(0, maxMs), remainingMs()));
+      return createDeadlineBudget(
+        Math.min(Math.max(0, maxMs), remainingMs()),
+        undefined,
+        childDeps,
+      );
     },
     release: abortFromDeadline,
   };
@@ -108,7 +161,7 @@ export const firstOfBudget = async <T>(
 
 /**
  * How late a `setTimeout(delayMs)` callback ran relative to arming, using the
- * same `performance.now()` clock as {@link createDeadlineBudget}. Negative
+ * same {@link deadlineNowMs} clock as {@link createDeadlineBudget}. Negative
  * (early fire) is preserved; callers must not treat this as host-sleep proof.
  */
 export const timeoutCallbackLatenessMs = (

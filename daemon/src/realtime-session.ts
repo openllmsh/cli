@@ -19,8 +19,8 @@
  * transport can reach the vendor dial without passing it.
  *
  * No live network call happens anywhere in this module's OWN test suite —
- * `setRealtimeUpstreamFactory` swaps in a fake socket and
- * `setRealtimePlanCheckerForTests` swaps in a fake policy decision.
+ * `configureRealtimeUpstreamFactory` swaps in a fake socket and
+ * `openRealtimeSession(..., { checkPlan })` injects a fake policy decision.
  * Production dials the real vendor URL/headers the delegate mints; this
  * daemon never constructs that URL itself (no arbitrary upstream targets).
  * The closing `report(...)` call's own network write (`recordRequest`,
@@ -106,16 +106,6 @@ export type TRealtimePlanChecker = (
   open: TRealtimeStreamOpenPayload,
 ) => Promise<TRealtimePlanAuthorization>;
 
-let planChecker: TRealtimePlanChecker = authorizeRealtimeOpenViaCloudPlan;
-
-/** Test seam ONLY — never call this from production code. `null` restores
- *  the real cloud-plan checker. Mirrors `setRealtimeUpstreamFactory` below. */
-export const setRealtimePlanCheckerForTests = (
-  fn: TRealtimePlanChecker | null,
-): void => {
-  planChecker = fn ?? authorizeRealtimeOpenViaCloudPlan;
-};
-
 /** Beyond this many concurrent realtime sessions, admission answers
  *  `realtime_busy` — voice sessions are heavier than a JSON tunnel hop, so
  *  the cap is intentionally tighter than `MAX_SERVED_TUNNELS`. */
@@ -133,12 +123,11 @@ const releaseRealtimeSession = (): void => {
   activeSessions = Math.max(0, activeSessions - 1);
 };
 
-/** Test-only observability seam. */
+/** Live concurrent realtime session count (admission / status). */
 export const activeRealtimeSessionCount = (): number => activeSessions;
 
-/** Test-only reset — production never calls this; the count only ever
- *  changes via `reserveRealtimeSession`/`releaseRealtimeSession`. */
-export const resetActiveRealtimeSessionsForTests = (): void => {
+/** Drop the admission counter — used on daemon shutdown / identity change. */
+export const clearActiveRealtimeSessions = (): void => {
   activeSessions = 0;
 };
 
@@ -198,9 +187,11 @@ const defaultUpstreamFactory: TRealtimeUpstreamFactory = (
 
 let upstreamFactory: TRealtimeUpstreamFactory = defaultUpstreamFactory;
 
-/** Test seam ONLY — never call this from production code. `null` restores
- *  the real WebSocket factory. */
-export const setRealtimeUpstreamFactory = (
+/**
+ * Replace the vendor WebSocket factory (custom transports / sandboxed hosts).
+ * Pass `null` to restore the production Bun WebSocket dialer.
+ */
+export const configureRealtimeUpstreamFactory = (
   fn: TRealtimeUpstreamFactory | null,
 ): void => {
   upstreamFactory = fn ?? defaultUpstreamFactory;
@@ -230,9 +221,19 @@ export type TRealtimeSessionResult =
   | { readonly ok: true; readonly session: TRealtimeSessionHandle }
   | { readonly ok: false; readonly refused: TStreamResetCode };
 
+export type TOpenRealtimeSessionOptions = {
+  /** Forwarded to `credentialForRealtime` (auth headers from the consumer). */
+  readonly inbound?: Headers;
+  /**
+   * Plan/policy gate. Defaults to the cloud plan checker; hosts may inject an
+   * alternate entitlement decision (offline, cached, or pre-authorized).
+   */
+  readonly checkPlan?: TRealtimePlanChecker;
+};
+
 /**
  * Open one realtime session for `open.provider`. Admission order:
- * capacity → cloud plan/policy (account entitlement, `planChecker`) →
+ * capacity → cloud plan/policy (account entitlement, `checkPlan`) →
  * delegate exposes `credentialForRealtime` → a usable (non-stale) credential.
  * Only past all four does an upstream socket get created. The policy check
  * runs BEFORE the daemon ever asks its delegate for a credential, so an
@@ -242,13 +243,14 @@ export type TRealtimeSessionResult =
 export const openRealtimeSession = async (
   open: TRealtimeStreamOpenPayload,
   handlers: TRealtimeSessionHandlers,
-  inbound?: Headers,
+  options?: TOpenRealtimeSessionOptions,
 ): Promise<TRealtimeSessionResult> => {
   if (!reserveRealtimeSession()) {
     return { ok: false, refused: "realtime_busy" };
   }
 
-  const authorization = await planChecker(open);
+  const checkPlan = options?.checkPlan ?? authorizeRealtimeOpenViaCloudPlan;
+  const authorization = await checkPlan(open);
   if (!authorization.ok) {
     releaseRealtimeSession();
     return { ok: false, refused: "realtime_policy_refused" };
@@ -264,7 +266,7 @@ export const openRealtimeSession = async (
     ReturnType<NonNullable<typeof delegate.credentialForRealtime>>
   >;
   try {
-    cred = await delegate.credentialForRealtime(inbound);
+    cred = await delegate.credentialForRealtime(options?.inbound);
   } catch {
     releaseRealtimeSession();
     return { ok: false, refused: "realtime_refused" };

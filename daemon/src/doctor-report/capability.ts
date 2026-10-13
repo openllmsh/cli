@@ -10,6 +10,7 @@ import {
   DOCTOR_LOCAL_CAPABILITY_FILENAME,
   DOCTOR_LOCAL_CAPABILITY_HEADER,
 } from "@openllmsh/protocol";
+import type { TAtomicWrite } from "./files";
 import { atomicWriteText, doctorStatePath, readTextFile } from "./files";
 
 let cachedToken: string | null = null;
@@ -22,10 +23,22 @@ export const doctorCapabilityPath = (): string =>
 export const doctorCapabilityHeaderName = (): string =>
   DOCTOR_LOCAL_CAPABILITY_HEADER;
 
+export type TMintDoctorCapabilityOptions = {
+  /** Override the durable write (fs-failure fixtures); defaults to the real fs path. */
+  readonly atomicWrite?: TAtomicWrite;
+};
+
 /** Mint a per-boot owner-only capability. Local FS only — never network. */
-export const mintDoctorCapability = (): boolean => {
+export const mintDoctorCapability = (
+  options?: TMintDoctorCapabilityOptions,
+): boolean => {
   const token = randomBytes(32).toString("hex");
-  if (!atomicWriteText(doctorCapabilityPath(), `${token}\n`)) {
+  const wrote = atomicWriteText(doctorCapabilityPath(), `${token}\n`, {
+    ...(options?.atomicWrite !== undefined
+      ? { write: options.atomicWrite }
+      : {}),
+  });
+  if (!wrote) {
     cachedToken = null;
     mintFailedClosed = true;
     return false;
@@ -39,9 +52,12 @@ export const mintDoctorCapability = (): boolean => {
  * Rotate the capability only after the loopback listener is bound.
  * A failed bind must not clobber a live process's token.
  */
-export const onDoctorListenAttempt = (bound: boolean): boolean => {
+export const onDoctorListenAttempt = (
+  bound: boolean,
+  options?: TMintDoctorCapabilityOptions,
+): boolean => {
   if (!bound) return false;
-  return mintDoctorCapability();
+  return mintDoctorCapability(options);
 };
 
 export const readDoctorCapability = (): string | null => {
@@ -89,7 +105,7 @@ export const readOwnerDoctorCapability = (): string | null => {
   }
 };
 
-export const resetDoctorCapabilityForTests = (): void => {
+export const clearDoctorCapabilityCache = (): void => {
   cachedToken = null;
   mintFailedClosed = false;
 };

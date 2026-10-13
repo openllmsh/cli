@@ -184,16 +184,6 @@ export const clearCursorNativeModels = (): void => {
   observation = null;
 };
 
-export const peekCursorNativeObservationForTests = (): {
-  readonly observedAt: number;
-  readonly provenance: TCursorModelObservationProvenance;
-  readonly entries: ReadonlyArray<TProviderModelEntry>;
-} | null => observation;
-
-export const resetCursorNativeModelObservationForTests = (): void => {
-  clearCursorNativeModels();
-};
-
 /**
  * Capture generation (request entry) plus trusted store fingerprint after
  * authenticate. Null when the store is unreadable/absent.

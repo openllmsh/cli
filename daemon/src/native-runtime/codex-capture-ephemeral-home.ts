@@ -229,14 +229,3 @@ export const createCodexCaptureEphemeralHome = async (args: {
     cleanup,
   };
 };
-
-/** Test-only: read back the ephemeral overlay's raw `config.toml` contents. */
-export const readCodexCaptureEphemeralHomeConfigForTest = async (
-  ephemeralHome: string,
-): Promise<string | null> => {
-  try {
-    return await readFile(join(ephemeralHome, "config.toml"), "utf8");
-  } catch {
-    return null;
-  }
-};

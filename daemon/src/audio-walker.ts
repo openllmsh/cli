@@ -80,24 +80,6 @@ const delegateHookFor = (
 ): "credentialForTranscription" | "credentialForSpeech" =>
   op === "transcription" ? "credentialForTranscription" : "credentialForSpeech";
 
-/** Test seam: override the injected WebSocket transport for the claude_code
- *  dictation session (never touched in production). */
-let claudeWsFactoryForTests: TWebSocketFactory | undefined;
-export const setClaudeWsFactoryForTests = (
-  factory: TWebSocketFactory | undefined,
-): void => {
-  claudeWsFactoryForTests = factory;
-};
-
-/** Test seam: skip real-time frame pacing so tests don't wait wall-clock
- *  time for a multi-second recording. */
-let claudePaceForTests: ((ms: number) => Promise<void>) | undefined;
-export const setClaudePaceForTests = (
-  pace: ((ms: number) => Promise<void>) | undefined,
-): void => {
-  claudePaceForTests = pace;
-};
-
 const acquireAudioUpstream = async (
   op: TAudioOp,
   provider: string,
@@ -386,9 +368,17 @@ const buildTranscriptionForm = (
   return form;
 };
 
+export type TAudioTranscriptionWalkerOptions = {
+  /** Injected WebSocket transport for the claude_code dictation session. */
+  readonly wsFactory?: TWebSocketFactory;
+  /** Frame pacing; production sleeps wall-clock, hosts may no-op or accelerate. */
+  readonly pace?: (ms: number) => Promise<void>;
+};
+
 export const runAudioTranscriptionWalker = async (
   args: TWalkArgs,
   multipart: TParsedMultipart | null,
+  options?: TAudioTranscriptionWalkerOptions,
 ): Promise<Response> => {
   const planErr = requirePlanned(args);
   if (planErr !== null) return planErr;
@@ -569,12 +559,10 @@ export const runAudioTranscriptionWalker = async (
         // CloseStream starves it and a short clip comes back with an EMPTY
         // transcript despite a 200 (live-verified on this branch).
         trailingSilenceMs: 1_200,
-        ...(claudeWsFactoryForTests !== undefined
-          ? { wsFactory: claudeWsFactoryForTests }
+        ...(options?.wsFactory !== undefined
+          ? { wsFactory: options.wsFactory }
           : {}),
-        ...(claudePaceForTests !== undefined
-          ? { pace: claudePaceForTests }
-          : {}),
+        ...(options?.pace !== undefined ? { pace: options.pace } : {}),
         signal: args.req.signal,
       });
       const latencyMs = Date.now() - startedAt;

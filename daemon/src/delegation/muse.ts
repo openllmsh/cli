@@ -338,12 +338,6 @@ export const readMuseNativeModels = (opts: {
   return cached.models;
 };
 
-export const resetMuseNativeModelObservationForTests = (): void => {
-  museNativeModels = null;
-  museNativeGeneration = 0;
-  museStatusCache.invalidate();
-};
-
 const {
   installHint: INSTALL_HINT,
   connectedDetail: CONNECTED_DETAIL,

@@ -88,6 +88,7 @@ import {
   GATE_STALE_CAP_MS,
   quotaGateDecision,
 } from "@openllmsh/wire/features/quota-gate";
+import type { TCountTokensCapabilityMemory } from "@openllmsh/wire/lib/canonical/count-tokens-capability";
 import {
   countTokensEndpointIdentity,
   countTokensUnsupportedFromUpstream,
@@ -212,7 +213,6 @@ import {
 } from "./hop-cooldown";
 import { logWarn, safeDiagnosticMessage } from "./logger";
 import { maybeReportModels } from "./model-report";
-import type { TNativeServeOutcome } from "./native-runtime/serve";
 import {
   isNativeRuntimeProvider,
   tryServeNativeRuntime,
@@ -221,32 +221,13 @@ import type { TNativeTokens } from "./native-runtime/types";
 import { tokensFromResponse, ZERO_TOKENS } from "./native-runtime/types";
 import { clearPlanCache } from "./plan-cache";
 import { isClaudeCodeOriginator, resolveHopExecution } from "./sub-method";
+import type { TTunnelToPeer } from "./tunnel-client";
 import { tunnelToPeer } from "./tunnel-client";
 import {
   peekUsageForQuotaGate,
   sampleUsageAfterRequest,
   sampleUsageOnExhaustion,
 } from "./usage-cache";
-
-/** Test seam: how many immediate status pushes auth-cooldown marks requested. */
-let authCooldownStatusPushesForTests = 0;
-
-type TTryServeNativeRuntime = typeof tryServeNativeRuntime;
-let tryServeNativeRuntimeOverride: TTryServeNativeRuntime | null = null;
-
-/** Install (or clear with `null`) a test-only native serve implementation. */
-export const setTryServeNativeRuntimeForTest = (
-  impl: TTryServeNativeRuntime | null,
-): void => {
-  tryServeNativeRuntimeOverride = impl;
-};
-
-const serveNativeRuntime = (
-  ...args: Parameters<TTryServeNativeRuntime>
-): Promise<TNativeServeOutcome> =>
-  tryServeNativeRuntimeOverride !== null
-    ? tryServeNativeRuntimeOverride(...args)
-    : tryServeNativeRuntime(...args);
 
 export const noteWalkerStreamTerminal = (opts: {
   readonly aborted: boolean;
@@ -259,12 +240,6 @@ export const noteWalkerStreamTerminal = (opts: {
       ? safeDiagnosticMessage`The stream stopped making progress.`
       : safeDiagnosticMessage`The stream ended in an unexpected failure.`,
   );
-};
-
-export const takeAuthCooldownStatusPushesForTests = (): number => {
-  const n = authCooldownStatusPushesForTests;
-  authCooldownStatusPushesForTests = 0;
-  return n;
 };
 
 // Upstream WIRE per subscription provider — structural (which adapter to run),
@@ -338,6 +313,35 @@ export type TWalkArgs = {
   /** The HMAC of the signed payload (plan+pmids+origin+strategy), or null. */
   readonly sigParam: string | null;
   readonly startedAt: number;
+  /**
+   * Wall-clock pause before a same-hop retry when the upstream gives no
+   * usable `Retry-After`. Defaults to {@link DEFAULT_HOP_RETRY_DELAY_MS}.
+   */
+  readonly hopRetryDelayMs?: number;
+  /**
+   * Cap applied to a parsed `Retry-After` delay before a same-hop retry.
+   * Defaults to {@link DEFAULT_HOP_RETRY_AFTER_CAP_MS}.
+   */
+  readonly hopRetryAfterCapMs?: number;
+  /**
+   * Optional native-runtime serve. Production omits this and uses
+   * {@link tryServeNativeRuntime}; callers may inject an alternate
+   * implementation (tests, specialised hosts).
+   */
+  readonly tryServeNativeRuntime?: typeof tryServeNativeRuntime;
+  /**
+   * Optional fleet-tunnel transport. Production omits this and uses the
+   * live RTC→mux ladder inside {@link tunnelToPeer}.
+   */
+  readonly tunnelToPeer?: TTunnelToPeer;
+  /**
+   * Fired when a subscription hop's NEW/changed `auth` cooldown triggers an
+   * immediate status push (so observers can count / react without a test-only
+   * module counter).
+   */
+  readonly onAuthCooldownStatusPush?: () => void;
+  /** Upstreams known to lack count_tokens. Defaults to the process memory. */
+  readonly countTokensCapability?: TCountTokensCapabilityMemory;
 };
 
 type THop = {
@@ -503,25 +507,30 @@ export const canWalkPlan = (hops: ReadonlyArray<THop>): boolean => {
   return true;
 };
 
-// One bounded, abort-aware pre-commit retry uses these neutral transport bounds.
-const HOP_RETRY_DELAY_MS = 1_000;
-const HOP_RETRY_AFTER_CAP_MS = 10_000;
+/** Default pause before a same-hop retry when no usable `Retry-After` is present. */
+export const DEFAULT_HOP_RETRY_DELAY_MS = 1_000;
+/** Cap applied to a parsed `Retry-After` delay before a same-hop retry. */
+export const DEFAULT_HOP_RETRY_AFTER_CAP_MS = 10_000;
 
 /** Bounded delay from an upstream response's `Retry-After` (seconds or
- * HTTP-date), falling back to {@link HOP_RETRY_DELAY_MS}. */
-const retryAfterDelayMs = (resp: Response): number => {
+ * HTTP-date), falling back to the hop-retry delay. */
+const retryAfterDelayMs = (
+  resp: Response,
+  hopRetryDelayMs: number,
+  hopRetryAfterCapMs: number,
+): number => {
   const raw = resp.headers.get("retry-after");
   if (raw !== null) {
     const secs = Number(raw);
     if (!Number.isNaN(secs)) {
-      return Math.max(0, Math.min(secs * 1000, HOP_RETRY_AFTER_CAP_MS));
+      return Math.max(0, Math.min(secs * 1000, hopRetryAfterCapMs));
     }
     const at = Date.parse(raw);
     if (!Number.isNaN(at)) {
-      return Math.max(0, Math.min(at - Date.now(), HOP_RETRY_AFTER_CAP_MS));
+      return Math.max(0, Math.min(at - Date.now(), hopRetryAfterCapMs));
     }
   }
-  return HOP_RETRY_DELAY_MS;
+  return hopRetryDelayMs;
 };
 
 /**
@@ -1013,7 +1022,6 @@ export const coolHopAfterStaleRefresh = (
   );
   if (changed && isSubscriptionSlug(hop.provider)) {
     getDelegate(hop.provider)?.invalidateStatusObservation?.();
-    authCooldownStatusPushesForTests += 1;
     requestStatusPush();
   }
 };
@@ -2274,6 +2282,9 @@ const tryFleetTunnel = async (
             : "chat_completions",
       body: new Uint8Array(args.rawBytes),
       accept: clientWantsStream ? "text/event-stream" : "application/json",
+      ...(args.tunnelToPeer !== undefined
+        ? { transport: args.tunnelToPeer }
+        : {}),
       anthropicVersion:
         args.surface === "messages"
           ? args.req.headers.get("anthropic-version")
@@ -2536,6 +2547,9 @@ const walkPlan = async (
 ): Promise<Response> => {
   walkCounter += 1;
   const walkSessionKey = `walk-${walkCounter}`;
+  const hopRetryDelayMs = args.hopRetryDelayMs ?? DEFAULT_HOP_RETRY_DELAY_MS;
+  const hopRetryAfterCapMs =
+    args.hopRetryAfterCapMs ?? DEFAULT_HOP_RETRY_AFTER_CAP_MS;
   const accountHashByProvider = new Map<string, string | null>();
   // Shared per-request cache of `delegate.status()` — the local auth gate and
   // the quota-account lookup both read through it so a hop pays status once.
@@ -2654,7 +2668,7 @@ const walkPlan = async (
         isSubscriptionSlug(hop.provider)
       ) {
         getDelegate(hop.provider)?.invalidateStatusObservation?.();
-        authCooldownStatusPushesForTests += 1;
+        args.onAuthCooldownStatusPush?.();
         requestStatusPush();
       }
     }
@@ -2834,7 +2848,8 @@ const walkPlan = async (
       // Official vendor runtime for the hop's concrete selection (variant +
       // capture). Pre-commit declines fall through to handrolled when
       // `methods` still allows it; otherwise fleet.
-      const native = await serveNativeRuntime({
+      const serveNative = args.tryServeNativeRuntime ?? tryServeNativeRuntime;
+      const native = await serveNative({
         provider: hop.provider,
         providerModelId: hop.providerModelId,
         surface: args.surface,
@@ -2914,7 +2929,10 @@ const walkPlan = async (
             policy.action === "retry_in_place" ||
             (finalHop && cls.reason === "rate_limit");
           if (shouldRetryInPlace && retryAttempt === 0) {
-            await abortableDelay(retryAfterDelayMs(native), args.req.signal);
+            await abortableDelay(
+              retryAfterDelayMs(native, hopRetryDelayMs, hopRetryAfterCapMs),
+              args.req.signal,
+            );
             if (args.req.signal.aborted) {
               return {
                 response: errorJson(499, "client aborted request"),
@@ -3081,8 +3099,8 @@ const walkPlan = async (
         const response = handrolledRetry.upstreamResponse;
         await abortableDelay(
           response === undefined
-            ? HOP_RETRY_DELAY_MS
-            : retryAfterDelayMs(response),
+            ? hopRetryDelayMs
+            : retryAfterDelayMs(response, hopRetryDelayMs, hopRetryAfterCapMs),
           args.req.signal,
         );
         if (args.req.signal.aborted) {
@@ -3155,7 +3173,7 @@ const walkPlan = async (
         );
       } catch {
         if (args.req.signal.aborted || retryAttempt === 1) return null;
-        await abortableDelay(HOP_RETRY_DELAY_MS, args.req.signal);
+        await abortableDelay(hopRetryDelayMs, args.req.signal);
         continue;
       }
       if (response.ok || args.req.signal.aborted) return response;
@@ -3170,7 +3188,10 @@ const walkPlan = async (
         action === "retry_in_place" ||
         (finalHop && cls.reason === "rate_limit");
       if (!shouldRetryInPlace || retryAttempt === 1) return response;
-      await abortableDelay(retryAfterDelayMs(response), args.req.signal);
+      await abortableDelay(
+        retryAfterDelayMs(response, hopRetryDelayMs, hopRetryAfterCapMs),
+        args.req.signal,
+      );
       if (args.req.signal.aborted) {
         return errorJson(499, "client aborted request");
       }
@@ -3613,7 +3634,11 @@ export const runCountTokens = async (args: TWalkArgs): Promise<Response> => {
     provider: hop.provider,
     endpointIdentity: countTokensEndpointIdentity(url),
   };
-  if (isCountTokensUnsupported(scope)) {
+  const capability = args.countTokensCapability ?? {
+    isUnsupported: isCountTokensUnsupported,
+    remember: rememberCountTokensUnsupported,
+  };
+  if (capability.isUnsupported(scope)) {
     return estimate(hopEncoding, null);
   }
   let built: ReturnType<typeof buildUpstreamRequest>;
@@ -3661,7 +3686,7 @@ export const runCountTokens = async (args: TWalkArgs): Promise<Response> => {
   }
   if (!resp.ok) {
     if (countTokensUnsupportedFromUpstream(resp.status, text)) {
-      rememberCountTokensUnsupported(scope);
+      capability.remember(scope);
       return estimate(hopEncoding, null);
     }
     return estimate(

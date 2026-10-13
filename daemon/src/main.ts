@@ -103,6 +103,10 @@ const BOOTSTRAP_RETRY_MS = 5 * 1000;
 const BOOT_AT = Date.now();
 
 export const main = async (): Promise<void> => {
+  const { installCredentialReset } = await import("./env");
+  const { resetDaemonCredentialState } = await import("./process-reset");
+  installCredentialReset(resetDaemonCredentialState);
+
   // `daemonPort()` loads the env file, so the kill-switch / opt-in vars are
   // resolved before the sandbox decision.
   const port = daemonPort();

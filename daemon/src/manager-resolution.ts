@@ -73,26 +73,6 @@ export type TManagerAdapter = {
   readonly fingerprint?: (candidate: string) => string | null;
 };
 
-const adapters: TManagerAdapter[] = [];
-
-/**
- * Cache of the last EXPLICIT-DEMAND resolution per candidate path, consulted
- * only by {@link peekManagerResolution}. Never written by a passive read —
- * only {@link resolveManagerCandidate} (the demand primitive) writes it, as a
- * side effect, so a passive observation can reuse a demand call's answer
- * without itself spawning anything. Keyed by the fingerprint captured at
- * write time so a "relevant bounded change" to the candidate itself (its
- * symlink target, or its mtime/size if it's a plain file) invalidates the
- * entry rather than serving a stale identity forever.
- */
-const peekCache = new Map<
-  string,
-  {
-    readonly fingerprint: string | null;
-    readonly resolution: TManagerResolution;
-  }
->();
-
 /** Cheap, synchronous fingerprint of a candidate path: its symlink target
  *  when it is one (mise shims typically are not, but some manager layouts
  *  are), else its mtime+size. `null` when the path can't be stat'd at all
@@ -127,134 +107,175 @@ const compositeFingerprint = (
   return `own:${own ?? "\u0000"}|sel:${selection ?? "\u0000"}`;
 };
 
-/** Test/registration hook. Adapters are appended; there are none by default,
- *  so default behavior is the "ordinary" passthrough below. */
-export const registerManagerAdapter = (adapter: TManagerAdapter): void => {
-  adapters.push(adapter);
-};
-
-/** Test-only reset so adapter registration doesn't leak across test files.
- *  Clears to a TRULY empty registry (no mise default) — used by fixtures
- *  that need the pure zero-adapter passthrough or that register their own
- *  fakes in its place. Also drops the demand-resolution peek cache, so a
- *  fake adapter from one test never leaks an answer into another. */
-export const resetManagerAdaptersForTests = (): void => {
-  adapters.length = 0;
-  peekCache.clear();
-};
-
-/** Test-only: restore the production default registry (mise only) after a
- *  test mutated it with `resetManagerAdaptersForTests` / its own fakes, so
- *  later tests in the same process see the same default a real daemon
- *  boots with. Prefer this over `resetManagerAdaptersForTests` in `afterEach`
- *  unless the test specifically exercises the zero-adapter passthrough. */
-export const restoreDefaultManagerAdaptersForTests = (): void => {
-  adapters.length = 0;
-  peekCache.clear();
-  adapters.push(miseManagerAdapter);
-};
-
-/**
- * Test-only escape hatch for A5 sandbox fixtures: restore the current
- * registry (whatever `resetManagerAdaptersForTests` left it as) after a test
- * mutates it, without re-running the module's default registration.
- */
-export const managerAdaptersForTests = (): readonly TManagerAdapter[] =>
-  adapters;
-
 export type TResolveManagerCandidateOpts = {
   /** Observer-only early-cancel, forwarded to the adapter's subprocess. */
   readonly signal?: AbortSignal;
 };
 
-/**
- * EXPLICIT-DEMAND resolution: resolve `candidate` (an ordinary host-CLI path
- * already chosen by `hostCliCandidates()` precedence) through any registered
- * manager adapters, spawning the adapter's bounded subprocess when the
- * candidate is recognized. With zero adapters registered this is a no-op:
- * returns `{ kind: "ordinary", target: candidate, identity: null }` for every
- * input, so existing behavior (link the candidate as-is) is entirely
- * unchanged.
- *
- * This is the ONLY function in this module that spawns a subprocess. Callers
- * on a passive/periodic path (a status read, a TTL-throttled reconcile) must
- * use {@link peekManagerResolution} instead — never this function — so an
- * idle daemon never re-launches a manager query on its own. Call this only
- * from an explicit demand: a user-initiated connect/logout, or inference
- * preparation that is about to actually invoke the CLI.
- */
-export const resolveManagerCandidate = async (
-  candidate: string,
-  opts?: TResolveManagerCandidateOpts,
-): Promise<TManagerResolution> => {
-  for (const adapter of adapters) {
-    if (!adapter.recognizes(candidate)) continue;
-    // Captured BEFORE the await: this is the candidate's shape at the moment
-    // we committed to resolving it. Reading it only AFTER `adapter.resolve`
-    // returns would fingerprint whatever the candidate looks like NOW, which
-    // can silently mismatch what it looked like when resolution actually ran
-    // — a shim re-created, or an interpreter/version switch, WHILE we were
-    // awaiting would otherwise get masked, letting an answer computed for the
-    // OLD state get cached and served as valid for the NEW one.
-    const fingerprintBeforeResolve = compositeFingerprint(adapter, candidate);
-    const target = await adapter.resolve(candidate, opts?.signal);
-    const resolution: TManagerResolution =
-      target === null
-        ? { kind: "unresolved", target: null, identity: adapter.name }
-        : { kind: "resolved", target, identity: `${adapter.name}:${target}` };
-    // Cancellation is not evidence that the installation stopped resolving.
-    if (opts?.signal?.aborted) return resolution;
-    // Populate the passive-read cache as a side effect of this demand call —
-    // but ONLY if the candidate's composite fingerprint (its own on-disk
-    // shape AND the adapter's selection-state signal) is still identical to
-    // what it was right before we started resolving. Any mutation observed
-    // during the await means this resolution no longer describes the
-    // candidate's current state, so it must not be cached at all (the
-    // aborted-cache guard above is preserved unchanged: this check runs
-    // strictly after it, never in place of it).
-    const fingerprintAfterResolve = compositeFingerprint(adapter, candidate);
-    if (fingerprintAfterResolve === fingerprintBeforeResolve) {
-      peekCache.set(candidate, {
-        fingerprint: fingerprintAfterResolve,
-        resolution,
-      });
-    }
-    return resolution;
-  }
-  return { kind: "ordinary", target: candidate, identity: null };
+export type TManagerRegistry = {
+  readonly registerManagerAdapter: (adapter: TManagerAdapter) => void;
+  readonly setManagerAdapters: (next: readonly TManagerAdapter[]) => void;
+  readonly listManagerAdapters: () => readonly TManagerAdapter[];
+  readonly resolveManagerCandidate: (
+    candidate: string,
+    opts?: TResolveManagerCandidateOpts,
+  ) => Promise<TManagerResolution>;
+  readonly peekManagerResolution: (
+    candidate: string,
+  ) => TManagerResolution | undefined;
 };
 
-/**
- * Cache-only, subprocess-free lookup for a PASSIVE observation. Never spawns
- * a manager subprocess, regardless of any elapsed TTL — a retry timer is not
- * demand-only behavior, and an idle daemon must not autonomously re-query a
- * version manager just because a periodic status read happened to run.
- *
- * Returns:
- *   - `{ kind: "ordinary", ... }` immediately for a candidate no adapter
- *     recognizes — such a path never has, and never will, cause a spawn;
- *   - the last EXPLICIT-DEMAND resolution ({@link resolveManagerCandidate})
- *     for a recognized shim, as long as the candidate's own on-disk
- *     fingerprint has not changed since that demand call ran;
- *   - `undefined` when the candidate is recognized as a manager shim but no
- *     fresh demand resolution exists yet (never resolved, or the candidate
- *     changed since). Callers MUST treat this as "not yet known, do not
- *     link or version-probe the raw shim" — never as "ordinary", and never
- *     as license to resolve it themselves from a passive path.
- */
-export const peekManagerResolution = (
-  candidate: string,
-): TManagerResolution | undefined => {
-  for (const adapter of adapters) {
-    if (!adapter.recognizes(candidate)) continue;
-    const hit = peekCache.get(candidate);
-    if (hit === undefined) return undefined;
-    if (hit.fingerprint !== compositeFingerprint(adapter, candidate)) {
-      return undefined;
+export type TManagerRegistryDeps = {
+  /** Initial adapter set. Production default: mise only. */
+  readonly adapters?: readonly TManagerAdapter[];
+};
+
+/** Build a manager-adapter registry (adapter list + demand-resolution cache own instance). */
+export const createManagerRegistry = (
+  deps: TManagerRegistryDeps = {},
+): TManagerRegistry => {
+  // `deps.adapters` defaults to the production mise-only set. Called lazily
+  // (function body, not a default-param expression), so `miseManagerAdapter`
+  // below is always initialized by the time any call runs — no TDZ risk.
+  const adapters: TManagerAdapter[] = [
+    ...(deps.adapters ?? [miseManagerAdapter]),
+  ];
+
+  /**
+   * Cache of the last EXPLICIT-DEMAND resolution per candidate path, consulted
+   * only by {@link peekManagerResolution}. Never written by a passive read —
+   * only {@link resolveManagerCandidate} (the demand primitive) writes it, as
+   * a side effect, so a passive observation can reuse a demand call's answer
+   * without itself spawning anything. Keyed by the fingerprint captured at
+   * write time so a "relevant bounded change" to the candidate itself (its
+   * symlink target, or its mtime/size if it's a plain file) invalidates the
+   * entry rather than serving a stale identity forever.
+   */
+  const peekCache = new Map<
+    string,
+    {
+      readonly fingerprint: string | null;
+      readonly resolution: TManagerResolution;
     }
-    return hit.resolution;
-  }
-  return { kind: "ordinary", target: candidate, identity: null };
+  >();
+
+  const registerManagerAdapter = (adapter: TManagerAdapter): void => {
+    adapters.push(adapter);
+  };
+
+  const setManagerAdapters = (next: readonly TManagerAdapter[]): void => {
+    adapters.length = 0;
+    peekCache.clear();
+    adapters.push(...next);
+  };
+
+  const listManagerAdapters = (): readonly TManagerAdapter[] =>
+    adapters.slice();
+
+  /**
+   * EXPLICIT-DEMAND resolution: resolve `candidate` (an ordinary host-CLI
+   * path already chosen by `hostCliCandidates()` precedence) through any
+   * registered manager adapters, spawning the adapter's bounded subprocess
+   * when the candidate is recognized. With zero adapters registered this is
+   * a no-op: returns `{ kind: "ordinary", target: candidate, identity: null
+   * }` for every input, so existing behavior (link the candidate as-is) is
+   * entirely unchanged.
+   *
+   * This is the ONLY function that spawns a subprocess. Callers on a
+   * passive/periodic path (a status read, a TTL-throttled reconcile) must
+   * use {@link peekManagerResolution} instead — never this function — so an
+   * idle daemon never re-launches a manager query on its own. Call this only
+   * from an explicit demand: a user-initiated connect/logout, or inference
+   * preparation that is about to actually invoke the CLI.
+   */
+  const resolveManagerCandidate = async (
+    candidate: string,
+    opts?: TResolveManagerCandidateOpts,
+  ): Promise<TManagerResolution> => {
+    for (const adapter of adapters) {
+      if (!adapter.recognizes(candidate)) continue;
+      // Captured BEFORE the await: this is the candidate's shape at the
+      // moment we committed to resolving it. Reading it only AFTER
+      // `adapter.resolve` returns would fingerprint whatever the candidate
+      // looks like NOW, which can silently mismatch what it looked like
+      // when resolution actually ran — a shim re-created, or an
+      // interpreter/version switch, WHILE we were awaiting would otherwise
+      // get masked, letting an answer computed for the OLD state get cached
+      // and served as valid for the NEW one.
+      const fingerprintBeforeResolve = compositeFingerprint(adapter, candidate);
+      const target = await adapter.resolve(candidate, opts?.signal);
+      const resolution: TManagerResolution =
+        target === null
+          ? { kind: "unresolved", target: null, identity: adapter.name }
+          : {
+              kind: "resolved",
+              target,
+              identity: `${adapter.name}:${target}`,
+            };
+      // Cancellation is not evidence that the installation stopped resolving.
+      if (opts?.signal?.aborted) return resolution;
+      // Populate the passive-read cache as a side effect of this demand
+      // call — but ONLY if the candidate's composite fingerprint (its own
+      // on-disk shape AND the adapter's selection-state signal) is still
+      // identical to what it was right before we started resolving. Any
+      // mutation observed during the await means this resolution no longer
+      // describes the candidate's current state, so it must not be cached
+      // at all (the aborted-cache guard above is preserved unchanged: this
+      // check runs strictly after it, never in place of it).
+      const fingerprintAfterResolve = compositeFingerprint(adapter, candidate);
+      if (fingerprintAfterResolve === fingerprintBeforeResolve) {
+        peekCache.set(candidate, {
+          fingerprint: fingerprintAfterResolve,
+          resolution,
+        });
+      }
+      return resolution;
+    }
+    return { kind: "ordinary", target: candidate, identity: null };
+  };
+
+  /**
+   * Cache-only, subprocess-free lookup for a PASSIVE observation. Never
+   * spawns a manager subprocess, regardless of any elapsed TTL — a retry
+   * timer is not demand-only behavior, and an idle daemon must not
+   * autonomously re-query a version manager just because a periodic status
+   * read happened to run.
+   *
+   * Returns:
+   *   - `{ kind: "ordinary", ... }` immediately for a candidate no adapter
+   *     recognizes — such a path never has, and never will, cause a spawn;
+   *   - the last EXPLICIT-DEMAND resolution ({@link resolveManagerCandidate})
+   *     for a recognized shim, as long as the candidate's own on-disk
+   *     fingerprint has not changed since that demand call ran;
+   *   - `undefined` when the candidate is recognized as a manager shim but
+   *     no fresh demand resolution exists yet (never resolved, or the
+   *     candidate changed since). Callers MUST treat this as "not yet
+   *     known, do not link or version-probe the raw shim" — never as
+   *     "ordinary", and never as license to resolve it themselves from a
+   *     passive path.
+   */
+  const peekManagerResolution = (
+    candidate: string,
+  ): TManagerResolution | undefined => {
+    for (const adapter of adapters) {
+      if (!adapter.recognizes(candidate)) continue;
+      const hit = peekCache.get(candidate);
+      if (hit === undefined) return undefined;
+      if (hit.fingerprint !== compositeFingerprint(adapter, candidate)) {
+        return undefined;
+      }
+      return hit.resolution;
+    }
+    return { kind: "ordinary", target: candidate, identity: null };
+  };
+
+  return {
+    registerManagerAdapter,
+    setManagerAdapters,
+    listManagerAdapters,
+    resolveManagerCandidate,
+    peekManagerResolution,
+  };
 };
 
 // ---------------------------------------------------------------------------
@@ -274,56 +295,6 @@ const envMsLocal = (name: string, fallback: number): number => {
 const miseResolveTimeoutMs = (): number =>
   envMsLocal("OPENLLM_MISE_RESOLVE_TIMEOUT_MS", 2_000);
 
-/**
- * Test-only home override for `miseHomeDir()` below. `node:os`'s `homedir()`
- * is resolved once and CACHED for the life of the process (verified: a later
- * `process.env.HOME` write is not observed) — the same gotcha
- * `working-set/base.ts` documents for the sandbox fixtures. This is a plain
- * module-level value a test sets directly; nothing in production ever calls
- * the setter, so — unlike an env var — there is no reachable production
- * redirect of which binary is trusted as "mise".
- */
-let miseHomeOverrideForTests: string | undefined;
-
-/** Test-only: point `miseBinCandidates()`/`miseGlobalConfigPath()`'s default
- *  at a fixture home instead of the process's real (cached) `homedir()`. */
-export const setMiseHomeOverrideForTests = (home: string | undefined): void => {
-  miseHomeOverrideForTests = home;
-};
-
-const miseHomeDir = (): string => miseHomeOverrideForTests ?? homedir();
-
-/**
- * Fixed, bounded set of locations mise's OWN launcher is known to install to,
- * checked in this order. Deliberately NOT a bare `"mise"` handed to the
- * spawn call to let it resolve via the daemon process's inherited PATH — an
- * unqualified name is not an "identified" executable: whatever a project- or
- * session-scoped shell init prepended to PATH would win. `resolveOnPath`
- * scans the daemon's own effective search space the same bounded,
- * existence-checked way `hostCliCandidates()` does for vendor CLIs, so this
- * still finds a Homebrew/custom-root install without trusting an ambient
- * override.
- */
-const miseBinCandidates = (): readonly string[] => [
-  join(miseHomeDir(), ".local", "bin", "mise"),
-  join(miseHomeDir(), ".local", "share", "mise", "bin", "mise"),
-  ...resolveOnPath("mise"),
-];
-
-/**
- * The `mise` launcher to invoke, resolved to an absolute, existing path from
- * the fixed candidate list above — never a bare `"mise"`, and never an env
- * var read as a production redirect (an env-var override of WHICH binary is
- * trusted as "mise" would itself be an untrusted-selection hole, exactly the
- * class of bug this adapter exists to close). `undefined` when no candidate
- * exists: the caller must then treat the shim as unresolved. Hermetic tests
- * install a fake `mise` at one of these real candidate paths (under a
- * temp `HOME`) rather than redirecting via an env var — see
- * `tests/daemon/mise-adapter.test.ts`.
- */
-const resolvedMiseBin = (): string | undefined =>
-  miseBinCandidates().find((p) => existsSync(p));
-
 /** A mise-managed shim lives at `.../mise/shims/<cmd>` (asdf-compatible
  *  layout mise also honors: `.../<data-dir>/shims/<cmd>` where the parent
  *  segment is literally named `mise`). Path-segment match only — cheap,
@@ -336,21 +307,6 @@ const isMiseShimPath = (candidate: string): boolean => {
   return segments[shimsIdx - 1] === "mise";
 };
 
-/**
- * Resolve a recognized mise shim to the real, absolute, existing binary it
- * currently activates, via a bounded `mise which <cmd>` explicit-argv call
- * (no shell, no arbitrary script execution). Rejects:
- *   - non-zero exit / empty output / timeout (→ null, per `runCapture`),
- *   - a relative answer (mise always prints absolute paths; anything else is
- *     untrusted output, not a real resolution),
- *   - self-reference (`mise which` echoing the shim path back — would cause
- *     `linkIsolatedCli` to symlink the shim to itself),
- *   - a cyclic answer that is itself another mise shim path (would leave the
- *     isolated link pointing at a shim, defeating the whole point of
- *     resolution and risking infinite indirection if something re-probes).
- * Any rejection returns `null` — the coordinator then reports "unresolved"
- * and the caller must NOT link or version-probe the original shim.
- */
 /**
  * Env vars that select a PROJECT- or SESSION-scoped mise configuration
  * rather than identifying where mise's global store lives. Blanket-deleting
@@ -409,30 +365,6 @@ const trustedGlobalMiseEnvOverrides = (): Record<
 };
 
 /**
- * `mise`'s own global config file — `MISE_GLOBAL_CONFIG_FILE` if the user
- * set one, else `$MISE_CONFIG_DIR/config.toml`, else the documented XDG
- * default `~/.config/mise/config.toml` (or `$XDG_CONFIG_HOME/mise/config.toml`).
- * See https://mise.jdx.dev/configuration.html. Read-only: this module never
- * writes it — it exists purely so the coordinator's cache can tell a real
- * `mise use -g …` selection change from an untouched shim file.
- */
-const miseGlobalConfigPath = (): string =>
-  misePaths(miseHomeDir()).globalConfigFile;
-
-/** {@link TManagerAdapter.fingerprint} for mise: the global config file's
- *  mtime+size (or its documented absence) — a selection SWITCH rewrites this
- *  file even when the shim binary itself is untouched. */
-const miseSelectionFingerprint = (): string => {
-  const path = miseGlobalConfigPath();
-  try {
-    const st = statSync(path);
-    return `cfg:${path}:${st.mtimeMs}:${st.size}`;
-  } catch {
-    return `cfg-absent:${path}`;
-  }
-};
-
-/**
  * Record WHY `mise which` failed — a closed signature of its stderr (e.g.
  * `mise_permission_denied` when confinement blocks mise's own config), never
  * the text. Without this a sandbox-blocked mise was indistinguishable from an
@@ -455,76 +387,185 @@ const noteMiseResolveFailure = (
   );
 };
 
-const resolveMiseShim = async (
-  candidate: string,
-  signal?: AbortSignal,
-): Promise<string | null> => {
-  const cmd = basename(candidate);
-  if (cmd.length === 0) return null;
-  const mise = resolvedMiseBin();
-  if (mise === undefined) return null; // no identified absolute mise executable — never trust a bare "mise"
-  // `runCapture`'s `spawnCwd` deliberately computes the child's cwd from
-  // `env.HOME` alone (see `delegation/spawn.ts`), and this override map never
-  // sets `HOME` — so the child ALWAYS lands in a neutral state/tmp dir, never
-  // this daemon process's own `cwd()` (which could be anything, including a
-  // user's project directory). That is the "actual cwd policy": mise still
-  // sees the REAL inherited `HOME` (so it finds its genuine global config,
-  // preserving valid custom global roots), but it can never walk UP from a
-  // project-scoped working directory to pick up ancestry config, because it
-  // never starts in one.
-  const env = trustedGlobalMiseEnvOverrides();
-  if (env === null) return null;
-  let signature: TDoctorFailureSignature | null = null;
-  const result = await runCaptureResult([mise, "which", cmd], env, {
-    probe: true,
-    timeoutMs: miseResolveTimeoutMs(),
-    maxBytes: 4_096,
-    ...(signal !== undefined ? { signal } : {}),
-    onFailureStderr: (stderr) => {
-      signature = classifyFailureOutput(stderr);
-    },
-  });
-  if (result.kind !== "ok") {
-    if (result.kind !== "aborted")
-      noteMiseResolveFailure(result.kind, signature);
-    return null;
-  }
-  const answer = result.text.trim();
-  if (answer.length === 0 || /[\r\n\0]/.test(answer)) return null;
-  if (!isAbsolute(answer)) return null;
-  if (answer === candidate) return null; // self-reference
-  if (isMiseShimPath(answer)) return null; // cyclic — still a shim
-  let real: string;
-  try {
-    real = realpathSync(answer);
-  } catch {
-    return null; // dangling — mise pointed at a binary that doesn't exist
-  }
-  try {
-    if (!statSync(real).isFile()) return null;
-    accessSync(real, constants.X_OK);
-  } catch {
-    return null;
-  }
-  if (real === candidate || isMiseShimPath(real)) return null;
-  return real;
+export type TCreateMiseManagerAdapterDeps = {
+  /**
+   * Home for mise path discovery. `node:os`'s `homedir()` is resolved once
+   * and CACHED for the process life (a later `process.env.HOME` write is
+   * not observed) — the same gotcha `working-set/base.ts` documents.
+   * Isolated installs / fixtures pass a different root. Defaults to
+   * `homedir()`.
+   */
+  readonly homeDir?: () => string;
 };
 
-export const miseManagerAdapter: TManagerAdapter = {
-  name: "mise",
-  recognizes: isMiseShimPath,
-  resolve: resolveMiseShim,
-  fingerprint: (): string | null => miseSelectionFingerprint(),
+/** Build a mise {@link TManagerAdapter} bound to a (possibly isolated) home. */
+export const createMiseManagerAdapter = (
+  deps: TCreateMiseManagerAdapterDeps = {},
+): TManagerAdapter => {
+  const miseHomeDir = deps.homeDir ?? homedir;
+
+  /**
+   * Fixed, bounded set of locations mise's OWN launcher is known to install
+   * to, checked in this order. Deliberately NOT a bare `"mise"` handed to
+   * the spawn call to let it resolve via the daemon process's inherited
+   * PATH — an unqualified name is not an "identified" executable: whatever
+   * a project- or session-scoped shell init prepended to PATH would win.
+   * `resolveOnPath` scans the daemon's own effective search space the same
+   * bounded, existence-checked way `hostCliCandidates()` does for vendor
+   * CLIs, so this still finds a Homebrew/custom-root install without
+   * trusting an ambient override.
+   */
+  const miseBinCandidates = (): readonly string[] => [
+    join(miseHomeDir(), ".local", "bin", "mise"),
+    join(miseHomeDir(), ".local", "share", "mise", "bin", "mise"),
+    ...resolveOnPath("mise"),
+  ];
+
+  /**
+   * The `mise` launcher to invoke, resolved to an absolute, existing path
+   * from the fixed candidate list above — never a bare `"mise"`, and never
+   * an env var read as a production redirect (an env-var override of WHICH
+   * binary is trusted as "mise" would itself be an untrusted-selection
+   * hole, exactly the class of bug this adapter exists to close).
+   * `undefined` when no candidate exists: the caller must then treat the
+   * shim as unresolved. Hermetic tests install a fake `mise` at one of
+   * these real candidate paths (under a temp `HOME`) rather than
+   * redirecting via an env var — see `tests/daemon/mise-adapter.test.ts`.
+   */
+  const resolvedMiseBin = (): string | undefined =>
+    miseBinCandidates().find((p) => existsSync(p));
+
+  /**
+   * `mise`'s own global config file — `MISE_GLOBAL_CONFIG_FILE` if the user
+   * set one, else `$MISE_CONFIG_DIR/config.toml`, else the documented XDG
+   * default `~/.config/mise/config.toml` (or
+   * `$XDG_CONFIG_HOME/mise/config.toml`). See
+   * https://mise.jdx.dev/configuration.html. Read-only: this adapter never
+   * writes it — it exists purely so the coordinator's cache can tell a real
+   * `mise use -g …` selection change from an untouched shim file.
+   */
+  const miseGlobalConfigPath = (): string =>
+    misePaths(miseHomeDir()).globalConfigFile;
+
+  const miseSelectionFingerprint = (): string => {
+    const path = miseGlobalConfigPath();
+    try {
+      const st = statSync(path);
+      return `cfg:${path}:${st.mtimeMs}:${st.size}`;
+    } catch {
+      return `cfg-absent:${path}`;
+    }
+  };
+
+  /**
+   * Resolve a recognized mise shim to the real, absolute, existing binary
+   * it currently activates, via a bounded `mise which <cmd>` explicit-argv
+   * call (no shell, no arbitrary script execution). Rejects:
+   *   - non-zero exit / empty output / timeout (→ null, per `runCapture`),
+   *   - a relative answer (mise always prints absolute paths; anything else
+   *     is untrusted output, not a real resolution),
+   *   - self-reference (`mise which` echoing the shim path back — would
+   *     cause `linkIsolatedCli` to symlink the shim to itself),
+   *   - a cyclic answer that is itself another mise shim path (would leave
+   *     the isolated link pointing at a shim, defeating the whole point of
+   *     resolution and risking infinite indirection if something re-probes).
+   * Any rejection returns `null` — the coordinator then reports "unresolved"
+   * and the caller must NOT link or version-probe the original shim.
+   */
+  const resolveMiseShim = async (
+    candidate: string,
+    signal?: AbortSignal,
+  ): Promise<string | null> => {
+    const cmd = basename(candidate);
+    if (cmd.length === 0) return null;
+    const mise = resolvedMiseBin();
+    if (mise === undefined) return null; // no identified absolute mise executable — never trust a bare "mise"
+    // `runCapture`'s `spawnCwd` deliberately computes the child's cwd from
+    // `env.HOME` alone (see `delegation/spawn.ts`), and this override map
+    // never sets `HOME` — so the child ALWAYS lands in a neutral state/tmp
+    // dir, never this daemon process's own `cwd()` (which could be
+    // anything, including a user's project directory). That is the "actual
+    // cwd policy": mise still sees the REAL inherited `HOME` (so it finds
+    // its genuine global config, preserving valid custom global roots), but
+    // it can never walk UP from a project-scoped working directory to pick
+    // up ancestry config, because it never starts in one.
+    const env = trustedGlobalMiseEnvOverrides();
+    if (env === null) return null;
+    let signature: TDoctorFailureSignature | null = null;
+    const result = await runCaptureResult([mise, "which", cmd], env, {
+      probe: true,
+      timeoutMs: miseResolveTimeoutMs(),
+      maxBytes: 4_096,
+      ...(signal !== undefined ? { signal } : {}),
+      onFailureStderr: (stderr) => {
+        signature = classifyFailureOutput(stderr);
+      },
+    });
+    if (result.kind !== "ok") {
+      if (result.kind !== "aborted")
+        noteMiseResolveFailure(result.kind, signature);
+      return null;
+    }
+    const answer = result.text.trim();
+    if (answer.length === 0 || /[\r\n\0]/.test(answer)) return null;
+    if (!isAbsolute(answer)) return null;
+    if (answer === candidate) return null; // self-reference
+    if (isMiseShimPath(answer)) return null; // cyclic — still a shim
+    let real: string;
+    try {
+      real = realpathSync(answer);
+    } catch {
+      return null; // dangling — mise pointed at a binary that doesn't exist
+    }
+    try {
+      if (!statSync(real).isFile()) return null;
+      accessSync(real, constants.X_OK);
+    } catch {
+      return null;
+    }
+    if (real === candidate || isMiseShimPath(real)) return null;
+    return real;
+  };
+
+  return {
+    name: "mise",
+    recognizes: isMiseShimPath,
+    resolve: resolveMiseShim,
+    fingerprint: (): string | null => miseSelectionFingerprint(),
+  };
 };
 
 /**
- * Default production registration — additive, per design decision §2.1: the
+ * Default production mise adapter — additive, per design decision §2.1: the
  * coordinator still runs the SAME `hostCliCandidates()` → `linkIsolatedCli`
  * pipeline; this only teaches it to recognize one more shim shape. A
  * candidate that never looks like a mise shim (`isMiseShimPath` false) never
  * triggers a subprocess, so every non-mise provider/path is unaffected.
- *
- * Tests that need a clean registry call `resetManagerAdaptersForTests()` and
- * register their own fakes; production takes this one adapter by default.
  */
-registerManagerAdapter(miseManagerAdapter);
+export const miseManagerAdapter: TManagerAdapter = createMiseManagerAdapter();
+
+let active: TManagerRegistry = createManagerRegistry();
+
+/** Replace the process-wide manager registry (tests / embedding hosts). */
+export const installManagerRegistry = (registry: TManagerRegistry): void => {
+  active = registry;
+};
+
+export const registerManagerAdapter = (adapter: TManagerAdapter): void =>
+  active.registerManagerAdapter(adapter);
+
+export const setManagerAdapters = (next: readonly TManagerAdapter[]): void =>
+  active.setManagerAdapters(next);
+
+export const listManagerAdapters = (): readonly TManagerAdapter[] =>
+  active.listManagerAdapters();
+
+export const resolveManagerCandidate = (
+  candidate: string,
+  opts?: TResolveManagerCandidateOpts,
+): Promise<TManagerResolution> =>
+  active.resolveManagerCandidate(candidate, opts);
+
+export const peekManagerResolution = (
+  candidate: string,
+): TManagerResolution | undefined => active.peekManagerResolution(candidate);

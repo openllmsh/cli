@@ -783,6 +783,11 @@ export type TMuseNativeParams = {
     readonly base_url: string;
     readonly auth: "bearer";
   };
+  /**
+   * Phase-timing clock. Defaults to `performance.now`. Tests inject a
+   * deterministic clock; production omits this.
+   */
+  readonly now?: () => number;
 };
 
 const setupDecline = (
@@ -954,20 +959,15 @@ type TMusePhaseMarks = {
   emitted: boolean;
 };
 
-let musePhaseNowImpl: () => number = (): number => performance.now();
-
-/** Test-only: replace the phase clock. Production always uses performance.now. */
-export const setMusePhaseClockForTests = (fn: (() => number) | null): void => {
-  musePhaseNowImpl = fn ?? ((): number => performance.now());
-};
-
-const musePhaseNow = (): number => musePhaseNowImpl();
+const defaultMusePhaseNow = (): number => performance.now();
 
 const musePhaseMs = (from: number, to: number): number =>
   Math.max(0, Math.round((to - from) * 1000) / 1000);
 
-const createMusePhaseMarks = (): TMusePhaseMarks => ({
-  startedAt: musePhaseNow(),
+const createMusePhaseMarks = (
+  now: () => number = defaultMusePhaseNow,
+): TMusePhaseMarks => ({
+  startedAt: now(),
   spawnStartedAt: null,
   hostReadyAt: null,
   sessionReadyAt: null,
@@ -994,10 +994,11 @@ const createMusePhaseMarks = (): TMusePhaseMarks => ({
 const emitMusePhaseTimings = (
   marks: TMusePhaseMarks,
   firstOutputOutcome: TMuseFirstOutputOutcome,
+  now: () => number = defaultMusePhaseNow,
 ): void => {
   if (marks.emitted) return;
   marks.emitted = true;
-  const endedAt = marks.firstOutputAt ?? musePhaseNow();
+  const endedAt = marks.firstOutputAt ?? now();
   const setupMs =
     marks.spawnStartedAt === null
       ? undefined
@@ -1615,7 +1616,8 @@ export const runMuseNative = async (
 
   // Entry clock after invalid-request declines — setup includes turn-root
   // prep, MCP, and overlay before the SDK host factory.
-  const phaseMarks = createMusePhaseMarks();
+  const now = params.now ?? defaultMusePhaseNow;
+  const phaseMarks = createMusePhaseMarks(now);
   // Split layout (enforced by `openMuseTurnSession`): workspaceRoot (session
   // cwd) NEVER contains the auth overlay HOME. Known-safe workspace reads
   // therefore cannot reach the auth symlink by a workspace-relative path.
@@ -1629,8 +1631,8 @@ export const runMuseNative = async (
   const noteFirstOutputSuccess = (): void => {
     if (phaseMarks.firstOutputAt !== null) return;
     if (!turn.sawOutput()) return;
-    phaseMarks.firstOutputAt = musePhaseNow();
-    emitMusePhaseTimings(phaseMarks, "success");
+    phaseMarks.firstOutputAt = now();
+    emitMusePhaseTimings(phaseMarks, "success", now);
   };
 
   type TQueueItem = TChatCompletionChunk | "end" | { readonly error: Error };
@@ -1680,7 +1682,7 @@ export const runMuseNative = async (
       endWith(turn.finish("cancelled"));
       return;
     }
-    emitMusePhaseTimings(phaseMarks, "aborted");
+    emitMusePhaseTimings(phaseMarks, "aborted", now);
     ended = true;
     push("end");
   };
@@ -1735,13 +1737,13 @@ export const runMuseNative = async (
         // Spawn/init clock starts immediately before the host factory — MCP
         // and overlay prep belong to setup_ms, not spawn_init_ms.
         onBeforeHostOpen: () => {
-          phaseMarks.spawnStartedAt = musePhaseNow();
+          phaseMarks.spawnStartedAt = now();
         },
         onHostReady: () => {
-          phaseMarks.hostReadyAt = musePhaseNow();
+          phaseMarks.hostReadyAt = now();
         },
         onSessionReady: () => {
-          phaseMarks.sessionReadyAt = musePhaseNow();
+          phaseMarks.sessionReadyAt = now();
         },
       },
     });
@@ -1769,7 +1771,7 @@ export const runMuseNative = async (
       rpcTimeoutMs,
       "muse session model confirm",
     );
-    phaseMarks.modelVerifiedAt = musePhaseNow();
+    phaseMarks.modelVerifiedAt = now();
     // Do NOT note authenticated on session/start alone — live evidence shows
     // Muse can open a session against an empty providers shell and only fail
     // later with turn errorKind authRequired. Auth memory is pinned by
@@ -1782,7 +1784,7 @@ export const runMuseNative = async (
       () => {},
     );
     if (params.signal.aborted) {
-      emitMusePhaseTimings(phaseMarks, "aborted");
+      emitMusePhaseTimings(phaseMarks, "aborted", now);
       await cleanup();
       return { kind: "declined", reason: "client aborted" };
     }
@@ -1791,11 +1793,12 @@ export const runMuseNative = async (
       rpcTimeoutMs,
       "muse turn/start",
     );
-    phaseMarks.turnSubmittedAt = musePhaseNow();
+    phaseMarks.turnSubmittedAt = now();
   } catch (error) {
     emitMusePhaseTimings(
       phaseMarks,
       params.signal.aborted ? "aborted" : "declined",
+      now,
     );
     await cleanup();
     return setupDecline(error, params.signal);
@@ -1886,7 +1889,7 @@ export const runMuseNative = async (
         if (outcome.error?.kind === "authRequired") {
           clearMuseStatusObservationCache();
         }
-        emitMusePhaseTimings(phaseMarks, "failure");
+        emitMusePhaseTimings(phaseMarks, "failure", now);
         ended = true;
         push({ error: new Error(reason) });
         void cleanup();
@@ -1938,7 +1941,7 @@ export const runMuseNative = async (
         noteFirstOutputSuccess();
         failStream(err);
       } else {
-        emitMusePhaseTimings(phaseMarks, "failure");
+        emitMusePhaseTimings(phaseMarks, "failure", now);
         ended = true;
         push({ error: err });
       }
@@ -1988,6 +1991,7 @@ export const runMuseNative = async (
         : params.signal.aborted
           ? "aborted"
           : "failure",
+      now,
     );
     await cleanup();
     const reason =

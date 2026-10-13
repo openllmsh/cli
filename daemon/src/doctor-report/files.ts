@@ -24,12 +24,11 @@ export const doctorStateDir = (): string => stateDir();
 export const doctorStatePath = (basename: string): string =>
   join(doctorStateDir(), basename);
 
-type TAtomicWrite = (path: string, contents: string) => boolean;
+export type TAtomicWrite = (path: string, contents: string) => boolean;
 
-let atomicWriteForTests: TAtomicWrite | null = null;
-
-export const setAtomicWriteForTests = (fn: TAtomicWrite | null): void => {
-  atomicWriteForTests = fn;
+export type TAtomicWriteTextOptions = {
+  /** Override the durable write path (tests inject failures). */
+  readonly write?: TAtomicWrite;
 };
 
 export const ensureDoctorStateDir = (): void => {
@@ -49,8 +48,7 @@ export const readTextFile = (path: string): string | null => {
   }
 };
 
-export const atomicWriteText = (path: string, contents: string): boolean => {
-  if (atomicWriteForTests !== null) return atomicWriteForTests(path, contents);
+const defaultAtomicWrite: TAtomicWrite = (path, contents): boolean => {
   try {
     ensureDoctorStateDir();
     const tmp = `${path}.${process.pid}.tmp`;
@@ -77,6 +75,12 @@ export const atomicWriteText = (path: string, contents: string): boolean => {
     return false;
   }
 };
+
+export const atomicWriteText = (
+  path: string,
+  contents: string,
+  options?: TAtomicWriteTextOptions,
+): boolean => (options?.write ?? defaultAtomicWrite)(path, contents);
 
 export const removeFile = (path: string): void => {
   try {

@@ -49,16 +49,6 @@ import { cleanNativeSpawnEnv, normalizeNativeTerminalResult } from "./types";
 const HELD_TTL_MS = 10 * 60 * 1000;
 /** How long to wait for the model's first output / next pause. */
 const DRIVE_TIMEOUT_MS = 120_000;
-/** Mutable so `setDriveTimeoutMsForTest` can shrink it for deterministic,
- *  bounded coverage of the deadline race in `drive()` — production never
- *  calls the setter, so this is always {@link DRIVE_TIMEOUT_MS}. */
-let driveTimeoutMs = DRIVE_TIMEOUT_MS;
-/** Test-only timeout override for deterministic drive()-deadline coverage
- *  (mirrors `setMuxAckTimeoutForTest` in `mux-host.ts`). Pass `null` to
- *  restore the production value. */
-export const setDriveTimeoutMsForTest = (timeoutMs: number | null): void => {
-  driveTimeoutMs = timeoutMs ?? DRIVE_TIMEOUT_MS;
-};
 /** After the FIRST tool handler fires, how long to keep collecting the rest of
  *  a parallel tool_use burst before returning. Parallel handlers fire within
  *  milliseconds; this only bounds a pathological unpaired block so it can't
@@ -286,6 +276,8 @@ type THeld = {
   lock: Promise<void>;
   sessionId: string | null;
   lastUsed: number;
+  /** Per-session drive / streamInput deadline (from start params, overridable on continue). */
+  driveTimeoutMs: number;
   readonly continuationIdentity: TToolContinuationIdentity;
 };
 
@@ -628,6 +620,12 @@ export type TStartToolTurnParams = {
   readonly systemText: string | null;
   readonly resumeSessionId: string | null;
   readonly userText: string;
+  /** Override the default drive / streamInput deadline for this held session. */
+  readonly driveTimeoutMs?: number;
+};
+
+export type TContinueToolTurnOptions = {
+  readonly driveTimeoutMs?: number;
 };
 
 /** Builds the message-iterator for a tool turn. The production default is
@@ -665,6 +663,7 @@ export const startToolTurn = async (
     lock: Promise.resolve(),
     sessionId: params.resumeSessionId,
     lastUsed: nowMs(),
+    driveTimeoutMs: params.driveTimeoutMs ?? DRIVE_TIMEOUT_MS,
     continuationIdentity,
   };
   return drive(h);
@@ -689,6 +688,7 @@ export const continueToolTurn = async (
   injectedContext: string | null = null,
   continuationToken: string | null = null,
   continuationIdentity: TToolContinuationIdentity = DEFAULT_CONTINUATION_IDENTITY,
+  options?: TContinueToolTurnOptions,
 ): Promise<TToolTurnResult> => {
   evictStale();
   const resultIds = new Set<string>();
@@ -780,6 +780,10 @@ export const continueToolTurn = async (
     };
   }
   refreshHeld(h);
+  const timeoutMs = options?.driveTimeoutMs ?? h.driveTimeoutMs;
+  if (options?.driveTimeoutMs !== undefined) {
+    h.driveTimeoutMs = timeoutMs;
+  }
   const outcome = (async (): Promise<TToolTurnResult> => {
     // Deliver client-added context as a genuine `role: "user"` message via
     // streamInput, BEFORE resolving any paused handler — it must never be
@@ -809,7 +813,7 @@ export const continueToolTurn = async (
           new Promise<never>((_, reject) => {
             inputTimer = setTimeout(
               () => reject(new Error("client context delivery timed out")),
-              driveTimeoutMs,
+              timeoutMs,
             );
           }),
         ]);
@@ -870,7 +874,7 @@ const drive = async (h: THeld): Promise<TToolTurnResult> => {
   let text = "";
   let toolUse: Array<{ id: string; name: string; input: unknown }> = [];
   let usage: TNativeTokens | undefined;
-  const deadline = nowMs() + driveTimeoutMs;
+  const deadline = nowMs() + h.driveTimeoutMs;
 
   for (;;) {
     const remaining = deadline - nowMs();
@@ -1084,23 +1088,4 @@ export const toolTurnToResponse = (
       },
     ],
   } as TChatCompletionResponse;
-};
-
-/** Test/introspection: count of held (paused) queries. */
-export const heldToolSessionCount = (): number => {
-  const seen = new Set<THeld>();
-  for (const [, h] of held) seen.add(h);
-  return seen.size;
-};
-
-/** Test-only teardown: force-close every currently held session (its live
- *  iterator + spawned subprocess, if any, and its streamInput queue) so a
- *  test that fails or times out before reaching a terminal drive() outcome
- *  doesn't leak a real spawned CLI process past the test. Mirrors
- *  `resetSessionsForTest` (session-core.ts) / `setMuxAckTimeoutForTest`
- *  (mux-host.ts)'s `*ForTest` convention. */
-export const closeAllHeldToolSessionsForTest = (): void => {
-  const seen = new Set<THeld>();
-  for (const [, h] of held) seen.add(h);
-  for (const h of seen) closeHeld(h);
 };

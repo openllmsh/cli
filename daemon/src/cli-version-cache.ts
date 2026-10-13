@@ -377,7 +377,7 @@ export const invalidateMatchingCliVersionOutput = (
 };
 
 /** Drop memory + inflight and re-read persist on the next lookup. */
-export const clearCliVersionCacheForTests = (): void => {
+export const clearCliVersionCache = (): void => {
   memory.clear();
   inflight.clear();
   persistLoaded = false;

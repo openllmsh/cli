@@ -51,7 +51,7 @@ export type TCliInstallState = {
 
 const cliFailStreak = new Map<string, number>();
 
-export const resetCliInstallDoctorStreakForTests = (): void => {
+export const clearCliInstallDoctorStreak = (): void => {
   cliFailStreak.clear();
 };
 

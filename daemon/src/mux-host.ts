@@ -133,7 +133,7 @@ export const MUX_CHANNEL_IDLE_TTL_MS = 90_000;
 const MUX_CHANNEL_REAPER_INTERVAL_MS = 10_000;
 const DEMUX_WARNING_THROTTLE_MS = 5_000;
 let muxAckTimeoutMs = MUX_ACK_TIMEOUT_MS;
-// Mutable ONLY for the test seam below; production keeps the constant export.
+// Overridable via configureMuxChannelIdleTtl; default matches the export.
 let muxChannelIdleTtlMs = MUX_CHANNEL_IDLE_TTL_MS;
 let channelReaper: ReturnType<typeof setInterval> | null = null;
 const lastDemuxWarningAt = new Map<string, number>();
@@ -188,25 +188,42 @@ const reapIdleChannels = (): void => {
 
 const ensureChannelReaper = (): void => {
   if (channelReaper !== null) return;
-  channelReaper = setInterval(reapIdleChannels, MUX_CHANNEL_REAPER_INTERVAL_MS);
+  channelReaper = setInterval(
+    reapIdleMuxChannels,
+    MUX_CHANNEL_REAPER_INTERVAL_MS,
+  );
   channelReaper.unref();
 };
 
-/** Test seam for deterministic idle-channel coverage. */
-export const reapIdleMuxChannelsForTest = (): void => reapIdleChannels();
+/** Run one idle-channel reaper pass (same work as the interval tick). */
+export const reapIdleMuxChannels = (): void => reapIdleChannels();
 
-/** Test seam for deterministic idle-channel coverage. */
-export const setMuxChannelIdleTtlForTest = (ttlMs: number | null): void => {
+/** Configure idle TTL for open mux channels; `null` restores the default. */
+export const configureMuxChannelIdleTtl = (ttlMs: number | null): void => {
   muxChannelIdleTtlMs = ttlMs ?? MUX_CHANNEL_IDLE_TTL_MS;
 };
 
-/** Test-only timeout override for deterministic channel-negotiation coverage. */
-export const setMuxAckTimeoutForTest = (timeoutMs: number | null): void => {
+/** Configure channel-ack timeout; `null` restores the default. */
+export const configureMuxAckTimeout = (timeoutMs: number | null): void => {
   muxAckTimeoutMs = timeoutMs ?? MUX_ACK_TIMEOUT_MS;
 };
 
-/** Test-only cache reset; production invalidation follows presence replacement. */
-export const resetMuxFailureCacheForTest = (): void => {
+const readPositiveMsEnv = (name: string): number | null => {
+  const raw = process.env[name]?.trim();
+  if (raw === undefined || raw.length === 0) return null;
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n < 1) return null;
+  return Math.floor(n);
+};
+
+// Optional ops knobs — same configure path tests use for short TTLs.
+configureMuxChannelIdleTtl(
+  readPositiveMsEnv("OPENLLM_MUX_CHANNEL_IDLE_TTL_MS"),
+);
+configureMuxAckTimeout(readPositiveMsEnv("OPENLLM_MUX_ACK_TIMEOUT_MS"));
+
+/** Drop remembered mux open failures (e.g. after presence replacement). */
+export const clearMuxFailureCache = (): void => {
   failedUntil.clear();
 };
 
@@ -440,10 +457,9 @@ export const configureMuxHost = (options: {
   ensureChannelReaper();
 };
 
-/** Test seam: the live channel for `channelId` (identity checks across a rebind). */
-export const getMuxChannelForTest = (
-  channelId: string,
-): TMuxChannel | undefined => channels.get(channelId)?.channel;
+/** Live mux channel for `channelId`, if still open. */
+export const getMuxChannel = (channelId: string): TMuxChannel | undefined =>
+  channels.get(channelId)?.channel;
 
 /**
  * Shared OPEN dispatcher for every daemon-side mux channel (relay WS + RTC).
@@ -711,14 +727,15 @@ export const muxHostOnBytes = (bytes: Uint8Array | null): void => {
     });
     return;
   }
-  const record = channels.get(envelope.channelId);
-  if (record === undefined) {
+  if (getMuxChannel(envelope.channelId) === undefined) {
     // Was a silent no-op: relay bytes for a channel the daemon never accepted
     // (or already tore down) disappeared here — the invisible half of the
     // production "device did not answer" black hole.
     logDemuxWarning("unknown_channel", { channelId: envelope.channelId });
     return;
   }
+  const record = channels.get(envelope.channelId);
+  if (record === undefined) return;
   record.sink?.(envelope.payload);
 };
 
@@ -730,4 +747,7 @@ export const resetAllChannels = (): void => {
     record.sink = null;
     record.channel.close("relay_restart");
   }
+  // Demux warn throttle is per-process; clear so parallel/rerun workers don't
+  // suppress the first warn of a fresh test after a sibling already logged.
+  lastDemuxWarningAt.clear();
 };

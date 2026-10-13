@@ -7,7 +7,7 @@
  * off-box. These helpers feed the LOCAL runner + the local usage panel
  * only.
  */
-import { existsSync } from "node:fs";
+import { existsSync, realpathSync } from "node:fs";
 import { rm } from "node:fs/promises";
 import { platform } from "node:os";
 import { join } from "node:path";
@@ -87,9 +87,17 @@ export const spawnCwd = (
   // Reject `/` explicitly: it "exists", so an env with `HOME=/` (or a daemon
   // whose HOME wasn't isolated) would otherwise pass the existsSync check and
   // re-introduce the exact root-cwd bug this helper exists to prevent.
-  if (home !== undefined && home.length > 0 && home !== "/" && existsSync(home))
-    return home;
-  return daemonTempDir();
+  const raw =
+    home !== undefined && home.length > 0 && home !== "/" && existsSync(home)
+      ? home
+      : daemonTempDir();
+  // Physical path so a symlinked state/tmp dir yields the same $PWD and
+  // MISE_CEILING_PATHS (realpath'd at the call site) under every host.
+  try {
+    return realpathSync(raw);
+  } catch {
+    return raw;
+  }
 };
 
 /**
@@ -203,6 +211,11 @@ export type TRunCaptureOpts = {
    * Unset keeps stderr ignored (the default for every existing caller).
    */
   readonly onFailureStderr?: (stderr: string) => void;
+  /**
+   * Watchdog scheduler for the capture deadline. Defaults to `setTimeout`.
+   * Tests inject delayed/immediate fires without module-global setters.
+   */
+  readonly scheduleTimeout?: TTimeoutScheduler;
 };
 
 const FAILURE_STDERR_MAX_BYTES = 2_048;
@@ -271,24 +284,14 @@ type TCaptureOutcome =
   | { readonly kind: "aborted" }
   | { readonly kind: "overflow" };
 
-type TCaptureCompleteHook = () => void;
-
-let captureCompleteHookForTests: TCaptureCompleteHook | null = null;
-
-/** Test-only: run after `complete` settles, before `Promise.race` reactions. */
-export const setCaptureCompleteHookForTests = (
-  hook: TCaptureCompleteHook | null,
-): void => {
-  captureCompleteHookForTests = hook;
-};
-
-type TCaptureTimeoutScheduler = (
+/** Injectable `setTimeout` for capture/login watchdogs (defaults to real timers). */
+export type TTimeoutScheduler = (
   callback: () => void,
   delayMs: number,
 ) => ReturnType<typeof setTimeout>;
 
-let captureTimeoutSchedulerForTests: TCaptureTimeoutScheduler | null = null;
-let loginTimeoutSchedulerForTests: TCaptureTimeoutScheduler | null = null;
+const defaultTimeoutScheduler: TTimeoutScheduler = (callback, delayMs) =>
+  setTimeout(callback, delayMs);
 
 export type TNativeAuthProducer =
   | "claude-refresh"
@@ -325,26 +328,6 @@ let nativeAuthOperationSeq = 0;
 export const newNativeAuthOperationId = (): string => {
   nativeAuthOperationSeq += 1;
   return `na-${nativeAuthOperationSeq.toString(36)}-${Math.floor(performance.now()).toString(36)}`;
-};
-
-/**
- * Test-only: replace the capture watchdog `setTimeout`. Used to inject a
- * delayed fire for lateness fields. Production always uses `setTimeout`.
- */
-export const setCaptureTimeoutSchedulerForTests = (
-  scheduler: TCaptureTimeoutScheduler | null,
-): void => {
-  captureTimeoutSchedulerForTests = scheduler;
-};
-
-/**
- * Test-only: replace the login watchdog `setTimeout`. Used to inject a
- * delayed fire for lateness fields. Production always uses `setTimeout`.
- */
-export const setLoginTimeoutSchedulerForTests = (
-  scheduler: TCaptureTimeoutScheduler | null,
-): void => {
-  loginTimeoutSchedulerForTests = scheduler;
 };
 
 export type TRunCaptureResult =
@@ -486,12 +469,7 @@ export const runCaptureResult = async (
         const code = await proc.exited;
         return { kind: "complete", out: read.out, code };
       })();
-      const scheduleTimeout =
-        captureTimeoutSchedulerForTests ??
-        ((
-          callback: () => void,
-          delayMs: number,
-        ): ReturnType<typeof setTimeout> => setTimeout(callback, delayMs));
+      const scheduleTimeout = opts?.scheduleTimeout ?? defaultTimeoutScheduler;
       const timeout = new Promise<TCaptureOutcome>((resolve) => {
         timerDelayMs = budget.remainingMs();
         timerArmedAtMs = performance.now();
@@ -508,12 +486,6 @@ export const runCaptureResult = async (
                 resolve({ kind: "aborted" }),
               );
             });
-      if (captureCompleteHookForTests !== null) {
-        const hook = captureCompleteHookForTests;
-        void complete.then(() => {
-          hook();
-        });
-      }
       const outcome = await Promise.race(
         abortWait === null
           ? [complete, timeout]
@@ -777,6 +749,16 @@ export type TSpawnLoginOpts = {
   readonly persistenceGraceMs?: number;
   readonly producer?: TNativeAuthProducer;
   readonly operationId?: string;
+  /**
+   * Watchdog scheduler for the login deadline. Defaults to `setTimeout`.
+   * Tests inject delayed/immediate fires without module-global setters.
+   */
+  readonly scheduleTimeout?: TTimeoutScheduler;
+  /**
+   * Cap for {@link TSpawnLoginOpts.onDeadline} hang. Defaults to
+   * {@link DEADLINE_CHECK_CAP_MS}.
+   */
+  readonly deadlineCheckCapMs?: number;
 };
 
 /**
@@ -785,8 +767,12 @@ export type TSpawnLoginOpts = {
  */
 export const DEADLINE_CHECK_CAP_MS = 400;
 
+/** Thin alias of {@link DEADLINE_CHECK_CAP_MS} for call sites that want a function. */
+export const deadlineCheckCapMs = (): number => DEADLINE_CHECK_CAP_MS;
+
 const awaitOnDeadline = async (
   check: (() => boolean | Promise<boolean>) | undefined,
+  capMs: number = DEADLINE_CHECK_CAP_MS,
 ): Promise<boolean> => {
   if (check === undefined) return false;
   let timer: ReturnType<typeof setTimeout> | null = null;
@@ -794,7 +780,7 @@ const awaitOnDeadline = async (
     return await Promise.race([
       Promise.resolve(check()).then((v) => v === true),
       new Promise<boolean>((resolve) => {
-        timer = setTimeout(() => resolve(false), DEADLINE_CHECK_CAP_MS);
+        timer = setTimeout(() => resolve(false), capMs);
       }),
     ]);
   } catch {
@@ -1083,7 +1069,10 @@ export const spawnLogin = async (
           rootExited: rootExitedAtDeadline,
           rootExitCode: rootExitCodeAtDeadline,
         });
-        const defer = await awaitOnDeadline(loginOpts?.onDeadline);
+        const defer = await awaitOnDeadline(
+          loginOpts?.onDeadline,
+          loginOpts?.deadlineCheckCapMs ?? DEADLINE_CHECK_CAP_MS,
+        );
         if (abandoned) return;
         if (defer) {
           const graceMs = Math.max(0, loginOpts?.persistenceGraceMs ?? 0);
@@ -1131,9 +1120,7 @@ export const spawnLogin = async (
       });
     };
     const scheduleTimeout =
-      loginTimeoutSchedulerForTests ??
-      ((callback: () => void, delayMs: number): ReturnType<typeof setTimeout> =>
-        setTimeout(callback, delayMs));
+      loginOpts?.scheduleTimeout ?? defaultTimeoutScheduler;
     timerDelayMs = budget.remainingMs();
     timerArmedAtMs = performance.now();
     killTimer = scheduleTimeout(() => {
@@ -1460,7 +1447,10 @@ export const spawnLoginPty = async (
               spawn_elapsed_ms: performance.now() - spawnedAtMs,
             }),
           );
-          const defer = await awaitOnDeadline(ptyOpts?.onDeadline);
+          const defer = await awaitOnDeadline(
+            ptyOpts?.onDeadline,
+            ptyOpts?.deadlineCheckCapMs ?? DEADLINE_CHECK_CAP_MS,
+          );
           if (defer) {
             const graceMs = Math.max(0, ptyOpts?.persistenceGraceMs ?? 0);
             if (

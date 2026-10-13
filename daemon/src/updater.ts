@@ -38,6 +38,7 @@ import { drainDisposableChildren } from "./child-supervisor";
 import { daemonEnv, stateDir } from "./env";
 import { hardenMacBinary } from "./harden-binary";
 import { logError, logInfo, logWarn, safeDiagnosticMessage } from "./logger";
+import type { TWaitUntilIdleOpts } from "./self-update";
 import {
   currentTarget,
   fetchBinary,
@@ -63,11 +64,19 @@ const updateTarget = (): string =>
 
 const PROBE_TIMEOUT_MS = 5_000;
 
+export type TProbeFingerprint = (path: string) => Promise<string | null>;
+
+export type TBinaryFingerprintOpts = {
+  readonly probe?: TProbeFingerprint;
+};
+
 /** The daemon fingerprint baked into the binary at `path`, or null when it
  *  can't be read (a pre-merge binary has no `--fingerprint`). */
 export const binaryFingerprint = async (
   path: string,
+  opts: TBinaryFingerprintOpts = {},
 ): Promise<string | null> => {
+  if (opts.probe !== undefined) return opts.probe(path);
   try {
     const proc = Bun.spawn([path, "daemon", "--fingerprint"], {
       stdin: "ignore",
@@ -92,8 +101,9 @@ export const binaryFingerprint = async (
 export const daemonCodeChanged = async (
   path: string,
   running: string = DAEMON_FINGERPRINT,
+  opts: TBinaryFingerprintOpts = {},
 ): Promise<boolean> => {
-  const onDisk = await binaryFingerprint(path);
+  const onDisk = await binaryFingerprint(path, opts);
   if (onDisk === null) {
     logWarn(
       "update",
@@ -104,12 +114,18 @@ export const daemonCodeChanged = async (
   return onDisk !== running;
 };
 
+type TSwapBinaryDeps = {
+  readonly probeFingerprint: TProbeFingerprint;
+  readonly harden: (path: string) => void;
+};
+
 /** Download, verify and atomically install `version` at `dest`. Returns
  *  whether the file was replaced. Never throws. */
 const swapBinary = async (
   dest: string,
   version: string,
   from: string,
+  deps: TSwapBinaryDeps,
 ): Promise<boolean> => {
   const target = currentTarget();
   if (target === null) {
@@ -145,7 +161,7 @@ const swapBinary = async (
     // The file being replaced IS the daemon (the service execs it). Only ever
     // install a binary that carries a daemon half: a cloud still pinning a
     // pre-merge standalone CLI must not overwrite the daemon with it.
-    if ((await binaryFingerprint(tmp)) === null) {
+    if ((await deps.probeFingerprint(tmp)) === null) {
       logError(
         "update",
         safeDiagnosticMessage`downloaded binary has no daemon half — refusing update`,
@@ -156,7 +172,7 @@ const swapBinary = async (
       return false;
     }
     renameSync(tmp, dest); // atomic; the running daemon keeps its old inode
-    hardenMacBinary(dest); // dequarantine + ad-hoc sign so arm64 can exec it
+    deps.harden(dest); // dequarantine + ad-hoc sign so arm64 can exec it
     // Record only AFTER a swap — a transient failure retries next tick, but a
     // swap that never converges (mis-publish) must back off.
     recordAttempt("cli", version);
@@ -177,18 +193,6 @@ const swapBinary = async (
   }
 };
 
-// One convergence at a time: a bootstrap tick, a CLI nudge and the dashboard's
-// "update now" can all fire together.
-let running = false;
-// The binary's identity when the daemon last decided "no restart needed", so a
-// tick only re-probes the fingerprint after the file actually changed.
-let settledSignature: string | null = null;
-
-export const resetUpdaterForTests = (): void => {
-  running = false;
-  settledSignature = null;
-};
-
 export type TConvergeOpts = {
   /** Explicit user request — bypasses the auto-update opt-out. */
   readonly force?: boolean;
@@ -196,11 +200,23 @@ export type TConvergeOpts = {
   readonly applyHeld?: boolean;
 };
 
-/** Seams for tests: the baked identity and the process exit. */
+/** Collaborators for a converge pass — production defaults when omitted. */
 export type TConvergeDeps = {
   readonly version: string;
   readonly fingerprint: string;
   readonly exit: () => void;
+  /** Override the on-disk fingerprint probe (defaults to spawning the binary). */
+  readonly probeFingerprint?: TProbeFingerprint;
+  /** Override macOS harden (defaults to `hardenMacBinary`). */
+  readonly harden?: (path: string) => void;
+  /** Override idle-drain timing / clock / sleep for the restart wait. */
+  readonly idleWait?: TWaitUntilIdleOpts;
+  /**
+   * Idle wait implementation. Defaults to the process-wide
+   * {@link waitUntilIdle}; tests pass a tracker-bound wait so begin/end
+   * and the drain share one counter.
+   */
+  readonly waitUntilIdle?: (opts?: TWaitUntilIdleOpts) => Promise<boolean>;
 };
 
 const defaultDeps = (): TConvergeDeps => ({
@@ -209,70 +225,121 @@ const defaultDeps = (): TConvergeDeps => ({
   exit: () => process.exit(0),
 });
 
+export type TBinaryUpdater = {
+  readonly convergeBinary: (
+    latest: string | null,
+    opts?: TConvergeOpts,
+    deps?: TConvergeDeps,
+  ) => Promise<void>;
+  readonly watchBinary: () => void;
+};
+
+/**
+ * Binary converge + file-watch loop with its own running/settled latch.
+ * Production uses {@link binaryUpdater}; tests build a fresh instance so
+ * latch state never leaks across cases.
+ */
+export const createBinaryUpdater = (): TBinaryUpdater => {
+  // One convergence at a time: a bootstrap tick, a CLI nudge and the
+  // dashboard's "update now" can all fire together.
+  let running = false;
+  // The binary's identity when the daemon last decided "no restart needed",
+  // so a tick only re-probes the fingerprint after the file actually changed.
+  let settledSignature: string | null = null;
+
+  const convergeBinary = async (
+    latest: string | null,
+    opts: TConvergeOpts = {},
+    deps: TConvergeDeps = defaultDeps(),
+  ): Promise<void> => {
+    if (running) return;
+    if (deps.version === "0.0.0-dev") return;
+    running = true;
+    try {
+      const probeFingerprint: TProbeFingerprint =
+        deps.probeFingerprint ?? ((path) => binaryFingerprint(path));
+      const harden = deps.harden ?? hardenMacBinary;
+      const idle = deps.waitUntilIdle ?? waitUntilIdle;
+      const dest = updateTarget();
+      const wantSwap =
+        (opts.force === true || autoUpdateEnabled()) &&
+        latest !== null &&
+        latest.length > 0 &&
+        latest !== deps.version &&
+        !recentlyAttempted("cli", latest);
+      if (wantSwap) {
+        await swapBinary(dest, latest, deps.version, {
+          probeFingerprint,
+          harden,
+        });
+      }
+
+      const signature = binarySignature(dest);
+      if (signature === null || signature === settledSignature) return;
+      if (
+        !(await daemonCodeChanged(dest, deps.fingerprint, {
+          probe: probeFingerprint,
+        }))
+      ) {
+        settledSignature = signature;
+        return;
+      }
+      await withSelfUpdateApply(opts.applyHeld === true, async () => {
+        logInfo("update", "daemon code changed on disk; restarting when idle");
+        // Still busy past the drain window → defer, never cut work off. The
+        // signature stays unsettled, so the next tick retries the restart.
+        if (!(await idle(deps.idleWait))) {
+          logInfo("update", "daemon busy; restart deferred to the next check");
+          return;
+        }
+        // The new binary is in place; bounded cleanup must not block the exit
+        // that lets launchd/systemd start the replacement daemon.
+        await drainDisposableChildren();
+        deps.exit();
+      });
+    } finally {
+      running = false;
+    }
+  };
+
+  const WATCH_INTERVAL_MS = 30_000;
+
+  /**
+   * Notice a binary someone else swapped (the CLI's launch check, the
+   * installer) between bootstrap ticks. A stat every
+   * {@link WATCH_INTERVAL_MS}; only a changed signature runs the fingerprint
+   * probe. Unref'd so it never holds the process open.
+   */
+  const watchBinary = (): void => {
+    if (DAEMON_VERSION === "0.0.0-dev") return;
+    let last = binarySignature(updateTarget());
+    const timer = setInterval(() => {
+      const now = binarySignature(updateTarget());
+      if (now === last) return;
+      last = now;
+      void convergeBinary(null).catch((err) => logError("update", err));
+    }, WATCH_INTERVAL_MS);
+    timer.unref();
+  };
+
+  return { convergeBinary, watchBinary };
+};
+
+/** Process-wide updater used by the daemon. */
+export const binaryUpdater = createBinaryUpdater();
+
 /**
  * Converge the binary to `latest` (the cloud's pinned version), then restart
  * the daemon only if its code changed. Also handles a file someone ELSE
  * swapped (the CLI's launch check, the installer): a changed signature
  * triggers the same fingerprint comparison. No-op off a compiled build.
  */
-export const convergeBinary = async (
+export const convergeBinary = (
   latest: string | null,
-  opts: TConvergeOpts = {},
-  deps: TConvergeDeps = defaultDeps(),
-): Promise<void> => {
-  if (running) return;
-  if (deps.version === "0.0.0-dev") return;
-  running = true;
-  try {
-    const dest = updateTarget();
-    const wantSwap =
-      (opts.force === true || autoUpdateEnabled()) &&
-      latest !== null &&
-      latest.length > 0 &&
-      latest !== deps.version &&
-      !recentlyAttempted("cli", latest);
-    if (wantSwap) await swapBinary(dest, latest, deps.version);
+  opts?: TConvergeOpts,
+  deps?: TConvergeDeps,
+): Promise<void> => binaryUpdater.convergeBinary(latest, opts, deps);
 
-    const signature = binarySignature(dest);
-    if (signature === null || signature === settledSignature) return;
-    if (!(await daemonCodeChanged(dest, deps.fingerprint))) {
-      settledSignature = signature;
-      return;
-    }
-    await withSelfUpdateApply(opts.applyHeld === true, async () => {
-      logInfo("update", "daemon code changed on disk; restarting when idle");
-      // Still busy past the drain window → defer, never cut work off. The
-      // signature stays unsettled, so the next tick retries the restart.
-      if (!(await waitUntilIdle())) {
-        logInfo("update", "daemon busy; restart deferred to the next check");
-        return;
-      }
-      // The new binary is in place; bounded cleanup must not block the exit
-      // that lets launchd/systemd start the replacement daemon.
-      await drainDisposableChildren();
-      deps.exit();
-    });
-  } finally {
-    running = false;
-  }
-};
-
-const WATCH_INTERVAL_MS = 30_000;
-
-/**
- * Notice a binary someone else swapped (the CLI's launch check, the installer)
- * between bootstrap ticks. A stat every {@link WATCH_INTERVAL_MS}; only a
- * changed signature runs the fingerprint probe. Unref'd so it never holds the
- * process open.
- */
 export const watchBinary = (): void => {
-  if (DAEMON_VERSION === "0.0.0-dev") return;
-  let last = binarySignature(updateTarget());
-  const timer = setInterval(() => {
-    const now = binarySignature(updateTarget());
-    if (now === last) return;
-    last = now;
-    void convergeBinary(null).catch((err) => logError("update", err));
-  }, WATCH_INTERVAL_MS);
-  timer.unref();
+  binaryUpdater.watchBinary();
 };

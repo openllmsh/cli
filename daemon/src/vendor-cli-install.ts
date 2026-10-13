@@ -29,14 +29,9 @@ type TLocalRecord = TVendorCliInstall & {
   readonly process_start?: string;
 };
 
-let nowMs = (): number => Date.now();
+export type TVendorCliInstallClock = () => number;
 
-/** Test-only clock for grace / stale transitions. Pass `null` to restore. */
-export const setVendorCliInstallClockForTests = (
-  fn: (() => number) | null,
-): void => {
-  nowMs = fn ?? ((): number => Date.now());
-};
+const defaultNowMs: TVendorCliInstallClock = (): number => Date.now();
 
 const vendorCliInstallRoot = (): string =>
   join(stateDir(), "vendor-cli-install");
@@ -192,6 +187,8 @@ const readRawRecord = (slug: string): TLocalRecord | null => {
 export type TReadVendorCliInstallOptions = {
   /** When the host CLI is already present, installer progress is moot. */
   readonly cliInstalled?: boolean;
+  /** Wall clock for grace/stale aging; defaults to `Date.now`. */
+  readonly nowMs?: TVendorCliInstallClock;
 };
 
 /**
@@ -207,7 +204,7 @@ export const readVendorCliInstall = (
     const record = readRawRecord(slug);
     if (record === null) return undefined;
 
-    const now = nowMs();
+    const now = (options?.nowMs ?? defaultNowMs)();
     const age = Math.max(0, now - record.updated_at_ms);
 
     if (record.stage === "installing") {
@@ -270,9 +267,11 @@ type TCliInstallCarrier = {
  */
 export const attachVendorCliInstall = <T extends TCliInstallCarrier>(
   conn: T,
+  options?: Pick<TReadVendorCliInstallOptions, "nowMs">,
 ): T => {
   const meta = readVendorCliInstall(conn.provider, {
     cliInstalled: conn.cli_installed === true,
+    ...(options?.nowMs !== undefined ? { nowMs: options.nowMs } : {}),
   });
   if (meta === undefined) {
     if (conn.cli_install === undefined) return conn;

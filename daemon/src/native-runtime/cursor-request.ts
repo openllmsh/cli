@@ -182,7 +182,9 @@ export const cursorRequestOf = (
   ) {
     promptText = `Conversation so far (already completed — do not repeat any of it):\n\n${lines
       .slice(0, -pendingUserTexts.length)
-      .join("\n\n")}\n\nCurrent request (answer only this):\n${pendingUserTexts.join("\n\n")}`;
+      .join(
+        "\n\n",
+      )}\n\nCurrent request (answer only this):\n${pendingUserTexts.join("\n\n")}`;
   }
   // ACP starts cold after a caller-tool handoff. Mark the resumption boundary
   // rather than presenting the original request as fresh work a second time.

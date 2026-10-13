@@ -30,6 +30,7 @@ import {
   reportingScope,
   reportingStatus,
 } from "./engine";
+import type { TWriteLocalPreferenceOptions } from "./preference";
 import { writeLocalPreference } from "./preference";
 
 const capabilityDeniedBody = (pathname: string): Record<string, unknown> => {
@@ -77,7 +78,10 @@ export const isDoctorLocalPath = (pathname: string): boolean =>
   pathname === DOCTOR_LOCAL_STATUS_PATH ||
   pathname === DOCTOR_LOCAL_PREFERENCE_PATH;
 
-export const handleDoctorLocal = async (req: Request): Promise<Response> => {
+export const handleDoctorLocal = async (
+  req: Request,
+  options?: TWriteLocalPreferenceOptions,
+): Promise<Response> => {
   const url = new URL(req.url);
   const denied = authorizeLocalDoctor(req, url.pathname);
   if (denied !== null) return denied;
@@ -127,7 +131,7 @@ export const handleDoctorLocal = async (req: Request): Promise<Response> => {
           ? { generation: scope.generation }
           : {}),
     };
-    if (!writeLocalPreference(scoped)) {
+    if (!writeLocalPreference(scoped, options)) {
       return json(500, { error: "persist_failed" });
     }
     applyLocalPreferenceAndMaybePurge(scoped.enabled);

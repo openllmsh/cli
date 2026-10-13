@@ -1,6 +1,7 @@
 export * from "./capability";
 export * from "./correlation";
 export * from "./engine";
+export * from "./files";
 export * from "./local-http";
 export * from "./platform";
 export * from "./preference";

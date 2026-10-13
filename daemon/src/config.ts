@@ -37,12 +37,15 @@ import { loadIdentityKey } from "./keypair";
 import { withoutCommandReplayContext } from "./op-context";
 import { clearPlanCache } from "./plan-cache";
 
-const EMPTY: TDaemonBootstrap = {
+/** Empty bootstrap row for offline/seeded hosts and harnesses. */
+export const EMPTY_DAEMON_BOOTSTRAP: TDaemonBootstrap = {
   catalog: [],
   provider_prefixes: [],
   user_fallback_groups: [],
   user_model_fallback_bindings: [],
 };
+
+const EMPTY = EMPTY_DAEMON_BOOTSTRAP;
 
 /**
  * Outcome of the last bootstrap attempt — surfaced on `GET /status` so
@@ -64,20 +67,37 @@ export const getCloudState = (): TCloudState => cloudState;
 
 /** Last bootstrap reporting policy. Absent/old clouds → null (upload off). */
 export const getReportingPolicy = (): TDaemonReportingPolicy | null =>
-  snapshot.reporting_policy ?? null;
+  currentBootstrapSnapshot().reporting_policy ?? null;
 
-/** Test-only: inject bootstrap reporting policy without a cloud fetch. */
-export const setReportingPolicyForTests = (
-  policy: TDaemonReportingPolicy | null,
+/**
+ * Install a full bootstrap snapshot into the in-memory cache (catalog index
+ * rebuilt). Offline/seeded hosts call this directly. Bumps the reporting
+ * policy revision so delayed diagnostics callbacks can fence — unless
+ * {@link refreshBootstrap} already claimed the revision for this fetch.
+ */
+export const applyBootstrapSnapshot = (
+  next: TDaemonBootstrap,
+  options?: { readonly preserveReportingRevision?: boolean },
 ): void => {
-  reportingPolicyRevision += 1;
+  if (options?.preserveReportingRevision !== true) {
+    reportingPolicyRevision += 1;
+  }
+  // The bootstrap body is trusted JSON, not decoded: a degraded or older cloud
+  // can omit a collection. Default the required ones so a partial snapshot
+  // never leaves `catalog` undefined for every later lookup to crash on.
   snapshot = {
-    ...snapshot,
-    ...(policy === null
-      ? { reporting_policy: undefined }
-      : { reporting_policy: policy }),
+    ...next,
+    catalog: next.catalog ?? [],
+    provider_prefixes: next.provider_prefixes ?? [],
+    user_fallback_groups: next.user_fallback_groups ?? [],
+    user_model_fallback_bindings: next.user_model_fallback_bindings ?? [],
   };
+  byModelId = new Map(snapshot.catalog.map((e) => [e.model_id, e]));
 };
+
+/** Read-only view of the in-memory bootstrap snapshot. */
+export const currentBootstrapSnapshot = (): Readonly<TDaemonBootstrap> =>
+  snapshot;
 
 /**
  * Refresh the cloud snapshot, recording the outcome in `cloudState`.
@@ -98,8 +118,7 @@ export const refreshBootstrap = (): Promise<boolean> =>
     try {
       const next = await fetchBootstrap();
       if (reportingRevision !== reportingPolicyRevision) return false;
-      snapshot = next;
-      byModelId = new Map(snapshot.catalog.map((e) => [e.model_id, e]));
+      applyBootstrapSnapshot(next, { preserveReportingRevision: true });
       cloudState = "ok";
       void import("./doctor-report")
         .then((m) => m.onBootstrapReportingPolicy(reportingRevision))
@@ -235,30 +254,4 @@ export const lookupCatalogEntry = (
  * the walker then resolves no defaults, which is today's behaviour.
  */
 export const catalogCapsDefaults = (): ReadonlyArray<TModelCapsDefaultRule> =>
-  snapshot.caps_defaults ?? [];
-
-/**
- * Test seam: pin the in-memory catalog the walker resolves hops against.
- * Production never calls this — bootstrap is the only writer.
- */
-export const setCatalogForTest = (
-  catalog: ReadonlyArray<TDaemonCatalogEntry>,
-  capsDefaults: ReadonlyArray<TModelCapsDefaultRule> = [],
-  modelSettings: TModelSettingsOverrides = {},
-): void => {
-  snapshot = {
-    ...EMPTY,
-    catalog: [...catalog],
-    caps_defaults: [...capsDefaults],
-    model_settings: modelSettings,
-  };
-  byModelId = new Map(snapshot.catalog.map((e) => [e.model_id, e]));
-};
-
-/** Test seam: pin the per-user plan HMAC key (null = unsigned-dev mode). */
-export const setPlanSigningKeyForTest = (key: string | null): void => {
-  snapshot = {
-    ...snapshot,
-    plan_signing_key: key,
-  };
-};
+  currentBootstrapSnapshot().caps_defaults ?? [];

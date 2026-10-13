@@ -236,16 +236,34 @@ const RECONNECT_JITTER_MS = 3_000;
 // each pre-open attempt enough time to complete before partysocket bails.
 export const CONTROL_CHANNEL_CONNECT_TIMEOUT_MS = 20_000;
 
-export const controlSocketOptions = (): {
+export type TControlSocketOptions = {
   readonly WebSocket: typeof WebSocket;
   readonly minReconnectionDelay: number;
   readonly maxReconnectionDelay: number;
   readonly connectionTimeout: number;
-} => ({
+  /** partysocket: reset retry count only after this much uptime (default 5s). */
+  readonly minUptime?: number;
+};
+
+/**
+ * Optional reconnect timing for `startControlChannel`. Production callers omit
+ * this and keep the fleet de-sync / partysocket defaults; tests (and any
+ * future config surface) can collapse jitter or tighten socket backoff.
+ */
+export type TControlChannelOptions = {
+  readonly reconnectJitterMs?: number;
+  readonly random?: () => number;
+  readonly socketOptions?: Partial<Omit<TControlSocketOptions, "WebSocket">>;
+};
+
+export const controlSocketOptions = (
+  overrides?: Partial<Omit<TControlSocketOptions, "WebSocket">>,
+): TControlSocketOptions => ({
   WebSocket: globalThis.WebSocket,
   minReconnectionDelay: 1_000,
   maxReconnectionDelay: 30_000,
   connectionTimeout: CONTROL_CHANNEL_CONNECT_TIMEOUT_MS,
+  ...overrides,
 });
 
 // Stand-down when ANOTHER daemon on the same API key evicts us (`4000
@@ -290,13 +308,20 @@ const heartbeat = createHeartbeat({
   heartbeatMs: HEARTBEAT_MS,
   maxMissedPongs: MAX_MISSED_PONGS,
 });
+
+const createControlSupersedeBackoff = (
+  options?: TControlChannelOptions,
+): ReturnType<typeof createSupersedeBackoff> =>
+  createSupersedeBackoff({
+    baseMs: SUPERSEDE_BASE_MS,
+    maxMs: SUPERSEDE_MAX_MS,
+    stableAfterMs: SUPERSEDE_STABLE_MS,
+    jitterMs: options?.reconnectJitterMs ?? RECONNECT_JITTER_MS,
+    random: options?.random,
+  });
+
 /** Escalating stand-down when a same-key daemon evicts this connection. */
-const supersedeBackoff = createSupersedeBackoff({
-  baseMs: SUPERSEDE_BASE_MS,
-  maxMs: SUPERSEDE_MAX_MS,
-  stableAfterMs: SUPERSEDE_STABLE_MS,
-  jitterMs: RECONNECT_JITTER_MS,
-});
+let supersedeBackoff = createControlSupersedeBackoff();
 /** Escalating stand-down when the plan's concurrent-device cap is full. */
 const deviceLimitBackoff = createDeviceLimitBackoff(deviceLimitBackoffConfig);
 /** Fresh connect ticket, stashed by the url provider for the next `hello`. */
@@ -494,43 +519,30 @@ const emitAuthFrame = (auth: TAuthEvent): void => {
   send({ type: "auth", key_id, auth });
 };
 
-type TAuthFlushTransportForTests = {
-  readonly keyId: string | null;
-  readonly ready: () => boolean;
-  readonly send: (payload: string) => void;
-};
-
-let authFlushTransportForTests: TAuthFlushTransportForTests | null = null;
-
-/** Test seam: stub key id + send readiness without dialing a real socket. */
-export const installAuthFlushTransportForTests = (
-  transport: TAuthFlushTransportForTests,
-): (() => void) => {
-  authFlushTransportForTests = transport;
-  return () => {
-    authFlushTransportForTests = null;
-  };
+export type TFlushAuthGapDeps = {
+  readonly keyId?: string | null;
+  readonly ready?: () => boolean;
+  readonly send?: (payload: string) => boolean;
 };
 
 /**
  * Replay auth events that landed while the socket was down, after hello.
  * Never drains until a usable key id and OPEN+helloSent hold; a mid-flush
  * socket close retains the unsent tail (send is best-effort, not exactly-once).
+ *
+ * Optional deps override the production transport (`daemonApiKeyId` /
+ * `authTransportReady` / `ws.send`) so callers can flush against a stub
+ * without dialing a real socket.
  */
-const flushAuthGap = (): void => {
-  const key_id = authFlushTransportForTests?.keyId ?? daemonApiKeyId();
+export const flushAuthGap = (deps?: TFlushAuthGapDeps): void => {
+  const key_id = deps?.keyId !== undefined ? deps.keyId : daemonApiKeyId();
   flushAuthGapBuffer(key_id, (auth) => {
     const ready =
-      authFlushTransportForTests !== null
-        ? authFlushTransportForTests.ready()
-        : authTransportReady();
+      deps?.ready !== undefined ? deps.ready() : authTransportReady();
     if (key_id === null || !ready) return false;
     try {
       const payload = JSON.stringify({ type: "auth", key_id, auth });
-      if (authFlushTransportForTests !== null) {
-        authFlushTransportForTests.send(payload);
-        return true;
-      }
+      if (deps?.send !== undefined) return deps.send(payload);
       if (ws === null) return false;
       ws.send(payload);
       return true;
@@ -540,58 +552,53 @@ const flushAuthGap = (): void => {
   });
 };
 
-/** Test seam: run the same flush used after hello. */
-export const flushAuthGapForTests = (): void => {
-  flushAuthGap();
+export type TAuthStatusEdgeObserver = {
+  readonly observe: (
+    connections: ReadonlyArray<TDaemonProviderConnection>,
+  ) => void;
+  readonly dispose: () => void;
 };
-
-const lastPostedAuthStatus = new Map<string, TAuthStatusBaseline>();
-let emitSessionLoss: (loss: TDaemonSessionLost) => Promise<void> =
-  notifySessionLost;
 
 /**
  * POST session-lost on a pure `connected → disconnected` edge. No settle,
  * no window, no latch — staying disconnected does not re-POST; a later
  * `→ connected` re-arms. `signed_out` never POSTs.
+ *
+ * Owns its own last-posted baseline map. Production wires
+ * {@link notifySessionLost}; tests pass a recording `notify`.
  */
-const observeAuthStatusEdges = (
-  connections: ReadonlyArray<TDaemonProviderConnection>,
-): void => {
-  for (const conn of connections) {
-    const edge = detectAuthLossEdge(
-      lastPostedAuthStatus.get(conn.provider),
-      conn,
-    );
-    if (edge === null) continue;
-    if (edge.lost) {
-      void emitSessionLoss({
-        slug: edge.slug,
-        diagnostic_code: edge.diagnostic_code ?? "unclassified",
-        ...(edge.account_hash !== undefined
-          ? { account_hash: edge.account_hash }
-          : {}),
-      });
-    }
-    lastPostedAuthStatus.set(edge.slug, edge.next);
-  }
-};
-
-/** Test-only seam for the status-literal edge detector. */
-export const startSessionLostNotifierForTests = (
-  notify: (loss: TDaemonSessionLost) => Promise<void>,
-): (() => void) => {
-  emitSessionLoss = notify;
-  lastPostedAuthStatus.clear();
-  return () => {
-    lastPostedAuthStatus.clear();
-    emitSessionLoss = notifySessionLost;
+export const createAuthStatusEdgeObserver = (opts?: {
+  readonly notify?: (loss: TDaemonSessionLost) => Promise<void>;
+}): TAuthStatusEdgeObserver => {
+  const lastPostedAuthStatus = new Map<string, TAuthStatusBaseline>();
+  const notify = opts?.notify ?? notifySessionLost;
+  return {
+    observe(connections) {
+      for (const conn of connections) {
+        const edge = detectAuthLossEdge(
+          lastPostedAuthStatus.get(conn.provider),
+          conn,
+        );
+        if (edge === null) continue;
+        if (edge.lost) {
+          void notify({
+            slug: edge.slug,
+            diagnostic_code: edge.diagnostic_code ?? "unclassified",
+            ...(edge.account_hash !== undefined
+              ? { account_hash: edge.account_hash }
+              : {}),
+          });
+        }
+        lastPostedAuthStatus.set(edge.slug, edge.next);
+      }
+    },
+    dispose() {
+      lastPostedAuthStatus.clear();
+    },
   };
 };
 
-/** Test-only: feed one computed status snapshot into the edge detector. */
-export const noteSessionLossStatusForTests = (
-  connections: ReadonlyArray<TDaemonProviderConnection>,
-): void => observeAuthStatusEdges(connections);
+const authStatusEdgeObserver = createAuthStatusEdgeObserver();
 
 /** Reset relay-owned work at a connection boundary. Mux channels and RTC
  * signaling sessions are tied to the old relay socket and must not continue
@@ -619,7 +626,7 @@ const observeNotificationTransitions = (
   connections: ReadonlyArray<TDaemonProviderConnection>,
 ): void => {
   noteConnectionsForSessionLost(connections);
-  observeAuthStatusEdges(connections);
+  authStatusEdgeObserver.observe(connections);
   for (const transition of noteConnectionsForQuota(connections)) {
     void notifyQuotaStatus(transition);
   }
@@ -1331,7 +1338,7 @@ export const migrateIfRelayMoved = async (
 };
 
 /** Start the WebSocket control loop (idempotent). */
-export const startControlChannel = (): void => {
+export const startControlChannel = (options?: TControlChannelOptions): void => {
   setStatusPublishQueueSnapshot(() => statusPublishCoalescer.snapshot());
   setAuthSink({
     emit: emitAuthFrame,
@@ -1340,6 +1347,9 @@ export const startControlChannel = (): void => {
     },
   });
   if (ws !== null) return;
+  // Apply reconnect timing at start so production keeps defaults and callers
+  // (including tests) can pass jitter / socket overrides without module seams.
+  supersedeBackoff = createControlSupersedeBackoff(options);
   logDebug("control-channel", "connecting over websocket");
   configureMuxHost({ send, sendBytes });
   configureRtcHost({ send });
@@ -1347,7 +1357,7 @@ export const startControlChannel = (): void => {
   const socket = new ReconnectingWebSocket(
     channelUrl,
     undefined,
-    controlSocketOptions(),
+    controlSocketOptions(options?.socketOptions),
   );
   ws = socket;
   // partysocket defaults binaryType to "blob". Fleet mux frames must arrive
@@ -1448,22 +1458,50 @@ export const startControlChannel = (): void => {
   };
 };
 
-/** Graceful-exit beacon: flip the key offline, then close. Best-effort. */
+/** Graceful-exit beacon: flip the key offline, then close. Best-effort.
+ *  Also returns the module to a cold start so a later `startControlChannel`
+ *  in the same process (suite re-entry, daemon restart) does not inherit
+ *  generation, dedup, backoff, or probe state from the prior socket. */
 export const stopControlChannel = async (): Promise<void> => {
-  lastPostedAuthStatus.clear();
-  clearAuthGap();
-  if (ws === null) return;
   stopWatcher();
   stopMigrationCheck();
   heartbeat.stop();
-  if (ws.readyState === ws.OPEN) send({ type: "status", active: false });
-  // Tear relay-scoped transports before nulling the socket so in-flight
-  // tunnels/mux/unmounted RTC do not outlive process stop. Mounted RTC is
-  // intentionally kept by resetUnmountedRtcSessions — full process exit
-  // reaps those with the peer connections.
-  resetRelayScopedState();
-  ws.close(); // partysocket: a manual close() disables further reconnection
-  ws = null;
+  statusPublishCoalescer.abandon();
+  authStatusEdgeObserver.dispose();
+  clearAuthGap();
+  if (ws !== null) {
+    if (ws.readyState === ws.OPEN) send({ type: "status", active: false });
+    // Tear relay-scoped transports before nulling the socket so in-flight
+    // tunnels/mux/unmounted RTC do not outlive process stop. Mounted RTC is
+    // intentionally kept by resetUnmountedRtcSessions — full process exit
+    // reaps those with the peer connections.
+    resetRelayScopedState();
+    ws.close(); // partysocket: a manual close() disables further reconnection
+    ws = null;
+  }
   setAuthSink(null);
   setStatusPublishQueueSnapshot(null);
+
+  // Cold-start bookkeeping — mirrors a fresh module load for the next start.
+  commandResults.clear();
+  connectionGeneration = 0;
+  ticket = "";
+  connectedWssOrigin = null;
+  lastFingerprint = "";
+  probesArmed = false;
+  pendingWelcomeStatus = false;
+  daemonSessionId = null;
+  supportsOrderedStatus = null;
+  statusSeq = 0;
+  binaryFrameTail = Promise.resolve();
+  helloSent = false;
+  hasConnected = false;
+  lastErrorReason = "";
+  lastCloseLine = "";
+  lastPresenceRefreshAt = 0;
+  statusReadTail = Promise.resolve();
+  listLocalReadTail = Promise.resolve();
+  migrationEnabled = false;
+  migrationInFlight = null;
+  supersedeBackoff = createControlSupersedeBackoff();
 };

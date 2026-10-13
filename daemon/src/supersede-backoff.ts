@@ -98,7 +98,9 @@ export const createSupersedeBackoff = (
     nextDelayMs: () => {
       const standDown = standDownMs();
       // No conflict: keep the existing fleet de-sync jitter.
-      if (standDown === 0) return random() * deps.jitterMs;
+      if (standDown === 0) {
+        return random() * deps.jitterMs;
+      }
       // Half fixed + half random: the fixed half guarantees the incumbent an
       // actually-quiet window (full jitter could redraw ~0 and re-thrash), the
       // random half de-correlates two contenders evicted at the same instant.

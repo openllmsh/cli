@@ -618,12 +618,22 @@ export const daemonEnv = (): TDaemonEnv => {
 };
 
 /**
- * Test-only: clear the memoized {@link daemonEnv} cache so the next call
- * re-reads `process.env`. Mirrors `resetSessionsForTest`. Never called in
- * production.
+ * Clear the memoized {@link daemonEnv} cache so the next call re-reads
+ * `process.env` (after credential/env-file changes or an identity rebind).
  */
-export const resetDaemonEnvCacheForTest = (): void => {
+export const clearDaemonEnvCache = (): void => {
   cached = null;
+};
+
+type TCredentialReset = () => void;
+let credentialReset: TCredentialReset = (): void => {};
+
+/**
+ * Composition-root hook: main installs the identity-scoped cache clearer so a
+ * key change cannot leave another account's usage/status/keypair state behind.
+ */
+export const installCredentialReset = (fn: TCredentialReset): void => {
+  credentialReset = fn;
 };
 
 /** Apply a credential only after its durable env-file write has succeeded. */
@@ -631,6 +641,7 @@ export const applyPersistedApiKey = (key: string): void => {
   process.env.OPENLLM_API_KEY = key;
   const current = daemonEnv();
   cached = { ...current, apiKey: key };
+  credentialReset();
 };
 
 /** Read one value from an exact env file without merging it into process state. */
@@ -657,6 +668,7 @@ export const setApiKey = (key: string | null): void => {
   // Refresh the cache in place so callers don't need to re-resolve env.
   const current = daemonEnv();
   cached = { ...current, apiKey: trimmed.length > 0 ? trimmed : null };
+  credentialReset();
 };
 
 export const hasApiKey = (): boolean => daemonEnv().apiKey !== null;

@@ -210,8 +210,8 @@ export const noteConnectionsForSessionLost = (
   }
 };
 
-/** Test-only: the trackers are process-global and leak across suites. */
-export const resetSessionLostTrackerForTests = (): void => {
+/** Clear session-lost baselines (daemon restart / identity rebind). */
+export const clearSessionLostTracker = (): void => {
   lastStatus.clear();
   unknownStreak.clear();
 };

@@ -23,27 +23,23 @@ export const isUnsignallableProcessGroup = (error: unknown): boolean => {
 const assertSafePgid = (pgid: number): boolean =>
   Number.isInteger(pgid) && pgid > 1;
 
-let deliverTerminationSignalsForTests: boolean | null = null;
-
 /**
- * Test-only: when false, TERM/KILL are not delivered so a live group can
- * remain after bounded terminate. `kill(-pgid, 0)` still probes existence.
+ * Ops/safety switch for process-group signal delivery. Dry-run hosts and
+ * containment fixtures pass `deliver: false` so `kill(-pgid, 0)` still
+ * probes existence while TERM/KILL are withheld. Default is `true`, and
+ * production never overrides it — this is a parameter, not global state, so
+ * a fixture's choice can never leak into another test or a real supervisor.
  */
-export const setDeliverTerminationSignalsForTests = (
-  deliver: boolean | null,
-): void => {
-  deliverTerminationSignalsForTests = deliver;
-};
-
 export const signalGroup = (
   pgid: number,
   signal: NodeJS.Signals | 0,
+  deliver = true,
 ): boolean => {
   // `kill(-1, sig)` is a broadcast to EVERY signallable process and `kill(0,
   // sig)` targets our OWN group — neither is ever a supervised child, so a
   // bogus pgid must never reach process.kill.
   if (!assertSafePgid(pgid)) return false;
-  if (deliverTerminationSignalsForTests === false && signal !== 0) {
+  if (!deliver && signal !== 0) {
     return true;
   }
   try {
@@ -83,14 +79,15 @@ export const terminateProcessGroup = async (
   graceMs: number = DEFAULT_TERMINATE_GRACE_MS,
   isStillOwned?: () => boolean,
   finalReapMs: number = DEFAULT_FINAL_REAP_MS,
+  deliver = true,
 ): Promise<TReapOutcome> => {
   const stillPresent = (): boolean =>
     isStillOwned !== undefined ? isStillOwned() : processGroupExists(pgid);
   if (!stillPresent()) return "exited";
-  const termDelivered = signalGroup(pgid, "SIGTERM");
+  const termDelivered = signalGroup(pgid, "SIGTERM", deliver);
   if (termDelivered && (await waitUntilGone(stillPresent, graceMs)))
     return "exited";
-  signalGroup(pgid, "SIGKILL");
+  signalGroup(pgid, "SIGKILL", deliver);
   if (await waitUntilGone(stillPresent, finalReapMs)) return "terminated";
   return "reap_unconfirmed";
 };

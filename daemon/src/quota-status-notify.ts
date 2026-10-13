@@ -140,7 +140,7 @@ export const noteConnectionsForQuota = (
   return transitions;
 };
 
-/** Test-only: process-global baselines must not leak across suites. */
-export const resetQuotaStatusTrackerForTests = (): void => {
+/** Clear posted quota-status baselines (daemon restart / identity rebind). */
+export const clearQuotaStatusTracker = (): void => {
   lastQuotaStatus.clear();
 };

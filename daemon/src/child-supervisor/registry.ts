@@ -99,35 +99,22 @@ export const PROCESS_START_TIME_HELPER_TIMEOUT_MS = 400;
 /** After the named budget expires, wait this long for SIGTERM before SIGKILL. */
 export const PROCESS_START_TIME_HELPER_KILL_WAIT_MS = 50;
 
-type TProcessStartTimeHelperSpawn = (
+export type TProcessStartTimeHelperSpawn = (
   pid: number,
 ) => ReturnType<typeof Bun.spawn>;
 
-let processStartTimeHelperSpawnForTests: TProcessStartTimeHelperSpawn | null =
-  null;
-
-/**
- * Test-only: replace the `ps` helper spawn. Production kill/read path still
- * runs. Do not use {@link superviseSpawn} here — that would recurse identity
- * lookup.
- */
-export const setProcessStartTimeHelperSpawnForTests = (
-  spawn: TProcessStartTimeHelperSpawn | null,
-): void => {
-  processStartTimeHelperSpawnForTests = spawn;
-};
-
-const defaultProcessStartTimeHelperSpawn: TProcessStartTimeHelperSpawn = (
-  pid,
-) =>
-  Bun.spawn(["ps", "-o", "lstart=", "-p", String(pid)], {
-    stdout: "pipe",
-    stderr: "ignore",
-    env: processStartTimePsEnv(),
-    // Own process group so reap can SIGKILL descendants without touching
-    // the daemon group. Test fakes must also set detached: true.
-    detached: true,
-  });
+/** Default detached `ps -o lstart=` helper. Do not pass {@link superviseSpawn}
+ *  here — that would recurse identity lookup. */
+export const defaultProcessStartTimeHelperSpawn: TProcessStartTimeHelperSpawn =
+  (pid) =>
+    Bun.spawn(["ps", "-o", "lstart=", "-p", String(pid)], {
+      stdout: "pipe",
+      stderr: "ignore",
+      env: processStartTimePsEnv(),
+      // Own process group so reap can SIGKILL descendants without touching
+      // the daemon group. Custom helpers must also set detached: true.
+      detached: true,
+    });
 
 const closeHelperStdout = (proc: ReturnType<typeof Bun.spawn>): void => {
   const stdout = proc.stdout;
@@ -180,12 +167,11 @@ const reapStartTimeHelper = async (
  */
 export const readProcessStartTime = async (
   pid: number,
+  spawn: TProcessStartTimeHelperSpawn = defaultProcessStartTimeHelperSpawn,
 ): Promise<string | null> => {
   // Owner-created helper budget — never a shared login/logout budget.
   // firstOfBudget only detaches its waiter; this finally releases the helper.
   const budget = createDeadlineBudget(PROCESS_START_TIME_HELPER_TIMEOUT_MS);
-  const spawn =
-    processStartTimeHelperSpawnForTests ?? defaultProcessStartTimeHelperSpawn;
   let proc: ReturnType<typeof Bun.spawn> | null = null;
   try {
     proc = spawn(pid);
