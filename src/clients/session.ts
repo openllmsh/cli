@@ -37,7 +37,6 @@ import { hermesBundledTuiDir, hermesProfileConfigPath } from "./hermes-home";
 import { HOOK_SCRIPTS } from "./hooks";
 import { buildLaunchPlan, type TLaunchPlan } from "./launch";
 import { buildLiveJson, writeLiveJson } from "./live";
-import { fetchMarketplaceServers } from "./marketplace";
 import { requireProviderRouting } from "./provider-preflight";
 import type { TClient, TClientFlags, TDaemonCli } from "./registry";
 import {
@@ -507,14 +506,13 @@ export const runSessionClient = async (
     return 127;
   }
 
-  // Catalog, tier and marketplace integrations are independent gateway reads —
-  // fetch them together. All fail open.
-  const [catalog, tier, marketplace] = await Promise.all([
+  // Catalog and tier are independent gateway reads — fetch them together.
+  // Both fail open. Marketplace integrations are served by `openllm mcp`.
+  const [catalog, tier] = await Promise.all([
     client.catalogSlug === undefined
       ? Promise.resolve(null)
       : fetchModelCatalog(gateway, client.catalogSlug),
     fetchTier(gateway),
-    flags.bare ? Promise.resolve([]) : fetchMarketplaceServers(gateway),
   ]);
 
   const runDir = createRunDir(client.id);
@@ -541,7 +539,6 @@ export const runSessionClient = async (
       catalog: catalog ?? undefined,
       tier,
       bare: flags.bare,
-      marketplace,
     });
     materialize(plan, runDir);
     const tuiDir =

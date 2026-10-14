@@ -41,24 +41,15 @@ const isLaunchServer = (v: unknown): v is TMarketplaceLaunchServer => {
 
 const LAUNCH_TIMEOUT_MS = 5_000;
 
-/** Ids the launcher already writes — an integration can never shadow them. */
+/** Reserved ids — an integration can never shadow the built-in server. */
 const RESERVED = new Set(["openllm"]);
 
 /**
- * The servers a launch plan may write. Merges are field-by-field, so a
- * clashing entry would BLEND into the built-in one rather than lose to it —
- * reserved ids are dropped outright, at the one place every plan reads.
- */
-export const launchableServers = (
-  servers: readonly TMarketplaceLaunchServer[] | undefined,
-): readonly TMarketplaceLaunchServer[] =>
-  (servers ?? []).filter((s) => !RESERVED.has(s.id));
-
-/**
- * The user's enabled marketplace integrations as ready MCP servers
+ * The user's enabled marketplace integrations as ready upstream MCP servers,
+ * dialled by `openllm mcp` and re-exported through its single entry
  * (`GET /api/marketplace/launch`). The gateway decrypts BYOK secrets with the
  * key's request-scoped DEK, the same way it decrypts provider keys. Fails
- * open to none: a slow or older gateway must never block a launch.
+ * open to none: a slow or older gateway must never block the MCP server.
  */
 export const fetchMarketplaceServers = async (
   gateway: TGateway,
@@ -79,87 +70,4 @@ export const fetchMarketplaceServers = async (
   } catch {
     return [];
   }
-};
-
-type TJson = Record<string, unknown>;
-
-const isRemote = (s: TMarketplaceLaunchServer): boolean =>
-  s.transport !== "stdio" && s.url !== undefined;
-
-/** Claude Code `mcpServers` entries (`--mcp-config` file). */
-export const claudeMcpServers = (
-  servers: readonly TMarketplaceLaunchServer[],
-): TJson =>
-  Object.fromEntries(
-    servers.map((s) => [
-      s.id,
-      isRemote(s)
-        ? { type: s.transport, url: s.url, headers: s.headers ?? {} }
-        : { command: s.command, args: s.args ?? [], env: s.env ?? {} },
-    ]),
-  );
-
-/** OpenCode `mcp` entries (its own schema: `remote` / `local`). */
-export const openCodeMcpServers = (
-  servers: readonly TMarketplaceLaunchServer[],
-): TJson =>
-  Object.fromEntries(
-    servers.map((s) => [
-      s.id,
-      isRemote(s)
-        ? { type: "remote", url: s.url, headers: s.headers ?? {} }
-        : {
-            type: "local",
-            command: [s.command, ...(s.args ?? [])],
-            environment: s.env ?? {},
-          },
-    ]),
-  );
-
-/** Hermes and Grok `mcp_servers` entries (`url` + `headers` table). */
-export const hermesMcpServers = (
-  servers: readonly TMarketplaceLaunchServer[],
-): TJson =>
-  Object.fromEntries(
-    servers.map((s) => [
-      s.id,
-      isRemote(s)
-        ? { url: s.url, headers: s.headers ?? {} }
-        : { command: s.command, args: s.args ?? [], env: s.env ?? {} },
-    ]),
-  );
-
-/**
- * Codex: `-c` overrides plus env. Header VALUES never reach argv — each header
- * is mapped by `env_http_headers` to an env var carried in the child env.
- * Only remote servers are supported here; stdio entries need P3.
- */
-export const codexMcpOverrides = (
-  servers: readonly TMarketplaceLaunchServer[],
-): {
-  readonly args: readonly string[];
-  readonly env: Record<string, string>;
-} => {
-  const args: string[] = [];
-  const env: Record<string, string> = {};
-  for (const s of servers) {
-    if (!isRemote(s)) continue;
-    const key = `mcp_servers.${s.id}`;
-    args.push("-c", `${key}.url=${JSON.stringify(s.url)}`);
-    const map: Record<string, string> = {};
-    for (const [header, value] of Object.entries(s.headers ?? {})) {
-      const varName = `OPENLLM_MCP_${s.id}_${header}`
-        .toUpperCase()
-        .replace(/[^A-Z0-9_]/g, "_");
-      map[header] = varName;
-      env[varName] = value;
-    }
-    if (Object.keys(map).length > 0) {
-      const inline = Object.entries(map)
-        .map(([h, v]) => `${JSON.stringify(h)} = ${JSON.stringify(v)}`)
-        .join(", ");
-      args.push("-c", `${key}.env_http_headers={ ${inline} }`);
-    }
-  }
-  return { args, env };
 };
