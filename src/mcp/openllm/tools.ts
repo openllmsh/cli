@@ -150,8 +150,20 @@ const inputSchemaFor = (op: TApiOperation): Record<string, unknown> => {
   };
 };
 
+/** Paths no agent may reach — not listed, not executable, not in web chat.
+ *  `/marketplace/launch` returns the user's DECRYPTED integration secrets
+ *  for the launcher to write into a 0600 run dir; as a tool it would put a
+ *  vendor key straight into model context. */
+const AGENT_FORBIDDEN_PATHS: ReadonlySet<string> = new Set([
+  "/marketplace/launch",
+]);
+
+const AGENT_OPERATIONS: ReadonlyArray<TApiOperation> = API_OPERATIONS.filter(
+  (op) => !AGENT_FORBIDDEN_PATHS.has(op.path),
+);
+
 const byToolName = new Map<string, TApiOperation>(
-  API_OPERATIONS.map((op) => [toolNameFor(op), op]),
+  AGENT_OPERATIONS.map((op) => [toolNameFor(op), op]),
 );
 
 /** Endpoints that require a browser SESSION, not an `sk-llm-…` key, and so
@@ -196,14 +208,14 @@ const toolDef = (op: TApiOperation): TToolDef => ({
 /** The FULL native-API tool surface — every operation. Consumed by the
  *  browser chat tool bridge (`lib/chat/tools.ts`), which intentionally
  *  exposes inference + account ops for in-chat delegation. */
-export const openllmToolDefsAll = API_OPERATIONS.map(toolDef);
+export const openllmToolDefsAll = AGENT_OPERATIONS.map(toolDef);
 
 /** Browser-safe identification/limit shared with the CLI-only local adapter. */
 export const TRANSCRIPTION_TOOL_NAME = "api_v1Audio_transcriptions";
 export const MAX_TRANSCRIPTION_BYTES = 25 * 1024 * 1024;
 
 /** MCP-listed subset, with local input contracts where the CLI owns the IO. */
-export const openllmToolDefs = API_OPERATIONS.filter(isMcpExposed).map(
+export const openllmToolDefs = AGENT_OPERATIONS.filter(isMcpExposed).map(
   (op): TToolDef => {
     const def = toolDef(op);
     if (def.name === MODELS_TOOL_NAME) {

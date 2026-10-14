@@ -308,6 +308,70 @@ export const API_OPERATIONS: readonly TApiOperation[] = [
     "hasBody": true
   },
   {
+    "id": "marketplace.catalog",
+    "method": "get",
+    "path": "/marketplace/catalog",
+    "summary": "",
+    "tags": [
+      "marketplace"
+    ],
+    "pathParams": [],
+    "queryParams": [],
+    "hasBody": false
+  },
+  {
+    "id": "marketplace.installations",
+    "method": "get",
+    "path": "/marketplace/installations",
+    "summary": "",
+    "tags": [
+      "marketplace"
+    ],
+    "pathParams": [],
+    "queryParams": [],
+    "hasBody": false
+  },
+  {
+    "id": "marketplace.uninstall",
+    "method": "delete",
+    "path": "/marketplace/installations/{id}",
+    "summary": "",
+    "tags": [
+      "marketplace"
+    ],
+    "pathParams": [
+      "id"
+    ],
+    "queryParams": [],
+    "hasBody": false
+  },
+  {
+    "id": "marketplace.install",
+    "method": "put",
+    "path": "/marketplace/installations/{id}",
+    "summary": "",
+    "tags": [
+      "marketplace"
+    ],
+    "pathParams": [
+      "id"
+    ],
+    "queryParams": [],
+    "hasBody": true
+  },
+  {
+    "id": "marketplace.launch",
+    "method": "get",
+    "path": "/marketplace/launch",
+    "summary": "",
+    "tags": [
+      "marketplace"
+    ],
+    "pathParams": [],
+    "queryParams": [],
+    "hasBody": false
+  },
+  {
     "id": "media.list",
     "method": "get",
     "path": "/media",

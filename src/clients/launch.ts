@@ -10,6 +10,13 @@
  */
 
 import { FREE_TIER_MCP_GROUPS } from "../commands";
+import type { TMarketplaceLaunchServer } from "./marketplace";
+import {
+  claudeMcpServers,
+  codexMcpOverrides,
+  hermesMcpServers,
+  openCodeMcpServers,
+} from "./marketplace";
 import {
   deepMerge,
   parseJsonLoose,
@@ -89,6 +96,8 @@ export type TLaunchInputs = {
   readonly tier?: TTier;
   /** Opt-in sterile Claude launch: omit the OpenLLM MCP overlay. */
   readonly bare?: boolean;
+  /** Enabled marketplace integrations, one MCP server each (resolved). */
+  readonly marketplace?: readonly TMarketplaceLaunchServer[];
 };
 
 export type TLaunchPlan = {
@@ -244,13 +253,17 @@ const planClaude = (inputs: TLaunchInputs): TLaunchPlan => {
       ...(inputs.bare
         ? {}
         : {
-            "mcp.json": substitute(
-              substituteJsonValue(
-                OVERLAYS.claude.mcp,
-                "MCP_ARGS",
-                vars.MCP_ARGS,
+            "mcp.json": withMarketplace(
+              substitute(
+                substituteJsonValue(
+                  OVERLAYS.claude.mcp,
+                  "MCP_ARGS",
+                  vars.MCP_ARGS,
+                ),
+                vars,
               ),
-              vars,
+              "mcpServers",
+              claudeMcpServers(inputs.marketplace ?? []),
             ),
           }),
     },
@@ -307,14 +320,15 @@ export const codexOverrideArgs = (
 const planCodex = (inputs: TLaunchInputs): TLaunchPlan => {
   const files: Record<string, string> = {};
   if (inputs.catalog !== undefined) files["models.json"] = inputs.catalog;
-  const args = codexOverrideArgs(
-    overlayVars(inputs),
-    inputs.catalog !== undefined,
-  );
+  const marketplace = codexMcpOverrides(inputs.marketplace ?? []);
+  const args = [
+    ...codexOverrideArgs(overlayVars(inputs), inputs.catalog !== undefined),
+    ...marketplace.args,
+  ];
   return {
     files,
     args,
-    env: { OPENLLM_API_KEY: inputs.apiKey },
+    env: { OPENLLM_API_KEY: inputs.apiKey, ...marketplace.env },
     hooks: false,
   };
 };
@@ -355,7 +369,9 @@ const planGrok = (inputs: TLaunchInputs): TLaunchPlan => {
           }
         })();
   const merged = deepMerge(
-    deepMerge(deepMerge(user, overlay), catalogDoc),
+    deepMerge(deepMerge(deepMerge(user, overlay), catalogDoc), {
+      mcp_servers: hermesMcpServers(inputs.marketplace ?? []),
+    }),
     mcp,
   ) as TJsonObject;
   return {
@@ -385,7 +401,9 @@ const planHermes = (inputs: TLaunchInputs): TLaunchPlan => {
   const overlay = parseYaml(overlayText) ?? {};
   const user =
     inputs.userConfig === undefined ? {} : (parseYaml(inputs.userConfig) ?? {});
-  const merged = deepMerge(user, overlay) as TJsonObject;
+  const merged = deepMerge(deepMerge(user, overlay), {
+    mcp_servers: hermesMcpServers(inputs.marketplace ?? []),
+  }) as TJsonObject;
   return {
     files: {
       "config.yaml": serializeYaml(merged),
@@ -441,7 +459,9 @@ const planOpenCode = (inputs: TLaunchInputs): TLaunchPlan => {
     inputs.userConfig === undefined
       ? {}
       : (parseJsonLoose(inputs.userConfig) ?? {});
-  const merged = deepMerge(user, overlay) as TJsonObject;
+  const merged = deepMerge(deepMerge(user, overlay), {
+    mcp: openCodeMcpServers(inputs.marketplace ?? []),
+  }) as TJsonObject;
   return {
     files: { "opencode.json": `${JSON.stringify(merged, null, 2)}\n` },
     args: [],
@@ -451,6 +471,22 @@ const planOpenCode = (inputs: TLaunchInputs): TLaunchPlan => {
     },
     hooks: false,
   };
+};
+
+/**
+ * Add marketplace servers under `key` of a JSON overlay, after the built-in
+ * ones. The `openllm` entry always wins a name clash.
+ */
+const withMarketplace = (
+  json: string,
+  key: string,
+  servers: TJsonObject,
+): string => {
+  if (Object.keys(servers).length === 0) return json;
+  const doc = JSON.parse(json) as TJsonObject;
+  const own = (doc[key] ?? {}) as TJsonObject;
+  doc[key] = { ...servers, ...own };
+  return `${JSON.stringify(doc, null, 2)}\n`;
 };
 
 /** Build the launch plan for a session client. */
