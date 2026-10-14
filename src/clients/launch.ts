@@ -369,10 +369,14 @@ const planGrok = (inputs: TLaunchInputs): TLaunchPlan => {
             return {};
           }
         })();
+  // Marketplace entries replace any same-named entry whole, then our own
+  // `openllm` server lands last.
   const merged = deepMerge(
-    deepMerge(deepMerge(deepMerge(user, overlay), catalogDoc), {
-      mcp_servers: hermesMcpServers(launchableServers(inputs.marketplace)),
-    }),
+    replaceServers(
+      deepMerge(deepMerge(user, overlay), catalogDoc) as TJsonObject,
+      "mcp_servers",
+      hermesMcpServers(launchableServers(inputs.marketplace)),
+    ),
     mcp,
   ) as TJsonObject;
   return {
@@ -405,9 +409,11 @@ const planHermes = (inputs: TLaunchInputs): TLaunchPlan => {
   // Marketplace servers go in BEFORE our overlay so the built-in `openllm`
   // server always wins a name clash.
   const merged = deepMerge(
-    deepMerge(user, {
-      mcp_servers: hermesMcpServers(launchableServers(inputs.marketplace)),
-    }),
+    replaceServers(
+      user,
+      "mcp_servers",
+      hermesMcpServers(launchableServers(inputs.marketplace)),
+    ),
     overlay,
   ) as TJsonObject;
   return {
@@ -468,9 +474,11 @@ const planOpenCode = (inputs: TLaunchInputs): TLaunchPlan => {
   // Marketplace servers go in BEFORE our overlay so the built-in `openllm`
   // server always wins a name clash.
   const merged = deepMerge(
-    deepMerge(user, {
-      mcp: openCodeMcpServers(launchableServers(inputs.marketplace)),
-    }),
+    replaceServers(
+      user,
+      "mcp",
+      openCodeMcpServers(launchableServers(inputs.marketplace)),
+    ),
     overlay,
   ) as TJsonObject;
   return {
@@ -498,6 +506,21 @@ const withMarketplace = (
   const own = (doc[key] ?? {}) as TJsonObject;
   doc[key] = { ...servers, ...own };
   return `${JSON.stringify(doc, null, 2)}\n`;
+};
+
+/**
+ * Write marketplace servers over `doc[key]` as WHOLE objects. A deep merge
+ * would blend a same-named entry from the user's own config into ours —
+ * carrying, say, their old Authorization header onto our endpoint.
+ */
+const replaceServers = (
+  doc: TJsonObject,
+  key: string,
+  servers: TJsonObject,
+): TJsonObject => {
+  if (Object.keys(servers).length === 0) return doc;
+  const own = (doc[key] ?? {}) as TJsonObject;
+  return { ...doc, [key]: { ...own, ...servers } };
 };
 
 /** Build the launch plan for a session client. */
