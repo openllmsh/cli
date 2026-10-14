@@ -32,12 +32,7 @@ import {
 import { basename, join } from "node:path";
 import { CLI_VERSION, cliBinPath, openllmDir, userHome } from "../env";
 import { requireCliApiKey } from "../onboarding";
-import {
-  contextStateDir,
-  fetchModelCatalog,
-  fetchTier,
-  resolveGateway,
-} from "./gateway";
+import { fetchModelCatalog, fetchTier, resolveGateway } from "./gateway";
 import { codexOverrideArgs, mcpArgsJson } from "./launch";
 import {
   appIconPath,
@@ -516,7 +511,6 @@ export const launchChatgpt = async (): Promise<number> => {
     {
       OPENLLM_API_BASE: gateway.base,
       OPENLLM_BIN: openllmBinPath(),
-      STATE_DIR: contextStateDir(),
       MODEL_CATALOG_PATH: catalogPath,
       MCP_ARGS: mcpArgsJson(tier),
     },

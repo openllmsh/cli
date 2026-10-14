@@ -4,6 +4,7 @@ import {
   readHookEvent,
   startHookWorker,
 } from "../hook-helpers";
+import { memoryEnv } from "./env";
 import { runMemoryExtraction, runMemoryRecall } from "./runtime";
 
 export const MEMORY_HOOK_USAGE = `usage: openllm exec memory <${EXEC_VERBS.memory.join("|")}>
@@ -32,9 +33,8 @@ export const runMemoryHookCommand = async (
     process.stderr.write(MEMORY_HOOK_USAGE);
     return 2;
   }
-  const toggle =
-    verb === "recall" ? "SUPERMEMORY_AUTO_RECALL" : "SUPERMEMORY_AUTO_SAVE";
-  if ((process.env[toggle] ?? "1") !== "1") return 0;
+  const toggle = verb === "recall" ? "AUTO_RECALL" : "AUTO_SAVE";
+  if ((memoryEnv(toggle) ?? "1") !== "1") return 0;
 
   // Compatibility for old standalone hooks. The CLI remains the only parser;
   // canonical overrides (even invalid ones) keep their normal precedence.

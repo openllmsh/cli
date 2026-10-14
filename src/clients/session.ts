@@ -32,12 +32,7 @@ import {
   waitForSessionHostSocket,
 } from "../session-host";
 import { attachBrokerSession } from "./attach";
-import {
-  contextStateDir,
-  fetchModelCatalog,
-  fetchTier,
-  resolveGateway,
-} from "./gateway";
+import { fetchModelCatalog, fetchTier, resolveGateway } from "./gateway";
 import { hermesBundledTuiDir, hermesProfileConfigPath } from "./hermes-home";
 import { HOOK_SCRIPTS } from "./hooks";
 import { buildLaunchPlan, type TLaunchPlan } from "./launch";
@@ -540,7 +535,6 @@ export const runSessionClient = async (
           ? process.env.OPENLLM_BIN_OVERRIDE
           : process.execPath,
       runDir,
-      stateDir: contextStateDir(),
       userConfig: readUserConfig(client),
       catalog: catalog ?? undefined,
       tier,

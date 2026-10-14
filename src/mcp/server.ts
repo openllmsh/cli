@@ -1,6 +1,6 @@
 /**
- * The ONE MCP server (`openllm mcp`) — composes native API, context, and
- * memory tools over stdio. `--only <group>` narrows the surface for debugging;
+ * The ONE MCP server (`openllm mcp`) — composes native API and memory
+ * tools over stdio. `--only <group>` narrows the surface for debugging;
  * the free-tier gate applies before registration, not just to tools/list.
  */
 
@@ -12,15 +12,11 @@ import { mcpGroupsForTier } from "../commands";
 import { CLI_VERSION } from "../env";
 import { requireCliApiKey } from "../onboarding";
 import {
-  claudeContextGroupToolDefs,
-  handleClaudeContextGroupTool,
-  isClaudeContextGroupTool,
-} from "./claude-context";
-import {
   handleLocalAuthTool,
   isLocalAuthTool,
   localAuthToolDefs,
 } from "./local-auth";
+import { handleMemoryTool, memoryToolDefs } from "./memory/tools";
 import {
   MODELS_TOOL_NAME,
   prioritizeSubscriptionModels,
@@ -32,17 +28,13 @@ import {
   TRANSCRIPTION_TOOL_NAME,
 } from "./openllm/tools";
 import { transcribeAudio } from "./openllm/transcribe-audio";
-import {
-  handleSupermemoryTool,
-  supermemoryToolDefs,
-} from "./supermemory/tools";
 import type { TToolResult } from "./types";
 
 export type { TMcpGroup } from "../commands";
 export { MCP_ONLY_GROUPS as MCP_GROUPS } from "../commands";
 
-const isSupermemoryTool = (name: string): boolean =>
-  supermemoryToolDefs.some((tool) => tool.name === name);
+const isMemoryTool = (name: string): boolean =>
+  memoryToolDefs.some((tool) => tool.name === name);
 
 /** One registration path for both negotiated stdio eras and local tests. */
 export const createMcpServer = ({
@@ -55,7 +47,7 @@ export const createMcpServer = ({
   config: { baseUrl: string; apiKey: string };
 }): McpServer => {
   const groups = mcpGroupsForTier(requested, tier);
-  const supermemoryConfig = {
+  const memoryConfig = {
     name: "openllm",
     version: CLI_VERSION,
     gatewayUrl: config.baseUrl,
@@ -65,8 +57,7 @@ export const createMcpServer = ({
     ...(groups.includes("openllm")
       ? [...openllmToolDefs, ...localAuthToolDefs]
       : []),
-    ...(groups.includes("openllm-context") ? claudeContextGroupToolDefs : []),
-    ...(groups.includes("openllm-memory") ? supermemoryToolDefs : []),
+    ...(groups.includes("openllm-memory") ? memoryToolDefs : []),
   ];
   const server = new McpServer(
     { name: "openllm", version: CLI_VERSION },
@@ -83,14 +74,8 @@ export const createMcpServer = ({
         inputSchema: fromJsonSchema<Record<string, unknown>>(inputSchema),
       },
       async (args): Promise<TToolResult> => {
-        if (
-          groups.includes("openllm-context") &&
-          isClaudeContextGroupTool(name)
-        ) {
-          return handleClaudeContextGroupTool(name, args, config);
-        }
-        if (groups.includes("openllm-memory") && isSupermemoryTool(name)) {
-          return handleSupermemoryTool(name, args, supermemoryConfig);
+        if (groups.includes("openllm-memory") && isMemoryTool(name)) {
+          return handleMemoryTool(name, args, memoryConfig);
         }
         if (groups.includes("openllm") && isLocalAuthTool(name))
           return handleLocalAuthTool(name, args);

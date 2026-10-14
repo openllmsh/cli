@@ -36,9 +36,10 @@ export type TTier = "free" | "trial" | "pro";
 
 /**
  * The `openllm mcp` argv for a tier. Paid tiers get the bare `["mcp"]` (all
- * groups); free tier narrows with `--only` per `FREE_TIER_MCP_GROUPS`,
- * excluding paid `claude-context` code-search. Overlay argv AND the MCP
- * server (`mcpGroupsForTier`) share that list so every MCP client is gated.
+ * groups); free tier narrows with `--only` per `FREE_TIER_MCP_GROUPS`. No
+ * group is paid today, but the plumbing stays for future Pro groups. Overlay
+ * argv AND the MCP server (`mcpGroupsForTier`) share that list so every MCP
+ * client is gated.
  */
 export const mcpArgs = (tier: TTier | undefined): readonly string[] =>
   tier === "free"
@@ -74,15 +75,13 @@ export type TLaunchInputs = {
   readonly binPath: string;
   /** Absolute run dir for this launch. */
   readonly runDir: string;
-  /** claude-context state dir. */
-  readonly stateDir: string;
   /** The user's existing config text for this client, when it exists. */
   readonly userConfig?: string;
   /** Client-shaped model catalog body from the gateway, when available. */
   readonly catalog?: string;
   /**
-   * The account tier this launch runs under. FREE tier excludes the paid
-   * code-search MCP group (`claude-context`) from the one `openllm mcp` server;
+   * The account tier this launch runs under. FREE tier narrows the one
+   * `openllm mcp` server to `FREE_TIER_MCP_GROUPS` (every group today);
    * `trial`/`pro` (and an unknown/undefined tier) get the full surface. Only
    * `"free"` narrows — anything else is treated as paid, so a failed tier fetch
    * fails OPEN to the full toolset rather than silently degrading a paying user.
@@ -159,7 +158,6 @@ export const overlayVars = (
   OPENLLM_API_BASE: inputs.apiBase,
   OPENLLM_API_KEY: inputs.apiKey,
   OPENLLM_BIN: inputs.binPath,
-  STATE_DIR: inputs.stateDir,
   HOOKS_DIR: `${inputs.runDir}/hooks`,
   MODEL_CATALOG_PATH: `${inputs.runDir}/models.json`,
   // TOML overlays (grok, codex) carry `args = {{MCP_ARGS}}` at an array
@@ -270,7 +268,6 @@ const planClaude = (inputs: TLaunchInputs): TLaunchPlan => {
       ANTHROPIC_DEFAULT_SONNET_MODEL: "plus",
       ANTHROPIC_DEFAULT_HAIKU_MODEL: "lite",
       OPENLLM_BIN: inputs.binPath,
-      CLAUDE_CONTEXT_STATE_DIR: inputs.stateDir,
     },
     // A second live credential is exactly what triggers the warning, so every
     // ambient Anthropic key is dropped — including any the user exported
@@ -372,7 +369,6 @@ const planGrok = (inputs: TLaunchInputs): TLaunchPlan => {
       ...memoryHookEnv(inputs),
       GROK_HOME: inputs.runDir,
       OPENLLM_BIN: inputs.binPath,
-      CLAUDE_CONTEXT_STATE_DIR: inputs.stateDir,
     },
     mirrorDir: "~/.grok",
     hooks: true,
@@ -403,7 +399,6 @@ const planHermes = (inputs: TLaunchInputs): TLaunchPlan => {
       HERMES_HOME: inputs.runDir,
       OPENLLM_API_KEY: inputs.apiKey,
       OPENLLM_BIN: inputs.binPath,
-      CLAUDE_CONTEXT_STATE_DIR: inputs.stateDir,
     },
     unsetEnv: ["OPENAI_API_KEY", "OPENAI_BASE_URL"],
     mirrorDir: "~/.hermes",
@@ -453,7 +448,6 @@ const planOpenCode = (inputs: TLaunchInputs): TLaunchPlan => {
     env: {
       OPENCODE_CONFIG: `${inputs.runDir}/opencode.json`,
       OPENLLM_BIN: inputs.binPath,
-      CLAUDE_CONTEXT_STATE_DIR: inputs.stateDir,
     },
     hooks: false,
   };

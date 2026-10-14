@@ -2,10 +2,11 @@ import { statSync } from "node:fs";
 import { CLI_VERSION } from "../cli-version";
 import type { TCliConfig } from "../env";
 import { cliConfig } from "../env";
-import type { SaveOptions } from "../mcp/supermemory/client";
-import { MemoryClient } from "../mcp/supermemory/client";
+import type { SaveOptions } from "../mcp/memory/client";
+import { MemoryClient } from "../mcp/memory/client";
 import { callOperation } from "../sdk/client";
 import { API_OPERATIONS } from "../sdk/generated/operations";
+import { memoryEnv, RECALL_MARKER } from "./env";
 import { MEMORY_EXTRACTION_PROMPT } from "./prompt";
 import { MemoryHookState, numeric } from "./state";
 import { memoryProject, recentTurns } from "./transcript";
@@ -76,7 +77,7 @@ const outputOf = (
 export const runMemoryRecall = async (
   input: unknown,
 ): Promise<TMemoryHookOutput | null> => {
-  if ((process.env.SUPERMEMORY_AUTO_RECALL ?? "1") !== "1") return null;
+  if ((memoryEnv("AUTO_RECALL") ?? "1") !== "1") return null;
   const event = recordOf(input);
   if (!event || typeof event.prompt !== "string") return null;
   let prompt = event.prompt
@@ -94,26 +95,24 @@ export const runMemoryRecall = async (
     return null;
   }
   try {
-    const limit = Math.trunc(
-      numeric(process.env.SUPERMEMORY_RECALL_LIMIT, 5, 1, 20),
-    );
+    const limit = Math.trunc(numeric(memoryEnv("RECALL_LIMIT"), 5, 1, 20));
     const minSimilarity = numeric(
-      process.env.SUPERMEMORY_RECALL_MIN_SIMILARITY,
+      memoryEnv("RECALL_MIN_SIMILARITY"),
       0.25,
       0,
       1,
     );
     const maxChars = Math.trunc(
-      numeric(process.env.SUPERMEMORY_RECALL_MAX_PROMPT, 1000, 16, 1000),
+      numeric(memoryEnv("RECALL_MAX_PROMPT"), 1000, 16, 1000),
     );
     prompt = prompt.slice(0, maxChars);
     const project = memoryProject(
       typeof event.cwd === "string" ? event.cwd : process.cwd(),
-      process.env.SUPERMEMORY_RECALL_PROJECT,
+      memoryEnv("RECALL_PROJECT"),
     );
     const client = cloudClient(
       config,
-      numeric(process.env.SUPERMEMORY_RECALL_TIMEOUT, 5, 0.5, 15) * 1000,
+      numeric(memoryEnv("RECALL_TIMEOUT"), 5, 0.5, 15) * 1000,
     );
     const found = await client.search(prompt, limit, {
       projects: project === "default" ? [project] : [project, "default"],
@@ -132,7 +131,7 @@ export const runMemoryRecall = async (
     state.log({ outcome: hits.length ? "recall" : "noop", hits: hits.length });
     if (!hits.length) return outputOf(state);
     const lines = [
-      "[supermemory] Relevant saved memories (auto-recalled):",
+      `${RECALL_MARKER} Relevant saved memories (auto-recalled):`,
       ...hits.map((memory) => {
         const text = memory.memory.trim();
         const content =
@@ -222,7 +221,7 @@ const destinationsOf = (
  * launcher passes its already-resolved inference origin; storage stays cloud.
  */
 export const runMemoryExtraction = async (input: unknown): Promise<void> => {
-  if ((process.env.SUPERMEMORY_AUTO_SAVE ?? "1") !== "1") return;
+  if ((memoryEnv("AUTO_SAVE") ?? "1") !== "1") return;
   const event = recordOf(input);
   if (
     !event ||
@@ -253,8 +252,7 @@ export const runMemoryExtraction = async (input: unknown): Promise<void> => {
   if (!session) return;
   const { previous } = session;
   const now = Date.now();
-  const interval =
-    numeric(process.env.SUPERMEMORY_AUTO_MIN_INTERVAL, 30, 0, 86400) * 1000;
+  const interval = numeric(memoryEnv("AUTO_MIN_INTERVAL"), 30, 0, 86400) * 1000;
   const stamp = (success: boolean): void =>
     state.stamp(session.path, {
       ...(success
@@ -277,10 +275,10 @@ export const runMemoryExtraction = async (input: unknown): Promise<void> => {
       return;
     const project = memoryProject(
       typeof event.cwd === "string" ? event.cwd : process.cwd(),
-      process.env.SUPERMEMORY_AUTO_PROJECT,
+      memoryEnv("AUTO_PROJECT"),
     );
     const maxTurns = Math.trunc(
-      numeric(process.env.SUPERMEMORY_AUTO_MAX_TURNS, 12, 2, 40),
+      numeric(memoryEnv("AUTO_MAX_TURNS"), 12, 2, 40),
     );
     let turns: ReturnType<typeof recentTurns>;
     try {
@@ -366,7 +364,7 @@ export const runMemoryExtraction = async (input: unknown): Promise<void> => {
       operation,
       {
         body: {
-          model: process.env.SUPERMEMORY_AUTO_MODEL || "lite",
+          model: memoryEnv("AUTO_MODEL") || "lite",
           messages: [
             { role: "system", content: MEMORY_EXTRACTION_PROMPT },
             { role: "user", content: userBlock },
@@ -399,7 +397,7 @@ export const runMemoryExtraction = async (input: unknown): Promise<void> => {
       }
     }
     const knownTeams = new Set(teams.map((team) => team.id));
-    const dedupe = numeric(process.env.SUPERMEMORY_AUTO_DEDUPE_SIM, 0.85, 0, 1);
+    const dedupe = numeric(memoryEnv("AUTO_DEDUPE_SIM"), 0.85, 0, 1);
     for (const item of extraction.save) {
       if (item.content.length < 12 || item.content.length > 4000) continue;
       const destinations = destinationsOf(

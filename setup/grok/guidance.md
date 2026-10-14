@@ -1,15 +1,6 @@
 ## OpenLLM tools
 
-### Semantic code search (claude-context)
-- For conceptual codebase questions ("where is X handled?", "how does Y work?",
-  "what code implements Z?") prefer `mcp__openllm__search_code` over Grep/Glob —
-  it finds code by meaning, not exact string match. Iterate: refine the query
-  and call again if the first pass is off.
-- Use Grep/Glob for exact identifiers, regex, or filename patterns.
-- When the user shares a documentation URL, index it with
-  `mcp__openllm__index_docs`, then answer via `mcp__openllm__search_docs`.
-
-### Cross-session memory (supermemory)
+### Cross-session memory
 - `mcp__openllm__memory` (action: "save" | "forget") and `mcp__openllm__recall`
   are the SINGLE source of truth for remembering things across conversations.
   Do NOT use the file-based auto-memory path (`~/.claude/projects/<slug>/memory/`,
@@ -26,7 +17,7 @@
 - Recall when the user references past work ("like we did before"), asks
   something that depends on prior context, or at the start of a non-trivial
   task — query once up front. A UserPromptSubmit hook auto-injects relevant
-  memories on every prompt (a "[supermemory] Relevant saved memories" block)
+  memories on every prompt (a "[memory] Relevant saved memories" block)
   — when one is present, only re-query with a different angle.
 - A background Stop hook also extracts confirmed conclusions after each
   exchange; explicit MCP saves always win over it.

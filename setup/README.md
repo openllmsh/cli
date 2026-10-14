@@ -15,7 +15,6 @@ user's home directory by a setup script.
    | `{{OPENLLM_API_BASE}}` | gateway base URL (local daemon when reachable, else cloud origin) |
    | `{{OPENLLM_API_KEY}}` | the user's `sk-llm-…` key |
    | `{{OPENLLM_BIN}}` | absolute path to the `openllm` binary |
-   | `{{STATE_DIR}}` | claude-context state dir |
    | `{{HOOKS_DIR}}` | run-local hooks dir (materialized per launch) |
    | `{{MODEL_CATALOG_PATH}}` | run-local model catalog file |
    | `{{MODELS}}` | client-shaped model block from `/api/setup/<client>/model-catalog` |

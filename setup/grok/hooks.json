@@ -1,40 +1,5 @@
 {
   "hooks": {
-    "SessionStart": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "\"$OPENLLM_BIN\" exec ctx session-start",
-            "timeout": 30
-          }
-        ]
-      }
-    ],
-    "PreToolUse": [
-      {
-        "matcher": "Grep|Glob|Bash|grep|list_dir|run_terminal_command",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "\"$OPENLLM_BIN\" exec ctx grep-nudge",
-            "timeout": 5
-          }
-        ]
-      }
-    ],
-    "PostToolUse": [
-      {
-        "matcher": "Edit|Write|NotebookEdit|edit_file|create_file",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "\"$OPENLLM_BIN\" exec ctx reindex-on-edit",
-            "timeout": 10
-          }
-        ]
-      }
-    ],
     "UserPromptSubmit": [
       {
         "hooks": [

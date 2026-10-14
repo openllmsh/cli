@@ -17,7 +17,6 @@ import {
   normalizeMcpGroup,
 } from "./commands";
 import { runCompletionCommand } from "./completion";
-import { runContextCommand } from "./context-hooks/command";
 import type { TDaemonLifecycleCommand } from "./daemon-delegation";
 import { runManagedDaemonCommand } from "./daemon-delegation";
 import {
@@ -242,23 +241,17 @@ export const runCli = async (argv: readonly string[]): Promise<void> => {
       await runMcpServer(groups);
       break;
     }
-    // `ctx` is the legacy alias the shipped hooks call — same dispatch as
-    // `exec ctx`. Hidden from help/completion; kept so hook bundles and the
-    // binary can rev independently.
-    case "ctx": {
-      if (wantsHelp(rest)) return usage(EXEC_USAGE, 0);
-      const verb = rest[0] ?? "";
-      if (!(EXEC_VERBS.ctx as readonly string[]).includes(verb)) {
-        return usage(EXEC_USAGE, 2);
-      }
-      await runContextCommand(rest);
-      break;
-    }
+    // Code search was removed. Hook configs written by released clients may
+    // still call `openllm ctx …` / `openllm exec ctx …`; exit quietly rather
+    // than failing every hook. Hidden from help/completion.
+    case "ctx":
+      return process.exit(0);
     case "exec": {
       if (rest.length === 0 || wantsHelp(rest)) {
         return usage(EXEC_USAGE, rest.length === 0 ? 2 : 0);
       }
       const group = rest[0];
+      if (group === "ctx") return process.exit(0);
       if (!isExecGroup(group)) {
         process.stderr.write(
           `unknown exec group "${group}" — expected one of: ${EXEC_GROUPS.join(", ")}\n\n${EXEC_USAGE}`,
@@ -270,9 +263,6 @@ export const runCli = async (argv: readonly string[]): Promise<void> => {
         return usage(EXEC_USAGE, 2);
       }
       switch (group) {
-        case "ctx":
-          await runContextCommand(rest.slice(1));
-          break;
         case "memory": {
           const { runMemoryHookCommand } = await import(
             "./memory-hooks/command"

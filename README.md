@@ -21,7 +21,6 @@ manages the local daemon and serves one MCP server with:
 - **Inference and read-only gateway tools**, generated from the gateway's OpenAPI
   spec. Account/configuration writes and duplicate raw plugin endpoints are not
   exposed through MCP.
-- **Semantic code and documentation search** (`openllm-context`, paid tiers).
 - **Persistent cross-session memory** (`openllm-memory`, including the free tier).
 
 The compiled binary is self-contained: the SDK and client overlays ship with it.
@@ -109,8 +108,7 @@ Every command accepts `-h` / `--help`.
 | `openllm sessions [list\|attach\|kill]` | Manage local daemon sessions |
 | `openllm doctor [report\|opt-out\|opt-in\|reporting-status\|--fix]` | Diagnostics, reporting preferences, and leftover install-state cleanup |
 | `openllm uninstall [--yes] [--keep-logins\|--remove-logins]` | Remove the full product: daemon + CLI |
-| `openllm mcp [--only <group>]` | MCP over stdio: `openllm`, `openllm-context`, `openllm-memory`; tier restrictions still apply |
-| `openllm exec ctx <index\|search\|status\|index-docs> …` | Code/docs-search hook commands |
+| `openllm mcp [--only <group>]` | MCP over stdio: `openllm`, `openllm-memory`; tier restrictions still apply |
 | `openllm exec memory <recall\|extract>` | Automatic memory hooks (event JSON on stdin; extraction runs in a detached worker) |
 | `openllm setup` | PATH symlink and shell completion (idempotent) |
 | `openllm completion <bash\|zsh\|fish\|install>` | Print or install shell completion |
@@ -129,13 +127,13 @@ prompts and extract confirmed, durable preferences and decisions after a turn.
 Both hooks run inside the compiled OpenLLM CLI; **Python, Node, and Bun do not
 need to be installed**. Memory storage uses the cloud gateway, while extraction
 uses the session's selected inference gateway and the `lite` alias by default
-(`SUPERMEMORY_AUTO_MODEL` overrides it).
+(`MEMORY_AUTO_MODEL` overrides it).
 
-Set `SUPERMEMORY_AUTO_SAVE=0` or `SUPERMEMORY_AUTO_RECALL=0` to disable either
-behavior. Repeated failures produce a rate-limited warning without blocking your
-work. Private, content-free health logs live under
-`~/.claude/plugin-state/supermemory/scopes/` (override the parent with
-`SUPERMEMORY_AUTO_LOG_DIR`). Failed attempts remain retryable; no historical
+Set `MEMORY_AUTO_SAVE=0` or `MEMORY_AUTO_RECALL=0` to disable either
+behavior (the pre-rename `SUPERMEMORY_*` names still work). Repeated failures
+produce a rate-limited warning without blocking your work. Private, content-free health logs live under
+`~/.claude/plugin-state/memory/scopes/` (override the parent with
+`MEMORY_AUTO_LOG_DIR`). Failed attempts remain retryable; no historical
 conversation backfill runs automatically. New hook code takes effect in a fresh
 session after updating the CLI.
 

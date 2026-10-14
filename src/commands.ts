@@ -21,19 +21,11 @@ export type TCommand = {
 
 /** The exec groups — every CLI utility runs through ONE path:
  *  `openllm exec <group> <verb> […]`. */
-export const EXEC_GROUPS = ["ctx", "memory"] as const;
+export const EXEC_GROUPS = ["memory"] as const;
 export type TExecGroup = (typeof EXEC_GROUPS)[number];
-
-export const CONTEXT_HOOK_VERBS = [
-  "session-start",
-  "reindex-on-edit",
-  "grep-nudge",
-  "index-worker",
-] as const;
 
 /** Per-group verbs (drives dispatch, help, and completion). */
 export const EXEC_VERBS: Record<TExecGroup, readonly string[]> = {
-  ctx: ["index", "search", "status", "index-docs", ...CONTEXT_HOOK_VERBS],
   memory: ["recall", "extract", "extract-worker"],
 };
 
@@ -186,26 +178,19 @@ export const FLAGS: readonly TFlag[] = [
  * SDK graph; `mcp/server.ts` re-exports it as `MCP_GROUPS` for dispatch.
  *
  * The group STRINGS are the openllm-branded selector vocabulary
- * (`openllm-context`, `openllm-memory`) — distinct from the internal backend
- * plugin slugs (`/api/plugins/claude-context`, `…/supermemory`), env vars, and
- * on-disk state dirs, all of which stay on their historical wire-stable names.
+ * (`openllm-memory`) — distinct from the internal backend plugin slug
+ * (`/api/plugins/memory`).
  */
-export const MCP_ONLY_GROUPS = [
-  "openllm",
-  "openllm-context",
-  "openllm-memory",
-] as const;
+export const MCP_ONLY_GROUPS = ["openllm", "openllm-memory"] as const;
 export type TMcpGroup = (typeof MCP_ONLY_GROUPS)[number];
 
 /**
  * Legacy group selectors accepted for backward compatibility. Free-tier client
- * overlays persisted `--only supermemory` (and code search `claude-context`)
- * into their configs before the rename, so `normalizeMcpGroup` maps those old
+ * overlays persisted `--only supermemory` into their configs before the rename, so `normalizeMcpGroup` maps those old
  * strings onto the current names rather than rejecting an already-installed
  * client.
  */
 const MCP_GROUP_ALIASES: Readonly<Record<string, TMcpGroup>> = {
-  "claude-context": "openllm-context",
   supermemory: "openllm-memory",
 };
 
@@ -219,10 +204,10 @@ export const normalizeMcpGroup = (s: string): TMcpGroup | undefined => {
 };
 
 /**
- * Groups a free-tier key is allowed to expose. Semantic code search
- * (`openllm-context`) is Pro. ONE list — overlay `mcpArgs()` and the MCP
+ * Groups a free-tier key is allowed to expose — every group today; the list
+ * stays so a future Pro group is excluded here. ONE list — overlay `mcpArgs()` and the MCP
  * server itself both read this, so a persisted client config that launches
- * `openllm mcp` with no `--only` still drops code search for free users.
+ * `openllm mcp` with no `--only` still drops a Pro group for free users.
  */
 export const FREE_TIER_MCP_GROUPS = ["openllm", "openllm-memory"] as const;
 

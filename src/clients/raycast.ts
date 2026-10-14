@@ -29,7 +29,7 @@ import {
 import { join } from "node:path";
 import { CLI_VERSION, openllmDir, userHome } from "../env";
 import { requireCliApiKey } from "../onboarding";
-import { contextStateDir, fetchModelCatalog, resolveGateway } from "./gateway";
+import { fetchModelCatalog, resolveGateway } from "./gateway";
 import { removeRegion, substitute, upsertRegion } from "./merge";
 import { OVERLAYS } from "./overlays";
 import { requireProviderRouting } from "./provider-preflight";
@@ -165,7 +165,6 @@ export const applyRaycast = async (): Promise<number> => {
     {
       OPENLLM_API_BASE: gateway.base,
       OPENLLM_API_KEY: gateway.apiKey,
-      STATE_DIR: contextStateDir(),
     },
   )
     // Strip the authoring header comments — only the provider item belongs in

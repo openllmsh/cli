@@ -20,7 +20,7 @@
 >     `.app` in `/Applications` — no vendor config is written);
 >  2. serves ONE MCP server exposing the MCP-relevant subset of the native
 >     gateway API (inference + read-only ops; §MCP), local daemon auth commands,
->     and the openllm-context and openllm-memory tool groups.
+>     and the openllm-memory tool group.
 >
 > Installed by [`packages/cli/install.sh`](install.sh) — the only installer —
 > which installs the one binary, leaves `openllmd` as a symlink to it, and runs
@@ -87,8 +87,7 @@ packages/cli/
     └── mcp/
         ├── server.ts     # the ONE server: composes every tool group over stdio
         ├── openllm/      # native-API tools — MCP-exposed subset of spec ops
-        ├── claude-context/  # code+docs search tools + the ctx hook CLI
-        └── supermemory/     # memory/recall/whoAmI tools
+        └── memory/          # memory/recall/whoAmI tools
 ```
 
 ## 2. Commands
@@ -100,9 +99,8 @@ packages/cli/
 | `openllm chatgpt [uninstall\|status]` | install `/Applications/OpenLLM ChatGPT.app`, whose only logic is `exec openllm chatgpt launch`. `launch` (hidden) rewrites `~/.openllm/clients/chatgpt/codex-shim` — the app's embedded `codex` plus the Codex overlay as `-c` overrides (`codexOverrideArgs`, shared with session `codex`) — then reopens ChatGPT with `CODEX_CLI_PATH` at the shim. Real `~/.codex` (chats, auth) is never written. Design: `docs/audit/2026-08-23-cowork-codex-mac-app-setups.md` §9 |
 | `openllm uninstall [--yes]` | remove the CLI (reverses always-on wiring first) |
 | `openllm doctor [--fix]` | report/clean leftovers from the old install model |
-| `openllm mcp [--only <group>]` | the unified MCP server over stdio (groups: `openllm`, `openllm-context`, `openllm-memory`; default all — `--only` is debug) |
-| `openllm exec ctx <index\|search\|status\|index-docs> …` | manual context commands (`ctx` kept as a hidden compatibility alias) |
-| `openllm exec ctx <session-start\|reindex-on-edit\|grep-nudge>` | Context hook events on stdin; `index-worker` is the internal detached command |
+| `openllm mcp [--only <group>]` | the unified MCP server over stdio (groups: `openllm`, `openllm-memory`; default all — `--only` is debug) |
+| `openllm exec ctx …` / `openllm ctx …` | removed (code search); hidden no-op exiting 0 so hooks written by released clients don't fail |
 | `openllm exec memory <recall\|extract>` | Memory hook events on stdin: foreground recall or detached extraction; `extract-worker` is the internal child command |
 | `openllm setup` | PATH symlink + shell completion — run automatically by the curl installer; shown as a copyable follow-up on the dashboard card for sandboxed one-click installs |
 | `openllm completion <bash\|zsh\|fish\|install>` | shell completion (derived from `commands.ts`, the single command-surface source) |
@@ -154,39 +152,6 @@ same command adapter and never reinterpret local control as a cloud API call.
 The public `/llms.txt` guide documents this onboarding path and points agents
 to runtime discovery rather than maintaining another provider capability table.
 
-### Automatic context hooks
-
-Claude and Grok invoke `"$OPENLLM_BIN" exec ctx session-start|reindex-on-edit|grep-nudge`
-directly. These hooks are compiled; no jq, Python, Node, or Bun installation is
-needed. Git remains required for repository identity. The unrelated
-`setup/hooks/statusline.sh` stays embedded and materialized, alongside the
-launcher-generated API-key helper.
-
-Index hooks prefer `CLAUDE_PROJECT_DIR`, then the event cwd, then the process
-cwd; the search nudge preserves event-cwd-first precedence. Canonical Git roots
-must have an origin. Foreground hooks do not resolve credentials: they schedule
-a detached self-invocation using the same executable (or the source entry when
-running from source), sending only root/trigger over stdin. The worker reuses
-`runClaudeContextCli(["index", "--path", root])`, including authentication,
-incremental sync, and retry cooldown. `auto-index.log` owns detached output;
-the foreground session message reports scheduling, never successful indexing.
-
-`CLAUDE_CONTEXT_AUTO_INDEX`, `CLAUDE_CONTEXT_REINDEX_ON_EDIT`,
-`CLAUDE_CONTEXT_REINDEX_INTERVAL` (120 seconds), `CLAUDE_CONTEXT_GREP_NUDGE`, and
-`CLAUDE_CONTEXT_STATE_DIR` retain their existing behavior. State defaults to
-`~/.claude/plugin-state/claude-context`. Each root's worker holds an embedded
-SQLite exclusive lock for the whole sync. The edit timestamp is checked and
-updated only under that lock; SessionStart shares the lock but neither consumes
-nor obeys the edit throttle. OS locks release on worker death, and distinct
-`.lock.sqlite` files never collide with old shell `.lock` directories. Edits
-remain silent; failures are fail-open with content-free foreground diagnostics.
-
-Claude snake_case and Grok camelCase search events share the advisory-only
-PreToolUse nudge. Atomic session markers suppress duplicate concurrent nudges;
-old markers are pruned with the previous seven-day `find -mtime +7` semantics.
-No permission decision is emitted. Hook stdin is bounded by the same small
-helper used by memory hooks, and neither credentials nor event JSON enter argv.
-
 ### Automatic memory hooks
 
 Claude and Grok's runtime overlays attach `UserPromptSubmit` recall and `Stop`
@@ -201,21 +166,23 @@ puts conversation text or credentials in argv.
 
 The launcher supplies its validated key/cloud origin snapshot and
 `OPENLLM_INFERENCE_ORIGIN` from its existing gateway selection. Extraction uses
-that inference origin (and the configured `SUPERMEMORY_AUTO_MODEL`, default
+that inference origin (and the configured `MEMORY_AUTO_MODEL`, default
 `lite`); memory reads/writes always use the cloud. Standalone invocation falls
 back to the configured cloud origin. `OPENLLM_DAEMON_ENV_FILE` remains the
 canonical configuration override; the memory command accepts the historical
 `OPENLLM_ENV_FILE` only when the canonical override is absent.
 
 Private, account/key-and-origin-scoped state under
-`~/.claude/plugin-state/supermemory` (or `SUPERMEMORY_AUTO_LOG_DIR`) tracks
+`~/.claude/plugin-state/memory` (or `MEMORY_AUTO_LOG_DIR`; an existing pre-rename
+`plugin-state/supermemory` dir is kept when the new one is absent) tracks
 successful input separately from failed attempts. Session locks serialize
 concurrent Stops; failed extraction or partial writes can retry unchanged input
 after a bounded cooldown. Valid empty extraction is a healthy no-op. Logs hold
 content-free diagnostics, not transcripts, keys, or raw error bodies. Repeated
 failure produces a rate-limited advisory in the foreground recall hook rather
-than blocking work or silently failing indefinitely. `SUPERMEMORY_AUTO_SAVE=0`
-and `SUPERMEMORY_AUTO_RECALL=0` remain independent opt-outs. No historical
+than blocking work or silently failing indefinitely. `MEMORY_AUTO_SAVE=0`
+and `MEMORY_AUTO_RECALL=0` remain independent opt-outs. Every `MEMORY_*`
+setting falls back to its pre-rename `SUPERMEMORY_*` name. No historical
 transcript backfill runs automatically.
 
 ### Brokered session launches
@@ -277,7 +244,7 @@ surfaces: `openllmToolDefsAll` (**every** operation — the browser chat and the
 execution map use it) and `openllmToolDefs`, the MCP-listed subset. The MCP
 subset (`isMcpExposed`) keeps inference (`/v1/*`) + read-only ops and drops
 account/config/vault writes plus the raw `/plugins/*` HTTP mirrors (the curated
-`openllm-context` + `openllm-memory` groups already cover those) — trimming ListTools
+`openllm-memory` group already covers those) — trimming ListTools
 to cut agent context. Execution still recognizes every operation, so a trimmed
 tool is never uncallable. Mutating operations carry explicit consent copy in
 their tool descriptions.

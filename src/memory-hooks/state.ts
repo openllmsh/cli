@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import {
   appendFileSync,
   chmodSync,
+  existsSync,
   mkdirSync,
   readFileSync,
   renameSync,
@@ -12,6 +13,7 @@ import {
 import { join } from "node:path";
 import { userHome } from "../env";
 import { tryHookLock } from "../hook-helpers";
+import { memoryEnv } from "./env";
 import type { THookDiagnostic } from "./transport";
 import { recordOf } from "./transport";
 
@@ -102,6 +104,17 @@ const healthOf = (value: unknown): TComponentHealth | undefined => {
   };
 };
 
+/**
+ * Hook state root. Throttle and failure counters lived under the pre-rename
+ * `supermemory` dir, so a machine that only has that one keeps using it rather
+ * than starting its counters over.
+ */
+const defaultStateDir = (): string => {
+  const current = join(userHome(), ".claude/plugin-state/memory");
+  const legacy = join(userHome(), ".claude/plugin-state/supermemory");
+  return !existsSync(current) && existsSync(legacy) ? legacy : current;
+};
+
 export class MemoryHookState {
   readonly root: string;
   constructor(
@@ -109,9 +122,7 @@ export class MemoryHookState {
     apiKey: string,
     private readonly component: TComponent,
   ) {
-    const parent =
-      process.env.SUPERMEMORY_AUTO_LOG_DIR ||
-      join(userHome(), ".claude/plugin-state/supermemory");
+    const parent = memoryEnv("AUTO_LOG_DIR") || defaultStateDir();
     privateDirectory(parent);
     const scopes = join(parent, "scopes");
     privateDirectory(scopes);
@@ -205,7 +216,7 @@ export class MemoryHookState {
       const degraded = (["extract", "recall"] as const).filter(
         (name) =>
           (state[name]?.failures ?? 0) >= 2 &&
-          !(name === "extract" && process.env.SUPERMEMORY_AUTO_SAVE === "0"),
+          !(name === "extract" && memoryEnv("AUTO_SAVE") === "0"),
       );
       const now = Date.now();
       if (!degraded.length || now - (state.noticeTs ?? 0) < 60 * 60 * 1000)
@@ -217,7 +228,7 @@ export class MemoryHookState {
           : degraded[0] === "extract"
             ? "saving"
             : "recall";
-      notice = `OpenLLM memory: automatic ${activity} has repeatedly failed. Work can continue; check the private supermemory hook logs and gateway/daemon connection.`;
+      notice = `OpenLLM memory: automatic ${activity} has repeatedly failed. Work can continue; check the private memory hook logs and gateway/daemon connection.`;
     });
     return notice;
   }

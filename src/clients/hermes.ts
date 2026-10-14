@@ -21,7 +21,7 @@ import {
 import { join } from "node:path";
 import { CLI_VERSION } from "../env";
 import { requireCliApiKey } from "../onboarding";
-import { contextStateDir, fetchTier, resolveGateway } from "./gateway";
+import { fetchTier, resolveGateway } from "./gateway";
 import {
   hermesActiveProfilePath,
   hermesBundledTuiDir,
@@ -156,7 +156,7 @@ const buildOverlay = (opts: {
   readonly apiBase: string;
   readonly apiKey: string;
   readonly binPath: string;
-  readonly stateDir: string;
+  readonly runDir: string;
   readonly tier: "free" | "trial" | "pro" | undefined;
 }): TJsonObject => {
   const vars = overlayVars({
@@ -164,8 +164,7 @@ const buildOverlay = (opts: {
     apiBase: opts.apiBase,
     apiKey: opts.apiKey,
     binPath: opts.binPath,
-    runDir: opts.stateDir,
-    stateDir: opts.stateDir,
+    runDir: opts.runDir,
     tier: opts.tier,
   } satisfies TLaunchInputs);
   return parseYaml(substitute(OVERLAYS.hermes.config, vars)) ?? {};
@@ -245,7 +244,7 @@ export const applyHermes = async (opts?: {
     apiBase: gateway.base,
     apiKey: gateway.apiKey,
     binPath: openllmBinPath(),
-    stateDir: contextStateDir(),
+    runDir: dest,
     tier,
   });
   const sourceCfg = parseConfig(
@@ -406,7 +405,6 @@ export const runHermesCommand = async (
         HERMES_HOME: hermesProfileDir(sticky),
         OPENLLM_API_KEY: gateway.apiKey,
         OPENLLM_BIN: openllmBinPath(),
-        CLAUDE_CONTEXT_STATE_DIR: contextStateDir(),
         ...(tuiDir === undefined ? {} : { HERMES_TUI_DIR: tuiDir }),
       },
       ["OPENAI_API_KEY", "OPENAI_BASE_URL"],

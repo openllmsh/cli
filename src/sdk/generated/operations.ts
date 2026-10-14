@@ -347,152 +347,60 @@ export const API_OPERATIONS: readonly TApiOperation[] = [
     "hasBody": false
   },
   {
-    "id": "pluginsClaudeContext.removeCodebase",
-    "method": "delete",
-    "path": "/plugins/claude-context/codebase",
-    "summary": "",
-    "tags": [
-      "pluginsClaudeContext"
-    ],
-    "pathParams": [],
-    "queryParams": [
-      {
-        "name": "codebaseId",
-        "required": true
-      },
-      {
-        "name": "branch",
-        "required": false
-      }
-    ],
-    "hasBody": false
-  },
-  {
-    "id": "pluginsClaudeContext.removeDocsJob",
-    "method": "delete",
-    "path": "/plugins/claude-context/docs/indexing",
-    "summary": "",
-    "tags": [
-      "pluginsClaudeContext"
-    ],
-    "pathParams": [],
-    "queryParams": [
-      {
-        "name": "sourceId",
-        "required": true
-      },
-      {
-        "name": "ref",
-        "required": true
-      }
-    ],
-    "hasBody": false
-  },
-  {
-    "id": "pluginsClaudeContext.removeDocsSource",
-    "method": "delete",
-    "path": "/plugins/claude-context/docs/source",
-    "summary": "",
-    "tags": [
-      "pluginsClaudeContext"
-    ],
-    "pathParams": [],
-    "queryParams": [
-      {
-        "name": "sourceId",
-        "required": true
-      }
-    ],
-    "hasBody": false
-  },
-  {
-    "id": "pluginsClaudeContext.removeJob",
-    "method": "delete",
-    "path": "/plugins/claude-context/indexing",
-    "summary": "",
-    "tags": [
-      "pluginsClaudeContext"
-    ],
-    "pathParams": [],
-    "queryParams": [
-      {
-        "name": "codebaseId",
-        "required": true
-      },
-      {
-        "name": "branch",
-        "required": true
-      }
-    ],
-    "hasBody": false
-  },
-  {
-    "id": "pluginsClaudeContext.usage",
-    "method": "get",
-    "path": "/plugins/claude-context/usage",
-    "summary": "",
-    "tags": [
-      "pluginsClaudeContext"
-    ],
-    "pathParams": [],
-    "queryParams": [],
-    "hasBody": false
-  },
-  {
-    "id": "pluginsSupermemory.forget",
+    "id": "pluginsMemory.forget",
     "method": "post",
-    "path": "/plugins/supermemory/forget",
+    "path": "/plugins/memory/forget",
     "summary": "",
     "tags": [
-      "pluginsSupermemory"
+      "pluginsMemory"
     ],
     "pathParams": [],
     "queryParams": [],
     "hasBody": true
   },
   {
-    "id": "pluginsSupermemory.projects",
+    "id": "pluginsMemory.projects",
     "method": "get",
-    "path": "/plugins/supermemory/projects",
+    "path": "/plugins/memory/projects",
     "summary": "",
     "tags": [
-      "pluginsSupermemory"
+      "pluginsMemory"
     ],
     "pathParams": [],
     "queryParams": [],
     "hasBody": false
   },
   {
-    "id": "pluginsSupermemory.save",
+    "id": "pluginsMemory.save",
     "method": "post",
-    "path": "/plugins/supermemory/save",
+    "path": "/plugins/memory/save",
     "summary": "",
     "tags": [
-      "pluginsSupermemory"
+      "pluginsMemory"
     ],
     "pathParams": [],
     "queryParams": [],
     "hasBody": true
   },
   {
-    "id": "pluginsSupermemory.search",
+    "id": "pluginsMemory.search",
     "method": "post",
-    "path": "/plugins/supermemory/search",
+    "path": "/plugins/memory/search",
     "summary": "",
     "tags": [
-      "pluginsSupermemory"
+      "pluginsMemory"
     ],
     "pathParams": [],
     "queryParams": [],
     "hasBody": true
   },
   {
-    "id": "pluginsSupermemory.usage",
+    "id": "pluginsMemory.usage",
     "method": "get",
-    "path": "/plugins/supermemory/usage",
+    "path": "/plugins/memory/usage",
     "summary": "",
     "tags": [
-      "pluginsSupermemory"
+      "pluginsMemory"
     ],
     "pathParams": [],
     "queryParams": [
@@ -516,12 +424,12 @@ export const API_OPERATIONS: readonly TApiOperation[] = [
     "hasBody": false
   },
   {
-    "id": "pluginsSupermemory.whoami",
+    "id": "pluginsMemory.whoami",
     "method": "get",
-    "path": "/plugins/supermemory/whoami",
+    "path": "/plugins/memory/whoami",
     "summary": "",
     "tags": [
-      "pluginsSupermemory"
+      "pluginsMemory"
     ],
     "pathParams": [],
     "queryParams": [],

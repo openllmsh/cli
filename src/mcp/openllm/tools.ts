@@ -165,7 +165,7 @@ const SESSION_ONLY_PATHS: ReadonlySet<string> = new Set(["/user/auth-methods"]);
  *  trims context bloat; it does NOT gate execution — `byToolName` above
  *  keeps every operation callable, and the browser chat imports the full
  *  `openllmToolDefsAll` below. Denylist:
- *   1. `/plugins/*` — the curated `claude-context` + `supermemory` MCP
+ *   1. `/plugins/*` — the curated `memory` MCP
  *      groups already expose these better; the raw HTTP mirrors are dupes.
  *   2. Non-`/v1/*` mutations (post/put/patch/delete) — account/config/
  *      vault/keys/sessions/credentials writes an agent shouldn't drive

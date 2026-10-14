@@ -1,9 +1,9 @@
 /**
- * supermemory plugin config.
+ * memory plugin config.
  *
  * Embedding happens entirely on the gateway (host-paid Bedrock Titan v2
  * at 1024-d, fixed). The bundle ships raw text to
- * `/api/plugins/supermemory/{save,forget,search}` and never touches an
+ * `/api/plugins/memory/{save,forget,search}` and never touches an
  * embedding endpoint — keeps the host model off the public surface.
  */
 

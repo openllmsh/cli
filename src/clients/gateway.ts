@@ -10,7 +10,7 @@
  */
 
 import type { TCliConfig } from "../env";
-import { cliConfig, openllmDir, sharedFileConfig } from "../env";
+import { cliConfig, sharedFileConfig } from "../env";
 import {
   DEFAULT_DAEMON_PORT,
   DEV_DEFAULT_DAEMON_PORT,
@@ -180,8 +180,3 @@ export const fetchTier = async (
     return undefined;
   }
 };
-
-/** claude-context's on-disk state dir (wire-stable name, every client). */
-export const contextStateDir = (): string =>
-  process.env.CLAUDE_CONTEXT_STATE_DIR ??
-  `${openllmDir()}/plugin-state/claude-context`;

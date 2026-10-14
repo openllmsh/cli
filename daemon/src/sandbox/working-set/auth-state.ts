@@ -68,7 +68,7 @@ export const authStateLayer = (home: string): TWorkingSet => {
     join(home, ".local", "state", "claude"),
     join(home, ".cache", "claude"),
     //   bun's global install cache ONLY (the SPLIT ~/.bun grant — audit §5-B):
-    //   the claude-context plugin install runs `bun install`, which populates
+    //   a plugin install running `bun install` populates
     //   ~/.bun/install/cache. The `bun` BINARY dir (~/.bun/bin) is read+exec in
     //   the readOnly set below — write access there would let a compromised
     //   daemon trojan the user's `bun` launcher. `existing()` drops it when bun

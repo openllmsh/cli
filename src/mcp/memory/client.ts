@@ -1,5 +1,5 @@
 /**
- * Thin client over the gateway's /api/plugins/supermemory/* endpoints.
+ * Thin client over the gateway's /api/plugins/memory/* endpoints.
  *
  * Embedding, ref-overlay scoping, and collection bootstrap all live server-side
  * now — this client just forwards save/forget/search calls with the caller's
@@ -109,14 +109,14 @@ export class MemoryClient {
       body.projects = opts.projects;
     if (opts.team) body.team = opts.team;
     if (opts.teams && opts.teams.length > 0) body.teams = opts.teams;
-    return this.request("POST", "/api/plugins/supermemory/save", body);
+    return this.request("POST", "/api/plugins/memory/save", body);
   }
 
   /** List the distinct project slugs the caller can read. */
   async listProjects(): Promise<string[]> {
     const res = await this.request<{ projects: string[] }>(
       "GET",
-      "/api/plugins/supermemory/projects",
+      "/api/plugins/memory/projects",
     );
     return Array.isArray(res?.projects) ? res.projects : [];
   }
@@ -127,7 +127,7 @@ export class MemoryClient {
     opts: SaveOptions = {},
   ): Promise<{ deleted: number }> {
     if (!content.trim()) throw new Error("content is required");
-    return this.request("POST", "/api/plugins/supermemory/forget", {
+    return this.request("POST", "/api/plugins/memory/forget", {
       content,
       ...(opts.project ? { project: opts.project } : {}),
     });
@@ -161,7 +161,7 @@ export class MemoryClient {
     }
     const byId = await this.request<{ deleted: number }>(
       "POST",
-      "/api/plugins/supermemory/forget",
+      "/api/plugins/memory/forget",
       { id: hit.id },
     );
     if (byId.deleted === 0) {
@@ -199,7 +199,7 @@ export class MemoryClient {
         project?: string;
         createdAt: string | null;
       }>;
-    }>("POST", "/api/plugins/supermemory/search", body);
+    }>("POST", "/api/plugins/memory/search", body);
     const results: Memory[] = res.results.map((r) => ({
       id: r.id,
       memory: r.content,
@@ -212,6 +212,6 @@ export class MemoryClient {
 
   /** Identity lookup — which email/role/teams is this MCP bound to? */
   async whoami(): Promise<WhoamiResult> {
-    return this.request<WhoamiResult>("GET", "/api/plugins/supermemory/whoami");
+    return this.request<WhoamiResult>("GET", "/api/plugins/memory/whoami");
   }
 }

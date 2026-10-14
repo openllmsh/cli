@@ -1,6 +1,7 @@
 import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { basename } from "node:path";
+import { LEGACY_RECALL_MARKER, RECALL_MARKER } from "./env";
 import { recordOf } from "./transport";
 
 export type TTranscriptTurn = { role: "user" | "assistant"; text: string };
@@ -89,7 +90,8 @@ export const recentTurns = (path: string, limit: number): TTranscriptTurn[] => {
       !parsed ||
       !text ||
       text.startsWith("<system-reminder>") ||
-      text.startsWith("[supermemory]")
+      text.startsWith(RECALL_MARKER) ||
+      text.startsWith(LEGACY_RECALL_MARKER)
     )
       continue;
     const previous = turns.at(-1);

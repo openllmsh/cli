@@ -1,40 +1,5 @@
 {
   "hooks": {
-    "SessionStart": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "\"{{OPENLLM_BIN}}\" exec ctx session-start",
-            "timeout": 30
-          }
-        ]
-      }
-    ],
-    "PreToolUse": [
-      {
-        "matcher": "Bash|exec_command|shell",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "\"{{OPENLLM_BIN}}\" exec ctx grep-nudge",
-            "timeout": 5
-          }
-        ]
-      }
-    ],
-    "PostToolUse": [
-      {
-        "matcher": "apply_patch|Edit|Write",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "\"{{OPENLLM_BIN}}\" exec ctx reindex-on-edit",
-            "timeout": 10
-          }
-        ]
-      }
-    ],
     "UserPromptSubmit": [
       {
         "hooks": [

@@ -1,7 +1,7 @@
 /**
- * supermemory tool group — defs + dispatcher, composed into the ONE
+ * memory tool group — defs + dispatcher, composed into the ONE
  * `openllm mcp` server by `../server.ts`. Extracted from the former
- * standalone MCP entry (`src/index.ts` of the supermemory plugin bundle);
+ * standalone MCP entry (`src/index.ts` of the former supermemory plugin bundle);
  * behavior is unchanged, only the server ownership moved.
  */
 
@@ -24,13 +24,13 @@ const recallDescription =
   "AUTHORITATIVE cross-session recall for this user. SINGLE source of truth — DO NOT use file-based memory paths. " +
   "Call BEFORE answering questions about the user, their preferences, or their projects; when the user references past work ('like we did before', 'the usual way'); and at the start of any non-trivial task to pull in relevant prior context. " +
   "Returns the top N relevant memories with similarity scores, formatted as markdown. " +
-  "Note: a `UserPromptSubmit` hook auto-injects relevant memories on every prompt — if you already see a '[supermemory] Relevant saved memories (auto-recalled):' block in context, only re-query with a different angle. " +
+  "Note: a `UserPromptSubmit` hook auto-injects relevant memories on every prompt — if you already see a '[memory] Relevant saved memories (auto-recalled):' block in context, only re-query with a different angle. " +
   "Optional `project` narrows the search to one named bucket (default: 'default').";
 
 const whoAmIDescription =
   "Identify which gateway account this MCP server is bound to. Returns email, role, and team memberships. Useful for debugging MCP configuration.";
 
-export const supermemoryToolDefs = [
+export const memoryToolDefs = [
   {
     name: "memory",
     description: memoryDescription,
@@ -273,7 +273,7 @@ const handleWhoAmI = async (client: MemoryClient): Promise<TToolResult> => {
   return { content: [{ type: "text" as const, text }] };
 };
 
-export const handleSupermemoryTool = async (
+export const handleMemoryTool = async (
   name: string,
   args: Record<string, unknown>,
   config: PluginConfig,
