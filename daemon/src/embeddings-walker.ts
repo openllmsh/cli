@@ -46,13 +46,33 @@ const serveLocalOrNull = async (
   provider: string,
   providerModelId: string,
   args: TWalkArgs,
+  finalHop: boolean,
 ): Promise<Response | null> =>
   serveLocalEmbeddings({
     provider,
     providerModelId,
     body: args.rawBody,
     signal: args.req.signal,
+    finalHop,
   });
+
+/** True when a later plan hop could still dial (local or API-key). */
+const hasDialableSuccessor = (
+  hops: ReadonlyArray<string>,
+  pmids: ReadonlyArray<string>,
+  fromIndex: number,
+): boolean => {
+  for (let j = fromIndex + 1; j < hops.length; j += 1) {
+    const modelId = hops[j];
+    if (modelId === undefined) continue;
+    const hop = resolveHop(modelId, pmids[j]);
+    if (isLocalServerSlug(hop.provider)) return true;
+    // OAuth has no embeddings surface — skip. Anything else is API-key /
+    // origin-passthrough and counts as dialable.
+    if (!isOAuthSlug(hop.provider)) return true;
+  }
+  return false;
+};
 
 /**
  * Walk a signed plan (when present) for a local embeddings hop; otherwise
@@ -79,10 +99,12 @@ export const runEmbeddings = async (args: TWalkArgs): Promise<Response> => {
       if (modelId === undefined) continue;
       const hop = resolveHop(modelId, pmids[i]);
       if (isLocalServerSlug(hop.provider)) {
+        const finalHop = !hasDialableSuccessor(hops, pmids, i);
         const local = await serveLocalOrNull(
           hop.provider,
           hop.providerModelId,
           args,
+          finalHop,
         );
         if (local !== null) return local;
         continue;
@@ -100,10 +122,12 @@ export const runEmbeddings = async (args: TWalkArgs): Promise<Response> => {
   }
   const parts = splitProviderModel(bodyModel);
   if (parts !== null && isLocalServerSlug(parts.provider)) {
+    // Body-only path has nowhere to fall through — always final.
     const local = await serveLocalOrNull(
       parts.provider,
       parts.providerModelId,
       args,
+      true,
     );
     if (local !== null) return local;
     return errorJson(

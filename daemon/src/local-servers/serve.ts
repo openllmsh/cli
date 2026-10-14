@@ -429,13 +429,16 @@ export const serveLocalHop = async (
 
 /**
  * Single-shot embeddings against a discovered local server. Returns null
- * when the model is not currently listed (caller forwards / errors).
+ * when the model is not currently listed, the port is dead, or (on a
+ * non-final hop) the upstream failure is fall-through-eligible — same
+ * classification as {@link serveLocalHop}.
  */
 export const serveLocalEmbeddings = async (args: {
   readonly provider: string;
   readonly providerModelId: string;
   readonly body: unknown;
   readonly signal: AbortSignal;
+  readonly finalHop: boolean;
 }): Promise<Response | null> => {
   if (!isLocalServerSlug(args.provider)) return null;
   const server = localServerForModel(args.provider, args.providerModelId);
@@ -466,10 +469,41 @@ export const serveLocalEmbeddings = async (args: {
     },
     args.signal,
   );
-  if (resp === null) return errorJson(502, "local embeddings upstream failed");
+  if (resp === null) {
+    if (args.signal.aborted) {
+      return errorJson(499, "client aborted request");
+    }
+    if (args.finalHop) {
+      return errorJson(502, "local embeddings upstream failed");
+    }
+    return null;
+  }
   if (resp.status >= 300 && resp.status < 400) {
     await resp.body?.cancel().catch(() => {});
-    return errorJson(502, "local embeddings upstream redirected");
+    if (args.finalHop) {
+      return errorJson(502, "local embeddings upstream redirected");
+    }
+    return null;
+  }
+  if (!resp.ok) {
+    const raw = await resp.text().catch(() => "");
+    const cls = classifyHopError({
+      status: resp.status,
+      envelope: errorEnvelopeFrom(raw),
+      providerFormat: "openai",
+      aborted: args.signal.aborted,
+    });
+    if (cls.kind === "abort") {
+      return errorJson(499, "client aborted request");
+    }
+    const policy = cooldownPolicyFor(cls.reason);
+    if (!args.finalHop && policy.action !== "surface") {
+      return null;
+    }
+    return new Response(raw.length > 0 ? raw : null, {
+      status: resp.status,
+      headers: { "content-type": "application/json" },
+    });
   }
   return new Response(resp.body, {
     status: resp.status,
