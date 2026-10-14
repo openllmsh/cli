@@ -38,7 +38,24 @@ import { tokensFromResponse, ZERO_TOKENS } from "../native-runtime/types";
 import { localServerForModel, preflightLocalPort } from "./discover";
 import { localKeyForPort } from "./keys";
 
+/** Bound how long we wait for local-upstream *headers*. Cleared once headers
+ *  arrive so a long local inference stream is not cut mid-body. */
 const LOCAL_REQUEST_TIMEOUT_MS = 120_000;
+
+/** Env override must be a strict positive safe integer (tests use a short
+ *  budget). Mirrors {@link originHeaderTimeoutMs} in `forward.ts`. */
+export const localHeaderTimeoutMs = (): number => {
+  const raw = process.env.OPENLLM_LOCAL_HEADER_TIMEOUT_MS;
+  if (raw === undefined) return LOCAL_REQUEST_TIMEOUT_MS;
+  const n = Number(raw);
+  return Number.isSafeInteger(n) && n > 0 ? n : LOCAL_REQUEST_TIMEOUT_MS;
+};
+
+const localHeaderTimeoutAbort = (): Error => {
+  const err = new Error("local header timeout");
+  err.name = "TimeoutError";
+  return err;
+};
 
 export type TLocalServeHop = {
   readonly modelId: string;
@@ -119,13 +136,29 @@ const localErrorResponse = (
   );
 };
 
+/**
+ * Fetch a local upstream, aborting only while waiting for response headers.
+ * {@link inboundSignal} stays on the fetch via `AbortSignal.any` so a client
+ * abort still cancels an in-flight body after headers arrive.
+ */
 const postLocal = async (
   url: string,
   init: RequestInit,
+  inboundSignal: AbortSignal,
 ): Promise<Response | null> => {
+  const headerTimeout = new AbortController();
+  const timer = setTimeout(() => {
+    if (!headerTimeout.signal.aborted) {
+      headerTimeout.abort(localHeaderTimeoutAbort());
+    }
+  }, localHeaderTimeoutMs());
+  const signal = AbortSignal.any([inboundSignal, headerTimeout.signal]);
   try {
-    return await fetch(url, init);
+    const resp = await fetch(url, { ...init, signal });
+    clearTimeout(timer);
+    return resp;
   } catch {
+    clearTimeout(timer);
     return null;
   }
 };
@@ -231,17 +264,16 @@ export const serveLocalHop = async (
   }
 
   const url = `${server.base_url}/v1/chat/completions`;
-  const signal = AbortSignal.any([
+  const resp = await postLocal(
+    url,
+    {
+      method: "POST",
+      headers: { ...built.headers, "content-type": "application/json" },
+      body: JSON.stringify(built.body),
+      redirect: "manual",
+    },
     args.req.signal,
-    AbortSignal.timeout(LOCAL_REQUEST_TIMEOUT_MS),
-  ]);
-  const resp = await postLocal(url, {
-    method: "POST",
-    headers: { ...built.headers, "content-type": "application/json" },
-    body: JSON.stringify(built.body),
-    signal,
-    redirect: "manual",
-  });
+  );
 
   if (resp === null) {
     if (args.req.signal.aborted) {
@@ -421,19 +453,19 @@ export const serveLocalEmbeddings = async (args: {
         }
       : { model: args.providerModelId };
 
-  const resp = await postLocal(`${server.base_url}/v1/embeddings`, {
-    method: "POST",
-    headers: {
-      ...authHeadersFor(server.port),
-      "content-type": "application/json",
+  const resp = await postLocal(
+    `${server.base_url}/v1/embeddings`,
+    {
+      method: "POST",
+      headers: {
+        ...authHeadersFor(server.port),
+        "content-type": "application/json",
+      },
+      body: JSON.stringify(upstreamBody),
+      redirect: "manual",
     },
-    body: JSON.stringify(upstreamBody),
-    signal: AbortSignal.any([
-      args.signal,
-      AbortSignal.timeout(LOCAL_REQUEST_TIMEOUT_MS),
-    ]),
-    redirect: "manual",
-  });
+    args.signal,
+  );
   if (resp === null) return errorJson(502, "local embeddings upstream failed");
   if (resp.status >= 300 && resp.status < 400) {
     await resp.body?.cancel().catch(() => {});

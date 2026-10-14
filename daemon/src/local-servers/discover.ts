@@ -353,12 +353,13 @@ const probeOne = async (port: number): Promise<TLocalServerState> => {
  */
 export const preflightLocalPort = async (port: number): Promise<boolean> => {
   try {
-    await fetch(`http://127.0.0.1:${port}/v1/models`, {
+    const res = await fetch(`http://127.0.0.1:${port}/v1/models`, {
       method: "GET",
       redirect: "manual",
       signal: AbortSignal.timeout(PROBE_TIMEOUT_MS),
       cache: "no-store",
     });
+    await res.body?.cancel().catch(() => {});
     return true;
   } catch {
     return false;
