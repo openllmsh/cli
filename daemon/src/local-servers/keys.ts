@@ -5,15 +5,18 @@
  * `OPENLLM_LOCAL_KEY_<PORT>`. Never logged, never pushed on status (status
  * carries `has_key` only). Empty value clears.
  */
-import { envFilePath, envFileValue, loadEnvFile, writeEnvFileVars } from "../env";
+import { envFilePath, envFileValue, writeEnvFileVars } from "../env";
 import { logWarn, safeDiagnosticMessage } from "../logger";
 
 const keyName = (port: number): string => `OPENLLM_LOCAL_KEY_${port}`;
 
-/** Read the stored key for `port`, or null when absent/empty. Never log it. */
+/**
+ * Read the stored key for `port`, or null when absent/empty. Never log it.
+ * Prefers `process.env` (kept fresh by {@link setLocalKey}); falls back to the
+ * env file without reloading the whole file into the process.
+ */
 export const localKeyForPort = (port: number): string | null => {
   if (!Number.isInteger(port) || port < 1 || port > 65535) return null;
-  loadEnvFile();
   const fromEnv = process.env[keyName(port)];
   if (typeof fromEnv === "string" && fromEnv.trim().length > 0) {
     return fromEnv.trim();

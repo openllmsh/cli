@@ -13,7 +13,11 @@ import type {
   TDaemonQuotaStatusReached,
   TProviderUsageWindow,
 } from "@openllmsh/protocol";
-import { QUOTA_REJECT_PERCENT, QUOTA_WARN_PERCENT } from "@openllmsh/protocol";
+import {
+  isOAuthProviderSlug,
+  QUOTA_REJECT_PERCENT,
+  QUOTA_WARN_PERCENT,
+} from "@openllmsh/protocol";
 
 type TQuotaStatus = "allowed" | "allowed_warning" | "rejected";
 
@@ -24,17 +28,6 @@ type TQuotaBaseline = {
 
 const quotaKey = (slug: string, accountHash: string | undefined): string =>
   `${slug}\0${accountHash ?? "-"}`;
-
-const isOAuthProviderSlug = (
-  slug: string,
-): slug is TDaemonQuotaStatusReached["slug"] =>
-  slug === "claude_code" ||
-  slug === "chatgpt" ||
-  slug === "kimi_code" ||
-  slug === "grok" ||
-  slug === "cursor" ||
-  slug === "muse" ||
-  slug === "antigravity";
 
 const farthestFiniteReset = (
   windows: ReadonlyArray<TProviderUsageWindow>,

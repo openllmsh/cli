@@ -167,14 +167,20 @@ export const looksLikeOpenAiCompatibleAuthChallenge = (
 const isReportableLocalServer = (state: TLocalServerState): boolean =>
   state.status === "ok" || state.status === "needs_key";
 
-const parseModels = (text: string): TProviderModelList => {
+/**
+ * Parse an OpenAI-compatible `/v1/models` body. Returns `null` when the body
+ * is not valid JSON or lacks a `data` array — those must NOT be treated as a
+ * reachable model server (plain HTTP 200 on a preset port is not enough).
+ * An empty `data: []` is a valid empty listing.
+ */
+export const parseModels = (text: string): TProviderModelList | null => {
   let body: unknown;
   try {
     body = JSON.parse(text);
   } catch {
-    return [];
+    return null;
   }
-  if (!isObject(body) || !Array.isArray(body.data)) return [];
+  if (!isObject(body) || !Array.isArray(body.data)) return null;
   const out: TProviderModelEntry[] = [];
   for (const entry of body.data) {
     if (!isObject(entry) || typeof entry.id !== "string") continue;
@@ -336,6 +342,17 @@ const probeOne = async (port: number): Promise<TLocalServerState> => {
     };
   }
   const models = parseModels(probe.text);
+  if (models === null) {
+    // HTTP 200 that is not an OpenAI-compatible models listing.
+    return {
+      slug: localServerPresetByPort(port)?.slug ?? localPortSlug(port),
+      port,
+      base_url: baseUrl,
+      status: "unreachable",
+      has_key: hasKey,
+      models: [],
+    };
+  }
   const slug = fingerprintSlug(port, probe.headers, models);
   return {
     slug,
@@ -501,29 +518,56 @@ export const localModelReportEntries =
  */
 let localReportDirty = true;
 
-const pushLocalModels = async (): Promise<void> => {
-  const local_entries = localModelReportEntries();
-  // `entries: []` must not wipe oauth rows — cloud treats absent/empty
-  // oauth entries as a no-op when `local_entries` is present (cloud side).
-  // Until that lands, still send the local set so a supporting cloud can
-  // replace this device's local rows.
-  try {
-    const result = await reportModels({
-      entries: [],
-      local_entries: [...local_entries],
-    });
-    if (result.ok) {
-      localReportDirty = false;
-      return;
-    }
-    logWarn("local-servers", safeDiagnosticMessage`local model report failed`, {
-      err: result.error,
-    });
-  } catch (err) {
-    logWarn("local-servers", safeDiagnosticMessage`local model report failed`, {
-      err: err instanceof Error ? err.message : String(err),
-    });
+/** One cloud report in flight; a concurrent request coalesces into a trailing re-push. */
+let reportInFlight: Promise<void> | null = null;
+let reportQueued = false;
+
+/**
+ * Push the current local model snapshot to the cloud. Serializes reports: at
+ * most one `reportModels` in flight; overlapping callers set a coalesce flag
+ * so a trailing re-push runs with the latest `lastStates` after the current
+ * one settles (avoids racing two replaces against the same device row).
+ */
+const pushLocalModels = (): Promise<void> => {
+  if (reportInFlight !== null) {
+    reportQueued = true;
+    return reportInFlight;
   }
+  reportInFlight = (async () => {
+    // `entries: []` must not wipe oauth rows — cloud treats absent/empty
+    // oauth entries as a no-op when `local_entries` is present (cloud side).
+    // Until that lands, still send the local set so a supporting cloud can
+    // replace this device's local rows.
+    for (;;) {
+      reportQueued = false;
+      const local_entries = localModelReportEntries();
+      try {
+        const result = await reportModels({
+          entries: [],
+          local_entries: [...local_entries],
+        });
+        if (result.ok) {
+          localReportDirty = false;
+        } else {
+          logWarn(
+            "local-servers",
+            safeDiagnosticMessage`local model report failed`,
+            { err: result.error },
+          );
+        }
+      } catch (err) {
+        logWarn(
+          "local-servers",
+          safeDiagnosticMessage`local model report failed`,
+          { err: err instanceof Error ? err.message : String(err) },
+        );
+      }
+      if (!reportQueued) break;
+    }
+  })().finally(() => {
+    reportInFlight = null;
+  });
+  return reportInFlight;
 };
 
 /**
@@ -630,6 +674,8 @@ export const stopLocalServerDiscovery = (): void => {
   activeProbes = 0;
   probeWaiters.splice(0);
   localReportDirty = true;
+  reportQueued = false;
+  reportInFlight = null;
 };
 
 /**
