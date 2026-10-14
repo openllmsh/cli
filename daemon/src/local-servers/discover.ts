@@ -583,6 +583,9 @@ export const rescanLocalServers = async (opts?: {
 export const rescanLocalPort = async (
   port: number,
 ): Promise<TLocalServerState> => {
+  // Let an in-flight full scan settle first, or it would land afterwards and
+  // overwrite this port's refreshed state with the pre-change probe.
+  if (inFlight !== null) await inFlight.catch(() => undefined);
   const state = await probeOne(port);
   const without = lastStates.filter((s) => s.port !== port);
   lastStates = (
