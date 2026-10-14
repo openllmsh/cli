@@ -160,7 +160,13 @@ const handleMemory = async (
     // (projects[], teams[]) shape the gateway accepts. The chunk lives once.
     const projectSet = new Set<string>();
     const teamSet = new Set<string>();
-    if (typeof args.project === "string" && args.project.trim()) {
+    const hasDestinations = Array.isArray(args.destinations);
+    // `project` is documented as ignored when `destinations` is provided.
+    if (
+      !hasDestinations &&
+      typeof args.project === "string" &&
+      args.project.trim()
+    ) {
       projectSet.add(args.project.trim());
     }
     if (Array.isArray(args.destinations)) {
@@ -263,7 +269,7 @@ const handleRecall = async (
 const handleWhoAmI = async (client: MemoryClient): Promise<TToolResult> => {
   const who = await client.whoami();
   const teamList = who.teams.length
-    ? who.teams.map((t) => t.name).join(", ")
+    ? who.teams.map((t) => `${t.name} (${t.id})`).join(", ")
     : "(none)";
   const text = [
     `email: ${who.email}`,
