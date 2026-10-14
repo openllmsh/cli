@@ -17138,6 +17138,12 @@
                                 "additionalProperties": {
                                   "type": "string"
                                 }
+                              },
+                              "blocked_tools": {
+                                "type": "array",
+                                "items": {
+                                  "type": "string"
+                                }
                               }
                             },
                             "additionalProperties": false
@@ -18323,6 +18329,12 @@
                             "required": [],
                             "properties": {},
                             "additionalProperties": {
+                              "type": "string"
+                            }
+                          },
+                          "blocked_tools": {
+                            "type": "array",
+                            "items": {
                               "type": "string"
                             }
                           }

@@ -270,11 +270,16 @@ export const connectUpstream = async (
       clientInfo: { name: "openllm", version: CLI_VERSION },
     });
     await channel.notify("notifications/initialized");
-    const tools = await listTools(channel.rpc);
+    const blocked = new Set(server.blocked_tools ?? []);
+    const tools = (await listTools(channel.rpc)).filter(
+      (tool) => !blocked.has(tool.name),
+    );
     return {
       id: server.id,
       tools,
       call: async (name, args) => {
+        if (blocked.has(name))
+          return errorResult(`${server.id}: ${name} is not available`);
         try {
           const result = await channel.rpc("tools/call", {
             name,

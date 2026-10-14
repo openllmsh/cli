@@ -14,6 +14,8 @@ export type TMarketplaceLaunchServer = {
   readonly command?: string;
   readonly args?: readonly string[];
   readonly env?: Readonly<Record<string, string>>;
+  /** Upstream tools never exposed — account-owner operations. */
+  readonly blocked_tools?: readonly string[];
 };
 
 const isStringRecord = (v: unknown): v is Record<string, string> =>
@@ -35,7 +37,10 @@ const isLaunchServer = (v: unknown): v is TMarketplaceLaunchServer => {
     (s.command === undefined || typeof s.command === "string") &&
     (s.args === undefined ||
       (Array.isArray(s.args) && s.args.every((a) => typeof a === "string"))) &&
-    (s.env === undefined || isStringRecord(s.env))
+    (s.env === undefined || isStringRecord(s.env)) &&
+    (s.blocked_tools === undefined ||
+      (Array.isArray(s.blocked_tools) &&
+        s.blocked_tools.every((t) => typeof t === "string")))
   );
 };
 
