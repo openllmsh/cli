@@ -3302,8 +3302,16 @@ const walkPlan = async (
         finalHop,
       );
       if (localResp === null) {
+        // Local miss (model gone, port dead, or a non-final eligible upstream
+        // rejection): trail + advance. Do NOT `addHopFailure` — that reports an
+        // error row to the cloud and clears the plan cache, which would cool a
+        // loopback server that was merely momentarily unavailable.
         lastError = `local hop ${hop.modelId} unavailable on this device`;
-        addHopFailure(hop, lastError);
+        hopTrail.push({
+          modelId: hop.modelId,
+          provider: hop.provider,
+          reason: lastError,
+        });
         continue;
       }
       return withHopTrailHeaders(localResp, hop);

@@ -195,7 +195,10 @@ export const fingerprintSlug = (
   for (const preset of LOCAL_SERVER_PRESETS) {
     if (preset.defaultPort !== port) continue;
     const token = preset.slug.replace(/^local_/, "");
-    if (haystack.includes(token) || haystack.includes(preset.label.toLowerCase())) {
+    if (
+      haystack.includes(token) ||
+      haystack.includes(preset.label.toLowerCase())
+    ) {
       return preset.slug;
     }
   }
@@ -315,9 +318,7 @@ export const currentLocalServerStates = (): ReadonlyArray<TLocalServerState> =>
   lastStates;
 
 /** Look up a currently-ok server by provider slug. */
-export const localServerBySlug = (
-  slug: string,
-): TLocalServerState | null =>
+export const localServerBySlug = (slug: string): TLocalServerState | null =>
   lastStates.find((s) => s.slug === slug && s.status === "ok") ?? null;
 
 /** True when `slug` currently lists `providerModelId`. */
@@ -331,24 +332,33 @@ export const localServerHasModel = (
 };
 
 /** Build `local_entries` for `POST /api/daemon/models` (replace semantics). */
-export const localModelReportEntries = (): ReadonlyArray<TDaemonModelReportEntry> => {
-  const byProvider = new Map<string, TProviderModelEntry[]>();
-  for (const state of lastStates) {
-    if (state.status !== "ok" || state.models.length === 0) continue;
-    const existing = byProvider.get(state.slug) ?? [];
-    const seen = new Set(existing.map((m) => m.provider_model_id));
-    for (const model of state.models) {
-      if (seen.has(model.provider_model_id)) continue;
-      seen.add(model.provider_model_id);
-      existing.push(model);
+export const localModelReportEntries =
+  (): ReadonlyArray<TDaemonModelReportEntry> => {
+    const byProvider = new Map<string, TProviderModelEntry[]>();
+    for (const state of lastStates) {
+      if (state.status !== "ok" || state.models.length === 0) continue;
+      const existing = byProvider.get(state.slug) ?? [];
+      const seen = new Set(existing.map((m) => m.provider_model_id));
+      for (const model of state.models) {
+        if (seen.has(model.provider_model_id)) continue;
+        seen.add(model.provider_model_id);
+        existing.push(model);
+      }
+      byProvider.set(state.slug, existing);
     }
-    byProvider.set(state.slug, existing);
-  }
-  return [...byProvider.entries()].map(([provider, models]) => ({
-    provider,
-    models,
-  }));
-};
+    return [...byProvider.entries()].map(([provider, models]) => ({
+      provider,
+      models,
+    }));
+  };
+
+/**
+ * Cloud local-model report dirty flag. Starts true so the first scan always
+ * reports (even when the snapshot is empty). Cleared only on a successful
+ * `reportModels`; a failed/returned-error report leaves it set so the next
+ * scan retries even if the snapshot itself did not change.
+ */
+let localReportDirty = true;
 
 const pushLocalModels = async (): Promise<void> => {
   const local_entries = localModelReportEntries();
@@ -357,13 +367,21 @@ const pushLocalModels = async (): Promise<void> => {
   // Until that lands, still send the local set so a supporting cloud can
   // replace this device's local rows.
   try {
-    await reportModels({ entries: [], local_entries: [...local_entries] });
+    const result = await reportModels({
+      entries: [],
+      local_entries: [...local_entries],
+    });
+    if (result.ok) {
+      localReportDirty = false;
+      return;
+    }
+    logWarn("local-servers", safeDiagnosticMessage`local model report failed`, {
+      err: result.error,
+    });
   } catch (err) {
-    logWarn(
-      "local-servers",
-      safeDiagnosticMessage`local model report failed`,
-      { err: err instanceof Error ? err.message : String(err) },
-    );
+    logWarn("local-servers", safeDiagnosticMessage`local model report failed`, {
+      err: err instanceof Error ? err.message : String(err),
+    });
   }
 };
 
@@ -402,6 +420,11 @@ export const rescanLocalServers = async (opts?: {
     lastStates = next;
     if (changed) {
       requestStatusPush();
+    }
+    // Report when the snapshot changed OR a prior report is still dirty
+    // (failed / never succeeded) so a transient cloud outage recovers on the
+    // next tick without waiting for another discovery delta.
+    if (changed || localReportDirty) {
       void pushLocalModels();
     }
     return lastStates;
@@ -436,7 +459,11 @@ export const startLocalServerDiscovery = (): void => {
     void rescanLocalServers().catch(() => {});
   }, LOCAL_SCAN_INTERVAL_MS);
   // Don't keep the process alive solely for the scan timer.
-  if (typeof scanTimer === "object" && scanTimer !== null && "unref" in scanTimer) {
+  if (
+    typeof scanTimer === "object" &&
+    scanTimer !== null &&
+    "unref" in scanTimer
+  ) {
     scanTimer.unref();
   }
 };
@@ -452,6 +479,7 @@ export const stopLocalServerDiscovery = (): void => {
   lastStates = [];
   activeProbes = 0;
   probeWaiters.splice(0);
+  localReportDirty = true;
 };
 
 /**

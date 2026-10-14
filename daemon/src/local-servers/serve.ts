@@ -10,28 +10,31 @@ import type {
   TChatCompletionChunk,
   TChatCompletionResponse,
   TDaemonRecordRequest,
+  TErrorEnvelope,
   TModelCaps,
   TModelSettings,
 } from "@openllmsh/protocol";
 import {
   ChatCompletionChunk,
-  LOCAL_REQUIRES_DAEMON_ERROR_CODE,
+  cooldownPolicyFor,
   isLocalServerSlug,
+  LOCAL_REQUIRES_DAEMON_ERROR_CODE,
 } from "@openllmsh/protocol";
+import { classifyHopError } from "@openllmsh/wire/lib/error-class";
 import { decodeProviderEventStream } from "@openllmsh/wire/lib/streaming/provider-decode";
 import {
   buildUpstreamRequest,
   clientWireOf,
   UnsupportedContentError,
 } from "@openllmsh/wire/providers/upstream-request";
-import { recordRequest } from "../cloud-client";
 import {
   deliverChunkStream,
   deliverJsonResponse,
   type TClientSurface,
 } from "../client-encode";
+import { recordRequest } from "../cloud-client";
 import { errorJson } from "../cors";
-import { ZERO_TOKENS, tokensFromResponse } from "../native-runtime/types";
+import { tokensFromResponse, ZERO_TOKENS } from "../native-runtime/types";
 import {
   localServerBySlug,
   localServerHasModel,
@@ -63,6 +66,61 @@ export type TLocalServeArgs = {
 const authHeadersFor = (port: number): Record<string, string> => {
   const key = localKeyForPort(port);
   return key !== null ? { Authorization: `Bearer ${key}` } : {};
+};
+
+/** Best-effort OpenAI/Anthropic error envelope parse for hop classification. */
+const errorEnvelopeFrom = (raw: string): TErrorEnvelope | undefined => {
+  try {
+    const json = JSON.parse(raw) as { error?: unknown };
+    if (typeof json.error === "string") {
+      return { error: { message: json.error, type: "upstream_error" } };
+    }
+    return json.error !== null && typeof json.error === "object"
+      ? { error: json.error as TErrorEnvelope["error"] }
+      : undefined;
+  } catch {
+    const message = raw.trim().slice(0, 500);
+    return message.length > 0
+      ? { error: { message, type: "upstream_error" } }
+      : undefined;
+  }
+};
+
+/**
+ * Terminal local-upstream error body. Local servers speak OpenAI; on the
+ * Anthropic messages surface rewrite to `{ type: "error", error: { type, message } }`
+ * so Claude Code sees a clean failure instead of an OpenAI-shaped envelope.
+ */
+const localErrorResponse = (
+  status: number,
+  raw: string,
+  surface: TClientSurface,
+): Response => {
+  if (surface !== "messages") {
+    return new Response(raw.length > 0 ? raw : null, {
+      status,
+      headers: { "content-type": "application/json" },
+    });
+  }
+  let message = `local upstream returned ${status}`;
+  let type = "api_error";
+  const envelope = errorEnvelopeFrom(raw);
+  if (
+    envelope?.error.message !== undefined &&
+    envelope.error.message.length > 0
+  ) {
+    message = envelope.error.message;
+  }
+  if (envelope?.error.type !== undefined && envelope.error.type.length > 0) {
+    type = envelope.error.type;
+  }
+  return new Response(
+    JSON.stringify({ type: "error", error: { type, message } }),
+    {
+      status,
+      headers: { "content-type": "application/json" },
+    },
+  );
 };
 
 const postLocal = async (
@@ -224,7 +282,23 @@ export const serveLocalHop = async (
 
   if (!resp.ok) {
     const raw = await resp.text().catch(() => "");
-    if (!finalHop && resp.status >= 500) return null;
+    // Same pre-commit classification the OAuth path uses: every non-abort
+    // failure is transient, and `cooldownPolicyFor` decides whether a non-final
+    // hop advances (`walk_no_cool` / `cool_and_advance` / `retry_in_place`) or
+    // surfaces immediately (`surface` — request-deterministic 4xx).
+    const cls = classifyHopError({
+      status: resp.status,
+      envelope: errorEnvelopeFrom(raw),
+      providerFormat: "openai",
+      aborted: args.req.signal.aborted,
+    });
+    if (cls.kind === "abort") {
+      return errorJson(499, "client aborted request");
+    }
+    const policy = cooldownPolicyFor(cls.reason);
+    if (!finalHop && policy.action !== "surface") {
+      return null;
+    }
     recordLocal(
       {
         model: hop.modelId,
@@ -237,10 +311,7 @@ export const serveLocalHop = async (
       },
       args.originParam,
     );
-    return new Response(raw.length > 0 ? raw : null, {
-      status: resp.status,
-      headers: { "content-type": "application/json" },
-    });
+    return localErrorResponse(resp.status, raw, args.surface);
   }
 
   const clientWire = clientWireOf(args.surface);
