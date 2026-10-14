@@ -17005,7 +17005,8 @@
                 "schema": {
                   "type": "object",
                   "required": [
-                    "entries"
+                    "entries",
+                    "included_available"
                   ],
                   "properties": {
                     "entries": {
@@ -17040,7 +17041,7 @@
                           "homepage": {
                             "type": "string"
                           },
-                          "icon": {
+                          "image": {
                             "type": "string"
                           },
                           "kind": {
@@ -17065,6 +17066,36 @@
                               "free",
                               "pro"
                             ]
+                          },
+                          "included_usage": {
+                            "type": "object",
+                            "required": [
+                              "unit",
+                              "free",
+                              "trial",
+                              "pro"
+                            ],
+                            "properties": {
+                              "unit": {
+                                "type": "string",
+                                "enum": [
+                                  "tool_calls"
+                                ]
+                              },
+                              "free": {
+                                "type": "number"
+                              },
+                              "trial": {
+                                "type": "number"
+                              },
+                              "pro": {
+                                "type": "number"
+                              },
+                              "host_key_env": {
+                                "type": "string"
+                              }
+                            },
+                            "additionalProperties": false
                           },
                           "mcp": {
                             "type": "object",
@@ -17145,6 +17176,12 @@
                           }
                         },
                         "additionalProperties": false
+                      }
+                    },
+                    "included_available": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
                       }
                     }
                   },
@@ -17383,7 +17420,8 @@
                 "schema": {
                   "type": "object",
                   "required": [
-                    "installations"
+                    "installations",
+                    "usage"
                   ],
                   "properties": {
                     "installations": {
@@ -17425,6 +17463,38 @@
                           },
                           "updated_at": {
                             "type": "string"
+                          }
+                        },
+                        "additionalProperties": false
+                      }
+                    },
+                    "usage": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "required": [
+                          "entry_id",
+                          "used",
+                          "allowance",
+                          "tier"
+                        ],
+                        "properties": {
+                          "entry_id": {
+                            "type": "string"
+                          },
+                          "used": {
+                            "type": "number"
+                          },
+                          "allowance": {
+                            "type": "number"
+                          },
+                          "tier": {
+                            "type": "string",
+                            "enum": [
+                              "free",
+                              "trial",
+                              "pro"
+                            ]
                           }
                         },
                         "additionalProperties": false
