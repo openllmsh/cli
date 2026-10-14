@@ -486,7 +486,9 @@ export const handleInference = async (req: Request): Promise<Response> => {
           return isOAuthSlug(provider) || isLocalServerSlug(provider);
         });
       if (!verified || !hasDaemonOnlyHop) {
-        if (!embeddingsLocalFallback) {
+        // A verified plan with no daemon-only hop belongs to origin; the
+        // body-model local fallback is only for an unverifiable plan.
+        if (!embeddingsLocalFallback || verified) {
           return withCors(req, await passthroughToOrigin(req, rawBytes));
         }
       } else {
