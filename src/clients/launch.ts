@@ -15,6 +15,7 @@ import {
   claudeMcpServers,
   codexMcpOverrides,
   hermesMcpServers,
+  launchableServers,
   openCodeMcpServers,
 } from "./marketplace";
 import {
@@ -263,7 +264,7 @@ const planClaude = (inputs: TLaunchInputs): TLaunchPlan => {
                 vars,
               ),
               "mcpServers",
-              claudeMcpServers(inputs.marketplace ?? []),
+              claudeMcpServers(launchableServers(inputs.marketplace)),
             ),
           }),
     },
@@ -320,7 +321,7 @@ export const codexOverrideArgs = (
 const planCodex = (inputs: TLaunchInputs): TLaunchPlan => {
   const files: Record<string, string> = {};
   if (inputs.catalog !== undefined) files["models.json"] = inputs.catalog;
-  const marketplace = codexMcpOverrides(inputs.marketplace ?? []);
+  const marketplace = codexMcpOverrides(launchableServers(inputs.marketplace));
   const args = [
     ...codexOverrideArgs(overlayVars(inputs), inputs.catalog !== undefined),
     ...marketplace.args,
@@ -370,7 +371,7 @@ const planGrok = (inputs: TLaunchInputs): TLaunchPlan => {
         })();
   const merged = deepMerge(
     deepMerge(deepMerge(deepMerge(user, overlay), catalogDoc), {
-      mcp_servers: hermesMcpServers(inputs.marketplace ?? []),
+      mcp_servers: hermesMcpServers(launchableServers(inputs.marketplace)),
     }),
     mcp,
   ) as TJsonObject;
@@ -401,9 +402,14 @@ const planHermes = (inputs: TLaunchInputs): TLaunchPlan => {
   const overlay = parseYaml(overlayText) ?? {};
   const user =
     inputs.userConfig === undefined ? {} : (parseYaml(inputs.userConfig) ?? {});
-  const merged = deepMerge(deepMerge(user, overlay), {
-    mcp_servers: hermesMcpServers(inputs.marketplace ?? []),
-  }) as TJsonObject;
+  // Marketplace servers go in BEFORE our overlay so the built-in `openllm`
+  // server always wins a name clash.
+  const merged = deepMerge(
+    deepMerge(user, {
+      mcp_servers: hermesMcpServers(launchableServers(inputs.marketplace)),
+    }),
+    overlay,
+  ) as TJsonObject;
   return {
     files: {
       "config.yaml": serializeYaml(merged),
@@ -459,9 +465,14 @@ const planOpenCode = (inputs: TLaunchInputs): TLaunchPlan => {
     inputs.userConfig === undefined
       ? {}
       : (parseJsonLoose(inputs.userConfig) ?? {});
-  const merged = deepMerge(deepMerge(user, overlay), {
-    mcp: openCodeMcpServers(inputs.marketplace ?? []),
-  }) as TJsonObject;
+  // Marketplace servers go in BEFORE our overlay so the built-in `openllm`
+  // server always wins a name clash.
+  const merged = deepMerge(
+    deepMerge(user, {
+      mcp: openCodeMcpServers(launchableServers(inputs.marketplace)),
+    }),
+    overlay,
+  ) as TJsonObject;
   return {
     files: { "opencode.json": `${JSON.stringify(merged, null, 2)}\n` },
     args: [],

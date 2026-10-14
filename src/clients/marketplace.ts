@@ -45,6 +45,16 @@ const LAUNCH_TIMEOUT_MS = 5_000;
 const RESERVED = new Set(["openllm"]);
 
 /**
+ * The servers a launch plan may write. Merges are field-by-field, so a
+ * clashing entry would BLEND into the built-in one rather than lose to it —
+ * reserved ids are dropped outright, at the one place every plan reads.
+ */
+export const launchableServers = (
+  servers: readonly TMarketplaceLaunchServer[] | undefined,
+): readonly TMarketplaceLaunchServer[] =>
+  (servers ?? []).filter((s) => !RESERVED.has(s.id));
+
+/**
  * The user's enabled marketplace integrations as ready MCP servers
  * (`GET /api/marketplace/launch`). The gateway decrypts BYOK secrets with the
  * key's request-scoped DEK, the same way it decrypts provider keys. Fails
