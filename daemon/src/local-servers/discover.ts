@@ -125,6 +125,48 @@ const probePort = async (
 const isObject = (v: unknown): v is Record<string, unknown> =>
   v !== null && typeof v === "object" && !Array.isArray(v);
 
+/**
+ * True when a 401/403 response looks like an OpenAI-compatible model server
+ * asking for credentials — not an unrelated listener (e.g. macOS AirPlay on
+ * :5000, which answers plain 403s). Plain status alone is not enough.
+ */
+export const looksLikeOpenAiCompatibleAuthChallenge = (
+  status: number,
+  text: string | null,
+  headers: Headers,
+): boolean => {
+  if (status !== 401 && status !== 403) return false;
+  const www = (headers.get("www-authenticate") ?? "").toLowerCase();
+  if (
+    www.includes("bearer") ||
+    www.includes("basic") ||
+    www.includes("api-key") ||
+    www.includes("apikey")
+  ) {
+    return true;
+  }
+  if (text === null) return false;
+  const trimmed = text.trim();
+  if (trimmed.length === 0) return false;
+  try {
+    const body: unknown = JSON.parse(trimmed);
+    if (!isObject(body)) return false;
+    if ("error" in body) return true;
+    if (typeof body.message === "string") return true;
+    if (typeof body.detail === "string" || Array.isArray(body.detail)) {
+      return true;
+    }
+    if (typeof body.object === "string" && body.object === "error") return true;
+    return false;
+  } catch {
+    return false;
+  }
+};
+
+/** Keep only ports that are real model servers (reachable or auth-gated). */
+const isReportableLocalServer = (state: TLocalServerState): boolean =>
+  state.status === "ok" || state.status === "needs_key";
+
 const parseModels = (text: string): TProviderModelList => {
   let body: unknown;
   try {
@@ -257,6 +299,23 @@ const probeOne = async (port: number): Promise<TLocalServerState> => {
     };
   }
   if (probe.status === 401 || probe.status === 403) {
+    if (
+      !looksLikeOpenAiCompatibleAuthChallenge(
+        probe.status,
+        probe.text,
+        probe.headers,
+      )
+    ) {
+      // Unrelated listener (AirPlay, printers, …) — not a model server.
+      return {
+        slug: localServerPresetByPort(port)?.slug ?? localPortSlug(port),
+        port,
+        base_url: baseUrl,
+        status: "unreachable",
+        has_key: hasKey,
+        models: [],
+      };
+    }
     return {
       slug: localServerPresetByPort(port)?.slug ?? localPortSlug(port),
       port,
@@ -415,7 +474,11 @@ export const rescanLocalServers = async (opts?: {
           prev.slug.startsWith("local_port_"));
       if (prefer) byPort.set(state.port, state);
     }
-    const next = [...byPort.values()].sort((a, b) => a.port - b.port);
+    // Drop unreachable / non-API listeners from status + UI. Presets are
+    // probed privately; only real model servers (ok / needs_key) surface.
+    const next = [...byPort.values()]
+      .filter(isReportableLocalServer)
+      .sort((a, b) => a.port - b.port);
     const changed = JSON.stringify(next) !== JSON.stringify(lastStates);
     lastStates = next;
     if (changed) {
@@ -440,7 +503,9 @@ export const rescanLocalPort = async (
 ): Promise<TLocalServerState> => {
   const state = await probeOne(port);
   const without = lastStates.filter((s) => s.port !== port);
-  lastStates = [...without, state].sort((a, b) => a.port - b.port);
+  lastStates = (
+    isReportableLocalServer(state) ? [...without, state] : without
+  ).sort((a, b) => a.port - b.port);
   requestStatusPush();
   void pushLocalModels();
   return state;

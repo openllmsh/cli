@@ -372,10 +372,15 @@ export const serveLocalHop = async (
       },
       args.originParam,
     );
-    return new Response(text, {
-      status: 502,
-      headers: { "content-type": "application/json" },
-    });
+    // Never echo the raw non-JSON body: clients expect a surface-shaped
+    // envelope, and the upstream text is not a useful contract.
+    return args.surface === "messages"
+      ? localErrorResponse(
+          502,
+          "local upstream response was not JSON",
+          args.surface,
+        )
+      : errorJson(502, "local upstream response was not JSON");
   }
   recordLocal(
     {
