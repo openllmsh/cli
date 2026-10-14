@@ -35,11 +35,7 @@ import {
 import { recordRequest } from "../cloud-client";
 import { errorJson } from "../cors";
 import { tokensFromResponse, ZERO_TOKENS } from "../native-runtime/types";
-import {
-  localServerBySlug,
-  localServerHasModel,
-  preflightLocalPort,
-} from "./discover";
+import { localServerForModel, preflightLocalPort } from "./discover";
 import { localKeyForPort } from "./keys";
 
 const LOCAL_REQUEST_TIMEOUT_MS = 120_000;
@@ -183,11 +179,8 @@ export const serveLocalHop = async (
 ): Promise<Response | null> => {
   if (!isLocalServerSlug(hop.provider)) return null;
 
-  const server = localServerBySlug(hop.provider);
-  if (
-    server === null ||
-    !localServerHasModel(hop.provider, hop.providerModelId)
-  ) {
+  const server = localServerForModel(hop.provider, hop.providerModelId);
+  if (server === null) {
     if (finalHop) {
       return errorJson(
         503,
@@ -413,11 +406,8 @@ export const serveLocalEmbeddings = async (args: {
   readonly signal: AbortSignal;
 }): Promise<Response | null> => {
   if (!isLocalServerSlug(args.provider)) return null;
-  const server = localServerBySlug(args.provider);
-  if (
-    server === null ||
-    !localServerHasModel(args.provider, args.providerModelId)
-  ) {
+  const server = localServerForModel(args.provider, args.providerModelId);
+  if (server === null) {
     return null;
   }
   const alive = await preflightLocalPort(server.port);

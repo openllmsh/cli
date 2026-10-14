@@ -372,23 +372,104 @@ let inFlight: Promise<ReadonlyArray<TLocalServerState>> | null = null;
 let scanTimer: ReturnType<typeof setInterval> | null = null;
 let started = false;
 
-/** Latest discovery snapshot (empty before the first scan settles). */
-export const currentLocalServerStates = (): ReadonlyArray<TLocalServerState> =>
-  lastStates;
+/**
+ * Merge two discovery rows that share a provider slug (same server TYPE on
+ * different ports, or a fingerprinted winner vs `local_port_*`). Unions
+ * models; prefers `ok` over `needs_key`, then the preset's default port,
+ * then the lower port. Used so status / UI show ONE row per type per device
+ * even when two LM Studio ports answer.
+ */
+export const mergeLocalServerStates = (
+  a: TLocalServerState,
+  b: TLocalServerState,
+): TLocalServerState => {
+  const statusRank = (s: TLocalServerState["status"]): number => {
+    if (s === "ok") return 0;
+    if (s === "needs_key") return 1;
+    return 2;
+  };
+  const defaultPort =
+    LOCAL_SERVER_PRESETS.find((p) => p.slug === a.slug)?.defaultPort ?? null;
+  const portScore = (port: number): number => {
+    if (defaultPort !== null && port === defaultPort) return 0;
+    return 1;
+  };
+  let winner = a;
+  let loser = b;
+  const byStatus = statusRank(a.status) - statusRank(b.status);
+  if (
+    byStatus > 0 ||
+    (byStatus === 0 &&
+      (portScore(a.port) > portScore(b.port) ||
+        (portScore(a.port) === portScore(b.port) && a.port > b.port)))
+  ) {
+    winner = b;
+    loser = a;
+  }
+  const seen = new Set(winner.models.map((m) => m.provider_model_id));
+  const models = [...winner.models];
+  let added = false;
+  for (const model of loser.models) {
+    if (seen.has(model.provider_model_id)) continue;
+    seen.add(model.provider_model_id);
+    models.push(model);
+    added = true;
+  }
+  return added ? { ...winner, models } : winner;
+};
 
-/** Look up a currently-ok server by provider slug. */
+/**
+ * One logical server per provider slug. Port collisions are handled earlier;
+ * this collapses e.g. two `local_lmstudio` ports into a single status row.
+ */
+export const collapseLocalServersBySlug = (
+  states: ReadonlyArray<TLocalServerState>,
+): ReadonlyArray<TLocalServerState> => {
+  const bySlug = new Map<string, TLocalServerState>();
+  for (const state of states) {
+    const prev = bySlug.get(state.slug);
+    if (prev === undefined) {
+      bySlug.set(state.slug, state);
+      continue;
+    }
+    bySlug.set(state.slug, mergeLocalServerStates(prev, state));
+  }
+  return [...bySlug.values()].sort((a, b) => a.port - b.port);
+};
+
+/**
+ * Status / UI snapshot: at most one row per server TYPE. Serve lookups use
+ * {@link localServerForModel} against the uncollapsed probe list so a model
+ * that only exists on a secondary port is still dialed on that port.
+ */
+export const currentLocalServerStates = (): ReadonlyArray<TLocalServerState> =>
+  collapseLocalServersBySlug(lastStates);
+
+/** Look up a currently-ok server by provider slug (first match). */
 export const localServerBySlug = (slug: string): TLocalServerState | null =>
   lastStates.find((s) => s.slug === slug && s.status === "ok") ?? null;
 
-/** True when `slug` currently lists `providerModelId`. */
+/**
+ * Ok server for `slug` that currently lists `providerModelId`. Prefers the
+ * port that actually advertised the model when the same type answers on
+ * several ports.
+ */
+export const localServerForModel = (
+  slug: string,
+  providerModelId: string,
+): TLocalServerState | null =>
+  lastStates.find(
+    (s) =>
+      s.slug === slug &&
+      s.status === "ok" &&
+      s.models.some((m) => m.provider_model_id === providerModelId),
+  ) ?? null;
+
+/** True when `slug` currently lists `providerModelId` on any ok port. */
 export const localServerHasModel = (
   slug: string,
   providerModelId: string,
-): boolean => {
-  const server = localServerBySlug(slug);
-  if (server === null) return false;
-  return server.models.some((m) => m.provider_model_id === providerModelId);
-};
+): boolean => localServerForModel(slug, providerModelId) !== null;
 
 /** Build `local_entries` for `POST /api/daemon/models` (replace semantics). */
 export const localModelReportEntries =
