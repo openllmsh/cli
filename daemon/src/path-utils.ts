@@ -38,6 +38,23 @@ export const spawnPathDirs = (): string[] =>
   ].filter((d) => d.length > 0);
 
 /**
+ * The PATH a spawned child gets: `basePath`'s own entries, then the same
+ * fallback dirs {@link spawnPathDirs} searches, deduped. Runnability checks
+ * (`isHostCliRunnable`) resolve shebang interpreters across those dirs, so the
+ * child must see them too — otherwise an npm shim (`#!/usr/bin/env node`) with
+ * Homebrew node passes the check and then exits 127 under launchd's bare PATH.
+ */
+export const augmentSpawnPath = (basePath: string | undefined): string => {
+  const dirs = [
+    ...(basePath?.split(delimiter) ?? []),
+    ...defaultBinDirs(),
+    "/usr/bin",
+    "/bin",
+  ].filter((d) => d.length > 0);
+  return [...new Set(dirs)].join(delimiter);
+};
+
+/**
  * Every existing location of `cmd` across the daemon's effective search space,
  * in priority order — a multi-hit `which -a` that doesn't depend on a shell.
  * Scans (deduped): the process's own PATH entries, then {@link defaultBinDirs}

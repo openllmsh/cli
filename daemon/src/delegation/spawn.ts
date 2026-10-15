@@ -34,6 +34,7 @@ import {
   safeDiagnosticMessage,
 } from "../logger";
 import { currentTickId } from "../op-context";
+import { augmentSpawnPath } from "../path-utils";
 import { sandboxSpawnArgs } from "../sandbox/exec";
 import { daemonTempDir } from "../sandbox/working-set";
 import { redactSensitiveArgv } from "./redact-sensitive-argv";
@@ -52,11 +53,14 @@ export const mergeSpawnEnv = (
   for (const [key, value] of Object.entries(base)) {
     if (value !== undefined) next[key] = value;
   }
-  if (overrides === undefined) return next;
-  for (const [key, value] of Object.entries(overrides)) {
+  for (const [key, value] of Object.entries(overrides ?? {})) {
     if (value === undefined) delete next[key];
     else next[key] = value;
   }
+  // An explicit PATH override is the caller's to own; otherwise widen the
+  // inherited service PATH to what the runnability checks searched.
+  if (overrides === undefined || !("PATH" in overrides))
+    next.PATH = augmentSpawnPath(next.PATH);
   return next;
 };
 
