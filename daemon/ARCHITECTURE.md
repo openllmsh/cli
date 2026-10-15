@@ -971,6 +971,19 @@ runs its OWN copy of each CLI under `<stateDir>/cli/<provider>/`
   no new cloud endpoint, table, diagnostics consent, or sandbox grant is needed.
   `openllm update` still does not start vendor installs, and externally managed
   installs never acquire progress records.
+- **`host-sign-in.ts`** — the optional `host_signed_in` hint: is the user
+  already signed in to the vendor CLI in their OWN home (`~/.claude.json`
+  `oauthAccount` + Linux `~/.claude/.credentials.json`, `~/.codex/auth.json`
+  tokens, `~/.kimi-code/credentials/kimi-code*.json`, `~/.grok/auth.json`,
+  Linux `~/.config/cursor/auth.json`; the vendors' own env overrides honoured).
+  Plain file reads only — never a `security`/keychain call, so it cannot raise
+  a SecurityAgent prompt; keychain-only stores (Cursor on macOS, Muse,
+  Antigravity) stay unknown and the field is omitted. A store is parsed only to
+  test that a login field is a non-empty string; nothing is copied, logged or
+  sent but the boolean, and the isolation rule above is unchanged (Connect
+  still logs in inside the isolated home). Cached per provider for 60s and
+  attached after installer metadata, so last-known never persists it.
+  Onboarding uses it to lead with providers that are one approval away.
 
 ## OS sandbox + typed control vocabulary (hardening)
 

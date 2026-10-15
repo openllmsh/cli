@@ -39,6 +39,7 @@ import { STATUS_CHECK_FAILED_DETAIL } from "./delegation/util";
 import { getCliState } from "./device-state";
 import { daemonPort, hasApiKey } from "./env";
 import { authCooldownForProvider } from "./hop-cooldown";
+import { attachHostSignIn } from "./host-sign-in";
 import { hasIdentityConflict } from "./identity-state";
 import { daemonPublicKey } from "./keypair";
 import { currentLocalServerStates } from "./local-servers";
@@ -674,6 +675,15 @@ export type TComputeStatusFreshOptions = {
   readonly trigger?: TStatusPublishTrigger;
 };
 
+/**
+ * Last step for every published provider row: installer progress, then the
+ * host sign-in hint. Both are merged AFTER auth overlays / last-known spreads,
+ * so a probe timeout cannot drop them and last-known never persists them.
+ */
+const publishConnection = (
+  conn: TDaemonProviderConnection,
+): TDaemonProviderConnection => attachHostSignIn(attachVendorCliInstall(conn));
+
 const computeStatusFreshInner = async (
   options?: TComputeStatusFreshOptions,
 ): Promise<TDaemonStatus> => {
@@ -685,7 +695,7 @@ const computeStatusFreshInner = async (
           daemonStatusState().pendingVerifiedPublish.delete(d.slug);
           const seeded = daemonStatusState().lastKnownConnections.get(d.slug);
           if (seeded?.observation === "connected") {
-            return attachVendorCliInstall(
+            return publishConnection(
               attachUpstreamAuthCooldown(d.slug, seeded),
             );
           }
@@ -718,7 +728,7 @@ const computeStatusFreshInner = async (
         if (
           normalizeProviderConnection(published).observation !== "connected"
         ) {
-          return attachVendorCliInstall(published);
+          return publishConnection(published);
         }
         // PEEK only — never hit the vendor here. `computeStatus` runs on every
         // status push (hello/reconnect, the periodic observer, post-command),
@@ -730,7 +740,7 @@ const computeStatusFreshInner = async (
         // on-demand read cached. See `usage-cache.ts`.
         const usage = peekUsage(d.slug, published.account_hash);
         if (usage !== null) published = { ...published, usage };
-        return attachVendorCliInstall(published);
+        return publishConnection(published);
       } catch (err) {
         // One provider's status read must NOT sink the whole snapshot (every
         // card would vanish + the push would fail). Surface a safe placeholder;
@@ -738,7 +748,7 @@ const computeStatusFreshInner = async (
         logWarn("status", `status() failed for ${d.slug}`, {
           err: err instanceof Error ? err.message : String(err),
         });
-        return attachVendorCliInstall(
+        return publishConnection(
           attachUpstreamAuthCooldown(d.slug, statusFailure(d.slug)),
         );
       }

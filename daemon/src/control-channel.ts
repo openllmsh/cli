@@ -127,6 +127,7 @@ export const statusChangeKey = (status: TDaemonStatus): string => {
         c.cli_installed === undefined ? "" : String(c.cli_installed),
         c.cli_install === undefined ? "" : JSON.stringify(c.cli_install),
         c.cli_version ?? "",
+        c.host_signed_in === undefined ? "" : String(c.host_signed_in),
         c.detail ?? "",
         c.last_login_at_ms === undefined || c.last_login_at_ms === null
           ? ""
