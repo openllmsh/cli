@@ -1186,6 +1186,58 @@ export const API_OPERATIONS: readonly TApiOperation[] = [
     "hasBody": false
   },
   {
+    "id": "vault.passkeyList",
+    "method": "get",
+    "path": "/vault/passkey",
+    "summary": "",
+    "tags": [
+      "vault"
+    ],
+    "pathParams": [],
+    "queryParams": [],
+    "hasBody": false
+  },
+  {
+    "id": "vault.passkeyCreate",
+    "method": "post",
+    "path": "/vault/passkey",
+    "summary": "",
+    "tags": [
+      "vault"
+    ],
+    "pathParams": [],
+    "queryParams": [],
+    "hasBody": true
+  },
+  {
+    "id": "vault.passkeyRemove",
+    "method": "delete",
+    "path": "/vault/passkey/{id}",
+    "summary": "",
+    "tags": [
+      "vault"
+    ],
+    "pathParams": [
+      "id"
+    ],
+    "queryParams": [],
+    "hasBody": false
+  },
+  {
+    "id": "vault.passkeyUpdate",
+    "method": "patch",
+    "path": "/vault/passkey/{id}",
+    "summary": "",
+    "tags": [
+      "vault"
+    ],
+    "pathParams": [
+      "id"
+    ],
+    "queryParams": [],
+    "hasBody": true
+  },
+  {
     "id": "vault.resetAbort",
     "method": "post",
     "path": "/vault/reset/abort",
