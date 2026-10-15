@@ -153,9 +153,14 @@ const inputSchemaFor = (op: TApiOperation): Record<string, unknown> => {
 /** Paths no agent may reach — not listed, not executable, not in web chat.
  *  `/marketplace/launch` returns the user's DECRYPTED integration secrets
  *  for the launcher to write into a 0600 run dir; as a tool it would put a
- *  vendor key straight into model context. */
+ *  vendor key straight into model context. `/vault/passkey*` manages the
+ *  passkey wraps that unlock the vault: browser-session only (an `sk-llm`
+ *  caller gets 403), and an agent revoking a user's unlock method is not a
+ *  delegation anyone asked for. */
 const AGENT_FORBIDDEN_PATHS: ReadonlySet<string> = new Set([
   "/marketplace/launch",
+  "/vault/passkey",
+  "/vault/passkey/{id}",
 ]);
 
 const AGENT_OPERATIONS: ReadonlyArray<TApiOperation> = API_OPERATIONS.filter(
