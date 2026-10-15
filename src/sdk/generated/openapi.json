@@ -27876,6 +27876,52 @@
                     "description": "a string at most 64 character(s) long",
                     "title": "maxLength(64)",
                     "maxLength": 64
+                  },
+                  "gravity": {
+                    "anyOf": [
+                      {
+                        "type": "object",
+                        "required": [],
+                        "properties": {
+                          "user_data": {
+                            "anyOf": [
+                              {
+                                "type": "object",
+                                "required": [],
+                                "properties": {},
+                                "additionalProperties": {
+                                  "$id": "/schemas/unknown",
+                                  "title": "unknown"
+                                }
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "client_context": {
+                            "anyOf": [
+                              {
+                                "type": "object",
+                                "required": [],
+                                "properties": {},
+                                "additionalProperties": {
+                                  "$id": "/schemas/unknown",
+                                  "title": "unknown"
+                                }
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          }
+                        },
+                        "additionalProperties": false
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
                   }
                 },
                 "additionalProperties": false
