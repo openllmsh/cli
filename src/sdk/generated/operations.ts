@@ -1092,6 +1092,100 @@ export const API_OPERATIONS: readonly TApiOperation[] = [
     "hasBody": true
   },
   {
+    "id": "vault.handoffCreate",
+    "method": "post",
+    "path": "/vault/handoff",
+    "summary": "",
+    "tags": [
+      "vault"
+    ],
+    "pathParams": [],
+    "queryParams": [],
+    "hasBody": true
+  },
+  {
+    "id": "vault.handoffStatus",
+    "method": "get",
+    "path": "/vault/handoff/{id}",
+    "summary": "",
+    "tags": [
+      "vault"
+    ],
+    "pathParams": [
+      "id"
+    ],
+    "queryParams": [],
+    "hasBody": false
+  },
+  {
+    "id": "vault.handoffApprove",
+    "method": "post",
+    "path": "/vault/handoff/{id}/approve",
+    "summary": "",
+    "tags": [
+      "vault"
+    ],
+    "pathParams": [
+      "id"
+    ],
+    "queryParams": [],
+    "hasBody": true
+  },
+  {
+    "id": "vault.handoffCancel",
+    "method": "post",
+    "path": "/vault/handoff/{id}/cancel",
+    "summary": "",
+    "tags": [
+      "vault"
+    ],
+    "pathParams": [
+      "id"
+    ],
+    "queryParams": [],
+    "hasBody": true
+  },
+  {
+    "id": "vault.handoffClaim",
+    "method": "post",
+    "path": "/vault/handoff/{id}/claim",
+    "summary": "",
+    "tags": [
+      "vault"
+    ],
+    "pathParams": [
+      "id"
+    ],
+    "queryParams": [],
+    "hasBody": true
+  },
+  {
+    "id": "vault.handoffDeny",
+    "method": "post",
+    "path": "/vault/handoff/{id}/deny",
+    "summary": "",
+    "tags": [
+      "vault"
+    ],
+    "pathParams": [
+      "id"
+    ],
+    "queryParams": [],
+    "hasBody": false
+  },
+  {
+    "id": "vault.handoffPending",
+    "method": "get",
+    "path": "/vault/handoff/pending",
+    "summary": "",
+    "tags": [
+      "vault"
+    ],
+    "pathParams": [],
+    "queryParams": [],
+    "hasBody": false
+  },
+  {
     "id": "vault.resetAbort",
     "method": "post",
     "path": "/vault/reset/abort",
