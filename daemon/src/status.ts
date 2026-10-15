@@ -682,7 +682,8 @@ export type TComputeStatusFreshOptions = {
  */
 const publishConnection = (
   conn: TDaemonProviderConnection,
-): TDaemonProviderConnection => attachHostSignIn(attachVendorCliInstall(conn));
+): Promise<TDaemonProviderConnection> =>
+  attachHostSignIn(attachVendorCliInstall(conn));
 
 const computeStatusFreshInner = async (
   options?: TComputeStatusFreshOptions,

@@ -23,9 +23,12 @@
  *     (unknown), never `false`.
  *
  * Probes run inside status computation, so results are cached per provider
- * for {@link HOST_SIGN_IN_TTL_MS}; a status tick costs a map lookup.
+ * for {@link HOST_SIGN_IN_TTL_MS}; a status tick costs a map lookup. Reads are
+ * async: `~/.claude.json` carries project history and can be tens of MB for a
+ * heavy user, and a synchronous read of it would stall the daemon's event
+ * loop — every in-flight proxied stream with it — once a minute.
  */
-import { readdirSync, readFileSync, statSync } from "node:fs";
+import { readdir, readFile, stat } from "node:fs/promises";
 import { homedir, platform } from "node:os";
 import { join } from "node:path";
 import { stateScoped } from "./state-scoped";
@@ -69,9 +72,9 @@ const isMissing = (err: unknown): boolean => {
 };
 
 /** Read + parse a JSON store. Missing → absent; anything else odd → unknown. */
-const readJson = (path: string): TRead<unknown> => {
+const readJson = async (path: string): Promise<TRead<unknown>> => {
   try {
-    const st = statSync(path);
+    const st = await stat(path);
     if (!st.isFile()) return UNKNOWN;
     if (st.size === 0) return ABSENT;
     if (st.size > MAX_STORE_BYTES) return UNKNOWN;
@@ -80,7 +83,7 @@ const readJson = (path: string): TRead<unknown> => {
   }
   let text: string;
   try {
-    text = readFileSync(path, "utf8");
+    text = await readFile(path, "utf8");
   } catch (err) {
     return isMissing(err) ? ABSENT : UNKNOWN;
   }
@@ -118,15 +121,19 @@ const both = (
       ? true
       : undefined;
 
-const verdict = <T>(
-  read: TRead<T>,
+const verdict = async <T>(
+  pending: Promise<TRead<T>>,
   test: (value: T) => boolean,
-): boolean | undefined =>
-  read.kind === "absent"
+): Promise<boolean | undefined> => {
+  const read = await pending;
+  return read.kind === "absent"
     ? false
     : read.kind === "present"
       ? test(read.value)
       : undefined;
+};
+
+type TProbeResult = Promise<boolean | undefined>;
 
 /**
  * Claude Code. The account the CLI is signed in to is recorded in its global
@@ -136,17 +143,17 @@ const verdict = <T>(
  * which is deliberately NOT queried; on Linux/Windows it is the file
  * `<config>/.credentials.json`, whose existence is additionally required there.
  */
-const probeClaude = (ctx: THostSignInContext): boolean | undefined => {
+const probeClaude = async (ctx: THostSignInContext): TProbeResult => {
   const configDir = envDir(ctx, "CLAUDE_CONFIG_DIR");
   const globalConfig =
     configDir !== undefined
       ? join(configDir, ".claude.json")
       : join(ctx.home, ".claude.json");
-  const account = verdict(readJson(globalConfig), (cfg) =>
+  const account = await verdict(readJson(globalConfig), (cfg) =>
     isRecord(cfg) ? hasAnyString(cfg.oauthAccount, ["accountUuid"]) : false,
   );
   if (ctx.platform === "darwin") return account;
-  const credentials = verdict(
+  const credentials = await verdict(
     readJson(join(configDir ?? join(ctx.home, ".claude"), ".credentials.json")),
     (store) =>
       isRecord(store) &&
@@ -160,7 +167,7 @@ const probeClaude = (ctx: THostSignInContext): boolean | undefined => {
  * sign-in writes `tokens`; an API-key-only setup writes `OPENAI_API_KEY` with
  * no tokens, which is not a subscription login.
  */
-const probeCodex = (ctx: THostSignInContext): boolean | undefined => {
+const probeCodex = (ctx: THostSignInContext): TProbeResult => {
   const codexHome = envDir(ctx, "CODEX_HOME") ?? join(ctx.home, ".codex");
   return verdict(readJson(join(codexHome, "auth.json")), (store) =>
     isRecord(store)
@@ -174,20 +181,20 @@ const probeCodex = (ctx: THostSignInContext): boolean | undefined => {
 const KIMI_SLOT = /^kimi-code(?:-env-[0-9a-f]{16})?\.json$/;
 
 /** Kimi Code. `$KIMI_CODE_HOME/credentials/<slot>.json` (default `~/.kimi-code`). */
-const probeKimi = (ctx: THostSignInContext): boolean | undefined => {
+const probeKimi = async (ctx: THostSignInContext): TProbeResult => {
   const kimiHome =
     envDir(ctx, "KIMI_CODE_HOME") ?? join(ctx.home, ".kimi-code");
   const dir = join(kimiHome, "credentials");
   let names: string[];
   try {
-    names = readdirSync(dir);
+    names = await readdir(dir);
   } catch (err) {
     return isMissing(err) ? false : undefined;
   }
   let unknown = false;
   for (const name of names) {
     if (!KIMI_SLOT.test(name)) continue;
-    const signedIn = verdict(readJson(join(dir, name)), (token) =>
+    const signedIn = await verdict(readJson(join(dir, name)), (token) =>
       hasAnyString(token, ["refresh_token", "access_token"]),
     );
     if (signedIn === true) return true;
@@ -198,7 +205,7 @@ const probeKimi = (ctx: THostSignInContext): boolean | undefined => {
 
 /** Grok Build. `~/.grok/auth.json`: a map of sessions, each carrying `key`
  *  (the access token) and `refresh_token`. */
-const probeGrok = (ctx: THostSignInContext): boolean | undefined =>
+const probeGrok = (ctx: THostSignInContext): TProbeResult =>
   verdict(readJson(join(ctx.home, ".grok", "auth.json")), (store) =>
     isRecord(store)
       ? Object.values(store).some((session) =>
@@ -209,7 +216,7 @@ const probeGrok = (ctx: THostSignInContext): boolean | undefined =>
 
 /** Cursor. Linux keeps the token in `$XDG_CONFIG_HOME/cursor/auth.json`
  *  (default `~/.config`); macOS keeps it in the keychain → unknown. */
-const probeCursor = (ctx: THostSignInContext): boolean | undefined => {
+const probeCursor = async (ctx: THostSignInContext): TProbeResult => {
   if (ctx.platform === "darwin") return undefined;
   const xdg = envDir(ctx, "XDG_CONFIG_HOME") ?? join(ctx.home, ".config");
   return verdict(readJson(join(xdg, "cursor", "auth.json")), (store) =>
@@ -227,7 +234,7 @@ const probeCursor = (ctx: THostSignInContext): boolean | undefined => {
  * keychain-backed or unverified host stores) always report unknown.
  */
 const PROBES: Readonly<
-  Record<string, (ctx: THostSignInContext) => boolean | undefined>
+  Record<string, (ctx: THostSignInContext) => TProbeResult>
 > = {
   claude_code: probeClaude,
   chatgpt: probeCodex,
@@ -240,14 +247,14 @@ const PROBES: Readonly<
  * Uncached probe of one provider. `true` = signed in to the vendor CLI in the
  * user's own home; `false` = definitely not; `undefined` = unknown.
  */
-export const probeHostSignIn = (
+export const probeHostSignIn = async (
   provider: string,
   context: THostSignInContext = defaultContext(),
-): boolean | undefined => {
+): TProbeResult => {
   const probe = PROBES[provider];
   if (probe === undefined) return undefined;
   try {
-    return probe(context);
+    return await probe(context);
   } catch {
     // Status must never throw on a hint.
     return undefined;
@@ -256,7 +263,7 @@ export const probeHostSignIn = (
 
 export type THostSignInProbe = {
   /** Cached answer for `provider` (see {@link probeHostSignIn}). */
-  readonly read: (provider: string) => boolean | undefined;
+  readonly read: (provider: string) => TProbeResult;
 };
 
 export type THostSignInProbeOptions = {
@@ -271,12 +278,15 @@ export const createHostSignInProbe = (
 ): THostSignInProbe => {
   const context = options?.context ?? defaultContext;
   const nowMs = options?.nowMs ?? Date.now;
+  // The PROMISE is cached, not the value: the providers' rows are computed
+  // in parallel and a status burst can ask twice before a read settles, so
+  // concurrent askers share one read rather than each starting their own.
   const cache = new Map<
     string,
-    { readonly at: number; readonly value: boolean | undefined }
+    { readonly at: number; readonly value: TProbeResult }
   >();
   return {
-    read: (provider: string): boolean | undefined => {
+    read: (provider: string): TProbeResult => {
       const now = nowMs();
       const hit = cache.get(provider);
       if (hit !== undefined && now - hit.at < HOST_SIGN_IN_TTL_MS)
@@ -300,11 +310,11 @@ type THostSignInCarrier = {
  * Attach `host_signed_in` to a status connection. An unknown answer removes
  * the field rather than publishing a guess.
  */
-export const attachHostSignIn = <T extends THostSignInCarrier>(
+export const attachHostSignIn = async <T extends THostSignInCarrier>(
   conn: T,
   probe: THostSignInProbe = defaultProbe(),
-): T => {
-  const value = probe.read(conn.provider);
+): Promise<T> => {
+  const value = await probe.read(conn.provider);
   if (value === undefined) {
     if (conn.host_signed_in === undefined) return conn;
     const { host_signed_in: _drop, ...rest } = conn;
