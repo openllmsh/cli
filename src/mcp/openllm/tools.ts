@@ -169,9 +169,15 @@ const byToolName = new Map<string, TApiOperation>(
 /** Endpoints that require a browser SESSION, not an `sk-llm-…` key, and so
  *  always 401 from the CLI. `/user/auth-methods` reads the auth service's
  *  `list-accounts` with the caller's cookies (see `authMethodsHandler`) and
- *  refuses the key path outright. Execution stays possible via `byToolName`;
- *  this only keeps them out of ListTools. */
-const SESSION_ONLY_PATHS: ReadonlySet<string> = new Set(["/user/auth-methods"]);
+ *  refuses the key path outright. The vault device-handoff reads
+ *  (`vaultHandoffPendingHandler` / `vaultHandoffStatusHandler`) refuse any
+ *  request presenting a key with a 403. Execution stays possible via
+ *  `byToolName`; this only keeps them out of ListTools. */
+const SESSION_ONLY_PATHS: ReadonlySet<string> = new Set([
+  "/user/auth-methods",
+  "/vault/handoff/pending",
+  "/vault/handoff/{id}",
+]);
 
 /** Which operations surface as MCP tools an agent SEES (ListTools). This
  *  trims context bloat; it does NOT gate execution — `byToolName` above
