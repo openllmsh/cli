@@ -148,13 +148,21 @@ const waitForEnvUpdateLock = (): void => {
  * Serialize read-modify-rename updates with the daemon-compatible file lock.
  * A killed writer leaves a stale regular file that is recovered after 30 seconds.
  */
-export const saveApiKey = (key: string): boolean => {
+export const saveApiKey = (key: string): boolean =>
+  saveEnvVars({ OPENLLM_API_KEY: key });
+
+/** Set `vars` in this environment's env file, keeping every other line (one
+ *  line per name, the first one replaced in place). Same lock as the daemon. */
+export const saveEnvVars = (
+  vars: Readonly<Record<string, string>>,
+): boolean => {
   // Dev launches write `.dev.env`, never the prod `.env` (dev daemon parity).
   const target = cliEnvFile();
   const lock = `${target}.lock`;
   let locked = false;
   try {
-    if (/[\r\n\0]/.test(key)) return false;
+    const entries = Object.entries(vars);
+    if (entries.some(([, value]) => /[\r\n\0]/.test(value))) return false;
     mkdirSync(dirname(target), { recursive: true, mode: 0o700 });
     for (let attempts = 0; attempts < ENV_UPDATE_LOCK_ATTEMPTS; attempts += 1) {
       try {
@@ -187,16 +195,21 @@ export const saveApiKey = (key: string): boolean => {
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") return false;
     }
-    let replaced = false;
+    const replaced = new Set<string>();
     const next = lines.flatMap((line): string[] => {
-      const match = /^\s*OPENLLM_API_KEY\s*=/.test(line);
-      if (!match) return [line];
-      if (replaced) return [];
-      replaced = true;
-      return [`OPENLLM_API_KEY=${key}`];
+      const name = /^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=/.exec(line)?.[1];
+      const value =
+        name !== undefined && Object.hasOwn(vars, name)
+          ? vars[name]
+          : undefined;
+      if (name === undefined || value === undefined) return [line];
+      if (replaced.has(name)) return [];
+      replaced.add(name);
+      return [`${name}=${value}`];
     });
     while (next.length > 0 && next[next.length - 1]?.trim() === "") next.pop();
-    if (!replaced) next.push(`OPENLLM_API_KEY=${key}`);
+    for (const [name, value] of entries)
+      if (!replaced.has(name)) next.push(`${name}=${value}`);
     const temp = join(
       dirname(target),
       `.${process.pid}.${crypto.randomUUID()}.tmp`,

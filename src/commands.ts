@@ -39,7 +39,7 @@ export const COMMANDS = [
   },
   {
     name: "login",
-    args: "[--key <key>]",
+    args: "[--key <key>] [--start] [--pty-sessions|--no-pty-sessions] [--json]",
     description: "Save or replace your OpenLLM API key",
   },
   {
