@@ -415,6 +415,13 @@ export type TStreamConnectConfig = {
   readonly stream?: "stdout" | "stderr";
   /** Parse the authorize URL off the chosen fd → `{ url, code }` (code: ""). */
   readonly parse: (buf: string) => { url: string; code: string } | null;
+  /**
+   * Open the parsed URL from the daemon. For a CLI the daemon tells NOT to
+   * open its own browser (cursor: `NO_OPEN_BROWSER=1`, which also keeps its
+   * unattended spawns quiet); codex and the rest open their own, so a second
+   * tab would be a duplicate. Default false.
+   */
+  readonly openBrowser?: boolean;
   /** Runs once a credential lands. Returning `false` FAILS the login — the
    *  keychain partition-list grant is observed, not best-effort. */
   readonly onConnected?: () =>
@@ -576,6 +583,15 @@ export const makeStreamConnect = (
         // Time-to-URL: how long the user waited before a link appeared.
         lifecycle.record("prompt", childMark);
         cfg.onParsed?.(res.found.url);
+        // A cancel can land between the parse and here; don't pop a browser
+        // on a user who already stopped (the child is killed on cancel).
+        if (
+          cfg.openBrowser === true &&
+          !openAuthUrlUnlessCancelled(cfg.slot, res.found.url)
+        ) {
+          lifecycle.record("terminal", undefined, { outcome: "cancelled" });
+          return { connected: false, detail: "sign-in cancelled" };
+        }
         const flow =
           cfg.slot.flow() ?? resolveLoginFlow(cfg.provider, "browser");
         publishPendingAuth(flow, cfg.provider, res.found);

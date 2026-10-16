@@ -583,6 +583,8 @@ const connectDirect = makeStreamConnect({
           waitFileStoreHint(join(cliConfigDir(PROVIDER), "auth.json"), signal),
   beforeLogin: () => ensureIsolatedKeychain(cliHome(PROVIDER)),
   stream: "stdout",
+  // `NO_OPEN_BROWSER=1` keeps cursor-agent from opening one itself.
+  openBrowser: true,
   parse: (buffer) => {
     const url = parseAuthUrl(buffer);
     return url === null ? null : { url, code: "" };
