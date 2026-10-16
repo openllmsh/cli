@@ -11,8 +11,10 @@
  */
 
 import type { CallToolResult } from "@modelcontextprotocol/server";
+// `cli-version`, not `env`: the browser chat dials upstreams through this
+// module too, and `env` pulls in node:fs.
+import { CLI_VERSION } from "../../cli-version";
 import type { TMarketplaceLaunchServer } from "../../clients/marketplace";
-import { CLI_VERSION } from "../../env";
 
 export type TUpstreamTool = {
   readonly name: string;
