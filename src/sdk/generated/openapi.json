@@ -32574,9 +32574,6 @@
                       "pro_monthly"
                     ]
                   },
-                  "return_to": {
-                    "type": "string"
-                  },
                   "promo_code": {
                     "type": "string",
                     "description": "a string at most 64 character(s) long",

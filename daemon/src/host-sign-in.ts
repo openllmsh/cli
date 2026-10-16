@@ -24,9 +24,12 @@
  *
  * Probes run inside status computation, so results are cached per provider
  * for {@link HOST_SIGN_IN_TTL_MS}; a status tick costs a map lookup. Reads are
- * async: `~/.claude.json` carries project history and can be tens of MB for a
- * heavy user, and a synchronous read of it would stall the daemon's event
- * loop — every in-flight proxied stream with it — once a minute.
+ * async, and `~/.claude.json` is never PARSED: it carries project history and
+ * can be tens of MB for a heavy user, and `JSON.parse` of that — synchronous
+ * however the bytes were read — would stall the daemon's event loop, every
+ * in-flight proxied stream with it, once a minute. It is scanned for the one
+ * field instead ({@link CLAUDE_ACCOUNT}); every other store is a small
+ * credential file, parsed under {@link MAX_PARSED_BYTES}.
  */
 import { readdir, readFile, stat } from "node:fs/promises";
 import { homedir, platform } from "node:os";
@@ -36,9 +39,20 @@ import { stateScoped } from "./state-scoped";
 /** How long one provider's answer is reused before the files are re-read. */
 export const HOST_SIGN_IN_TTL_MS = 60_000;
 
-/** Larger than any credential file; `~/.claude.json` carries project history
- *  and can reach a few MB. Anything bigger is treated as unknown. */
-const MAX_STORE_BYTES = 32 * 1024 * 1024;
+/** Larger than any credential file. A bigger store is unknown, not parsed. */
+const MAX_PARSED_BYTES = 1024 * 1024;
+
+/** Cap on the one store that is scanned rather than parsed (`~/.claude.json`). */
+const MAX_SCANNED_BYTES = 64 * 1024 * 1024;
+
+/**
+ * `"oauthAccount": { …, "accountUuid": "<non-empty>", … }` — the signed-in
+ * account in Claude's global config, matched within that one flat object
+ * (`[^{}]*` cannot leave it). Linear, allocation-free, and it never touches
+ * the project history around it.
+ */
+const CLAUDE_ACCOUNT =
+  /"oauthAccount"\s*:\s*\{[^{}]*"accountUuid"\s*:\s*"[^"\\]+"/;
 
 /** Where the probe looks: the user's real home, OS and environment. */
 export type THostSignInContext = {
@@ -71,24 +85,32 @@ const isMissing = (err: unknown): boolean => {
   return code === "ENOENT" || code === "ENOTDIR";
 };
 
-/** Read + parse a JSON store. Missing → absent; anything else odd → unknown. */
-const readJson = async (path: string): Promise<TRead<unknown>> => {
+/** Read a store's text. Missing or empty → absent; odd or too big → unknown. */
+const readText = async (
+  path: string,
+  maxBytes: number,
+): Promise<TRead<string>> => {
   try {
     const st = await stat(path);
     if (!st.isFile()) return UNKNOWN;
     if (st.size === 0) return ABSENT;
-    if (st.size > MAX_STORE_BYTES) return UNKNOWN;
-  } catch (err) {
-    return isMissing(err) ? ABSENT : UNKNOWN;
-  }
-  let text: string;
-  try {
-    text = await readFile(path, "utf8");
+    if (st.size > maxBytes) return UNKNOWN;
   } catch (err) {
     return isMissing(err) ? ABSENT : UNKNOWN;
   }
   try {
-    return { kind: "present", value: JSON.parse(text) as unknown };
+    return { kind: "present", value: await readFile(path, "utf8") };
+  } catch (err) {
+    return isMissing(err) ? ABSENT : UNKNOWN;
+  }
+};
+
+/** Read + parse a small JSON store. Missing → absent; anything odd → unknown. */
+const readJson = async (path: string): Promise<TRead<unknown>> => {
+  const read = await readText(path, MAX_PARSED_BYTES);
+  if (read.kind !== "present") return read;
+  try {
+    return { kind: "present", value: JSON.parse(read.value) as unknown };
   } catch {
     // Possibly caught mid-write by the vendor CLI — not evidence either way.
     return UNKNOWN;
@@ -123,7 +145,7 @@ const both = (
 
 const verdict = async <T>(
   pending: Promise<TRead<T>>,
-  test: (value: T) => boolean,
+  test: (value: T) => boolean | undefined,
 ): Promise<boolean | undefined> => {
   const read = await pending;
   return read.kind === "absent"
@@ -149,8 +171,16 @@ const probeClaude = async (ctx: THostSignInContext): TProbeResult => {
     configDir !== undefined
       ? join(configDir, ".claude.json")
       : join(ctx.home, ".claude.json");
-  const account = await verdict(readJson(globalConfig), (cfg) =>
-    isRecord(cfg) ? hasAnyString(cfg.oauthAccount, ["accountUuid"]) : false,
+  const account = await verdict(
+    readText(globalConfig, MAX_SCANNED_BYTES),
+    // No match is a definite "no" only for a COMPLETE document: one caught
+    // mid-write by the CLI may simply not have reached the field yet.
+    (text) =>
+      CLAUDE_ACCOUNT.test(text)
+        ? true
+        : text.trimEnd().endsWith("}")
+          ? false
+          : undefined,
   );
   if (ctx.platform === "darwin") return account;
   const credentials = await verdict(
