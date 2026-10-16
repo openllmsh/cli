@@ -286,6 +286,11 @@ export const runCli = async (argv: readonly string[]): Promise<void> => {
       if (wantsHelp(rest)) return usage(LOGIN_USAGE, 0);
       return process.exit(await runLogin(rest));
     }
+    case "config": {
+      const { CONFIG_USAGE, runConfig } = await import("./config-cmd");
+      if (wantsHelp(rest)) return usage(CONFIG_USAGE, 0);
+      return process.exit(runConfig(rest));
+    }
     case "setup":
       if (wantsHelp(rest)) return usage(SETUP_USAGE, 0);
       return process.exit(runSetup());

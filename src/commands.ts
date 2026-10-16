@@ -43,6 +43,11 @@ export const COMMANDS = [
     description: "Save or replace your OpenLLM API key",
   },
   {
+    name: "config",
+    args: "--json",
+    description: "Print the resolved origin, env file and port as JSON",
+  },
+  {
     name: "claude",
     args: "[...args]",
     description: "Run Claude Code through OpenLLM",

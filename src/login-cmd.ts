@@ -10,8 +10,14 @@
  *
  * Unlike the credential gate in `onboarding.ts`, login ALWAYS asks for a key —
  * an already-configured key is replaced, which is how a key gets rotated.
+ *
+ * A daemon already running reads its key at start, so login restarts it; one
+ * that isn't running is left alone. The desktop app pairs through this
+ * command (key on stdin), so terminal and app behave the same.
  */
 
+import { daemonPort, daemonReachable } from "./clients/gateway";
+import { runManagedDaemonCommand } from "./daemon-delegation";
 import { cliConfig } from "./env";
 import { defaultTerminal, isUsableApiKey, saveApiKey } from "./onboarding";
 import type { TCredentialGateTerminal } from "./runtime-contracts";
@@ -20,13 +26,16 @@ export const LOGIN_USAGE = `usage: openllm login [--key <sk-llm-...>]
 
 Save your OpenLLM API key to ~/.openllm/.env, replacing any existing key.
 With no --key, the key is read from piped stdin, or prompted for (hidden)
-on an interactive terminal. Get a key under Keys after signing in.
+on an interactive terminal. A running daemon is restarted to pick it up.
+Get a key under Keys after signing in.
 `;
 
 export type TLoginIo = {
   readonly terminal: TCredentialGateTerminal;
   /** Piped stdin, or null when stdin is a terminal. */
   readonly readStdin: () => Promise<string | null>;
+  /** Restart the daemon if it is running; its exit status, 0 when it isn't. */
+  readonly restartRunningDaemon: () => Promise<number>;
 };
 
 const readPipedStdin = async (): Promise<string | null> => {
@@ -34,9 +43,15 @@ const readPipedStdin = async (): Promise<string | null> => {
   return await Bun.stdin.text();
 };
 
+const restartRunningDaemon = async (): Promise<number> =>
+  (await daemonReachable(daemonPort()))
+    ? await runManagedDaemonCommand("restart")
+    : 0;
+
 const defaultIo: TLoginIo = {
   terminal: defaultTerminal,
   readStdin: readPipedStdin,
+  restartRunningDaemon,
 };
 
 export const runLogin = async (
@@ -99,5 +114,11 @@ export const runLogin = async (
     );
   }
   process.env.OPENLLM_API_KEY = trimmed;
+  if ((await io.restartRunningDaemon()) !== 0) {
+    io.terminal.write(
+      "[openllm] The key is saved, but restarting the daemon failed. Run `openllm restart`.\n",
+    );
+    return 1;
+  }
   return 0;
 };
