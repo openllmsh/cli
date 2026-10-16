@@ -319,10 +319,14 @@ export const anthropicMessagesFromHistoryTurns = (
       }
       for (const call of turn.toolCalls) {
         let input: unknown = {};
-        try {
-          input = JSON.parse(call.arguments) as unknown;
-        } catch {
-          input = { _raw: call.arguments };
+        const trimmed = call.arguments.trim();
+        // Argument-less calls ("" / "null") are `{}`, never `{ _raw: "" }`.
+        if (trimmed !== "" && trimmed !== "null") {
+          try {
+            input = JSON.parse(call.arguments) as unknown;
+          } catch {
+            input = { _raw: call.arguments };
+          }
         }
         const leaf = sanitizeClaudeMcpToolName(call.name);
         const mcpName =

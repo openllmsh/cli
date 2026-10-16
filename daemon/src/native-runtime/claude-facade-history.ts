@@ -37,6 +37,11 @@ const textOf = (message: TAssistant): string => {
 };
 
 const toolInputOf = (argumentsJson: string): unknown => {
+  // An argument-less call is serialized as "" (or "null") by OpenAI-wire
+  // clients; Anthropic's `tool_use.input` for it is `{}`. Same rule as the
+  // wire's `parseToolArguments`.
+  const trimmed = argumentsJson.trim();
+  if (trimmed === "" || trimmed === "null") return {};
   try {
     const input: unknown = JSON.parse(argumentsJson);
     if (typeof input === "object" && input !== null && !Array.isArray(input))
