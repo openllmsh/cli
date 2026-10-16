@@ -11,16 +11,23 @@
  * still runs the normal vendor login in the isolated home).
  *
  * Rules every probe follows:
- *   - Plain file reads only. NO `security` / keychain call of any kind — a
- *     provider whose host store lives in the macOS keychain (Claude's token,
- *     Cursor, Muse, Antigravity) is answered from a non-keychain file or left
- *     unknown, so this can never raise a SecurityAgent prompt.
- *   - Nothing read leaves the function: a store is parsed only to test that a
- *     login field is a non-empty string, and the result is one boolean. No
- *     value, path or file content is logged or put on the wire.
- *   - `false` only for a definite answer (the store is absent, or holds no
- *     login). An unreadable / oversized / mid-write store is `undefined`
- *     (unknown), never `false`.
+ *   - A file that holds a CREDENTIAL is never opened. Its presence is the
+ *     signal: `stat` only — it exists, is a regular file, and is larger than
+ *     an empty store ({@link MIN_LOGIN_BYTES}). The vendor CLIs write these
+ *     files at login and delete them at logout, so presence is a good hint;
+ *     the cost of a false positive is only that a provider is listed first.
+ *     The one file whose CONTENT is read is Claude's global config, which
+ *     holds the signed-in account's id and no secret
+ *     (`docs/proposals/subscription-oauth-terms-compliance.md`).
+ *   - NO `security` / keychain call of any kind — a provider whose host store
+ *     lives in the macOS keychain (Claude's token, Cursor, Muse, Antigravity)
+ *     is answered from a non-keychain file or left unknown, so this can never
+ *     raise a SecurityAgent prompt.
+ *   - Nothing read leaves the function: the result is one boolean. No value,
+ *     path or file content is logged or put on the wire.
+ *   - `false` only for a definite answer (the store is absent or empty). An
+ *     odd / oversized / mid-write store is `undefined` (unknown), never
+ *     `false`.
  *
  * Probes run inside status computation, so results are cached per provider
  * for {@link HOST_SIGN_IN_TTL_MS}; a status tick costs a map lookup. Reads are
@@ -28,8 +35,7 @@
  * can be tens of MB for a heavy user, and `JSON.parse` of that — synchronous
  * however the bytes were read — would stall the daemon's event loop, every
  * in-flight proxied stream with it, once a minute. It is scanned for the one
- * field instead ({@link CLAUDE_ACCOUNT}); every other store is a small
- * credential file, parsed under {@link MAX_PARSED_BYTES}.
+ * field instead ({@link CLAUDE_ACCOUNT}).
  */
 import { readdir, readFile, stat } from "node:fs/promises";
 import { homedir, platform } from "node:os";
@@ -39,8 +45,11 @@ import { stateScoped } from "./state-scoped";
 /** How long one provider's answer is reused before the files are re-read. */
 export const HOST_SIGN_IN_TTL_MS = 60_000;
 
-/** Larger than any credential file. A bigger store is unknown, not parsed. */
-const MAX_PARSED_BYTES = 1024 * 1024;
+/**
+ * A credential store at or under this size holds no login (`{}`, `null`, a
+ * stray newline); a token alone is longer.
+ */
+const MIN_LOGIN_BYTES = 16;
 
 /** Cap on the one store that is scanned rather than parsed (`~/.claude.json`). */
 const MAX_SCANNED_BYTES = 64 * 1024 * 1024;
@@ -105,27 +114,21 @@ const readText = async (
   }
 };
 
-/** Read + parse a small JSON store. Missing → absent; anything odd → unknown. */
-const readJson = async (path: string): Promise<TRead<unknown>> => {
-  const read = await readText(path, MAX_PARSED_BYTES);
-  if (read.kind !== "present") return read;
+/**
+ * A credential store, by `stat` alone — never opened. Missing or too small to
+ * hold a login → absent; present → present; anything odd → unknown.
+ */
+const storePresent = async (path: string): Promise<TRead<true>> => {
   try {
-    return { kind: "present", value: JSON.parse(read.value) as unknown };
-  } catch {
-    // Possibly caught mid-write by the vendor CLI — not evidence either way.
-    return UNKNOWN;
+    const st = await stat(path);
+    if (!st.isFile()) return UNKNOWN;
+    return st.size > MIN_LOGIN_BYTES
+      ? { kind: "present", value: true }
+      : ABSENT;
+  } catch (err) {
+    return isMissing(err) ? ABSENT : UNKNOWN;
   }
 };
-
-const isRecord = (value: unknown): value is Readonly<Record<string, unknown>> =>
-  value !== null && typeof value === "object" && !Array.isArray(value);
-
-const nonEmptyString = (value: unknown): boolean =>
-  typeof value === "string" && value.length > 0;
-
-/** Any of `keys` on `obj` is a non-empty string (presence only, never read). */
-const hasAnyString = (obj: unknown, keys: ReadonlyArray<string>): boolean =>
-  isRecord(obj) && keys.some((k) => nonEmptyString(obj[k]));
 
 const envDir = (ctx: THostSignInContext, name: string): string | undefined => {
   const value = ctx.env[name];
@@ -184,26 +187,22 @@ const probeClaude = async (ctx: THostSignInContext): TProbeResult => {
   );
   if (ctx.platform === "darwin") return account;
   const credentials = await verdict(
-    readJson(join(configDir ?? join(ctx.home, ".claude"), ".credentials.json")),
-    (store) =>
-      isRecord(store) &&
-      hasAnyString(store.claudeAiOauth, ["refreshToken", "accessToken"]),
+    storePresent(
+      join(configDir ?? join(ctx.home, ".claude"), ".credentials.json"),
+    ),
+    () => true,
   );
   return both(account, credentials);
 };
 
 /**
- * Codex (ChatGPT). `$CODEX_HOME/auth.json` (default `~/.codex`). A ChatGPT
- * sign-in writes `tokens`; an API-key-only setup writes `OPENAI_API_KEY` with
- * no tokens, which is not a subscription login.
+ * Codex (ChatGPT). `$CODEX_HOME/auth.json` (default `~/.codex`), written at
+ * login and removed at logout. An API-key-only setup writes it too, which
+ * reads as signed in: tolerable for a hint that only orders the list.
  */
 const probeCodex = (ctx: THostSignInContext): TProbeResult => {
   const codexHome = envDir(ctx, "CODEX_HOME") ?? join(ctx.home, ".codex");
-  return verdict(readJson(join(codexHome, "auth.json")), (store) =>
-    isRecord(store)
-      ? hasAnyString(store.tokens, ["refresh_token", "access_token"])
-      : false,
-  );
+  return verdict(storePresent(join(codexHome, "auth.json")), () => true);
 };
 
 /** Kimi's token slots: `credentials/kimi-code.json` (legacy / mainland) or
@@ -224,39 +223,23 @@ const probeKimi = async (ctx: THostSignInContext): TProbeResult => {
   let unknown = false;
   for (const name of names) {
     if (!KIMI_SLOT.test(name)) continue;
-    const signedIn = await verdict(readJson(join(dir, name)), (token) =>
-      hasAnyString(token, ["refresh_token", "access_token"]),
-    );
+    const signedIn = await verdict(storePresent(join(dir, name)), () => true);
     if (signedIn === true) return true;
     if (signedIn === undefined) unknown = true;
   }
   return unknown ? undefined : false;
 };
 
-/** Grok Build. `~/.grok/auth.json`: a map of sessions, each carrying `key`
- *  (the access token) and `refresh_token`. */
+/** Grok Build. `~/.grok/auth.json`, a map of sessions (`{}` when none). */
 const probeGrok = (ctx: THostSignInContext): TProbeResult =>
-  verdict(readJson(join(ctx.home, ".grok", "auth.json")), (store) =>
-    isRecord(store)
-      ? Object.values(store).some((session) =>
-          hasAnyString(session, ["key", "refresh_token"]),
-        )
-      : false,
-  );
+  verdict(storePresent(join(ctx.home, ".grok", "auth.json")), () => true);
 
 /** Cursor. Linux keeps the token in `$XDG_CONFIG_HOME/cursor/auth.json`
  *  (default `~/.config`); macOS keeps it in the keychain → unknown. */
 const probeCursor = async (ctx: THostSignInContext): TProbeResult => {
   if (ctx.platform === "darwin") return undefined;
   const xdg = envDir(ctx, "XDG_CONFIG_HOME") ?? join(ctx.home, ".config");
-  return verdict(readJson(join(xdg, "cursor", "auth.json")), (store) =>
-    hasAnyString(store, [
-      "accessToken",
-      "access_token",
-      "refreshToken",
-      "refresh_token",
-    ]),
-  );
+  return verdict(storePresent(join(xdg, "cursor", "auth.json")), () => true);
 };
 
 /**

@@ -978,9 +978,11 @@ runs its OWN copy of each CLI under `<stateDir>/cli/<provider>/`
   Linux `~/.config/cursor/auth.json`; the vendors' own env overrides honoured).
   Plain file reads only — never a `security`/keychain call, so it cannot raise
   a SecurityAgent prompt; keychain-only stores (Cursor on macOS, Muse,
-  Antigravity) stay unknown and the field is omitted. A store is parsed only to
-  test that a login field is a non-empty string; nothing is copied, logged or
-  sent but the boolean, and the isolation rule above is unchanged (Connect
+  Antigravity) stay unknown and the field is omitted. A file that holds a
+  credential is never opened — `stat` only (present and larger than an empty
+  store); the one file whose content is read is `~/.claude.json`, scanned (not
+  parsed — it can be tens of MB) for the account id, which is not a secret.
+  Nothing is copied, logged or sent but the boolean, and the isolation rule above is unchanged (Connect
   still logs in inside the isolated home). Cached per provider for 60s and
   attached after installer metadata, so last-known never persists it.
   Onboarding uses it to lead with providers that are one approval away.
