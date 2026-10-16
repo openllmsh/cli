@@ -461,6 +461,13 @@ export const configureMuxHost = (options: {
   ensureChannelReaper();
 };
 
+/** Whether any relay mux channel carries an open stream (a request in flight). */
+export const muxStreamsInFlight = (): boolean => {
+  for (const record of channels.values())
+    if (record.channel.openStreamCount() > 0) return true;
+  return false;
+};
+
 /** Live mux channel for `channelId`, if still open. */
 export const getMuxChannel = (channelId: string): TMuxChannel | undefined =>
   channels.get(channelId)?.channel;

@@ -59,6 +59,7 @@ import {
   currentDaemonCaps,
   handleChannelOpenAck,
   muxHostOnBytes,
+  muxStreamsInFlight,
   replaceMuxPeerCaps,
   resetAllChannels,
   updateMuxPeerCaps,
@@ -733,6 +734,8 @@ const stopMigrationCheck = (): void => {
   migrationEnabled = false;
   if (migrationTimer !== null) clearTimeout(migrationTimer);
   migrationTimer = null;
+  if (relayMoveTimer !== null) clearTimeout(relayMoveTimer);
+  relayMoveTimer = null;
 };
 
 const startMigrationCheck = (): void => {
@@ -1072,6 +1075,11 @@ const dispatchFrame = (frame: TRelayFrame): void => {
         pendingWelcomeStatus = true;
       }
       return;
+    case "relay_moved":
+      // This box was superseded by a newer deploy (it pushes this instead of
+      // us polling for it): follow it once our in-flight requests finish.
+      if (ws !== null) moveRelayWhenIdle(ws, connectionGeneration);
+      return;
     case "ping":
       // The relay's keepalive ping → answer so its missed-pong reap stays happy.
       send({ type: "pong" });
@@ -1335,7 +1343,36 @@ export const migrateIfRelayMoved = async (
     from: current,
     to: fresh,
   });
-  socket.reconnect();
+  moveRelayWhenIdle(socket, generation ?? connectionGeneration);
+};
+
+/** How often a pending relay move rechecks for in-flight requests. */
+const RELAY_MOVE_POLL_MS = 1_000;
+let relayMoveTimer: ReturnType<typeof setTimeout> | null = null;
+
+/**
+ * Move to the current relay box without cutting a request in flight: redial
+ * now (no backoff) when no mux stream is open, otherwise wait for the streams
+ * to finish. The superseded box keeps serving them and closes us with 4010 at
+ * its drain deadline regardless. Fenced to `generation` so a reconnect that
+ * already happened is never bounced again.
+ */
+const moveRelayWhenIdle = (
+  socket: ReconnectingWebSocket,
+  generation: number,
+): void => {
+  if (relayMoveTimer !== null) return;
+  const attempt = (): void => {
+    relayMoveTimer = null;
+    if (ws !== socket || generation !== connectionGeneration) return;
+    if (muxStreamsInFlight()) {
+      relayMoveTimer = setTimeout(attempt, RELAY_MOVE_POLL_MS);
+      relayMoveTimer.unref?.();
+      return;
+    }
+    socket.reconnect();
+  };
+  attempt();
 };
 
 /** Start the WebSocket control loop (idempotent). */
