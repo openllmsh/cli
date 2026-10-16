@@ -59,9 +59,29 @@ export type TLoginIo = {
   readonly writeStdout: (text: string) => void;
 };
 
+/** How long piped stdin may stay silent. A caller that inherits an open but
+ *  unused stdin (a tool, a service manager) must fail, not block forever. */
+export const STDIN_TIMEOUT_MS = 15_000;
+
+/**
+ * Piped stdin, or null when stdin is a terminal. Empty input (`</dev/null`,
+ * a closed pipe) and a pipe that stays silent past `STDIN_TIMEOUT_MS` are
+ * both "no key": a non-interactive shell gets the usage error, never a
+ * format error or a hang.
+ */
 const readPipedStdin = async (): Promise<string | null> => {
   if (process.stdin.isTTY === true) return null;
-  return await Bun.stdin.text();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<string>((resolve) => {
+    timer = setTimeout(() => resolve(""), STDIN_TIMEOUT_MS);
+  });
+  try {
+    return await Promise.race([Bun.stdin.text(), timeout]);
+  } catch {
+    return "";
+  } finally {
+    clearTimeout(timer);
+  }
 };
 
 const runDaemon = async (
@@ -140,9 +160,9 @@ export const runLogin = async (
   let key = parsed.key;
   if (key === null) {
     const piped = await io.readStdin();
-    if (piped !== null) {
+    if (piped !== null && piped.trim().length > 0) {
       key = piped;
-    } else if (io.terminal.isInteractive()) {
+    } else if (piped === null && io.terminal.isInteractive()) {
       io.terminal.write(
         `Paste your OpenLLM API key (from ${cliConfig().gatewayUrl}/keys).\n`,
       );
@@ -153,7 +173,7 @@ export const runLogin = async (
       }
     } else {
       io.terminal.write(
-        "[openllm] No API key given. Pass --key <key> or pipe it on stdin.\n",
+        "[openllm] No API key given. Pass --key <key> or pipe it on stdin (e.g. `echo $KEY | openllm login`).\n",
       );
       return 2;
     }
