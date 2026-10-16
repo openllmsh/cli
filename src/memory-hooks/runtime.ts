@@ -369,8 +369,9 @@ export const runMemoryExtraction = async (input: unknown): Promise<void> => {
             { role: "system", content: MEMORY_EXTRACTION_PROMPT },
             { role: "user", content: userBlock },
           ],
+          // No `temperature`: the `lite` chain leads with subscription hops
+          // whose native runtimes have no sampling knob and decline it.
           max_tokens: 700,
-          temperature: 0.0,
         },
       },
       { timeoutMs: 30_000, fetch: memoryHookTransport() },
