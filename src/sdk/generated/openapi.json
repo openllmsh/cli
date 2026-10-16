@@ -24100,10 +24100,7 @@
                   },
                   "label": {
                     "type": "string",
-                    "description": "a string at most 80 character(s) long",
-                    "title": "maxLength(80)",
-                    "minLength": 1,
-                    "maxLength": 80
+                    "description": "a string that will be trimmed"
                   }
                 },
                 "additionalProperties": false
@@ -24141,6 +24138,8 @@
                           "id",
                           "label",
                           "requester_pubkey",
+                          "requester_location",
+                          "requester_user_agent",
                           "created_at",
                           "expires_at"
                         ],
@@ -24153,6 +24152,26 @@
                           },
                           "requester_pubkey": {
                             "type": "string"
+                          },
+                          "requester_location": {
+                            "anyOf": [
+                              {
+                                "type": "string"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "requester_user_agent": {
+                            "anyOf": [
+                              {
+                                "type": "string"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
                           },
                           "created_at": {
                             "type": "string"
