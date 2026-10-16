@@ -156,11 +156,22 @@ const inputSchemaFor = (op: TApiOperation): Record<string, unknown> => {
  *  vendor key straight into model context. `/vault/passkey*` manages the
  *  passkey wraps that unlock the vault: browser-session only (an `sk-llm`
  *  caller gets 403), and an agent revoking a user's unlock method is not a
- *  delegation anyone asked for. */
+ *  delegation anyone asked for. `/vault/handoff*` hands the vault to a new
+ *  device: an agent must neither ask for it (every request prompts the user's
+ *  devices) nor see or answer one — browser-session only, like the passkeys.
+ *  Web chat runs the full tool list with the session cookie, so the handlers'
+ *  own `sk-llm` refusal is not enough on its own. */
 const AGENT_FORBIDDEN_PATHS: ReadonlySet<string> = new Set([
   "/marketplace/launch",
   "/vault/passkey",
   "/vault/passkey/{id}",
+  "/vault/handoff",
+  "/vault/handoff/pending",
+  "/vault/handoff/{id}",
+  "/vault/handoff/{id}/approve",
+  "/vault/handoff/{id}/cancel",
+  "/vault/handoff/{id}/claim",
+  "/vault/handoff/{id}/deny",
 ]);
 
 const AGENT_OPERATIONS: ReadonlyArray<TApiOperation> = API_OPERATIONS.filter(
