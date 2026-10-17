@@ -554,7 +554,11 @@ export const main = async (): Promise<void> => {
       );
       logError("boot", err);
     }
-    void loadDoctor().then((d) => d.onDoctorListenAttempt(false));
+    void loadDoctor()
+      .then((d) => d.onDoctorListenAttempt(false))
+      .catch((err: unknown) => {
+        logError("boot", err);
+      });
     exitAfterDisposableDrain(1);
     return;
   }

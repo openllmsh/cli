@@ -1,13 +1,14 @@
 import { createHash } from "node:crypto";
 import {
   mkdirSync,
+  readdirSync,
   readFileSync,
   renameSync,
   rmSync,
   statSync,
   writeFileSync,
 } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { CLI_VERSION } from "../cli-version";
 import type { TCliConfig } from "../env";
 import { cliConfig, openllmDir } from "../env";
@@ -93,6 +94,9 @@ type TRecallCacheEntry = {
   readonly context: string | null;
 };
 
+/** Cap on cached recall files per account scope (expired ones pruned first). */
+const RECALL_CACHE_MAX_FILES = 64;
+
 const recallCachePath = (
   accountScope: string,
   project: string,
@@ -109,6 +113,14 @@ const recallCachePath = (
   return join(dir, `${key}.json`);
 };
 
+const unlinkQuiet = (path: string): void => {
+  try {
+    rmSync(path, { force: true });
+  } catch {
+    /* best-effort */
+  }
+};
+
 const readRecallCache = (path: string): TRecallCacheEntry | null => {
   try {
     const value: unknown = JSON.parse(readFileSync(path, "utf8"));
@@ -117,10 +129,16 @@ const readRecallCache = (path: string): TRecallCacheEntry | null => {
       value === null ||
       !("ts" in value) ||
       typeof value.ts !== "number"
-    )
+    ) {
+      unlinkQuiet(path);
       return null;
+    }
     const age = Date.now() - value.ts;
-    if (age < 0 || age > RECALL_CACHE_TTL_MS) return null;
+    if (age < 0 || age > RECALL_CACHE_TTL_MS) {
+      // Expired entries hold recalled memory text at rest — delete on sight.
+      unlinkQuiet(path);
+      return null;
+    }
     const context =
       "context" in value &&
       (typeof value.context === "string" || value.context === null)
@@ -132,6 +150,42 @@ const readRecallCache = (path: string): TRecallCacheEntry | null => {
   }
 };
 
+const pruneRecallCacheDir = (dir: string): void => {
+  try {
+    const names = readdirSync(dir).filter((name) => name.endsWith(".json"));
+    if (names.length === 0) return;
+    const now = Date.now();
+    const kept: { path: string; ts: number }[] = [];
+    for (const name of names) {
+      const path = join(dir, name);
+      try {
+        const value: unknown = JSON.parse(readFileSync(path, "utf8"));
+        const ts =
+          typeof value === "object" &&
+          value !== null &&
+          "ts" in value &&
+          typeof value.ts === "number"
+            ? value.ts
+            : null;
+        if (ts === null || now - ts < 0 || now - ts > RECALL_CACHE_TTL_MS) {
+          unlinkQuiet(path);
+          continue;
+        }
+        kept.push({ path, ts });
+      } catch {
+        unlinkQuiet(path);
+      }
+    }
+    if (kept.length <= RECALL_CACHE_MAX_FILES) return;
+    kept.sort((a, b) => a.ts - b.ts);
+    for (const entry of kept.slice(0, kept.length - RECALL_CACHE_MAX_FILES)) {
+      unlinkQuiet(entry.path);
+    }
+  } catch {
+    /* best-effort cache hygiene */
+  }
+};
+
 const writeRecallCache = (path: string, context: string | null): void => {
   const temp = `${path}.${process.pid}.tmp`;
   try {
@@ -139,12 +193,9 @@ const writeRecallCache = (path: string, context: string | null): void => {
       mode: 0o600,
     });
     renameSync(temp, path);
+    pruneRecallCacheDir(dirname(path));
   } catch {
-    try {
-      rmSync(temp, { force: true });
-    } catch {
-      /* best-effort cache */
-    }
+    unlinkQuiet(temp);
   }
 };
 
@@ -192,23 +243,29 @@ export const runMemoryRecall = async (
       memoryEnv("RECALL_PROJECT"),
     );
     const cacheEnabled = (memoryEnv("RECALL_CACHE") ?? "1") === "1";
-    const cachePath = recallCachePath(
-      createHash("sha256")
-        .update(`${config.gatewayUrl}\0${config.apiKey}`)
-        .digest("hex")
-        .slice(0, 32),
-      project,
-      prompt,
-    );
+    let cachePath: string | null = null;
     if (cacheEnabled) {
-      const cached = readRecallCache(cachePath);
-      if (cached) {
-        state.health("success");
-        state.log({
-          outcome: cached.context ? "recall" : "noop",
-          hits: cached.context ? 1 : 0,
-        });
-        return outputOf(state, cached.context ?? undefined);
+      try {
+        cachePath = recallCachePath(
+          createHash("sha256")
+            .update(`${config.gatewayUrl}\0${config.apiKey}`)
+            .digest("hex")
+            .slice(0, 32),
+          project,
+          prompt,
+        );
+        const cached = readRecallCache(cachePath);
+        if (cached) {
+          state.health("success");
+          state.log({
+            outcome: cached.context ? "recall" : "noop",
+            hits: cached.context ? 1 : 0,
+          });
+          return outputOf(state, cached.context ?? undefined);
+        }
+      } catch {
+        // Cache setup/read failures are a miss — fall through to search.
+        cachePath = null;
       }
     }
     const client = cloudClient(
@@ -232,7 +289,7 @@ export const runMemoryRecall = async (
     state.health("success");
     state.log({ outcome: hits.length ? "recall" : "noop", hits: hits.length });
     if (!hits.length) {
-      if (cacheEnabled) writeRecallCache(cachePath, null);
+      if (cachePath !== null) writeRecallCache(cachePath, null);
       return outputOf(state);
     }
     const lines = [
@@ -245,7 +302,7 @@ export const runMemoryRecall = async (
       }),
     ];
     const context = lines.join("\n");
-    if (cacheEnabled) writeRecallCache(cachePath, context);
+    if (cachePath !== null) writeRecallCache(cachePath, context);
     return outputOf(state, context);
   } catch (error) {
     state.diagnostic(diagnosticOf(error, "recall"));

@@ -2296,11 +2296,16 @@ export const createKeychainRuntime = (
     );
     noteKeychainIoResult(kc, found);
     if (found.code !== 0) {
-      secretCache.set(cacheKey, {
-        mtimeMs,
-        storedAtMs: Date.now(),
-        secret: null,
-      });
+      // Timeouts / aborts are inconclusive — caching `null` would suppress a
+      // real secret for the TTL after a slow or cancelled `security` spawn.
+      // Conclusive nonzero exits (item-not-found, decode errors, …) stay cached.
+      if (!found.timedOut && !found.aborted) {
+        secretCache.set(cacheKey, {
+          mtimeMs,
+          storedAtMs: Date.now(),
+          secret: null,
+        });
+      }
       return null;
     }
     const { stdout } = found;

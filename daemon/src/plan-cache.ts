@@ -28,6 +28,8 @@
  *   - A periodic sweeper (§7) drops TTL-expired entries so unused aliases
  *     cannot accumulate until the next lookup / bootstrap clear; a soft
  *     max-entries cap drops the oldest when exceeded.
+ *   - {@link clearPlanCache} bumps a generation so in-flight loaders that
+ *     started before the clear cannot re-store a stale tuple afterward.
  */
 
 /** How long a signed tuple may be replayed. One interactive burst — long
@@ -61,6 +63,9 @@ export type TPlanTuple = Omit<TCachedPlan, "storedAtMs">;
 
 const cache = new Map<string, TCachedPlan>();
 const inFlight = new Map<string, Promise<TCachedPlan | null>>();
+/** Bumped by {@link clearPlanCache}; loaders capture it and refuse to store
+ *  when it has moved on (in-flight work started before the clear). */
+let cacheGeneration = 0;
 let sweepTimer: ReturnType<typeof setInterval> | null = null;
 
 /** Remember the signed tuple that served `alias` (called after every verified
@@ -120,21 +125,29 @@ export const loadPlan = async (
     return existing;
   }
 
+  const generation = cacheGeneration;
+  // Register the in-flight promise BEFORE the loader can run/settle so a
+  // re-entrant / concurrent miss coalesces onto this op. `Promise.resolve().then`
+  // defers the loader to a microtask; a bare async IIFE would invoke `loader()`
+  // synchronously up to its first await.
   let op!: Promise<TCachedPlan | null>;
-  op = (async (): Promise<TCachedPlan | null> => {
+  op = Promise.resolve().then(async (): Promise<TCachedPlan | null> => {
     try {
       const tuple = await loader();
       if (tuple === null) return lookupPlan(alias);
+      if (generation !== cacheGeneration) return lookupPlan(alias);
       storePlan(alias, tuple);
       return lookupPlan(alias);
     } finally {
       if (inFlight.get(alias) === op) inFlight.delete(alias);
     }
-  })();
+  });
   inFlight.set(alias, op);
 
   if (hit !== null) {
     // Soft-stale: serve the cached tuple; refresh completes in the background.
+    // Observe rejection so a failed refresh cannot become an unhandled rejection.
+    void op.catch(() => undefined);
     return hit;
   }
   return op;
@@ -174,6 +187,7 @@ export const planCacheSize = (): number => cache.size;
 
 /** Drop everything (bootstrap refresh / key rotation). */
 export const clearPlanCache = (): void => {
+  cacheGeneration += 1;
   cache.clear();
   inFlight.clear();
 };
