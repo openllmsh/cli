@@ -605,6 +605,41 @@ const captureInFlight = new Map<
   } | null>
 >();
 
+// In-memory stand-in for the persisted capture stamps when config.json can't
+// be written: without it an unwritable config would let every stale hop spawn
+// the capture again. Keyed by CLI version, honoured for the same TTL.
+const captureAttemptMemo = new Map<
+  TCliProvider,
+  { readonly version: string; readonly atMs: number }
+>();
+
+const persistCapture = async (
+  provider: TCliProvider,
+  ver: string | null,
+  patch: Partial<TAuthConfig>,
+): Promise<void> => {
+  try {
+    await patchConfig(provider, patch);
+  } catch (error) {
+    captureAttemptMemo.set(provider, { version: ver ?? "", atMs: Date.now() });
+    logWarn("auth-config", `${provider} capture result not persisted`, {
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
+};
+
+const captureAttemptMemoized = (
+  provider: TCliProvider,
+  cliVer: string | null,
+): boolean => {
+  const memo = captureAttemptMemo.get(provider);
+  return (
+    memo !== undefined &&
+    memo.version === (cliVer ?? "") &&
+    Date.now() - memo.atMs < TTL_MS
+  );
+};
+
 const runCaptureOnce = (
   provider: TCliProvider,
 ): Promise<{
@@ -620,14 +655,14 @@ const runCaptureOnce = (
     if (captured === null) {
       // Remember the failure so the next hops don't each pay the capture
       // timeout again for the same CLI version.
-      await patchConfig(provider, {
+      await persistCapture(provider, ver, {
         capture_failed_version: ver ?? "",
         capture_failed_at_ms: Date.now(),
       });
       logWarn("auth-config", `${provider} upstream capture yielded no request`);
       return null;
     }
-    await patchConfig(provider, {
+    await persistCapture(provider, ver, {
       // `liveCapture: false` providers keep their URL policy (serve the
       // stable default) — a run for them exists for IDENTITY only, so no
       // URL is persisted that `ensureUpstreamUrl` would then start serving.
@@ -709,6 +744,7 @@ const ensureUpstreamUrl = async (
     const ver = await cliVersion(cliBin(provider), cliEnv(provider));
     if (stored !== null && urlFresh(cfg, ver)) return stored;
     if (captureRecentlyFailed(cfg, ver)) return stored;
+    if (captureAttemptMemoized(provider, ver)) return stored;
     if (stored !== null) {
       // Stale but previously verified for this account: never make the
       // request wait on a capture (a CLI that hangs costs the full
