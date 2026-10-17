@@ -67,7 +67,9 @@ import {
   originFailureType,
   planFetchFailureAction,
 } from "./net-error";
-import { lookupPlan, storePlan } from "./plan-cache";
+import type { TPlanTuple } from "./plan-cache";
+import { loadPlan, lookupPlan, planNeedsRefresh } from "./plan-cache";
+
 import { isBodylessVideoOp, videoOperationFor } from "./video-ops";
 import {
   runVideoCancel,
@@ -318,12 +320,26 @@ export const handleInference = async (req: Request): Promise<Response> => {
   // caller's exact original bytes, and a non-media surface is never
   // rewritten, so neither is touched here. Content-type is unchanged —
   // this stays `application/json`, so no header fixup is needed.
-  if (normalizedJsonBody && multipart === null) {
+  //
+  // Model-less media always rewrites bytes in `materializeSelectedModel`,
+  // so skip the early full-body JSON.stringify there (large image data
+  // URLs were paying ~1–5 ms twice). Explicit-alias / non-media-default
+  // paths may passthrough before materialize and still need the sync.
+  const syncNormalizedJsonBytes = (): void => {
+    if (!normalizedJsonBody || multipart !== null) return;
     const encoded = new TextEncoder().encode(JSON.stringify(rawBody));
     rawBytes = encoded.buffer.slice(
       encoded.byteOffset,
       encoded.byteOffset + encoded.byteLength,
     ) as ArrayBuffer;
+    normalizedJsonBody = false;
+  };
+  if (
+    normalizedJsonBody &&
+    multipart === null &&
+    !(modelField.kind !== "explicit" && mediaSurface !== null)
+  ) {
+    syncNormalizedJsonBytes();
   }
 
   // Signed-plan cache (flag-gated rider — `plan-cache.ts`). A plan fetched
@@ -352,7 +368,9 @@ export const handleInference = async (req: Request): Promise<Response> => {
       ? null
       : JSON.stringify([mediaSurface ?? "chat", explicitAlias]);
   // Never cache model-less defaults under one empty alias — selection
-  // depends on surface/options and current availability.
+  // depends on surface/options and current availability. Soft-stale hits
+  // are served immediately; `loadPlan` below coalesces concurrent misses
+  // and refreshes soft-stale entries in the background.
   if (planCacheEnabled() && planCacheKey !== null) {
     const cached = lookupPlan(planCacheKey);
     if (cached !== null) {
@@ -437,39 +455,62 @@ export const handleInference = async (req: Request): Promise<Response> => {
   // pure-BYOK plan (and a failed fetch) passes through to the origin
   // verbatim — the cloud keeps its own fallback/cooldown machinery,
   // byte-identical to a directly-pointed client.
-  if (planParam === null && !isResponsesCompact && explicitAlias !== null) {
-    let fetched: Awaited<ReturnType<typeof fetchPlan>> | null = null;
-    try {
-      fetched = await fetchPlan(
-        explicitAlias,
-        estimateBodyTokens(rawBody),
-        req.signal,
-        // The surface this request is FOR — already decided by the path
-        // above. Sending it is what stops an ambiguous family name from
-        // being planned on the wrong surface: `model=grok` posted to
-        // `/v1/images/generations` must plan grok's IMAGE model, not the
-        // chat one the cloud's chat default would pick. `null` (a chat or
-        // compact request) omits it and keeps the historical default.
-        mediaSurface ?? undefined,
-      );
-    } catch (err) {
-      const outcome = handlePlanFetchError(err, explicitAlias);
-      if (outcome === "throw") throw err;
-      if (outcome !== "passthrough") return outcome;
-    }
+  // Soft-stale cache hits still enter this block so `loadPlan` can refresh
+  // them without blocking the request on WAN.
+  if (
+    (planParam === null ||
+      (planCacheEnabled() &&
+        planCacheKey !== null &&
+        planNeedsRefresh(planCacheKey))) &&
+    !isResponsesCompact &&
+    explicitAlias !== null
+  ) {
     // Embeddings against an explicit `local_*` model can be served on-device
     // without a cloud plan (local rows are device-live). Fall through to
     // `runEmbeddings` instead of origin-passthrough when the plan is missing
     // or not daemon-only.
     const embeddingsLocalFallback =
       isEmbeddings && isLocalServerSlug(explicitAlias.split("/")[0] ?? "");
-    if (fetched === null) {
-      if (embeddingsLocalFallback) {
-        // leave planParam null — runEmbeddings serves from the body model
-      } else {
-        return withCors(req, await passthroughToOrigin(req, rawBytes));
+
+    type TPlanFetchOutcome =
+      | { readonly kind: "tuple"; readonly tuple: TPlanTuple }
+      | { readonly kind: "passthrough" }
+      | { readonly kind: "response"; readonly response: Response }
+      | { readonly kind: "embeddings-local" };
+
+    let fetchErrorResponse: Response | null = null;
+    let fetchShouldThrow: unknown = null;
+
+    const resolveFetched = async (): Promise<TPlanFetchOutcome> => {
+      let fetched: Awaited<ReturnType<typeof fetchPlan>> | null = null;
+      try {
+        fetched = await fetchPlan(
+          explicitAlias,
+          estimateBodyTokens(rawBody),
+          req.signal,
+          // The surface this request is FOR — already decided by the path
+          // above. Sending it is what stops an ambiguous family name from
+          // being planned on the wrong surface: `model=grok` posted to
+          // `/v1/images/generations` must plan grok's IMAGE model, not the
+          // chat one the cloud's chat default would pick. `null` (a chat or
+          // compact request) omits it and keeps the historical default.
+          mediaSurface ?? undefined,
+        );
+      } catch (err) {
+        const outcome = handlePlanFetchError(err, explicitAlias);
+        if (outcome === "throw") {
+          fetchShouldThrow = err;
+          return { kind: "passthrough" };
+        }
+        if (outcome !== "passthrough") {
+          return { kind: "response", response: outcome };
+        }
+        return { kind: "passthrough" };
       }
-    } else {
+      if (fetched === null) {
+        if (embeddingsLocalFallback) return { kind: "embeddings-local" };
+        return { kind: "passthrough" };
+      }
       const fetchedContextOverflowStrategy =
         fetched.context_overflow_strategy ?? null;
       const verified = planSignatureOk(
@@ -489,23 +530,67 @@ export const handleInference = async (req: Request): Promise<Response> => {
         // A verified plan with no daemon-only hop belongs to origin; the
         // body-model local fallback is only for an unverifiable plan.
         if (!embeddingsLocalFallback || verified) {
+          return { kind: "passthrough" };
+        }
+        return { kind: "embeddings-local" };
+      }
+      return {
+        kind: "tuple",
+        tuple: {
+          planParam: fetched.plan,
+          pmidsParam: fetched.pmids,
+          originParam: fetched.origin,
+          contextOverflowStrategy: fetchedContextOverflowStrategy,
+          sigParam: fetched.sig,
+        },
+      };
+    };
+
+    if (planCacheEnabled() && planCacheKey !== null) {
+      const loaded = await loadPlan(planCacheKey, async () => {
+        const outcome = await resolveFetched();
+        if (outcome.kind === "response") {
+          fetchErrorResponse = outcome.response;
+          return null;
+        }
+        if (outcome.kind === "tuple") return outcome.tuple;
+        if (outcome.kind === "embeddings-local") {
+          // Signal via empty planParam sentinel — caller checks planParam.
+          return null;
+        }
+        return null;
+      });
+      if (fetchShouldThrow !== null) throw fetchShouldThrow;
+      if (fetchErrorResponse !== null) return fetchErrorResponse;
+      if (loaded !== null) {
+        planParam = loaded.planParam;
+        pmidsParam = loaded.pmidsParam;
+        originParam = loaded.originParam;
+        contextOverflowStrategy = loaded.contextOverflowStrategy;
+        sigParam = loaded.sigParam;
+      } else if (planParam === null) {
+        if (embeddingsLocalFallback) {
+          // leave planParam null — runEmbeddings serves from the body model
+        } else {
+          syncNormalizedJsonBytes();
           return withCors(req, await passthroughToOrigin(req, rawBytes));
         }
+      }
+    } else if (planParam === null) {
+      const outcome = await resolveFetched();
+      if (fetchShouldThrow !== null) throw fetchShouldThrow;
+      if (outcome.kind === "response") return outcome.response;
+      if (outcome.kind === "tuple") {
+        planParam = outcome.tuple.planParam;
+        pmidsParam = outcome.tuple.pmidsParam;
+        originParam = outcome.tuple.originParam;
+        contextOverflowStrategy = outcome.tuple.contextOverflowStrategy;
+        sigParam = outcome.tuple.sigParam;
+      } else if (outcome.kind === "embeddings-local") {
+        // leave planParam null
       } else {
-        planParam = fetched.plan;
-        pmidsParam = fetched.pmids;
-        originParam = fetched.origin;
-        contextOverflowStrategy = fetchedContextOverflowStrategy;
-        sigParam = fetched.sig;
-        if (planCacheEnabled() && planCacheKey !== null) {
-          storePlan(planCacheKey, {
-            planParam,
-            pmidsParam,
-            originParam,
-            contextOverflowStrategy,
-            sigParam,
-          });
-        }
+        syncNormalizedJsonBytes();
+        return withCors(req, await passthroughToOrigin(req, rawBytes));
       }
     }
   } else if (
@@ -661,6 +746,9 @@ export const handleInference = async (req: Request): Promise<Response> => {
     walkHeaders.set("content-type", passthroughContentType);
     walkHeaders.delete("content-length");
   }
+  // Safety net: any deferred normalize that didn't go through
+  // materializeSelectedModel still needs bytes to match rawBody.
+  syncNormalizedJsonBytes();
   const walkReq =
     passthroughContentType !== null
       ? new Request(req.url, {

@@ -61,6 +61,7 @@ import {
   skippedModelDiscovery,
 } from "./fetch-model-list";
 import {
+  clearKeychainSecretCache,
   ensureIsolatedKeychain,
   ensureKeychainReady,
   grantKeychainToolAccess,
@@ -249,6 +250,9 @@ const triggerRefresh = async (): Promise<void> => {
   const keychain = await ensureKeychainReady(cliHome(PROVIDER));
   if (!keychainRefreshSpawnAllowed(PROVIDER, keychain)) return;
   clearAuthStatusCache();
+  // Rotating the token invalidates any TTL-cached keychain secret for this
+  // account home — the next read must see the fresh blob.
+  clearKeychainSecretCache(cliHome(PROVIDER));
   // The refresh persists the rotated token into the macOS keychain via
   // securityd, which refuses a Seatbelt-confined caller; unconfined on macOS,
   // confined on Linux (file-backed store) — `sandbox/policy.ts`.
@@ -272,6 +276,7 @@ const triggerRefresh = async (): Promise<void> => {
           },
         }),
   });
+  clearKeychainSecretCache(cliHome(PROVIDER));
   clearAuthStatusCache();
 };
 
@@ -1069,6 +1074,9 @@ export const claudeCodeDelegate: TProviderDelegate = {
           },
         );
         if (!resp.ok) {
+          if (resp.status === 401) {
+            clearKeychainSecretCache(cliHome(PROVIDER));
+          }
           const reason =
             resp.status === 401
               ? "Claude authorization was rejected — re-sign in via the Claude Code CLI."
@@ -1180,11 +1188,14 @@ export const claudeCodeDelegate: TProviderDelegate = {
       // + `anthropic-version` last (isOAuth). Identity comes from the shape-only
       // fixture capture (never `authorization`); an absent fixture serves
       // originator-only, the pre-parity behavior.
-      const url = await resolveUpstreamUrl(PROVIDER, {
-        captureIfMissing: true,
-      });
-      const identity = await resolveIdentityHeaders(PROVIDER);
-      const acct = await readAccountHash();
+      // URL / identity / account-hash are independent once the token is live.
+      const [url, identity, acct] = await Promise.all([
+        resolveUpstreamUrl(PROVIDER, {
+          captureIfMissing: true,
+        }),
+        resolveIdentityHeaders(PROVIDER),
+        readAccountHash(),
+      ]);
       return {
         access_token: token.accessToken,
         headers: identity ?? {},

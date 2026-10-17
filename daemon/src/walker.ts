@@ -880,16 +880,29 @@ const debugCodexStream = async (
   try {
     await mkdir(join(stateDir(), "debug"), { recursive: true });
     outputReady = true;
+    const parts: string[] = [];
+    const joinParts = (): string =>
+      parts.length <= 1 ? (parts[0] ?? "") : parts.join("");
     for (;;) {
       const { value, done } = await reader.read();
       if (done) {
-        buffer += decoder.decode();
+        const tail = decoder.decode();
+        if (tail.length > 0) parts.push(tail);
+        buffer += joinParts();
+        parts.length = 0;
         if (buffer.length > 0) enqueueFrame(buffer);
         enqueueEnd("end", null);
         await writes;
         return;
       }
-      buffer += decoder.decode(value, { stream: true });
+      const piece = decoder.decode(value, { stream: true });
+      if (piece.length > 0) parts.push(piece);
+      // Hold rope parts until a line terminator could complete an SSE frame.
+      if (parts.length > 1 && !piece.includes("\n") && !piece.includes("\r")) {
+        continue;
+      }
+      buffer += joinParts();
+      parts.length = 0;
       for (;;) {
         const boundary = nextSseFrameBoundary(buffer);
         if (boundary === null) break;
@@ -2168,6 +2181,10 @@ export const ensureLocalSubscription = async (
 
   const { readProviderStatus } = await import("./status");
   const { normalizeProviderConnection } = await import("@openllmsh/protocol");
+  // Always probe through `readProviderStatus` — a process-wide last-known
+  // connected row must not mask a later unknown/timeout (serviceable:false).
+  // Per-walk dedupe is `connectedByProvider` above; status owns its own
+  // in-flight coalescing so hops in one tick still share one CLI spawn.
   const status = await readProviderStatus(provider);
   if (status === null) {
     const miss: TLocalSubscriptionAuth = {
@@ -2822,7 +2839,9 @@ const walkPlan = async (
         provider: hop.provider,
         reason: decision.reason,
       });
-      clearPlanCache();
+      // Quota skip advances to the next hop in THIS walk — the signed plan
+      // is still valid for the burst. Busting the cache here forced a WAN
+      // re-fetch on every subsequent request in the same interactive burst.
       return HOP_CONTINUE;
     }
 

@@ -452,6 +452,8 @@ export type TKeychainRuntime = {
     observeOnly?: boolean,
   ) => Promise<TStoreRead<string>>;
   readonly keychainStoreIdentity: (home: string) => TKeychainStoreIdentity;
+  /** Drop cached `find-generic-password -w` payloads (optional home scope). */
+  readonly clearKeychainSecretCache: (home?: string) => void;
   readonly clear: () => void;
 };
 
@@ -951,6 +953,22 @@ export const createKeychainRuntime = (
     }
   >();
 
+  /**
+   * Short-TTL cache of `find-generic-password -w` payloads. Keyed by
+   * isolated keychain path + service name (account/install scoped — never
+   * shared across homes or tiers). Invalidated on keychain mtime change,
+   * TTL expiry, {@link clearKeychainSecretCache}, and the runtime `clear()`.
+   */
+  const KEYCHAIN_SECRET_TTL_MS = 5_000;
+  const secretCache = new Map<
+    string,
+    {
+      readonly mtimeMs: number;
+      readonly storedAtMs: number;
+      readonly secret: string | null;
+    }
+  >();
+
   type TKeychainPayloads = {
     readonly values: ReadonlyArray<string>;
     readonly secretUnreadable: boolean;
@@ -961,6 +979,17 @@ export const createKeychainRuntime = (
     string,
     Promise<TStoreRead<TKeychainPayloads>>
   >();
+
+  const invalidateSecretCache = (home?: string): void => {
+    if (home === undefined) {
+      secretCache.clear();
+      return;
+    }
+    const prefix = `${loginKeychainPath(home)}\0`;
+    for (const key of secretCache.keys()) {
+      if (key.startsWith(prefix)) secretCache.delete(key);
+    }
+  };
 
   // A chain we recreated once this process (bounds self-heal to one attempt per
   // path per process — launchd KeepAlive resets it on restart).
@@ -2059,6 +2088,7 @@ export const createKeychainRuntime = (
     pendingUnlockSkip.clear();
     autoLockOffByKc.clear();
     dumpCache.clear();
+    secretCache.clear();
     inFlightKeychainReads.clear();
     macosKeychainLane = Promise.resolve();
     keychainCounters = emptyKeychainCounters();
@@ -2245,6 +2275,16 @@ export const createKeychainRuntime = (
     signal?: AbortSignal,
   ): Promise<string | null> => {
     const kc = loginKeychainPath(home);
+    const mtimeMs = keychainMtimeMs(kc);
+    const cacheKey = `${kc}\0${service}`;
+    const cached = secretCache.get(cacheKey);
+    if (
+      cached !== undefined &&
+      cached.mtimeMs === mtimeMs &&
+      Date.now() - cached.storedAtMs < KEYCHAIN_SECRET_TTL_MS
+    ) {
+      return cached.secret;
+    }
     const found = await spawnSecurity(
       ["find-generic-password", "-s", service, "-w", kc],
       home,
@@ -2255,10 +2295,23 @@ export const createKeychainRuntime = (
       },
     );
     noteKeychainIoResult(kc, found);
-    if (found.code !== 0) return null;
+    if (found.code !== 0) {
+      secretCache.set(cacheKey, {
+        mtimeMs,
+        storedAtMs: Date.now(),
+        secret: null,
+      });
+      return null;
+    }
     const { stdout } = found;
     const trimmed = stdout.trim();
-    return trimmed.length > 0 ? trimmed : null;
+    const secret = trimmed.length > 0 ? trimmed : null;
+    secretCache.set(cacheKey, {
+      mtimeMs,
+      storedAtMs: Date.now(),
+      secret,
+    });
+    return secret;
   };
 
   /**
@@ -2355,6 +2408,7 @@ export const createKeychainRuntime = (
     findKeychainServices,
     readIsolatedKeychain,
     keychainStoreIdentity,
+    clearKeychainSecretCache: invalidateSecretCache,
     clear,
   };
 };
@@ -2394,3 +2448,6 @@ export const readIsolatedKeychain: TKeychainRuntime["readIsolatedKeychain"] = (
 
 export const keychainStoreIdentity: TKeychainRuntime["keychainStoreIdentity"] =
   (...args) => defaultKeychainRuntime.keychainStoreIdentity(...args);
+
+export const clearKeychainSecretCache: TKeychainRuntime["clearKeychainSecretCache"] =
+  (...args) => defaultKeychainRuntime.clearKeychainSecretCache(...args);
