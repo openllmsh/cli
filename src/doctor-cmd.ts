@@ -1,8 +1,9 @@
 /**
- * `openllm doctor [--fix] [--no-ai] [-c]` — leftover-install report plus
+ * `openllm doctor [--fix] [--ai] [-c]` — leftover-install report plus
  * local daemon health. The daemon's live `state.json` is intentionally excluded
  * from leftover detection. `--fix` applies safe repairs (currently: remove
  * OpenLLM-owned leftovers and managed regions); the user's own settings survive.
+ * AI diagnosis is opt-in (`--ai`) so the default path stays interactive-fast.
  *
  * After the deterministic sections print, a default-on AI diagnosis (lite)
  * embeds a bounded `openllmd logs -n` tail. A TTY-only stderr spinner covers
@@ -156,7 +157,8 @@ const DAEMON_STATUS_TIMEOUT_MS = 1_500;
 const DAEMON_STATUS_COMMAND_TIMEOUT_MS = 2_000;
 const LOG_WARNING_TAIL_LINES = 400;
 const LOG_WARNING_OUTPUT_LIMIT = 8;
-const AI_TIMEOUT_MS = 90_000;
+/** Hard budget for opt-in AI diagnosis — fail open rather than block for a minute. */
+const AI_TIMEOUT_MS = 10_000;
 const DAEMON_LOG_TIMEOUT_MS = 8_000;
 const DAEMON_LOG_LINES = 200;
 const DAEMON_LOG_CHAR_LIMIT = 24_000;
@@ -191,13 +193,12 @@ const SPINNER_INTERVAL_MS = 80;
 const spinnerLabel = (model: string): string =>
   `AI diagnosis (${model}) — reading logs…`;
 
-/** The model the AI diagnosis runs on when `--model` is not passed. `plus` is
- *  the mid default-chain tier — a stronger read than the old `lite` default,
- *  while `--model` lets a heavier (`ultra`) or cheaper (`lite`) tier, or any
- *  explicit model id, be chosen per run. */
-const DEFAULT_DOCTOR_MODEL = "plus";
+/** The model the AI diagnosis runs on when `--ai` is set without `--model`.
+ *  `lite` keeps the opt-in path snappy under the hard AI timeout; `--model`
+ *  still selects a heavier (`plus`/`ultra`) tier or any explicit model id. */
+const DEFAULT_DOCTOR_MODEL = "lite";
 
-/** Parse `--model <alias>`; default `plus`. Returns null (caller rejects) when
+/** Parse `--model <alias>`; default `lite`. Returns null (caller rejects) when
  *  `--model` is given without a following value (a flag or nothing), or given
  *  more than once — an ambiguous request should error, not silently pick one. */
 export const parseDoctorModel = (args: readonly string[]): string | null => {
@@ -212,21 +213,22 @@ export const parseDoctorModel = (args: readonly string[]): string | null => {
   return value;
 };
 
-const DOCTOR_USAGE = `openllm doctor [--fix] [--no-ai] [--model <alias>] [-c]
+const DOCTOR_USAGE = `openllm doctor [--fix] [--ai] [--model <alias>] [-c]
 
 Diagnose the local daemon and leftover install state.
-Default AI diagnosis sends the redacted report and recent daemon logs
-for processing; --no-ai keeps them on this machine.
+Deterministic checks print immediately. AI diagnosis is opt-in (\`--ai\`)
+and sends the redacted report plus recent daemon logs through your gateway.
 
   openllm doctor            report only — changes nothing
   openllm doctor --fix      apply safe fixes (remove leftover install artifacts)
-  openllm doctor --no-ai    skip the AI diagnosis
-  openllm doctor --model ultra   run the AI diagnosis on a specific model
+  openllm doctor --ai       add an AI diagnosis (model ${DEFAULT_DOCTOR_MODEL}, ${AI_TIMEOUT_MS / 1000}s budget)
+  openllm doctor --ai --model ultra   run the AI diagnosis on a specific model
   openllm doctor -c         copy the full report to the clipboard
 
   --fix            apply safe fixes
-  --no-ai          disable the default AI diagnosis
-  --model <alias>  model for the AI diagnosis (default ${DEFAULT_DOCTOR_MODEL})
+  --ai             enable AI diagnosis (off by default)
+  --no-ai          keep AI off (default; retained for older scripts)
+  --model <alias>  model for the AI diagnosis (default ${DEFAULT_DOCTOR_MODEL}; implies --ai)
   -c, --copy       copy the printed report to the clipboard
 
 --fix removes only OpenLLM-owned paths and managed regions; your own settings
@@ -1132,7 +1134,11 @@ export const runDoctor = async (args: readonly string[]): Promise<number> => {
   }
 
   const fix = args.includes("--fix");
-  const includeAi = !args.includes("--no-ai");
+  // AI is opt-in so the default interactive path stays ~tens of ms. Passing
+  // `--model` alone also opts in (otherwise the flag would be a no-op).
+  const includeAi =
+    !args.includes("--no-ai") &&
+    (args.includes("--ai") || args.includes("--model"));
   const copy = args.includes("-c") || args.includes("--copy");
   const model = parseDoctorModel(args);
   if (model === null) {
@@ -1285,14 +1291,22 @@ export const runDoctor = async (args: readonly string[]): Promise<number> => {
   emit(`${reportText}\n`);
 
   if (!includeAi) {
-    emit(formatAiSection(null, model, "disabled by --no-ai"));
+    emit(
+      formatAiSection(
+        null,
+        model,
+        args.includes("--no-ai")
+          ? "disabled by --no-ai"
+          : "skipped (pass --ai to enable)",
+      ),
+    );
   } else if (!existsSync(cliBinPath())) {
     emit(formatAiSection(null, model, "openllm CLI not found"));
   } else if (cliConfig().apiKey.length === 0) {
     emit(formatAiSection(null, model, "no API key configured"));
   } else {
     process.stderr.write(
-      `AI diagnosis sends the report and recent daemon logs through your gateway (model: ${model}) — use --no-ai to keep them local.\n`,
+      `AI diagnosis sends the report and recent daemon logs through your gateway (model: ${model}; ${AI_TIMEOUT_MS / 1000}s budget).\n`,
     );
     const stopSpinner = startStderrSpinner(spinnerLabel(model));
     let diagnosis: string | null = null;

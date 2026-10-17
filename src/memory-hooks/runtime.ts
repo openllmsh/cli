@@ -1,7 +1,16 @@
-import { statSync } from "node:fs";
+import { createHash } from "node:crypto";
+import {
+  mkdirSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
+import { join } from "node:path";
 import { CLI_VERSION } from "../cli-version";
 import type { TCliConfig } from "../env";
-import { cliConfig } from "../env";
+import { cliConfig, openllmDir } from "../env";
 import type { SaveOptions } from "../mcp/memory/client";
 import { MemoryClient } from "../mcp/memory/client";
 import { callOperation } from "../sdk/client";
@@ -17,6 +26,12 @@ import {
   memoryHookTransport,
   recordOf,
 } from "./transport";
+
+/** Default recall HTTP budget (seconds). Hooks used to wait 5s; 2s fails open
+ *  faster on a wedged gateway without changing successful RTT much. */
+const DEFAULT_RECALL_TIMEOUT_S = 2;
+/** Short TTL for identical prompt recalls within one coding burst. */
+const RECALL_CACHE_TTL_MS = 60_000;
 
 export type TMemoryHookOutput = {
   systemMessage?: string;
@@ -73,6 +88,66 @@ const outputOf = (
     : null;
 };
 
+type TRecallCacheEntry = {
+  readonly ts: number;
+  readonly context: string | null;
+};
+
+const recallCachePath = (
+  accountScope: string,
+  project: string,
+  prompt: string,
+): string => {
+  // Lives under ~/.openllm/cache — NOT the plugin-state diagnostic dir, which
+  // must never retain recalled memory text (transcript sentinels, secrets).
+  const dir = join(openllmDir(), "cache", "memory-recall", accountScope);
+  mkdirSync(dir, { recursive: true, mode: 0o700 });
+  const key = createHash("sha256")
+    .update(`${project}\0${prompt}`)
+    .digest("hex")
+    .slice(0, 32);
+  return join(dir, `${key}.json`);
+};
+
+const readRecallCache = (path: string): TRecallCacheEntry | null => {
+  try {
+    const value: unknown = JSON.parse(readFileSync(path, "utf8"));
+    if (
+      typeof value !== "object" ||
+      value === null ||
+      !("ts" in value) ||
+      typeof value.ts !== "number"
+    )
+      return null;
+    const age = Date.now() - value.ts;
+    if (age < 0 || age > RECALL_CACHE_TTL_MS) return null;
+    const context =
+      "context" in value &&
+      (typeof value.context === "string" || value.context === null)
+        ? value.context
+        : null;
+    return { ts: value.ts, context };
+  } catch {
+    return null;
+  }
+};
+
+const writeRecallCache = (path: string, context: string | null): void => {
+  const temp = `${path}.${process.pid}.tmp`;
+  try {
+    writeFileSync(temp, JSON.stringify({ ts: Date.now(), context }), {
+      mode: 0o600,
+    });
+    renameSync(temp, path);
+  } catch {
+    try {
+      rmSync(temp, { force: true });
+    } catch {
+      /* best-effort cache */
+    }
+  }
+};
+
 /** Foreground prompt hook: fail-open, filtered project + global data injection. */
 export const runMemoryRecall = async (
   input: unknown,
@@ -84,7 +159,13 @@ export const runMemoryRecall = async (
     .trim()
     .replace(/^<user_query>\s*([\s\S]*?)\s*<\/user_query>$/, "$1")
     .trim();
-  if (prompt.length < 6 || prompt.startsWith("!") || prompt.startsWith("/"))
+  // Skip shell bangs, slash-commands, and trivial prompts (acks / one-word).
+  if (
+    prompt.length < 6 ||
+    prompt.startsWith("!") ||
+    prompt.startsWith("/") ||
+    !/\s/.test(prompt)
+  )
     return null;
   const config = cliConfig();
   if (!config.apiKey || !config.gatewayUrl) return null;
@@ -110,9 +191,30 @@ export const runMemoryRecall = async (
       typeof event.cwd === "string" ? event.cwd : process.cwd(),
       memoryEnv("RECALL_PROJECT"),
     );
+    const cacheEnabled = (memoryEnv("RECALL_CACHE") ?? "1") === "1";
+    const cachePath = recallCachePath(
+      createHash("sha256")
+        .update(`${config.gatewayUrl}\0${config.apiKey}`)
+        .digest("hex")
+        .slice(0, 32),
+      project,
+      prompt,
+    );
+    if (cacheEnabled) {
+      const cached = readRecallCache(cachePath);
+      if (cached) {
+        state.health("success");
+        state.log({
+          outcome: cached.context ? "recall" : "noop",
+          hits: cached.context ? 1 : 0,
+        });
+        return outputOf(state, cached.context ?? undefined);
+      }
+    }
     const client = cloudClient(
       config,
-      numeric(memoryEnv("RECALL_TIMEOUT"), 5, 0.5, 15) * 1000,
+      numeric(memoryEnv("RECALL_TIMEOUT"), DEFAULT_RECALL_TIMEOUT_S, 0.5, 15) *
+        1000,
     );
     const found = await client.search(prompt, limit, {
       projects: project === "default" ? [project] : [project, "default"],
@@ -129,7 +231,10 @@ export const runMemoryRecall = async (
       .slice(0, limit);
     state.health("success");
     state.log({ outcome: hits.length ? "recall" : "noop", hits: hits.length });
-    if (!hits.length) return outputOf(state);
+    if (!hits.length) {
+      if (cacheEnabled) writeRecallCache(cachePath, null);
+      return outputOf(state);
+    }
     const lines = [
       `${RECALL_MARKER} Relevant saved memories (auto-recalled):`,
       ...hits.map((memory) => {
@@ -139,7 +244,9 @@ export const runMemoryRecall = async (
         return `- (${Math.round(memory.similarity * 100)}% · ${memory.project || project}) ${content}`;
       }),
     ];
-    return outputOf(state, lines.join("\n"));
+    const context = lines.join("\n");
+    if (cacheEnabled) writeRecallCache(cachePath, context);
+    return outputOf(state, context);
   } catch (error) {
     state.diagnostic(diagnosticOf(error, "recall"));
     state.health("failure");

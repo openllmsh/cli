@@ -6,7 +6,7 @@
           {
             "type": "command",
             "command": "\"{{OPENLLM_BIN}}\" exec memory recall",
-            "timeout": 10
+            "timeout": 3
           }
         ]
       }

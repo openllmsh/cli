@@ -102,43 +102,63 @@ export const createMcpServer = ({
     );
   }
   if (groups.includes("openllm")) {
-    // A duplicate name or an unconvertible schema skips that one tool only —
-    // a bad vendor manifest must never take the built-in tools down with it.
-    const registered = new Set(tools.map((tool) => tool.name));
-    for (const upstream of upstreams) {
-      for (const tool of upstream.tools) {
-        const name = upstreamToolName(upstream.id, tool.name);
-        if (registered.has(name)) {
-          console.warn(`[MCP] marketplace: skipping duplicate tool ${name}`);
-          continue;
-        }
-        try {
-          server.registerTool(
-            name,
-            {
-              ...(tool.description === undefined
-                ? {}
-                : { description: tool.description }),
-              ...(tool.annotations === undefined
-                ? {}
-                : { annotations: tool.annotations }),
-              inputSchema: fromJsonSchema<Record<string, unknown>>(
-                tool.inputSchema,
-              ),
-            },
-            (args): Promise<CallToolResult> => upstream.call(tool.name, args),
-          );
-          registered.add(name);
-        } catch (err) {
-          console.warn(
-            `[MCP] marketplace: skipping ${name}: ${err instanceof Error ? err.message : String(err)}`,
-          );
-        }
-      }
-    }
+    attachMarketplaceUpstreams(
+      server,
+      upstreams,
+      new Set(tools.map((tool) => tool.name)),
+    );
   }
   return server;
 };
+
+/** Register marketplace proxy tools on a live server. Safe to call after
+ *  `serveStdio` — each `registerTool` notifies `tools/list_changed`. */
+export const attachMarketplaceUpstreams = (
+  server: McpServer,
+  upstreams: readonly TUpstream[],
+  alreadyRegistered: ReadonlySet<string> = new Set(),
+): void => {
+  // A duplicate name or an unconvertible schema skips that one tool only —
+  // a bad vendor manifest must never take the built-in tools down with it.
+  const registered = new Set(alreadyRegistered);
+  for (const upstream of upstreams) {
+    for (const tool of upstream.tools) {
+      const name = upstreamToolName(upstream.id, tool.name);
+      if (registered.has(name)) {
+        console.warn(`[MCP] marketplace: skipping duplicate tool ${name}`);
+        continue;
+      }
+      try {
+        server.registerTool(
+          name,
+          {
+            ...(tool.description === undefined
+              ? {}
+              : { description: tool.description }),
+            ...(tool.annotations === undefined
+              ? {}
+              : { annotations: tool.annotations }),
+            inputSchema: fromJsonSchema<Record<string, unknown>>(
+              tool.inputSchema,
+            ),
+          },
+          (args): Promise<CallToolResult> => upstream.call(tool.name, args),
+        );
+        registered.add(name);
+      } catch (err) {
+        console.warn(
+          `[MCP] marketplace: skipping ${name}: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+    }
+  }
+};
+
+/** How long the first `tools/list` (via the server factory) may wait for
+ *  marketplace upstreams before serving built-ins alone. Clients that list
+ *  once still see marketplace tools when the handshake finishes in time;
+ *  slower handshakes land via `tools/list_changed` after listen. */
+const MARKETPLACE_LIST_WAIT_MS = 2_500;
 
 export const runMcpServer = async (
   requested: readonly TMcpGroup[],
@@ -165,19 +185,77 @@ export const runMcpServer = async (
     cloudOrigin: cfg.gatewayUrl,
     local: false,
   };
-  // Tier and marketplace integrations are independent reads; both fail open.
-  const [tier, servers] = await Promise.all([
-    fetchTier(gateway),
-    requested.includes("openllm") ? fetchMarketplaceServers(gateway) : [],
-  ]);
-  const upstreams = await connectUpstreams(servers);
+  // Kick off gateway reads before we listen — but do NOT await marketplace
+  // upstream handshakes on the critical path. `serveStdio` starts reading
+  // stdin immediately; the factory (called on the client's first message)
+  // waits briefly so one-shot `tools/list` clients still see marketplace
+  // tools when the handshake is fast.
+  const tierPromise = fetchTier(gateway);
+  const marketplacePromise: Promise<readonly TUpstream[]> = requested.includes(
+    "openllm",
+  )
+    ? fetchMarketplaceServers(gateway).then(connectUpstreams)
+    : Promise.resolve([]);
+  let upstreams: readonly TUpstream[] = [];
+  let marketplaceSettled = false;
+  const marketplaceTask = marketplacePromise.then(
+    (connected) => {
+      upstreams = connected;
+      marketplaceSettled = true;
+      return connected;
+    },
+    (err: unknown) => {
+      marketplaceSettled = true;
+      console.warn(
+        `[MCP] marketplace: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      return [] as const;
+    },
+  );
   const closeUpstreams = (): void => {
     for (const upstream of upstreams) void upstream.close();
   };
   process.once("exit", closeUpstreams);
   process.stdin.once("end", closeUpstreams);
-  serveStdio(() => createMcpServer({ requested, tier, config, upstreams }));
+
+  let attachedLate = false;
+  serveStdio(async () => {
+    const [tier] = await Promise.all([
+      tierPromise,
+      marketplaceSettled
+        ? Promise.resolve()
+        : Promise.race([
+            marketplaceTask.then(() => undefined),
+            new Promise<void>((resolve) => {
+              setTimeout(resolve, MARKETPLACE_LIST_WAIT_MS);
+            }),
+          ]),
+    ]);
+    // Snapshot which upstreams the constructor already registered so a late
+    // attach does not double-register when the wait budget covered them.
+    const includedAtCreate = upstreams;
+    const server = createMcpServer({
+      requested,
+      tier,
+      config,
+      upstreams: includedAtCreate,
+    });
+    if (includedAtCreate.length > 0) attachedLate = true;
+    // Marketplace finished after the wait budget: attach and notify.
+    if (!marketplaceSettled) {
+      void marketplaceTask.then((connected) => {
+        if (attachedLate || connected.length === 0) return;
+        attachedLate = true;
+        if (mcpGroupsForTier(requested, tier).includes("openllm")) {
+          attachMarketplaceUpstreams(server, connected);
+        }
+      });
+    }
+    return server;
+  });
+  // Announce immediately — hosts key off this line. Tier only shapes the
+  // group list in the message; requested groups are a safe provisional.
   console.log(
-    `[MCP] openllm v${CLI_VERSION} listening on stdio (groups: ${mcpGroupsForTier(requested, tier).join(", ")})`,
+    `[MCP] openllm v${CLI_VERSION} listening on stdio (groups: ${requested.join(", ")})`,
   );
 };

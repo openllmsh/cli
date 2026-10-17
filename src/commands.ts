@@ -261,6 +261,7 @@ export const COMMAND_ARGS: Readonly<
     "--dry-run",
     "--yes",
     "--fix",
+    "--ai",
     "--no-ai",
     "--model",
     "-c",

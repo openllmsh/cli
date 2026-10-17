@@ -88,6 +88,12 @@ export const daemonVersion = async (): Promise<string | null> => {
  * Run a public lifecycle command in the daemon half (a child process: daemon
  * commands `process.exit` and load the daemon module graph, which CLI commands
  * should not). Preserves its stdout, stderr, and exit status for the caller.
+ *
+ * Performance note (cli-startup audit §6): `status` / `auth` always pay this
+ * spawn (~70–100 ms) even when a daemon is already up. A loopback shortcut is
+ * intentionally NOT used here — `status` is a rich supervisor/service report
+ * (not just `GET /status`), and `auth` drives native CLI login / keychain
+ * flows that live in the daemon module graph. Prefer spawn for correctness.
  */
 export const runManagedDaemonCommand = async (
   command:

@@ -101,11 +101,11 @@ export const fetchProviderPreflight = async (
   }
 };
 
-/** One gate/message for ephemeral launches and persistent client applies. */
-export const requireProviderRouting = async (
+/** Apply a completed preflight result — shared by the await and overlap paths. */
+export const applyProviderRouting = (
+  result: TProviderPreflight,
   gateway: TGateway,
-): Promise<boolean> => {
-  const result = await fetchProviderPreflight(gateway);
+): boolean => {
   if (result === "empty") {
     process.stderr.write(
       "No models are available for your OpenLLM account.\n" +
@@ -128,3 +128,9 @@ export const requireProviderRouting = async (
   }
   return true;
 };
+
+/** One gate/message for ephemeral launches and persistent client applies. */
+export const requireProviderRouting = async (
+  gateway: TGateway,
+): Promise<boolean> =>
+  applyProviderRouting(await fetchProviderPreflight(gateway), gateway);

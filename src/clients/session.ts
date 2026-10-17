@@ -37,7 +37,10 @@ import { hermesBundledTuiDir, hermesProfileConfigPath } from "./hermes-home";
 import { HOOK_SCRIPTS } from "./hooks";
 import { buildLaunchPlan, type TLaunchPlan } from "./launch";
 import { buildLiveJson, writeLiveJson } from "./live";
-import { requireProviderRouting } from "./provider-preflight";
+import {
+  applyProviderRouting,
+  fetchProviderPreflight,
+} from "./provider-preflight";
 import type { TClient, TClientFlags, TDaemonCli } from "./registry";
 import {
   buildSessionChoices,
@@ -452,7 +455,17 @@ export const runSessionClient = async (
   const gateway = await resolveGateway({
     config: credential.config,
   });
-  if (!(await requireProviderRouting(gateway))) return 1;
+  // Overlap preflight with catalog/tier — all three hit the gateway and the
+  // serial wait was ~150–200 ms of avoidable latency on cold launch. The
+  // empty/denied gate still runs before spawn; broker launches only need
+  // preflight and ignore the other two.
+  const preflightPromise = fetchProviderPreflight(gateway);
+  const catalogPromise =
+    client.catalogSlug === undefined
+      ? Promise.resolve(null)
+      : fetchModelCatalog(gateway, client.catalogSlug);
+  const tierPromise = fetchTier(gateway);
+  if (!applyProviderRouting(await preflightPromise, gateway)) return 1;
 
   const forwarded = forwardedVendorArgs(userArgs);
   // Durable local sessions do not need a running daemon. A forced
@@ -506,14 +519,9 @@ export const runSessionClient = async (
     return 127;
   }
 
-  // Catalog and tier are independent gateway reads — fetch them together.
-  // Both fail open. Marketplace integrations are served by `openllm mcp`.
-  const [catalog, tier] = await Promise.all([
-    client.catalogSlug === undefined
-      ? Promise.resolve(null)
-      : fetchModelCatalog(gateway, client.catalogSlug),
-    fetchTier(gateway),
-  ]);
+  // Catalog and tier were started with preflight above — both fail open.
+  // Marketplace integrations are served by `openllm mcp`.
+  const [catalog, tier] = await Promise.all([catalogPromise, tierPromise]);
 
   const runDir = createRunDir(client.id);
   let code = 1;

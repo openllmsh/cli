@@ -4,16 +4,14 @@
  */
 
 import { CLI_VERSION, printSelfVersion } from "./cli-version";
-import { isAlwaysOnClientId, runAlwaysOnCommand } from "./clients/always-on";
-import { runHermesCommand } from "./clients/hermes";
 import { CLIENTS, isClientId, parseClientFlags } from "./clients/registry";
-import { runSessionClient } from "./clients/session";
-import type { TExecGroup } from "./commands";
+import type { TExecGroup, TMcpGroup } from "./commands";
 import {
   AUTO_UPDATE_ACTIONS,
   EXEC_GROUPS,
   EXEC_VERBS,
   helpText,
+  MCP_ONLY_GROUPS,
   normalizeMcpGroup,
 } from "./commands";
 import { runCompletionCommand } from "./completion";
@@ -24,13 +22,12 @@ import {
   isDoctorReportingVerb,
   runDoctorReportCommand,
 } from "./doctor-report-cmd";
-import type { TMcpGroup } from "./mcp/server";
-import { MCP_GROUPS, runMcpServer } from "./mcp/server";
-import { runSelfUpdate } from "./self-update";
-import { runSessionsCommand } from "./sessions-cmd";
 import { runSetup } from "./setup-cmd";
 import { runUninstall } from "./uninstall-cmd";
 import { runUpdate } from "./update-cmd";
+
+/** Re-export alias kept local so help/usage never load `mcp/server`. */
+const MCP_GROUPS = MCP_ONLY_GROUPS;
 
 const HELP = helpText(CLI_VERSION);
 
@@ -199,19 +196,24 @@ export const runCli = async (argv: readonly string[]): Promise<void> => {
   // hand-written cases, so help/completion/dispatch can't drift.
   if (cmd !== undefined && isClientId(cmd)) {
     const client = CLIENTS[cmd];
-    if (client.id === "hermes") {
-      return process.exit(await runHermesCommand(rest, clientFlags));
-    }
-    if (isAlwaysOnClientId(client.id)) {
-      return process.exit(
-        await runAlwaysOnCommand(client.id, rest, clientFlags),
-      );
-    }
     // ONLY a LEADING -h/--help is ours; anywhere else it belongs to the client
     // (`openllm claude --resume -h` must reach the client). `--` forwards it.
     if (rest[0] === "-h" || rest[0] === "--help") {
       return usage(clientUsage(cmd), 0);
     }
+    if (client.id === "hermes") {
+      const { runHermesCommand } = await import("./clients/hermes");
+      return process.exit(await runHermesCommand(rest, clientFlags));
+    }
+    const { isAlwaysOnClientId, runAlwaysOnCommand } = await import(
+      "./clients/always-on"
+    );
+    if (isAlwaysOnClientId(client.id)) {
+      return process.exit(
+        await runAlwaysOnCommand(client.id, rest, clientFlags),
+      );
+    }
+    const { runSessionClient } = await import("./clients/session");
     return process.exit(await runSessionClient(client, rest, clientFlags));
   }
 
@@ -238,6 +240,7 @@ export const runCli = async (argv: readonly string[]): Promise<void> => {
         }
         groups = [g];
       }
+      const { runMcpServer } = await import("./mcp/server");
       await runMcpServer(groups);
       break;
     }
@@ -332,12 +335,16 @@ export const runCli = async (argv: readonly string[]): Promise<void> => {
       if (wantsHelp(rest)) return usage(UPDATE_USAGE, 0);
       if (rest.length > 0) return usage(UPDATE_USAGE, 2);
       return process.exit(await runUpdate());
-    case "self-update":
+    case "self-update": {
       if (wantsHelp(rest)) return usage(SELF_UPDATE_USAGE, 0);
+      const { runSelfUpdate } = await import("./self-update");
       await runSelfUpdate();
       break;
-    case "sessions":
+    }
+    case "sessions": {
+      const { runSessionsCommand } = await import("./sessions-cmd");
       return process.exit(await runSessionsCommand(rest));
+    }
     case "uninstall":
       return process.exit(await runUninstall(rest));
     case "doctor": {
@@ -347,7 +354,7 @@ export const runCli = async (argv: readonly string[]): Promise<void> => {
       }
       if (wantsHelp(rest)) {
         process.stdout.write(
-          `${DOCTOR_REPORT_USAGE}\nLegacy leftover scan (does not upload diagnostics):\n  openllm doctor [--fix] [--no-ai] [--model <alias>] [-c]\n`,
+          `${DOCTOR_REPORT_USAGE}\nLegacy leftover scan (does not upload diagnostics):\n  openllm doctor [--fix] [--ai] [--model <alias>] [-c]\n`,
         );
         return process.exit(0);
       }
