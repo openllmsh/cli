@@ -438,7 +438,7 @@ export const filterIdentityHeaders = (
 
 type TCapturedRequest = {
   readonly path: string;
-  /** Session-resolved vendor URL (null → `origin + path`). */
+  /** Session-resolved vendor URL (sessionless specs: null → `origin + path`; session specs: null = unresolved route → failed capture). */
   readonly url: string | null;
   readonly identityHeaders: Readonly<Record<string, string>>;
 };
@@ -580,8 +580,16 @@ const captureInferenceRequest = async (
     logDebug("auth-config", `capture yielded no request for ${provider}`);
     return null;
   }
+  // A session capture must resolve its own route (e.g. Codex workspace
+  // residency); substituting the generic origin would persist a wrong host.
+  const resolvedUrl =
+    spec.session !== undefined ? captured.url : spec.origin + captured.path;
+  if (resolvedUrl === null) {
+    logDebug("auth-config", `capture for ${provider} resolved no route`);
+    return null;
+  }
   return {
-    url: captured.url ?? spec.origin + captured.path,
+    url: resolvedUrl,
     identityHeaders: captured.identityHeaders,
   };
 };
@@ -701,11 +709,16 @@ const ensureUpstreamUrl = async (
     const ver = await cliVersion(cliBin(provider), cliEnv(provider));
     if (stored !== null && urlFresh(cfg, ver)) return stored;
     if (captureRecentlyFailed(cfg, ver)) return stored;
-    // Stale or never captured: never make the request wait on a capture (a
-    // CLI that hangs costs the full CAPTURE_TIMEOUT_MS). Serve the stored URL
-    // (null → the caller's default) and refresh off-path.
-    void runCaptureOnce(provider).catch(() => null);
-    return stored;
+    if (stored !== null) {
+      // Stale but previously verified for this account: never make the
+      // request wait on a capture (a CLI that hangs costs the full
+      // CAPTURE_TIMEOUT_MS). Serve it and refresh off-path.
+      void runCaptureOnce(provider).catch(() => null);
+      return stored;
+    }
+    // Never captured: the generic default may be the wrong workspace host,
+    // so this one-time capture is awaited (a failure is negative-cached
+    // above, so it cannot repeat per hop).
   }
   const captured = await runCaptureOnce(provider);
   return captured?.url ?? stored;
