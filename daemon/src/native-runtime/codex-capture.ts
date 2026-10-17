@@ -161,7 +161,7 @@ const isCodexCaptureModelCatalogPreamblePath = (pathname: string): boolean =>
  * suffix (see that constant's doc comment); nothing here changes what base
  * URL the native binary itself was configured with.
  */
-const codexCapturePreambleForwardPath = (pathname: string): string =>
+export const codexCapturePreambleForwardPath = (pathname: string): string =>
   isCodexCaptureModelCatalogPreamblePath(pathname)
     ? pathname.replace(
         CODEX_CAPTURE_OPENAI_PATH_PREFIX,
@@ -268,7 +268,7 @@ export const isCodexCaptureInferencePath = (pathname: string): boolean =>
 export const isCodexCapturePreamblePath = (pathname: string): boolean =>
   !isCodexCaptureInferencePath(pathname);
 
-const isWorkspaceAccountsCheckPath = (pathname: string): boolean =>
+export const isWorkspaceAccountsCheckPath = (pathname: string): boolean =>
   pathname.endsWith("/wham/accounts/check");
 
 /** Methods we will forward for a recognized preamble path. */
@@ -506,7 +506,7 @@ export const reframeFetchedControlResponse = async (
  * `clone().json()` (decoded JSON semantics). The Response returned to native
  * is separately reframed by {@link reframeFetchedControlResponse}.
  */
-const recordWorkspaceRoutesFromResponse = async (
+export const recordWorkspaceRoutesFromResponse = async (
   response: Response,
   routes: TCodexWorkspaceRouteMemory,
 ): Promise<void> => {

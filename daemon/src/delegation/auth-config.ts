@@ -41,6 +41,15 @@ import { join } from "node:path";
 import type { TCliProvider } from "../cli-paths";
 import { cliBin, cliEnv, cliRoot } from "../cli-paths";
 import { logDebug, logInfo, logWarn } from "../logger";
+import {
+  codexCapturePreambleForwardPath,
+  codexCaptureRedirectArgs,
+  createCodexWorkspaceRouteMemory,
+  isWorkspaceAccountsCheckPath,
+  recordWorkspaceRoutesFromResponse,
+  reframeFetchedControlResponse,
+  remapCodexObservedUrlToExternal,
+} from "../native-runtime/codex-capture";
 import { sandboxSpawnArgs } from "../sandbox/exec";
 import { unwrapKeychainSpawn } from "../sandbox/policy";
 import { isOtherKimiRegionOrigin, kimiEndpoints } from "./kimi-region";
@@ -147,6 +156,47 @@ type TCaptureSpec = {
    *  `/v1/messages` has never drifted (every capture returned the default), so
    *  the capture was pure risk with no benefit. */
   readonly liveCapture?: boolean;
+  /** Per-run hooks for a CLI whose capture needs more than a path match:
+   *  rewrite a preamble forward target, observe forwarded preamble responses,
+   *  and map the captured request back to the vendor URL. Absent = forward
+   *  verbatim and serve `origin + captured path`. */
+  readonly session?: () => TCaptureSession;
+};
+
+type TCaptureSession = {
+  readonly forwardPath: (path: string) => string;
+  readonly observe: (path: string, response: Response) => Promise<void>;
+  readonly upstreamUrl: (path: string, headers: Headers) => string | null;
+};
+
+/**
+ * Codex capture session — reuses the bridge-capture plumbing
+ * (`native-runtime/codex-capture.ts`) so the URL capture and bridge-capture
+ * track the vendor identically, with nothing replayed or hardcoded:
+ * `openai_base_url` stays OFF the `/backend-api/codex` suffix so codex
+ * (0.159+) does not run workspace-routing discovery against the recorder
+ * (that discovery never completes on loopback and the CLI exits without
+ * sending `/responses`); the vendor's own `/wham/accounts/check`
+ * `workspace_backend_origin` decides the dispatch host for this account.
+ */
+const codexCaptureSession = (): TCaptureSession => {
+  const routes = createCodexWorkspaceRouteMemory();
+  return {
+    forwardPath: codexCapturePreambleForwardPath,
+    observe: async (path, response) => {
+      if (isWorkspaceAccountsCheckPath(path))
+        await recordWorkspaceRoutesFromResponse(response, routes);
+    },
+    upstreamUrl: (path, headers) => {
+      const resolved = routes.resolveDispatchOrigin([...headers.entries()]);
+      return resolved.ok
+        ? remapCodexObservedUrlToExternal(
+            `http://loopback${path}`,
+            resolved.origin,
+          )
+        : null;
+    },
+  };
 };
 
 const CAPTURE: Readonly<Record<TCliProvider, TCaptureSpec>> = {
@@ -172,40 +222,38 @@ const CAPTURE: Readonly<Record<TCliProvider, TCaptureSpec>> = {
     captureIdentity: true,
   },
   chatgpt: {
-    // `liveCapture: false`: every capture since the sidecar existed returned
-    // this default, and codex-cli 0.159 broke the capture outright (its
-    // workspace-routing discovery fails against the recorder, retries ~12s and
-    // exits without ever sending `/responses`). The failed capture re-ran on
-    // EVERY hop, adding 15-20s to each ChatGPT request (p50 2.6s → 22s,
-    // 2026-10). Hermes Agent likewise hardcodes `chatgpt.com/backend-api/codex`
-    // (`agent/codex_headers.py`). A previously captured URL is still served.
+    // Codex's `/responses` host follows the account's workspace routing (data
+    // residency), so it is CAPTURED, never hardcoded — see
+    // `codexCaptureSession`. Captures run off the request path (stale or
+    // missing → served stored/default immediately) and a failure is
+    // negative-cached per CLI version, so a broken capture never adds latency
+    // (it once cost every ChatGPT hop 15-20s: 2026-10, codex-cli 0.159).
     origin: "https://chatgpt.com",
     path: "/backend-api/codex/responses",
     // Codex fires backend-api preamble (`/ps/plugins/installed`, `/wham/apps`,
     // analytics) before inference — match only the `/responses` call.
     match: (p) => p.endsWith("/responses"),
-    // TWO redirects are required. `chatgpt_base_url` only covers the preamble;
-    // the INFERENCE `/responses` call uses the model provider's base_url, which
-    // under ChatGPT auth resolves to the hardcoded CHATGPT_CODEX_BASE_URL unless
-    // `openai_base_url` overrides the built-in openai provider — the ONLY config
-    // hook. WITHOUT it the inference hits the REAL endpoint and spends tokens;
-    // WITH it the recorder intercepts `/responses` (codex opens it as a
-    // WebSocket upgrade — the handshake's identity headers aren't replayed; only
-    // the URL is captured). `--ephemeral` + bypass flags keep it non-interactive.
-    argv: (bin, base) => [
-      bin,
-      "exec",
-      "--skip-git-repo-check",
-      "--dangerously-bypass-approvals-and-sandbox",
-      "--ephemeral",
-      "-c",
-      `chatgpt_base_url=${base}/backend-api`,
-      "-c",
-      `openai_base_url=${base}/backend-api/codex`,
-      "ping",
-    ],
+    // Both redirects come from the shared bridge-capture helper:
+    // `chatgpt_base_url` covers the preamble, `openai_base_url` the inference
+    // (codex opens it as a WebSocket upgrade — only the URL is captured).
+    // `--ephemeral` + bypass flags keep it non-interactive.
+    argv: (bin, base) => {
+      const redirect = codexCaptureRedirectArgs(base);
+      return [
+        bin,
+        "exec",
+        "--skip-git-repo-check",
+        "--dangerously-bypass-approvals-and-sandbox",
+        "--ephemeral",
+        "-c",
+        `chatgpt_base_url=${redirect.chatgptBaseUrl}`,
+        "-c",
+        `openai_base_url=${redirect.openaiBaseUrl}`,
+        "ping",
+      ];
+    },
     env: () => ({}),
-    liveCapture: false,
+    session: codexCaptureSession,
   },
   kimi_code: {
     // Region-dependent (global `api.kimi.ai` by default) — see `kimi-region.ts`.
@@ -390,6 +438,8 @@ export const filterIdentityHeaders = (
 
 type TCapturedRequest = {
   readonly path: string;
+  /** Session-resolved vendor URL (null → `origin + path`). */
+  readonly url: string | null;
   readonly identityHeaders: Readonly<Record<string, string>>;
 };
 
@@ -411,6 +461,7 @@ type TRecorder = {
  * discard the header set.
  */
 const startRecorder = (spec: TCaptureSpec): TRecorder => {
+  const session = spec.session?.();
   let resolveFirst!: (v: TCapturedRequest) => void;
   let captured = false;
   const first = new Promise<TCapturedRequest>((resolve) => {
@@ -425,6 +476,7 @@ const startRecorder = (spec: TCaptureSpec): TRecorder => {
         captured = true;
         resolveFirst({
           path: url.pathname,
+          url: session?.upstreamUrl(url.pathname, req.headers) ?? null,
           identityHeaders:
             spec.captureIdentity === true
               ? filterIdentityHeaders(req.headers)
@@ -437,7 +489,8 @@ const startRecorder = (spec: TCaptureSpec): TRecorder => {
       try {
         const fwd = new Headers(req.headers);
         fwd.delete("host");
-        return await fetch(spec.origin + url.pathname + url.search, {
+        const forwardPath = session?.forwardPath(url.pathname) ?? url.pathname;
+        const response = await fetch(spec.origin + forwardPath + url.search, {
           method: req.method,
           headers: fwd,
           body:
@@ -445,6 +498,10 @@ const startRecorder = (spec: TCaptureSpec): TRecorder => {
               ? undefined
               : await req.arrayBuffer(),
         });
+        if (session === undefined) return response;
+        await session.observe(url.pathname, response);
+        // Bun fetch decodes the body but keeps stale content-encoding.
+        return await reframeFetchedControlResponse(response);
       } catch {
         return new Response(null, { status: 502 });
       }
@@ -524,7 +581,7 @@ const captureInferenceRequest = async (
     return null;
   }
   return {
-    url: spec.origin + captured.path,
+    url: captured.url ?? spec.origin + captured.path,
     identityHeaders: captured.identityHeaders,
   };
 };
@@ -644,12 +701,11 @@ const ensureUpstreamUrl = async (
     const ver = await cliVersion(cliBin(provider), cliEnv(provider));
     if (stored !== null && urlFresh(cfg, ver)) return stored;
     if (captureRecentlyFailed(cfg, ver)) return stored;
-    if (stored !== null) {
-      // Stale but servable: never make the request wait on a capture (a CLI
-      // that hangs costs the full CAPTURE_TIMEOUT_MS). Refresh off-path.
-      void runCaptureOnce(provider).catch(() => null);
-      return stored;
-    }
+    // Stale or never captured: never make the request wait on a capture (a
+    // CLI that hangs costs the full CAPTURE_TIMEOUT_MS). Serve the stored URL
+    // (null → the caller's default) and refresh off-path.
+    void runCaptureOnce(provider).catch(() => null);
+    return stored;
   }
   const captured = await runCaptureOnce(provider);
   return captured?.url ?? stored;
