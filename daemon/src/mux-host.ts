@@ -9,8 +9,9 @@ import {
   SEEDGATE_CAP,
 } from "@openllmsh/protocol";
 import {
+  channelIdToBytes,
   decodeChannelEnvelope,
-  encodeChannelEnvelope,
+  encodeChannelEnvelopeWithTag,
 } from "@openllmsh/tunnel/channel-envelope";
 import { decodeJsonPayload, encodeJsonPayload } from "@openllmsh/tunnel/codec";
 import type { TDuplex, TMuxChannel } from "@openllmsh/tunnel/mux";
@@ -94,6 +95,11 @@ export const currentDaemonCaps = (): string[] => {
  */
 type TRelayChannel = {
   readonly channelId: string;
+  /**
+   * Cached 16-byte mux2 tag — avoids per-frame UUID string→bytes. Filled on
+   * the first outbound binary frame (admission can register before any send).
+   */
+  channelTag: Uint8Array | null;
   readonly keyId: string | null;
   readonly consumer: "browser" | "daemon" | null;
   readonly channel: TMuxChannel;
@@ -375,8 +381,18 @@ const registerChannel = (
 ): TRelayChannel => {
   let muxSink: ((bytes: Uint8Array | null) => void) | null = null;
   let record: TRelayChannel | null = null;
+  // Lazily cache the 16-byte mux2 tag on first send. Admission / seed-gate
+  // paths register a channel before any binary frame; forcing UUID parse at
+  // register time rejected otherwise-valid control-plane channel ids.
+  const tagOf = (): Uint8Array => {
+    if (record === null) return channelIdToBytes(channelId);
+    if (record.channelTag === null) {
+      record.channelTag = channelIdToBytes(channelId);
+    }
+    return record.channelTag;
+  };
   const duplex = relayDuplex(
-    (bytes) => sendBinary?.(encodeChannelEnvelope(channelId, bytes)),
+    (bytes) => sendBinary?.(encodeChannelEnvelopeWithTag(tagOf(), bytes)),
     (callback) => {
       muxSink = callback;
       if (record !== null) {
@@ -422,6 +438,7 @@ const registerChannel = (
   record = {
     channel,
     channelId,
+    channelTag: null,
     keyId,
     consumer: side === "daemon" ? "browser" : null,
     seedGated: false,
