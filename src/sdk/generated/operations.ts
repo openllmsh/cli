@@ -1272,5 +1272,17 @@ export const API_OPERATIONS: readonly TApiOperation[] = [
     "pathParams": [],
     "queryParams": [],
     "hasBody": false
+  },
+  {
+    "id": "health.version",
+    "method": "get",
+    "path": "/version",
+    "summary": "",
+    "tags": [
+      "health"
+    ],
+    "pathParams": [],
+    "queryParams": [],
+    "hasBody": false
   }
 ];
