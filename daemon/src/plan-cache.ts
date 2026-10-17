@@ -62,7 +62,11 @@ export type TCachedPlan = {
 export type TPlanTuple = Omit<TCachedPlan, "storedAtMs">;
 
 const cache = new Map<string, TCachedPlan>();
-const inFlight = new Map<string, Promise<TCachedPlan | null>>();
+type TInFlightShared = {
+  readonly entry: TCachedPlan | null;
+  readonly shared: unknown;
+};
+const inFlight = new Map<string, Promise<TInFlightShared>>();
 /** Bumped by {@link clearPlanCache}; loaders capture it and refuse to store
  *  when it has moved on (in-flight work started before the clear). */
 let cacheGeneration = 0;
@@ -103,6 +107,73 @@ export const planNeedsRefresh = (alias: string): boolean => {
   return age >= PLAN_CACHE_SOFT_REFRESH_MS && age < PLAN_CACHE_TTL_MS;
 };
 
+export type TPlanLoadShared<TShared> = {
+  readonly entry: TCachedPlan | null;
+  /** Present for hard-miss waiters of this flight; null on warm/soft-stale hits. */
+  readonly shared: TShared | null;
+};
+
+/**
+ * Single-flight plan load that also shares an arbitrary loader `shared` value
+ * with every hard-miss waiter. Soft-stale hits return the cached entry
+ * immediately (with `shared: null`); hard misses await the loader so concurrent
+ * callers see the same response/throw outcome instead of only the first
+ * caller's closure.
+ *
+ * `loader.store` is the signed tuple to cache, or `null` to leave the cache
+ * untouched. `loader.shared` is returned to every waiter of this flight.
+ */
+export const loadPlanWithShared = async <TShared>(
+  alias: string,
+  loader: () => Promise<{
+    readonly store: TPlanTuple | null;
+    readonly shared: TShared;
+  }>,
+): Promise<TPlanLoadShared<TShared>> => {
+  const hit = lookupPlan(alias);
+  const refresh = hit !== null && planNeedsRefresh(alias);
+  if (hit !== null && !refresh) return { entry: hit, shared: null };
+
+  const existing = inFlight.get(alias);
+  if (existing !== undefined) {
+    if (hit !== null) return { entry: hit, shared: null };
+    const joined = await existing;
+    return { entry: joined.entry, shared: joined.shared as TShared };
+  }
+
+  const generation = cacheGeneration;
+  // Register the in-flight promise BEFORE the loader can run/settle so a
+  // re-entrant / concurrent miss coalesces onto this op. `Promise.resolve().then`
+  // defers the loader to a microtask; a bare async IIFE would invoke `loader()`
+  // synchronously up to its first await.
+  let op!: Promise<TInFlightShared>;
+  op = Promise.resolve().then(async (): Promise<TInFlightShared> => {
+    try {
+      const { store, shared } = await loader();
+      if (store === null) {
+        return { entry: lookupPlan(alias), shared };
+      }
+      if (generation !== cacheGeneration) {
+        return { entry: lookupPlan(alias), shared };
+      }
+      storePlan(alias, store);
+      return { entry: lookupPlan(alias), shared };
+    } finally {
+      if (inFlight.get(alias) === op) inFlight.delete(alias);
+    }
+  });
+  inFlight.set(alias, op);
+
+  if (hit !== null) {
+    // Soft-stale: serve the cached tuple; refresh completes in the background.
+    // Observe rejection so a failed refresh cannot become an unhandled rejection.
+    void op.catch(() => undefined);
+    return { entry: hit, shared: null };
+  }
+  const settled = await op;
+  return { entry: settled.entry, shared: settled.shared as TShared };
+};
+
 /**
  * Single-flight plan load. Concurrent callers for the same `alias` share one
  * `loader` invocation. Soft-stale hits are returned immediately while a
@@ -115,42 +186,11 @@ export const loadPlan = async (
   alias: string,
   loader: () => Promise<TPlanTuple | null>,
 ): Promise<TCachedPlan | null> => {
-  const hit = lookupPlan(alias);
-  const refresh = hit !== null && planNeedsRefresh(alias);
-  if (hit !== null && !refresh) return hit;
-
-  const existing = inFlight.get(alias);
-  if (existing !== undefined) {
-    if (hit !== null) return hit;
-    return existing;
-  }
-
-  const generation = cacheGeneration;
-  // Register the in-flight promise BEFORE the loader can run/settle so a
-  // re-entrant / concurrent miss coalesces onto this op. `Promise.resolve().then`
-  // defers the loader to a microtask; a bare async IIFE would invoke `loader()`
-  // synchronously up to its first await.
-  let op!: Promise<TCachedPlan | null>;
-  op = Promise.resolve().then(async (): Promise<TCachedPlan | null> => {
-    try {
-      const tuple = await loader();
-      if (tuple === null) return lookupPlan(alias);
-      if (generation !== cacheGeneration) return lookupPlan(alias);
-      storePlan(alias, tuple);
-      return lookupPlan(alias);
-    } finally {
-      if (inFlight.get(alias) === op) inFlight.delete(alias);
-    }
+  const { entry } = await loadPlanWithShared(alias, async () => {
+    const store = await loader();
+    return { store, shared: null };
   });
-  inFlight.set(alias, op);
-
-  if (hit !== null) {
-    // Soft-stale: serve the cached tuple; refresh completes in the background.
-    // Observe rejection so a failed refresh cannot become an unhandled rejection.
-    void op.catch(() => undefined);
-    return hit;
-  }
-  return op;
+  return entry;
 };
 
 /** Drop TTL-expired entries. Returns how many were removed. */

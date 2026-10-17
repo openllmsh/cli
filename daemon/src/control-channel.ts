@@ -36,6 +36,10 @@ import {
   notifySessionLost,
 } from "./cloud-client";
 import { runCommandInner } from "./control-relay";
+import {
+  markCredentialStoresDirtyIfChanged,
+  resetCredentialStoreFingerprint,
+} from "./credential-store-dirty";
 import { logKeychainWatcherTick } from "./delegation/keychain";
 import {
   createDeviceLimitBackoff,
@@ -663,6 +667,9 @@ const pushStatus = async (
   active?: boolean,
   trigger: TStatusPublishTrigger = "welcome",
 ): Promise<void> => {
+  // Clear dirty at compute start so a mark+push path does not leave the bit
+  // set for a redundant watcher full-probe. Marks during the await re-queue.
+  statusWatcherGate.clearDirty();
   try {
     await enqueueStatusPublish({
       skipUnchanged: false,
@@ -718,6 +725,9 @@ export const pushStatusIfChanged = async (
             : "manual",
     );
   }
+  // Clear dirty at compute start so mark+push paths do not leave work queued
+  // for a redundant watcher probe (presence / auth-sink / bootstrap).
+  statusWatcherGate.clearDirty();
   try {
     await enqueueStatusPublish({
       skipUnchanged: true,
@@ -731,6 +741,10 @@ export const pushStatusIfChanged = async (
 const startWatcher = (): void => {
   if (watchTimer !== null) return;
   watchTimer = setInterval(() => {
+    // Cheap fs identity only — never keychain unlock / vendor auth. Turns a
+    // would-be heartbeat-only tick into a full dirty probe when an external
+    // credential file (or keychain db mtime) changed while we were idle.
+    markCredentialStoresDirtyIfChanged();
     const decision = statusWatcherGate.consumeWatcherCompute();
     if (!decision.run) return;
     // Idle ticks must not touch keychain / auth machinery (§6). Only a dirty
@@ -760,6 +774,8 @@ const stopWatcher = (): void => {
     clearInterval(watchTimer);
     watchTimer = null;
   }
+  // A restarted watcher must re-baseline instead of diffing a stale snapshot.
+  resetCredentialStoreFingerprint();
 };
 
 const scheduleMigrationCheck = (): void => {

@@ -1136,9 +1136,13 @@ export const runDoctor = async (args: readonly string[]): Promise<number> => {
   const fix = args.includes("--fix");
   // AI is opt-in so the default interactive path stays ~tens of ms. Passing
   // `--model` alone also opts in (otherwise the flag would be a no-op).
-  const includeAi =
-    !args.includes("--no-ai") &&
-    (args.includes("--ai") || args.includes("--model"));
+  const noAi = args.includes("--no-ai");
+  const wantsAi = args.includes("--ai") || args.includes("--model");
+  if (noAi && wantsAi) {
+    process.stderr.write(DOCTOR_USAGE);
+    return 2;
+  }
+  const includeAi = wantsAi;
   const copy = args.includes("-c") || args.includes("--copy");
   const model = parseDoctorModel(args);
   if (model === null) {

@@ -40,6 +40,12 @@ export type TStatusWatcherGate = {
   /** Reason of the current dirty bit, or null when clean. */
   readonly dirtyReason: () => TStatusDirtyReason | null;
   /**
+   * Clear the dirty bit without consulting the heartbeat. Use when a compute
+   * is starting for any trigger so the next watcher tick does not redo work
+   * already covered; marks that arrive during the compute stay queued.
+   */
+  readonly clearDirty: () => void;
+  /**
    * Whether a watcher tick should run `computeStatusFresh`. Consumes the dirty
    * bit when returning true for a dirty tick (heartbeat ticks leave it clear).
    */
@@ -74,6 +80,9 @@ export const createStatusWatcherGate = (
     },
     isDirty: () => dirty !== null,
     dirtyReason: () => dirty,
+    clearDirty: () => {
+      dirty = null;
+    },
     consumeWatcherCompute: (nowMs = now()) => {
       if (dirty !== null) {
         dirty = null;

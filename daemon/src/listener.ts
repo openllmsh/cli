@@ -68,7 +68,7 @@ import {
   planFetchFailureAction,
 } from "./net-error";
 import type { TPlanTuple } from "./plan-cache";
-import { loadPlan, lookupPlan, planNeedsRefresh } from "./plan-cache";
+import { loadPlanWithShared, lookupPlan, planNeedsRefresh } from "./plan-cache";
 
 import { isBodylessVideoOp, videoOperationFor } from "./video-ops";
 import {
@@ -422,8 +422,14 @@ export const handleInference = async (req: Request): Promise<Response> => {
   const handlePlanFetchError = (
     err: unknown,
     label: string,
+    /**
+     * Abort signal that owns this fetch. Omit (or pass `undefined`) for a
+     * shared single-flight load so one client's abort is not classified as an
+     * origin failure for every joined waiter.
+     */
+    signal?: AbortSignal,
   ): Response | "passthrough" | "throw" => {
-    const decision = planFetchFailureAction(err, req.signal);
+    const decision = planFetchFailureAction(err, signal);
     if (decision.action === "origin-error") {
       logWarn("listener", originFailureDiagnostic(decision.kind), {
         stage: "plan_fetch",
@@ -476,18 +482,22 @@ export const handleInference = async (req: Request): Promise<Response> => {
       | { readonly kind: "tuple"; readonly tuple: TPlanTuple }
       | { readonly kind: "passthrough" }
       | { readonly kind: "response"; readonly response: Response }
+      | { readonly kind: "throw"; readonly error: unknown }
       | { readonly kind: "embeddings-local" };
 
-    let fetchErrorResponse: Response | null = null;
-    let fetchShouldThrow: unknown = null;
-
-    const resolveFetched = async (): Promise<TPlanFetchOutcome> => {
+    const resolveFetched = async (
+      /**
+       * Bound the shared single-flight to the cloud timeout only — never one
+       * caller's `req.signal` — so one abort cannot fail every joined waiter.
+       */
+      signal: AbortSignal | undefined,
+    ): Promise<TPlanFetchOutcome> => {
       let fetched: Awaited<ReturnType<typeof fetchPlan>> | null = null;
       try {
         fetched = await fetchPlan(
           explicitAlias,
           estimateBodyTokens(rawBody),
-          req.signal,
+          signal,
           // The surface this request is FOR — already decided by the path
           // above. Sending it is what stops an ambiguous family name from
           // being planned on the wrong surface: `model=grok` posted to
@@ -497,11 +507,8 @@ export const handleInference = async (req: Request): Promise<Response> => {
           mediaSurface ?? undefined,
         );
       } catch (err) {
-        const outcome = handlePlanFetchError(err, explicitAlias);
-        if (outcome === "throw") {
-          fetchShouldThrow = err;
-          return { kind: "passthrough" };
-        }
+        const outcome = handlePlanFetchError(err, explicitAlias, signal);
+        if (outcome === "throw") return { kind: "throw", error: err };
         if (outcome !== "passthrough") {
           return { kind: "response", response: outcome };
         }
@@ -546,39 +553,10 @@ export const handleInference = async (req: Request): Promise<Response> => {
       };
     };
 
-    if (planCacheEnabled() && planCacheKey !== null) {
-      const loaded = await loadPlan(planCacheKey, async () => {
-        const outcome = await resolveFetched();
-        if (outcome.kind === "response") {
-          fetchErrorResponse = outcome.response;
-          return null;
-        }
-        if (outcome.kind === "tuple") return outcome.tuple;
-        if (outcome.kind === "embeddings-local") {
-          // Signal via empty planParam sentinel — caller checks planParam.
-          return null;
-        }
-        return null;
-      });
-      if (fetchShouldThrow !== null) throw fetchShouldThrow;
-      if (fetchErrorResponse !== null) return fetchErrorResponse;
-      if (loaded !== null) {
-        planParam = loaded.planParam;
-        pmidsParam = loaded.pmidsParam;
-        originParam = loaded.originParam;
-        contextOverflowStrategy = loaded.contextOverflowStrategy;
-        sigParam = loaded.sigParam;
-      } else if (planParam === null) {
-        if (embeddingsLocalFallback) {
-          // leave planParam null — runEmbeddings serves from the body model
-        } else {
-          syncNormalizedJsonBytes();
-          return withCors(req, await passthroughToOrigin(req, rawBytes));
-        }
-      }
-    } else if (planParam === null) {
-      const outcome = await resolveFetched();
-      if (fetchShouldThrow !== null) throw fetchShouldThrow;
+    const applyPlanFetchOutcome = async (
+      outcome: TPlanFetchOutcome,
+    ): Promise<Response | null> => {
+      if (outcome.kind === "throw") throw outcome.error;
       if (outcome.kind === "response") return outcome.response;
       if (outcome.kind === "tuple") {
         planParam = outcome.tuple.planParam;
@@ -586,12 +564,48 @@ export const handleInference = async (req: Request): Promise<Response> => {
         originParam = outcome.tuple.originParam;
         contextOverflowStrategy = outcome.tuple.contextOverflowStrategy;
         sigParam = outcome.tuple.sigParam;
-      } else if (outcome.kind === "embeddings-local") {
-        // leave planParam null
-      } else {
-        syncNormalizedJsonBytes();
-        return withCors(req, await passthroughToOrigin(req, rawBytes));
+        return null;
       }
+      if (outcome.kind === "embeddings-local") {
+        // leave planParam null — runEmbeddings serves from the body model
+        return null;
+      }
+      syncNormalizedJsonBytes();
+      return withCors(req, await passthroughToOrigin(req, rawBytes));
+    };
+
+    if (planCacheEnabled() && planCacheKey !== null) {
+      const { entry, shared } = await loadPlanWithShared<TPlanFetchOutcome>(
+        planCacheKey,
+        async () => {
+          // Shared flight: cloud timeout only (no per-request abort).
+          const outcome = await resolveFetched(undefined);
+          if (outcome.kind === "tuple") {
+            return { store: outcome.tuple, shared: outcome };
+          }
+          return { store: null, shared: outcome };
+        },
+      );
+      if (shared !== null) {
+        const applied = await applyPlanFetchOutcome(shared);
+        if (applied !== null) return applied;
+      } else if (entry !== null) {
+        // Soft-stale immediate serve (background refresh still running).
+        planParam = entry.planParam;
+        pmidsParam = entry.pmidsParam;
+        originParam = entry.originParam;
+        contextOverflowStrategy = entry.contextOverflowStrategy;
+        sigParam = entry.sigParam;
+      } else if (planParam === null) {
+        if (!embeddingsLocalFallback) {
+          syncNormalizedJsonBytes();
+          return withCors(req, await passthroughToOrigin(req, rawBytes));
+        }
+      }
+    } else if (planParam === null) {
+      const outcome = await resolveFetched(req.signal);
+      const applied = await applyPlanFetchOutcome(outcome);
+      if (applied !== null) return applied;
     }
   } else if (
     planParam === null &&

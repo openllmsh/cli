@@ -286,7 +286,10 @@ export const portsToProbe = (
   return [...ports].sort((a, b) => a - b);
 };
 
-const probeOne = async (port: number): Promise<TLocalServerState> => {
+const probeOne = async (
+  port: number,
+  opts?: { readonly bypassNegative?: boolean },
+): Promise<TLocalServerState> => {
   const baseUrl = `http://127.0.0.1:${port}`;
   const key = localKeyForPort(port);
   const hasKey = key !== null;
@@ -298,7 +301,9 @@ const probeOne = async (port: number): Promise<TLocalServerState> => {
     has_key: hasKey,
     models: [],
   });
-  if (isNegativelyCached(port)) return unreachable();
+  if (opts?.bypassNegative !== true && isNegativelyCached(port)) {
+    return unreachable();
+  }
   const probe = await probePort(port, key);
   if (probe === null) {
     // Closed / timed-out ports stay cheap on the next tick — no negative cache.
@@ -332,7 +337,11 @@ const probeOne = async (port: number): Promise<TLocalServerState> => {
     };
   }
   if (probe.status < 200 || probe.status > 299 || probe.text === null) {
-    noteNonApiListener(port);
+    // 5xx (and other transient non-2xx without a body) often means a model
+    // server is still loading — do not pin a 10-minute negative cache.
+    // Definitive non-API answers are redirects / plain 401/403 (above) and
+    // 2xx bodies that are not a model list (below).
+    if (probe.status < 500) noteNonApiListener(port);
     return unreachable();
   }
   const models = parseModels(probe.text);
@@ -656,7 +665,9 @@ export const rescanLocalPort = async (
   // Let an in-flight full scan settle first, or it would land afterwards and
   // overwrite this port's refreshed state with the pre-change probe.
   if (inFlight !== null) await inFlight.catch(() => undefined);
-  const state = await probeOne(port);
+  // User-triggered rescan must always hit the wire — a prior 5xx/404 negative
+  // cache must not hide a server that has since finished loading.
+  const state = await probeOne(port, { bypassNegative: true });
   const without = lastStates.filter((s) => s.port !== port);
   lastStates = (
     isReportableLocalServer(state) ? [...without, state] : without

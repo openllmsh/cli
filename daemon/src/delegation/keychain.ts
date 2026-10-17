@@ -968,6 +968,12 @@ export const createKeychainRuntime = (
       readonly secret: string | null;
     }
   >();
+  /**
+   * Bumped on every {@link invalidateSecretCache} / runtime `clear()` so an
+   * in-flight `find-generic-password` that started before the invalidation
+   * cannot repopulate the cache with a pre-refresh token.
+   */
+  let secretCacheGeneration = 0;
 
   type TKeychainPayloads = {
     readonly values: ReadonlyArray<string>;
@@ -981,6 +987,7 @@ export const createKeychainRuntime = (
   >();
 
   const invalidateSecretCache = (home?: string): void => {
+    secretCacheGeneration += 1;
     if (home === undefined) {
       secretCache.clear();
       return;
@@ -2088,6 +2095,7 @@ export const createKeychainRuntime = (
     pendingUnlockSkip.clear();
     autoLockOffByKc.clear();
     dumpCache.clear();
+    secretCacheGeneration += 1;
     secretCache.clear();
     inFlightKeychainReads.clear();
     macosKeychainLane = Promise.resolve();
@@ -2277,6 +2285,7 @@ export const createKeychainRuntime = (
     const kc = loginKeychainPath(home);
     const mtimeMs = keychainMtimeMs(kc);
     const cacheKey = `${kc}\0${service}`;
+    const generation = secretCacheGeneration;
     const cached = secretCache.get(cacheKey);
     if (
       cached !== undefined &&
@@ -2299,7 +2308,12 @@ export const createKeychainRuntime = (
       // Timeouts / aborts are inconclusive — caching `null` would suppress a
       // real secret for the TTL after a slow or cancelled `security` spawn.
       // Conclusive nonzero exits (item-not-found, decode errors, …) stay cached.
-      if (!found.timedOut && !found.aborted) {
+      // Skip the write when the cache was invalidated while we were in flight.
+      if (
+        !found.timedOut &&
+        !found.aborted &&
+        generation === secretCacheGeneration
+      ) {
         secretCache.set(cacheKey, {
           mtimeMs,
           storedAtMs: Date.now(),
@@ -2311,11 +2325,13 @@ export const createKeychainRuntime = (
     const { stdout } = found;
     const trimmed = stdout.trim();
     const secret = trimmed.length > 0 ? trimmed : null;
-    secretCache.set(cacheKey, {
-      mtimeMs,
-      storedAtMs: Date.now(),
-      secret,
-    });
+    if (generation === secretCacheGeneration) {
+      secretCache.set(cacheKey, {
+        mtimeMs,
+        storedAtMs: Date.now(),
+        secret,
+      });
+    }
     return secret;
   };
 

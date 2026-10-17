@@ -10,8 +10,12 @@
  */
 
 import { bumpStoreIdentityEpoch } from "./delegation/observation-cache";
+import { markStatusDirty } from "./status-dirty";
 
 /** Credential store identity changed (login/logout/refresh/invalidate). */
 export const noteAuthStoreIdentityChange = (slug: string): void => {
   bumpStoreIdentityEpoch(slug);
+  // Ensure the dirty-gated watcher re-probes even when the caller does not
+  // push status immediately (external/store-only paths).
+  markStatusDirty("auth");
 };

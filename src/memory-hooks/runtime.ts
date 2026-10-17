@@ -211,11 +211,14 @@ export const runMemoryRecall = async (
     .replace(/^<user_query>\s*([\s\S]*?)\s*<\/user_query>$/, "$1")
     .trim();
   // Skip shell bangs, slash-commands, and trivial prompts (acks / one-word).
+  // The no-whitespace check is ASCII-only: CJK / Thai prompts routinely have
+  // no spaces between words, so a bare `!/\s/` would disable recall for them.
+  const asciiOnly = [...prompt].every((ch) => (ch.codePointAt(0) ?? 0) < 0x80);
   if (
     prompt.length < 6 ||
     prompt.startsWith("!") ||
     prompt.startsWith("/") ||
-    !/\s/.test(prompt)
+    (!/\s/.test(prompt) && prompt.length < 16 && asciiOnly)
   )
     return null;
   const config = cliConfig();
