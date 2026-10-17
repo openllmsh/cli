@@ -41,26 +41,19 @@ import {
   markHealthyBoot,
 } from "./boot-guard";
 import {
+  bootstrapBackoffConfig,
+  createBootstrapBackoff,
+} from "./bootstrap-backoff";
+import {
   drainDisposableChildren,
   sweepStaleChildrenOnBoot,
 } from "./child-supervisor";
 import { runCli } from "./cli";
 import { getCloudState, latestCliVersion, refreshBootstrap } from "./config";
-import {
-  pushStatusIfChanged,
-  startControlChannel,
-  stopControlChannel,
-} from "./control-channel";
 import { corsHeaders, isPreflight, preflightResponse } from "./cors";
 import { isSurvivableTransportError } from "./crash-policy";
 import { requireServiceApiKey } from "./credential-gate";
 import { getCliState, refreshCliState } from "./device-state";
-import {
-  handleDoctorLocal,
-  initDoctorCursorAtTail,
-  isDoctorLocalPath,
-  onDoctorListenAttempt,
-} from "./doctor-report";
 import {
   daemonEnv,
   daemonPort,
@@ -70,11 +63,9 @@ import {
   stateDir,
 } from "./env";
 import { buildHealth } from "./health";
-import { handleInference } from "./listener";
 import { handleLocalAuth } from "./local-auth";
-import { startLocalServerDiscovery } from "./local-servers";
 import { flushLogs, logError, logInfo, safeDiagnosticMessage } from "./logger";
-import { observeLoginModelReports } from "./model-report";
+import { startPlanCacheSweeper } from "./plan-cache";
 import { ptySessionsEnabled } from "./pty-sessions-pref";
 import type { TLocalRealtimeSocketData } from "./realtime-handler";
 import {
@@ -87,17 +78,13 @@ import { recordSandboxState, sandboxState } from "./sandbox/landlock";
 import { beginRequest, endRequest, trackBodyDone } from "./self-update";
 import { migrateLegacyInstall } from "./service";
 import { reconcileSessionHostsAtBoot } from "./session-host";
-import { convergeBinary, watchBinary } from "./updater";
+import { convergeBinary } from "./updater";
 import { enableUsagePersistence } from "./usage-cache";
 import { DAEMON_VERSION } from "./version";
 
-// Once the cloud snapshot is healthy, refresh every 5 minutes to stay in
-// lockstep with dashboard config changes.
-const BOOTSTRAP_TTL_MS = 5 * 60 * 1000;
-// Until it's healthy (no key yet / cloud still starting up in dev / key
-// just changed), retry quickly so the daemon picks up a freshly-set key
-// or a `next dev` that finished compiling — without waiting a full TTL.
-const BOOTSTRAP_RETRY_MS = 5 * 1000;
+// Bootstrap refresh cadence — healthy stays on the long TTL; unhealthy uses
+// exponential backoff with jitter (see bootstrap-backoff.ts / audit §2).
+const bootstrapBackoff = createBootstrapBackoff(bootstrapBackoffConfig);
 
 // Wall-clock at process start, for the `/status` uptime field. Module-load time
 // is "boot" for our purposes (the listener binds within the same tick).
@@ -107,7 +94,14 @@ export const main = async (): Promise<void> => {
   // `daemonPort()` loads the env file, so the kill-switch / opt-in vars are
   // resolved before the sandbox decision.
   const port = daemonPort();
-  initDoctorCursorAtTail();
+  // Doctor engine is lazy (§3) — loaded just before listen hooks need it,
+  // never at module-eval time.
+  type TDoctorMod = typeof import("./doctor-report");
+  let doctorMod: TDoctorMod | null = null;
+  const loadDoctor = async (): Promise<TDoctorMod> => {
+    if (doctorMod === null) doctorMod = await import("./doctor-report");
+    return doctorMod;
+  };
 
   // Crash-loop circuit breaker. The supervisor (systemd `Restart=always` /
   // launchd `KeepAlive`) relaunches us on every exit, so a persistent boot
@@ -239,19 +233,38 @@ export const main = async (): Promise<void> => {
   // the post-restart usage read is rate-limited (rather than showing an error
   // with nothing to fall back to). See `usage-cache.ts`.
   enableUsagePersistence(stateDir());
-  observeLoginModelReports();
-  // Probe well-known local model-server ports (Ollama, LM Studio, …) and
-  // keep the snapshot fresh for status + /v1/models fleet merge.
-  startLocalServerDiscovery();
+  // Model-report observers pull the auth/delegate graph — defer off cold boot (§3).
+  void import("./model-report")
+    .then((m) => {
+      m.observeLoginModelReports();
+    })
+    .catch((err) => logError("main", err));
+  startPlanCacheSweeper();
+
+  // Control channel (status watcher, relay) stays off the module-eval graph so
+  // listen can bind before delegates / keychain / native-runtime load (§3).
+  type TControlChannelMod = typeof import("./control-channel");
+  let controlChannel: TControlChannelMod | null = null;
+  const loadControlChannel = async (): Promise<TControlChannelMod> => {
+    if (controlChannel === null) {
+      controlChannel = await import("./control-channel");
+    }
+    return controlChannel;
+  };
+  const pushStatusIfChanged = async (
+    trigger?: import("./status-publish-coalesce").TStatusPublishTrigger,
+  ): Promise<void> => {
+    const cc = await loadControlChannel();
+    await cc.pushStatusIfChanged(trigger);
+  };
 
   // Pull the catalog + routing config. This NEVER throws — when there's
   // no API key yet (the daemon installs keyless; the dashboard sets the
   // key afterwards) or the cloud isn't reachable, it records the reason
   // in `cloudState` and the daemon comes up anyway, serving the control
-  // surface so the dashboard can set/fix the key. We poll on a SHORT
-  // interval until the snapshot is healthy, then relax to the TTL — so a
-  // just-set key (or a `next dev` that just finished booting) is picked
-  // up within seconds, not after a 5-minute wait.
+  // surface so the dashboard can set/fix the key. Unhealthy retries use
+  // exponential backoff (§2); `no_key` stays fast so a just-set key is
+  // picked up within seconds.
   const runCloudReadyWork = (): void => {
     if (getCloudState() === "ok") {
       // Eager manifest-driven device-state walk (`install.sh -s` per registry item)
@@ -264,10 +277,14 @@ export const main = async (): Promise<void> => {
         .catch((err) => logError("main", err));
     }
   };
+  const noteBootstrapOutcome = (): void => {
+    const state = getCloudState();
+    if (state === "ok") bootstrapBackoff.noteSuccess();
+    else if (state !== "no_key") bootstrapBackoff.noteFailure();
+  };
   const scheduleBootstrap = (): void => {
-    const delay =
-      getCloudState() === "ok" ? BOOTSTRAP_TTL_MS : BOOTSTRAP_RETRY_MS;
-    setTimeout(async () => {
+    const delay = bootstrapBackoff.nextDelayMs(getCloudState());
+    const timer = setTimeout(async () => {
       try {
         // A retry that flips cloud_state (e.g. a boot-time `unreachable`
         // recovering to `ok` once the network/cloud is up) must re-push the
@@ -275,6 +292,7 @@ export const main = async (): Promise<void> => {
         // the relay socket immediately on change (the channel's own watcher
         // would catch it within a couple seconds anyway).
         const changed = await refreshBootstrap();
+        noteBootstrapOutcome();
         if (changed) await pushStatusIfChanged("bootstrap");
         // A bootstrap that just recovered to `ok` (boot-time unreachable, or a
         // newly-set key) is the first chance to run the device-state walk.
@@ -283,44 +301,60 @@ export const main = async (): Promise<void> => {
             .then(() => pushStatusIfChanged("bootstrap"))
             .catch((err) => logError("main", err));
         }
-        // Periodic version check — picks up a release published while running.
-        // `.catch` each: a rejected converge here is fire-and-forget, so without
-        // it a non-transient throw becomes an unhandledRejection and (pre-C1)
-        // took the daemon down.
-        // Also notices a binary someone else swapped (the CLI's launch check)
-        // and restarts only if the daemon half changed.
-        void convergeBinary(latestCliVersion()).catch((err) =>
-          logError("main", err),
-        );
+        // Periodic version check — picks up a release published while running,
+        // and notices a binary someone else swapped (the CLI's launch check).
+        // Coalesced here (§5) — the former 30s watchBinary timer is gone.
+        if (getCloudState() === "ok") {
+          void convergeBinary(latestCliVersion()).catch((err) =>
+            logError("main", err),
+          );
+        }
       } catch (err) {
         // setTimeout doesn't observe the async callback's promise, so an
         // unguarded throw here is an unhandled rejection AND skips the reschedule
         // below — silently killing the bootstrap/self-update loop forever. Catch,
         // log, and always reschedule in `finally`.
         logError("main", err);
+        noteBootstrapOutcome();
       } finally {
         scheduleBootstrap();
       }
     }, delay);
+    timer.unref?.();
   };
   const startBootstrapLoop = (): void => {
     void refreshBootstrap()
       .then(() => {
+        noteBootstrapOutcome();
         // Converge the single binary to the cloud's pinned release (no-op
         // from source / when already current). It restarts the daemon only
         // when the daemon half changed, and only once `/v1` is idle.
         // `.catch` so a rejected converge can't escape this `.then` as an
-        // unhandledRejection.
-        void convergeBinary(latestCliVersion()).catch((err) =>
-          logError("main", err),
-        );
-        watchBinary();
+        // unhandledRejection. Gated on healthy cloud (§2 proposal).
+        if (getCloudState() === "ok") {
+          void convergeBinary(latestCliVersion()).catch((err) =>
+            logError("main", err),
+          );
+        }
         runCloudReadyWork();
       })
-      .catch((err) => logError("main", err))
+      .catch((err) => {
+        logError("main", err);
+        noteBootstrapOutcome();
+      })
       .finally(() => {
         scheduleBootstrap();
       });
+  };
+
+  // Lazy inference handler — keeps native-runtime / walker off the listen path (§3).
+  let handleInference: ((req: Request) => Promise<Response>) | null = null;
+  const inference = async (req: Request): Promise<Response> => {
+    if (handleInference === null) {
+      const mod = await import("./listener");
+      handleInference = mod.handleInference;
+    }
+    return handleInference(req);
   };
 
   // Graceful-exit beacon: flip the key offline immediately on Ctrl-C /
@@ -328,7 +362,7 @@ export const main = async (): Promise<void> => {
   let shuttingDown = false;
   const finishShutdown = async (signal: NodeJS.Signals): Promise<void> => {
     try {
-      await stopControlChannel();
+      if (controlChannel !== null) await controlChannel.stopControlChannel();
     } catch (err) {
       logError("control-channel", err);
     }
@@ -407,7 +441,7 @@ export const main = async (): Promise<void> => {
           beginRequest();
           let res: Response;
           try {
-            res = await handleInference(req);
+            res = await inference(req);
           } catch (err) {
             logError("inference", err, { path: url.pathname });
             // Carry CORS on the synthesized error too — a cross-origin dashboard
@@ -463,8 +497,11 @@ export const main = async (): Promise<void> => {
         // which `openllmd status` can't compute itself. Secret-free subset of
         // `computeStatus()`; see `health.ts`. Shares the loopback CORS grant.
         if (url.pathname === AUTH_LOCAL_PATH) return handleLocalAuth(req);
-        if (isDoctorLocalPath(url.pathname)) {
-          return handleDoctorLocal(req);
+        {
+          const doctor = await loadDoctor();
+          if (doctor.isDoctorLocalPath(url.pathname)) {
+            return doctor.handleDoctorLocal(req);
+          }
         }
         if (url.pathname === "/status") {
           if (isPreflight(req)) return preflightResponse(req);
@@ -517,16 +554,20 @@ export const main = async (): Promise<void> => {
       );
       logError("boot", err);
     }
-    onDoctorListenAttempt(false);
+    void loadDoctor().then((d) => d.onDoctorListenAttempt(false));
     exitAfterDisposableDrain(1);
     return;
   }
 
-  if (!onDoctorListenAttempt(true)) {
-    const msg =
-      "doctor capability could not be persisted; local doctor routes fail closed";
-    process.stderr.write(`openllmd: ${msg}\n`);
-    logError("boot", msg);
+  {
+    const doctor = await loadDoctor();
+    doctor.initDoctorCursorAtTail();
+    if (!doctor.onDoctorListenAttempt(true)) {
+      const msg =
+        "doctor capability could not be persisted; local doctor routes fail closed";
+      process.stderr.write(`openllmd: ${msg}\n`);
+      logError("boot", msg);
+    }
   }
 
   // Reap verified disposable children left by a prior daemon instance —
@@ -552,11 +593,20 @@ export const main = async (): Promise<void> => {
     logError("session", err);
   }
 
+  // Local discovery is demand-adjacent and not required to bind the port —
+  // load it after listen so its probe graph stays off the cold boot path (§3).
+  void import("./local-servers")
+    .then((m) => {
+      m.startLocalServerDiscovery();
+    })
+    .catch((err) => logError("main", err));
+
   // Dial OUT to the cloud relay over a WebSocket: it delivers dashboard
   // commands and marks this key's daemon "online" server-side — so the
   // dashboard never reaches loopback (no Private Network Access prompt). See
   // `docs/proposals/daemon-relay-websocket-push.md`.
-  startControlChannel();
+  const cc = await loadControlChannel();
+  cc.startControlChannel();
 
   // Bootstrap is intentionally last: the listener is already bound and relay
   // presence can only be published after it is routeable. Keep cloud-dependent

@@ -22,6 +22,7 @@ import {
 import { requestStatusPush } from "../auth-events";
 import { reportModels } from "../cloud-client";
 import { logWarn, safeDiagnosticMessage } from "../logger";
+import { markStatusDirty } from "../status-dirty";
 import { localKeyForPort } from "./keys";
 
 /** Connect / probe deadline. A local port answers fast or is gone. */
@@ -30,6 +31,13 @@ const MAX_BODY_BYTES = 1024 * 1024;
 const MAX_CONCURRENT_PROBES = 4;
 /** Periodic rescan cadence. */
 export const LOCAL_SCAN_INTERVAL_MS = 60_000;
+/**
+ * How long a port that answered with a non-LLM HTTP response (e.g. macOS
+ * AirPlay Receiver on :5000 → 403) stays off the probe list. Closed ports
+ * are cheap; this targets listeners that burn a full HTTP round-trip every
+ * minute without ever being model servers (audit §4).
+ */
+export const LOCAL_NEGATIVE_CACHE_MS = 10 * 60 * 1000;
 
 type TProbeResult = {
   readonly status: number;
@@ -282,27 +290,24 @@ const probeOne = async (port: number): Promise<TLocalServerState> => {
   const baseUrl = `http://127.0.0.1:${port}`;
   const key = localKeyForPort(port);
   const hasKey = key !== null;
+  const unreachable = (): TLocalServerState => ({
+    slug: localServerPresetByPort(port)?.slug ?? localPortSlug(port),
+    port,
+    base_url: baseUrl,
+    status: "unreachable",
+    has_key: hasKey,
+    models: [],
+  });
+  if (isNegativelyCached(port)) return unreachable();
   const probe = await probePort(port, key);
   if (probe === null) {
-    return {
-      slug: localServerPresetByPort(port)?.slug ?? localPortSlug(port),
-      port,
-      base_url: baseUrl,
-      status: "unreachable",
-      has_key: hasKey,
-      models: [],
-    };
+    // Closed / timed-out ports stay cheap on the next tick — no negative cache.
+    return unreachable();
   }
   if (probe.status >= 300 && probe.status < 400) {
     // Redirect refused — treat as unreachable (SSRF hardening).
-    return {
-      slug: localServerPresetByPort(port)?.slug ?? localPortSlug(port),
-      port,
-      base_url: baseUrl,
-      status: "unreachable",
-      has_key: hasKey,
-      models: [],
-    };
+    noteNonApiListener(port);
+    return unreachable();
   }
   if (probe.status === 401 || probe.status === 403) {
     if (
@@ -313,15 +318,10 @@ const probeOne = async (port: number): Promise<TLocalServerState> => {
       )
     ) {
       // Unrelated listener (AirPlay, printers, …) — not a model server.
-      return {
-        slug: localServerPresetByPort(port)?.slug ?? localPortSlug(port),
-        port,
-        base_url: baseUrl,
-        status: "unreachable",
-        has_key: hasKey,
-        models: [],
-      };
+      noteNonApiListener(port);
+      return unreachable();
     }
+    clearNegative(port);
     return {
       slug: localServerPresetByPort(port)?.slug ?? localPortSlug(port),
       port,
@@ -332,27 +332,16 @@ const probeOne = async (port: number): Promise<TLocalServerState> => {
     };
   }
   if (probe.status < 200 || probe.status > 299 || probe.text === null) {
-    return {
-      slug: localServerPresetByPort(port)?.slug ?? localPortSlug(port),
-      port,
-      base_url: baseUrl,
-      status: "unreachable",
-      has_key: hasKey,
-      models: [],
-    };
+    noteNonApiListener(port);
+    return unreachable();
   }
   const models = parseModels(probe.text);
   if (models === null) {
     // HTTP 200 that is not an OpenAI-compatible models listing.
-    return {
-      slug: localServerPresetByPort(port)?.slug ?? localPortSlug(port),
-      port,
-      base_url: baseUrl,
-      status: "unreachable",
-      has_key: hasKey,
-      models: [],
-    };
+    noteNonApiListener(port);
+    return unreachable();
   }
+  clearNegative(port);
   const slug = fingerprintSlug(port, probe.headers, models);
   return {
     slug,
@@ -389,6 +378,42 @@ let lastStates: ReadonlyArray<TLocalServerState> = [];
 let inFlight: Promise<ReadonlyArray<TLocalServerState>> | null = null;
 let scanTimer: ReturnType<typeof setInterval> | null = null;
 let started = false;
+
+/**
+ * Ports that repeatedly look like non-API listeners. Keyed by port; value is
+ * the earliest time a full probe may run again. Cleared when a probe becomes
+ * reportable (`ok` / `needs_key`) or on discovery stop.
+ */
+const negativeUntil = new Map<number, number>();
+
+/** Test / diagnostics — current negative-cache deadlines. */
+export const localNegativeCacheSnapshot = (): ReadonlyMap<number, number> =>
+  new Map(negativeUntil);
+
+export const clearLocalNegativeCache = (): void => {
+  negativeUntil.clear();
+};
+
+const noteNonApiListener = (port: number, nowMs: number = Date.now()): void => {
+  negativeUntil.set(port, nowMs + LOCAL_NEGATIVE_CACHE_MS);
+};
+
+const clearNegative = (port: number): void => {
+  negativeUntil.delete(port);
+};
+
+const isNegativelyCached = (
+  port: number,
+  nowMs: number = Date.now(),
+): boolean => {
+  const until = negativeUntil.get(port);
+  if (until === undefined) return false;
+  if (until <= nowMs) {
+    negativeUntil.delete(port);
+    return false;
+  }
+  return true;
+};
 
 /**
  * Merge two discovery rows that share a provider slug (same server TYPE on
@@ -608,6 +633,7 @@ export const rescanLocalServers = async (opts?: {
     const changed = JSON.stringify(next) !== JSON.stringify(lastStates);
     lastStates = next;
     if (changed) {
+      markStatusDirty("local-servers");
       requestStatusPush();
     }
     // Report when the snapshot changed OR a prior report is still dirty
@@ -635,6 +661,7 @@ export const rescanLocalPort = async (
   lastStates = (
     isReportableLocalServer(state) ? [...without, state] : without
   ).sort((a, b) => a.port - b.port);
+  markStatusDirty("local-servers");
   requestStatusPush();
   void pushLocalModels();
   return state;
@@ -676,6 +703,7 @@ export const stopLocalServerDiscovery = (): void => {
   localReportDirty = true;
   reportQueued = false;
   reportInFlight = null;
+  clearLocalNegativeCache();
 };
 
 /**

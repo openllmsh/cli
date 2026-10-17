@@ -84,6 +84,11 @@ import {
 } from "./rtc-host";
 import { scheduleDaemonCommand } from "./scheduled-command";
 import { computeStatusFresh, setStatusPublishQueueSnapshot } from "./status";
+import {
+  markStatusDirty,
+  STATUS_WATCH_POLL_MS,
+  statusWatcherGate,
+} from "./status-dirty";
 import type { TStatusPublishTrigger } from "./status-publish-coalesce";
 import { createStatusPublishCoalescer } from "./status-publish-coalesce";
 import { createSupersedeBackoff, isSupersededClose } from "./supersede-backoff";
@@ -211,7 +216,12 @@ export const planWatcherSnapshot = (
   return { key, skipSerialize: false };
 };
 
-export const WATCH_MS = 15_000;
+/**
+ * Watcher poll interval. Ticks are cheap: they only run a full status compute
+ * when {@link statusWatcherGate} says so (dirty event or slow heartbeat). See
+ * `status-dirty.ts` and docs/audit/cli-daemon-performance/04-daemon-lifecycle.md §1.
+ */
+export const WATCH_MS = STATUS_WATCH_POLL_MS;
 // Heartbeat: the daemon sends its OWN `ping` on this interval and arms the
 // liveness watchdog off the relay's `pong` (not off arbitrary inbound frames),
 // so it detects a dead daemon→relay direction itself and reconnects — rather
@@ -294,6 +304,12 @@ const sleep = (ms: number): Promise<void> =>
 
 let ws: ReconnectingWebSocket | null = null;
 let watchTimer: ReturnType<typeof setInterval> | null = null;
+/**
+ * Set for the next watcher-triggered compute when the tick is heartbeat-only
+ * (nothing marked dirty). Cleared as soon as `computeFresh` observes it.
+ * Idle hosts must not re-enter keychain / vendor auth observe (§6).
+ */
+let watcherSkipProviderProbes = false;
 let migrationTimer: ReturnType<typeof setTimeout> | null = null;
 let migrationInFlight: Promise<void> | null = null;
 let migrationEnabled = false;
@@ -350,9 +366,13 @@ const statusPublishCoalescer = createStatusPublishCoalescer({
   now: () => Date.now(),
   epoch: () => connectionGeneration,
   computeFresh: async (trigger) => {
+    const skipProviderProbes =
+      trigger === "watcher" && watcherSkipProviderProbes;
+    watcherSkipProviderProbes = false;
     const status = await computeStatusFresh({
       trigger,
       ...(trigger === "late-probe" ? { reuseSettledSlugProbes: true } : {}),
+      ...(skipProviderProbes ? { skipProviderProbes: true } : {}),
     });
     return { status, fingerprint: statusChangeKey(status) };
   },
@@ -412,8 +432,11 @@ const statusPublishCoalescer = createStatusPublishCoalescer({
   },
 });
 /** Binary WebSocket frames can arrive as a mix of Blobs and ArrayBuffers. Blob
- * conversion is async, so queue all binary delivery to preserve wire order. */
+ * conversion is async, so queue Blob delivery behind this tail to preserve wire
+ * order. ArrayBuffer/Uint8Array take a sync fast path when the queue is empty. */
 let binaryFrameTail: Promise<void> = Promise.resolve();
+/** Depth of async binary frames still awaiting conversion/delivery. */
+let binaryFrameQueueDepth = 0;
 /** Whether THIS connection's `hello` has been sent. The relay 4001-closes any
  *  connection whose FIRST frame isn't a hello, and an out-of-band status push
  *  (the bootstrap scheduler fires `pushStatusIfChanged` the moment
@@ -488,7 +511,9 @@ export const handleControlChannelHeartbeatSilent = (): void => {
 const sendBytes = (bytes: Uint8Array): void => {
   if (ws === null || ws.readyState !== ws.OPEN || !helloSent) return;
   try {
-    ws.send(bytes.slice());
+    // Envelope buffers are freshly allocated by mux-host; no defensive copy.
+    // Cast past PartySocket's BufferSource ArrayBuffer pin (same as origin).
+    ws.send(bytes as unknown as ArrayBuffer);
   } catch {
     // best-effort while the socket races a close
   }
@@ -637,12 +662,17 @@ const observeNotificationTransitions = (
 const pushStatus = async (
   active?: boolean,
   trigger: TStatusPublishTrigger = "welcome",
-): Promise<void> =>
-  enqueueStatusPublish({
-    skipUnchanged: false,
-    active,
-    trigger,
-  });
+): Promise<void> => {
+  try {
+    await enqueueStatusPublish({
+      skipUnchanged: false,
+      active,
+      trigger,
+    });
+  } finally {
+    statusWatcherGate.noteComputed();
+  }
+};
 
 /** Throttle for `notePresenceActivity` — traffic-driven presence refreshes are
  *  a liveness signal, not telemetry, so one per minute is ample (the routing
@@ -665,6 +695,7 @@ export const notePresenceActivity = (): void => {
   const now = Date.now();
   if (now - lastPresenceRefreshAt < PRESENCE_REFRESH_MS) return;
   lastPresenceRefreshAt = now;
+  markStatusDirty("presence");
   void pushStatus(undefined, "presence").catch(() => {
     // best-effort: presence also self-heals on the relay keepalive
   });
@@ -675,16 +706,38 @@ export const notePresenceActivity = (): void => {
  *  so the bootstrap scheduler can push a `cloud_state` change immediately. */
 export const pushStatusIfChanged = async (
   trigger: TStatusPublishTrigger = "watcher",
-): Promise<void> =>
-  enqueueStatusPublish({
-    skipUnchanged: true,
-    trigger,
-  });
+): Promise<void> => {
+  if (trigger !== "watcher") {
+    markStatusDirty(
+      trigger === "bootstrap"
+        ? "bootstrap"
+        : trigger === "presence"
+          ? "presence"
+          : trigger === "command" || trigger === "auth-sink"
+            ? "command"
+            : "manual",
+    );
+  }
+  try {
+    await enqueueStatusPublish({
+      skipUnchanged: true,
+      trigger,
+    });
+  } finally {
+    statusWatcherGate.noteComputed();
+  }
+};
 
 const startWatcher = (): void => {
   if (watchTimer !== null) return;
   watchTimer = setInterval(() => {
-    logKeychainWatcherTick();
+    const decision = statusWatcherGate.consumeWatcherCompute();
+    if (!decision.run) return;
+    // Idle ticks must not touch keychain / auth machinery (§6). Only a dirty
+    // event (or the slow heartbeat) may enter the status path; log the
+    // keychain watcher tick solely then. Heartbeat-only skips provider probes.
+    if (!decision.heartbeatOnly) logKeychainWatcherTick();
+    watcherSkipProviderProbes = decision.heartbeatOnly;
     pushStatusIfChanged().catch(() => {
       // best-effort: a failed snapshot push retries on the next tick
     });
@@ -1171,6 +1224,7 @@ const enqueueBinaryFrame = (
   generation: number,
   read: () => Promise<Uint8Array>,
 ): void => {
+  binaryFrameQueueDepth += 1;
   binaryFrameTail = binaryFrameTail
     .then(async () => {
       const bytes = await read();
@@ -1186,7 +1240,24 @@ const enqueueBinaryFrame = (
           err: err instanceof Error ? err.message : String(err),
         },
       );
+    })
+    .finally(() => {
+      // Dropped on reconnect/stop when generation advances; only the live
+      // generation owns the depth counter.
+      if (generation === connectionGeneration) {
+        binaryFrameQueueDepth = Math.max(0, binaryFrameQueueDepth - 1);
+      }
     });
+};
+
+/** Sync demux when no Blob conversion is in flight — preserves order vs the queue. */
+const deliverBinaryFrameSync = (
+  generation: number,
+  bytes: Uint8Array,
+): void => {
+  if (generation !== connectionGeneration) return;
+  if (ws === null || ws.readyState !== ws.OPEN) return;
+  muxHostOnBytes(bytes);
 };
 
 const onMessage = (data: unknown): void => {
@@ -1194,15 +1265,20 @@ const onMessage = (data: unknown): void => {
   // a later connection after reconnect/reset.
   const generation = connectionGeneration;
   if (data instanceof ArrayBuffer) {
-    enqueueBinaryFrame(generation, async () => new Uint8Array(data));
+    const bytes = new Uint8Array(data);
+    if (binaryFrameQueueDepth === 0) deliverBinaryFrameSync(generation, bytes);
+    else enqueueBinaryFrame(generation, async () => bytes);
     return;
   }
   if (data instanceof Uint8Array) {
-    enqueueBinaryFrame(generation, async () => data);
+    if (binaryFrameQueueDepth === 0) deliverBinaryFrameSync(generation, data);
+    else enqueueBinaryFrame(generation, async () => data);
     return;
   }
   if (typeof Buffer !== "undefined" && Buffer.isBuffer(data)) {
-    enqueueBinaryFrame(generation, async () => new Uint8Array(data));
+    const bytes = new Uint8Array(data);
+    if (binaryFrameQueueDepth === 0) deliverBinaryFrameSync(generation, bytes);
+    else enqueueBinaryFrame(generation, async () => bytes);
     return;
   }
   // partysocket defaults binaryType to "blob". We force "arraybuffer" on
@@ -1381,6 +1457,7 @@ export const startControlChannel = (options?: TControlChannelOptions): void => {
   setAuthSink({
     emit: emitAuthFrame,
     pushStatus: () => {
+      markStatusDirty("auth");
       void pushStatus(undefined, "auth-sink");
     },
   });
@@ -1433,6 +1510,7 @@ export const startControlChannel = (options?: TControlChannelOptions): void => {
     // Same for binary frames: a late Blob conversion from the prior socket
     // must not sit ahead of this connection's first mux bytes.
     binaryFrameTail = Promise.resolve();
+    binaryFrameQueueDepth = 0;
     probesArmed = false;
     pendingWelcomeStatus = false;
     // Do not block registration on provider/CLI probes. The relay needs identity
@@ -1532,6 +1610,7 @@ export const stopControlChannel = async (): Promise<void> => {
   supportsOrderedStatus = null;
   statusSeq = 0;
   binaryFrameTail = Promise.resolve();
+  binaryFrameQueueDepth = 0;
   helloSent = false;
   hasConnected = false;
   lastErrorReason = "";

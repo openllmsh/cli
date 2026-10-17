@@ -673,6 +673,12 @@ export type TComputeStatusFreshOptions = {
   readonly reuseSettledSlugProbes?: boolean;
   /** Publication trigger — command/auth bypass observer backoff. */
   readonly trigger?: TStatusPublishTrigger;
+  /**
+   * Heartbeat-only watcher ticks: rebuild provider rows from last-known
+   * without calling `delegate.status()` (no keychain / vendor auth observe).
+   * Demand-driven and dirty ticks omit this.
+   */
+  readonly skipProviderProbes?: boolean;
 };
 
 /**
@@ -689,6 +695,7 @@ const computeStatusFreshInner = async (
   options?: TComputeStatusFreshOptions,
 ): Promise<TDaemonStatus> => {
   const force = forceProbeTrigger(options?.trigger);
+  const skipProviderProbes = options?.skipProviderProbes === true;
   const connections = await Promise.all(
     Object.values(DELEGATES).map(async (d) => {
       try {
@@ -700,6 +707,23 @@ const computeStatusFreshInner = async (
               attachUpstreamAuthCooldown(d.slug, seeded),
             );
           }
+        }
+        if (skipProviderProbes) {
+          const last = daemonStatusState().lastKnownConnections.get(d.slug);
+          if (last !== undefined) {
+            let published = attachUpstreamAuthCooldown(d.slug, last);
+            if (
+              normalizeProviderConnection(published).observation === "connected"
+            ) {
+              const usage = peekUsage(d.slug, published.account_hash);
+              if (usage !== null) published = { ...published, usage };
+            }
+            return publishConnection(published);
+          }
+          // No last-known yet — honest unknown without spawning a probe.
+          return publishConnection(
+            attachUpstreamAuthCooldown(d.slug, statusFailure(d.slug)),
+          );
         }
         const raw = await boundedDelegateStatus(
           d.slug,

@@ -302,24 +302,14 @@ export const createBinaryUpdater = (): TBinaryUpdater => {
     }
   };
 
-  const WATCH_INTERVAL_MS = 30_000;
-
   /**
-   * Notice a binary someone else swapped (the CLI's launch check, the
-   * installer) between bootstrap ticks. A stat every
-   * {@link WATCH_INTERVAL_MS}; only a changed signature runs the fingerprint
-   * probe. Unref'd so it never holds the process open.
+   * Formerly a 30s signature poll. Coalesced into the bootstrap tick
+   * (`main.ts` → `convergeBinary(latestCliVersion())`) so idle hosts do not
+   * pay an extra ~120 wakeups/hour (audit §5). Kept as a no-op export so
+   * callers / tests that still invoke it stay safe.
    */
   const watchBinary = (): void => {
-    if (DAEMON_VERSION === "0.0.0-dev") return;
-    let last = binarySignature(updateTarget());
-    const timer = setInterval(() => {
-      const now = binarySignature(updateTarget());
-      if (now === last) return;
-      last = now;
-      void convergeBinary(null).catch((err) => logError("update", err));
-    }, WATCH_INTERVAL_MS);
-    timer.unref();
+    // no-op — bootstrap loop owns binary convergence
   };
 
   return { convergeBinary, watchBinary };
