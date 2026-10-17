@@ -40,7 +40,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { TCliProvider } from "../cli-paths";
 import { cliBin, cliEnv, cliRoot } from "../cli-paths";
-import { logDebug, logInfo } from "../logger";
+import { logDebug, logInfo, logWarn } from "../logger";
 import { sandboxSpawnArgs } from "../sandbox/exec";
 import { unwrapKeychainSpawn } from "../sandbox/policy";
 import { isOtherKimiRegionOrigin, kimiEndpoints } from "./kimi-region";
@@ -61,6 +61,11 @@ export type TAuthConfig = {
    *  handrolled transport for bridge parity (see the bright-line note above).
    *  Absent for every other provider. */
   readonly identity_headers?: Readonly<Record<string, string>>;
+  /** Negative cache: the CLI version + epoch ms of the last capture that
+   *  yielded no request. Within the TTL for the same version, a hop serves the
+   *  stored/default URL instead of re-running a capture known to fail. */
+  readonly capture_failed_version?: string;
+  readonly capture_failed_at_ms?: number;
 };
 
 /** Re-capture / re-extract once older than this, even when neither the CLI
@@ -167,11 +172,13 @@ const CAPTURE: Readonly<Record<TCliProvider, TCaptureSpec>> = {
     captureIdentity: true,
   },
   chatgpt: {
-    // NOTE: codex's `/responses` endpoint genuinely DRIFTS on CLI updates
-    // (unlike claude's stable `/v1/messages`), so we can't set
-    // `liveCapture: false` here — the capture must keep running to track the
-    // real endpoint. Codex's analogous refresh-token rotation race is instead
-    // narrowed by the empty-token guard + atomic `auth.json` write in chatgpt.ts.
+    // `liveCapture: false`: every capture since the sidecar existed returned
+    // this default, and codex-cli 0.159 broke the capture outright (its
+    // workspace-routing discovery fails against the recorder, retries ~12s and
+    // exits without ever sending `/responses`). The failed capture re-ran on
+    // EVERY hop, adding 15-20s to each ChatGPT request (p50 2.6s → 22s,
+    // 2026-10). Hermes Agent likewise hardcodes `chatgpt.com/backend-api/codex`
+    // (`agent/codex_headers.py`). A previously captured URL is still served.
     origin: "https://chatgpt.com",
     path: "/backend-api/codex/responses",
     // Codex fires backend-api preamble (`/ps/plugins/installed`, `/wham/apps`,
@@ -198,6 +205,7 @@ const CAPTURE: Readonly<Record<TCliProvider, TCaptureSpec>> = {
       "ping",
     ],
     env: () => ({}),
+    liveCapture: false,
   },
   kimi_code: {
     // Region-dependent (global `api.kimi.ai` by default) — see `kimi-region.ts`.
@@ -543,8 +551,17 @@ const runCaptureOnce = (
   const spec = CAPTURE[provider];
   const run = (async () => {
     const captured = await captureInferenceRequest(provider);
-    if (captured === null) return null;
     const ver = await cliVersion(cliBin(provider), cliEnv(provider));
+    if (captured === null) {
+      // Remember the failure so the next hops don't each pay the capture
+      // timeout again for the same CLI version.
+      await patchConfig(provider, {
+        capture_failed_version: ver ?? "",
+        capture_failed_at_ms: Date.now(),
+      });
+      logWarn("auth-config", `${provider} upstream capture yielded no request`);
+      return null;
+    }
     await patchConfig(provider, {
       // `liveCapture: false` providers keep their URL policy (serve the
       // stable default) — a run for them exists for IDENTITY only, so no
@@ -582,6 +599,15 @@ const captureFresh = (cfg: TAuthConfig, cliVer: string | null): boolean =>
 const urlFresh = (cfg: TAuthConfig, cliVer: string | null): boolean =>
   cfg.upstream_url !== undefined && captureFresh(cfg, cliVer);
 
+/** A capture already failed for this CLI version within the TTL. */
+const captureRecentlyFailed = (
+  cfg: TAuthConfig,
+  cliVer: string | null,
+): boolean =>
+  cfg.capture_failed_version === (cliVer ?? "") &&
+  typeof cfg.capture_failed_at_ms === "number" &&
+  Date.now() - cfg.capture_failed_at_ms < TTL_MS;
+
 /**
  * Ensure (and return) the captured upstream URL for a provider: the stored URL
  * if fresh (version match AND within TTL AND a valid inference path), else a
@@ -614,13 +640,25 @@ const ensureUpstreamUrl = async (
   // Hard read-only: wins over `force`. Auto discoverModels / usage / a
   // logged-out box must not spawn `--version` or recapture.
   if (opts?.captureIfMissing === false) return stored;
-  if (opts?.force !== true && stored !== null) {
+  if (opts?.force !== true) {
     const ver = await cliVersion(cliBin(provider), cliEnv(provider));
-    if (urlFresh(cfg, ver)) return stored;
+    if (stored !== null && urlFresh(cfg, ver)) return stored;
+    if (captureRecentlyFailed(cfg, ver)) return stored;
+    if (stored !== null) {
+      // Stale but servable: never make the request wait on a capture (a CLI
+      // that hangs costs the full CAPTURE_TIMEOUT_MS). Refresh off-path.
+      void runCaptureOnce(provider).catch(() => null);
+      return stored;
+    }
   }
   const captured = await runCaptureOnce(provider);
   return captured?.url ?? stored;
 };
+
+/** The in-flight capture for a provider, if any (tests settle background runs). */
+export const pendingUpstreamCapture = (
+  provider: TCliProvider,
+): Promise<unknown> => captureInFlight.get(provider) ?? Promise.resolve();
 
 /**
  * The isolated CLI's own identity headers for a HANDROLLED hop — the stored
