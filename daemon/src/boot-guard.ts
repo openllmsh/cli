@@ -78,7 +78,7 @@ export const guardCrashLoop = (): void => {
   if (!park) return;
   logError(
     "boot-guard",
-    safeDiagnosticMessage`Crash loop detected; disabling self-restore.`,
+    safeDiagnosticMessage`Crash loop detected; disabling self-restore. Fix the cause, then run openllmd restart.`,
     {
       restarts: recent.length,
       windowSec: Math.round(CRASH_WINDOW_MS / 1000),
