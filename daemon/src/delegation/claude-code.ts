@@ -884,7 +884,7 @@ const device = makePasteBackDevice({
     if ((await credentialRefreshable()) === false) {
       logWarn(
         "claude-code",
-        safeDiagnosticMessage`headless login landed a credential with NO refresh token — it cannot auto-refresh (re-login will be needed at access-token expiry)`,
+        safeDiagnosticMessage`Headless login produced no refresh capability; re-login will be needed at access expiry.`,
       );
     }
     refreshConfig();

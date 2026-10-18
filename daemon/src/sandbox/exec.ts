@@ -168,7 +168,8 @@ export const runSandboxExec = async (
     process.stderr.write(
       `openllmd --sandbox-exec: sandbox not applied (${state}) — running unconfined\n`,
     );
-    logWarn("sandbox", `--sandbox-exec apply degraded (${state})`, {
+    logWarn("sandbox", "Sandbox-exec apply degraded.", {
+      state,
       command: tail[0] ?? "?",
     });
   }
@@ -216,7 +217,7 @@ export const runSandboxExec = async (
     // `128 + N`, not a signalCode — so `logIfKilled` can't fire there. Log
     // the kill HERE (the shim shares the daemon's log file), preserving the
     // "child killed by a signal — likely a sandbox denial" breadcrumb.
-    logWarn("sandbox", `--sandbox-exec child killed by ${proc.signalCode}`, {
+    logWarn("sandbox", "Sandbox-exec child killed by signal.", {
       command: tail[0] ?? "?",
       signal: proc.signalCode,
     });
@@ -259,7 +260,7 @@ export const probeSandboxCapability = async (): Promise<TSandboxState> => {
   if (process.env.OPENLLM_DAEMON_NO_SANDBOX === "1") {
     logWarn(
       "sandbox",
-      safeDiagnosticMessage`OPENLLM_DAEMON_NO_SANDBOX=1 — children run unconfined`,
+      safeDiagnosticMessage`Sandbox disabled by environment; children run unconfined.`,
     );
     return "off";
   }

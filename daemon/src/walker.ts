@@ -3613,10 +3613,10 @@ export const runCountTokens = async (args: TWalkArgs): Promise<Response> => {
     reason: string | null,
   ): Promise<Response> => {
     if (reason !== null) {
-      logWarn(
-        "count-tokens",
-        `serving local estimate for ${args.endpoint}: ${reason}`,
-      );
+      logWarn("count-tokens", "Serving local estimate.", {
+        endpoint: args.endpoint,
+        reason,
+      });
     }
     return new Response(
       JSON.stringify({

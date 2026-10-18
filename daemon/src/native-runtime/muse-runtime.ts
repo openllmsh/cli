@@ -1143,7 +1143,7 @@ export const rememberMuseModelsFromSession = async (
   } catch (error) {
     logWarn(
       "native-runtime",
-      safeDiagnosticMessage`muse model/list failed; skipping observation`,
+      safeDiagnosticMessage`Muse model list failed; skipping observation.`,
       {
         error: error instanceof Error ? error.message : String(error),
       },
@@ -1271,7 +1271,7 @@ export const listMuseModelsDemand = async (
   } catch (error) {
     logWarn(
       "native-runtime",
-      safeDiagnosticMessage`muse demand model/list failed`,
+      safeDiagnosticMessage`Muse demand model list failed.`,
       {
         error: error instanceof Error ? error.message : String(error),
       },

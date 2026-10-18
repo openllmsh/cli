@@ -49,6 +49,9 @@ export const hardenMacBinary = (
       stdio: "ignore",
     });
   } catch (err) {
-    logWarn("harden", `could not codesign binary ${path}: ${String(err)}`);
+    logWarn("harden", "Could not codesign the updated binary.", {
+      path,
+      err: String(err),
+    });
   }
 };

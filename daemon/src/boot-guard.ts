@@ -20,7 +20,7 @@
  * boots anyway and, on Linux, systemd's start-limit still bounds the churn.
  */
 import { isDevMode } from "./env";
-import { logError, logWarn } from "./logger";
+import { logError, logWarn, safeDiagnosticMessage } from "./logger";
 import { serviceStop } from "./service";
 import {
   clearRtcRun,
@@ -78,9 +78,11 @@ export const guardCrashLoop = (): void => {
   if (!park) return;
   logError(
     "boot-guard",
-    `crash loop detected — ${recent.length} restarts within ${Math.round(
-      CRASH_WINDOW_MS / 1000,
-    )}s. Disabling self-restore so it stops thrashing; fix the cause (see the error above) then run \`openllmd restart\`.`,
+    safeDiagnosticMessage`Crash loop detected; disabling self-restore.`,
+    {
+      restarts: recent.length,
+      windowSec: Math.round(CRASH_WINDOW_MS / 1000),
+    },
   );
   try {
     // Disable self-restore (launchctl disable+bootout / systemctl --user
@@ -140,11 +142,12 @@ export const guardRtcCircuitBreaker = (): void => {
     process.env.OPENLLM_RTC_DISABLE = "1";
     logWarn(
       "rtc-breaker",
-      `RTC withdrawn: ${RTC_CRASH_LIMIT}+ native crashes with RTC live within ` +
-        `${Math.round(RTC_CRASH_WINDOW_MS / 60000)}m. Falling back to relay-mux ` +
-        `(one hop slower, fully functional). Auto-clears on the next daemon ` +
-        `upgrade or once the crashes age out.`,
-      { crashes: decision.nextState.rtcCrashes?.length ?? 0 },
+      "RTC withdrawn after repeated native crashes; falling back to relay mux.",
+      {
+        crashes: decision.nextState.rtcCrashes?.length ?? 0,
+        crashLimit: RTC_CRASH_LIMIT,
+        windowMin: Math.round(RTC_CRASH_WINDOW_MS / 60000),
+      },
     );
   }
   // Persist the tally + a sentinel that reflects the EFFECTIVE RTC state (honours

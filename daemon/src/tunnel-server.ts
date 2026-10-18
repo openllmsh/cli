@@ -193,10 +193,9 @@ export const createMuxTunnelServer =
     } catch (error) {
       complete();
       if (!signal.aborted) {
-        logWarn(
-          "tunnel",
-          `mux dispatch failed: ${error instanceof Error ? error.message : String(error)}`,
-        );
+        logWarn("tunnel", "Mux dispatch failed.", {
+          error: error instanceof Error ? error.message : String(error),
+        });
       }
       throw error;
     }

@@ -527,7 +527,8 @@ const boundedDelegateStatus = async (
     ).then(
       (conn) => conn,
       (err: unknown) => {
-        logWarn("status", `status() failed for ${slug}`, {
+        logWarn("status", "Provider status probe failed.", {
+          slug,
           err: err instanceof Error ? err.message : String(err),
         });
         return statusFailure(slug);
@@ -770,7 +771,8 @@ const computeStatusFreshInner = async (
         // One provider's status read must NOT sink the whole snapshot (every
         // card would vanish + the push would fail). Surface a safe placeholder;
         // the next push self-corrects once the provider recovers.
-        logWarn("status", `status() failed for ${d.slug}`, {
+        logWarn("status", "Provider status probe failed.", {
+          slug: d.slug,
           err: err instanceof Error ? err.message : String(err),
         });
         return publishConnection(

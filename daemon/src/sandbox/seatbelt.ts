@@ -243,10 +243,10 @@ export const applySeatbelt = (homeOverride?: string): TSandboxState => {
         }
         lib.symbols.sandbox_free_error(errPtr);
       }
-      logWarn(
-        "sandbox",
-        `seatbelt sandbox_init failed (${rc}): ${msg} — running unconfined`,
-      );
+      logWarn("sandbox", "Seatbelt sandbox init failed; running unconfined.", {
+        rc,
+        msg,
+      });
       cachedState = "error";
       return cachedState;
     }
@@ -259,10 +259,9 @@ export const applySeatbelt = (homeOverride?: string): TSandboxState => {
     cachedState = "enforced";
     return cachedState;
   } catch (err) {
-    logWarn(
-      "sandbox",
-      `seatbelt setup threw (${err instanceof Error ? err.message : String(err)}) — running unconfined`,
-    );
+    logWarn("sandbox", "Seatbelt setup threw; running unconfined.", {
+      err: err instanceof Error ? err.message : String(err),
+    });
     cachedState = "error";
     return cachedState;
   }

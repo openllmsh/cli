@@ -1350,7 +1350,12 @@ const channelUrl = async (): Promise<string> => {
       deviceLimitBackoff.noteDenied();
       logWarn(
         "control-channel",
-        `device limit reached (${err.deviceCount}/${err.deviceCap} active devices) — standing down ~${Math.round(deviceLimitBackoff.standDownMs() / 1000)}s before retry`,
+        "Device limit reached; standing down before retry.",
+        {
+          deviceCount: err.deviceCount,
+          deviceCap: err.deviceCap,
+          standDownSec: Math.round(deviceLimitBackoff.standDownMs() / 1000),
+        },
       );
     }
     throw err;
@@ -1568,7 +1573,11 @@ export const startControlChannel = (options?: TControlChannelOptions): void => {
     if (isSupersededClose(ev.code, closeReason)) {
       logWarn(
         "control-channel",
-        `another OpenLLM daemon is connected with this API key and took over the relay slot; standing down ~${Math.round(supersedeBackoff.standDownMs() / 1000)}s before re-dialing (run one daemon per key, or mint a separate key per device)`,
+        "Another daemon took over the relay slot; standing down before re-dialing.",
+        {
+          standDownSec: Math.round(supersedeBackoff.standDownMs() / 1000),
+          hint: "run one daemon per key, or mint a separate key per device",
+        },
       );
       return;
     }

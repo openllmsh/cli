@@ -199,7 +199,7 @@ export const createChildSupervisor = (
     if (outcome === "reap_unconfirmed") {
       logWarn(
         "child-supervisor",
-        safeDiagnosticMessage`process group unreaped after bounded TERM/KILL`,
+        safeDiagnosticMessage`Process group not reaped after TERM and KILL.`,
         {
           pid: tracked.handle.pid,
           pgid: tracked.handle.pgid,

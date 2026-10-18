@@ -622,7 +622,8 @@ const persistCapture = async (
     await patchConfig(provider, patch);
   } catch (error) {
     captureAttemptMemo.set(provider, { version: ver ?? "", atMs: Date.now() });
-    logWarn("auth-config", `${provider} capture result not persisted`, {
+    logWarn("auth-config", "Provider capture outcome not persisted.", {
+      provider,
       error: error instanceof Error ? error.message : String(error),
     });
   }
@@ -659,7 +660,9 @@ const runCaptureOnce = (
         capture_failed_version: ver ?? "",
         capture_failed_at_ms: Date.now(),
       });
-      logWarn("auth-config", `${provider} upstream capture yielded no request`);
+      logWarn("auth-config", "Provider upstream capture yielded no request.", {
+        provider,
+      });
       return null;
     }
     await persistCapture(provider, ver, {

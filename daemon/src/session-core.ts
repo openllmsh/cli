@@ -385,10 +385,9 @@ export const pollSessionActivity = async (
   try {
     busyPids = await probeActivity(pids);
   } catch (error) {
-    logWarn(
-      "session",
-      `activity probe failed; retaining sessions: ${error instanceof Error ? error.message : String(error)}`,
-    );
+    logWarn("session", "Activity probe failed; retaining sessions.", {
+      error: error instanceof Error ? error.message : String(error),
+    });
     for (const session of dormant) {
       session.busy = true;
       session.lastBusyAtMs = now;
@@ -1386,18 +1385,17 @@ export const openSession = (
       s.emulator?.dispose();
       s.emulator = null;
       sessions.delete(s.id);
-      logWarn(
-        "session",
-        `session spawn failed: ${err instanceof Error ? err.message : String(err)}`,
-      );
+      logWarn("session", "Session spawn failed.", {
+        err: err instanceof Error ? err.message : String(err),
+      });
       nack("spawn_failed");
     }
   } catch (err) {
-    logWarn(
-      "session",
-      `session open failed: ${err instanceof Error ? err.message : String(err)}`,
-      { id: frame.session_id, mode: frame.mode },
-    );
+    logWarn("session", "Session open failed.", {
+      id: frame.session_id,
+      mode: frame.mode,
+      err: err instanceof Error ? err.message : String(err),
+    });
     nack("spawn_failed");
   }
 };

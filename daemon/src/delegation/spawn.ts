@@ -145,15 +145,19 @@ export const logIfKilled = (
   // diagnosis down a dead end. Default to the sandbox hint only when confinement
   // is unknown or true.
   const confined = opts?.confined !== false;
-  logError("delegation", `child killed by ${signal}`, {
-    command: argv[0],
-    argv: [...argv],
-    signal,
-    confined,
-    hint: confined
-      ? "likely an OS sandbox denial — see DaemonStatus.sandbox / the sandbox working set"
-      : "external signal on an unconfined child — likely a daemon restart/drain or manual kill (the sandbox was not involved)",
-  });
+  logError(
+    "delegation",
+    safeDiagnosticMessage`Child process killed by signal.`,
+    {
+      command: argv[0],
+      argv: [...argv],
+      signal,
+      confined,
+      hint: confined
+        ? "likely an OS sandbox denial — see DaemonStatus.sandbox / the sandbox working set"
+        : "external signal on an unconfined child — likely a daemon restart/drain or manual kill (the sandbox was not involved)",
+    },
+  );
   return true;
 };
 

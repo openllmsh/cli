@@ -629,7 +629,8 @@ export const handleInference = async (req: Request): Promise<Response> => {
       if (err instanceof MediaDefaultPlanError) {
         logWarn(
           "listener",
-          `media default plan ${err.status} ${err.type} — not forwarding media`,
+          "Media default plan rejected; not forwarding media.",
+          { status: err.status, type: err.type },
         );
         return withCors(
           req,

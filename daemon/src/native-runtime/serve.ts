@@ -277,7 +277,7 @@ const recordResumeOutcome = (
   if (outcome === "resumeMiss") {
     logWarn(
       "native-runtime",
-      safeDiagnosticMessage`resume MISS — prior history did not correlate; re-seeding a fresh session with the rendered transcript`,
+      safeDiagnosticMessage`Resume miss; prior history did not correlate; re-seeding a fresh session.`,
       { ...meta, seedChars },
     );
     return;

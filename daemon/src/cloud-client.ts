@@ -477,7 +477,7 @@ export const publishIdentity = async (pubkey: string): Promise<void> => {
         setIdentityConflict(true);
         logWarn(
           "identity",
-          safeDiagnosticMessage`cloud pin conflicts with local X25519 key — RTC will fail until the pin is reset`,
+          safeDiagnosticMessage`Cloud key pin conflicts with the local device key; RTC fails until it is reset.`,
           {},
         );
         // Push once per false→true; repeated 409s (bootstrap ~5min) stay silent.

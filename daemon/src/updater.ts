@@ -114,7 +114,7 @@ export const daemonCodeChanged = async (
   if (onDisk === null) {
     logWarn(
       "update",
-      "binary on disk reports no daemon fingerprint — not restarting onto it",
+      "Binary on disk reports no daemon fingerprint; not restarting onto it.",
     );
     return false;
   }
@@ -179,7 +179,12 @@ const swapBinary = async (
   if (target === null) {
     logWarn(
       "update",
-      `unsupported host ${process.platform}-${process.arch} — no prebuilt openllm for this arch; build from source: https://github.com/openllmsh/cli#build-from-source`,
+      "Unsupported host architecture; no prebuilt binary for this arch.",
+      {
+        platform: process.platform,
+        arch: process.arch,
+        hint: "build from source: https://github.com/openllmsh/cli#build-from-source",
+      },
     );
     return false;
   }
@@ -195,7 +200,7 @@ const swapBinary = async (
     if (actual !== expected) {
       logError(
         "update",
-        safeDiagnosticMessage`checksum mismatch — refusing update`,
+        safeDiagnosticMessage`Checksum mismatch; refusing update.`,
         {
           target,
           version,
@@ -214,7 +219,7 @@ const swapBinary = async (
     if ((await deps.probeFingerprint(tmp)) === null) {
       logError(
         "update",
-        safeDiagnosticMessage`downloaded binary has no daemon half — refusing update`,
+        safeDiagnosticMessage`Downloaded binary has no daemon half; refusing update.`,
         { target, version },
       );
       rmSync(tmp, { force: true });

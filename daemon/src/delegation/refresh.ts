@@ -427,7 +427,7 @@ export const resolveToken = <T>(opts: {
   const token = opts.refreshed ?? opts.prior;
   if (!opts.hasRefreshToken(token)) {
     noteRefreshTokenLost(opts.provider);
-    logWarn("refresh", safeDiagnosticMessage`refresh token lost`, {
+    logWarn("refresh", safeDiagnosticMessage`Refresh material lost.`, {
       provider: opts.provider,
       phase: "refresh_token_lost",
     });

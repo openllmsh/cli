@@ -308,7 +308,7 @@ const applyInner = async (opts?: TApplySandboxOpts): Promise<TSandboxState> => {
   if (process.env.OPENLLM_DAEMON_NO_SANDBOX === "1") {
     logWarn(
       "sandbox",
-      safeDiagnosticMessage`OPENLLM_DAEMON_NO_SANDBOX=1 — running unconfined`,
+      safeDiagnosticMessage`Sandbox disabled by environment; running unconfined.`,
     );
     return "off";
   }
@@ -336,7 +336,7 @@ const applyInner = async (opts?: TApplySandboxOpts): Promise<TSandboxState> => {
     if (probed === null) {
       logWarn(
         "sandbox",
-        safeDiagnosticMessage`could not bind libc — running unconfined`,
+        safeDiagnosticMessage`Could not bind libc; running unconfined.`,
       );
       return "error";
     }
@@ -365,7 +365,9 @@ const applyInner = async (opts?: TApplySandboxOpts): Promise<TSandboxState> => {
       ),
     );
     if (rulesetFd < 0) {
-      logWarn("sandbox", `landlock_create_ruleset failed (${rulesetFd})`);
+      logWarn("sandbox", "Landlock create ruleset failed.", {
+        rulesetFd,
+      });
       return "error";
     }
 
@@ -404,7 +406,12 @@ const applyInner = async (opts?: TApplySandboxOpts): Promise<TSandboxState> => {
               0n,
             ),
           );
-          if (rc !== 0) logWarn("sandbox", `landlock rule failed for ${path}`);
+          if (rc !== 0) {
+            logWarn("sandbox", "Landlock rule failed for a path.", {
+              path,
+              rc,
+            });
+          }
         } finally {
           libc.close(fd);
         }
@@ -418,7 +425,7 @@ const applyInner = async (opts?: TApplySandboxOpts): Promise<TSandboxState> => {
       libc.close(rulesetFd);
       logWarn(
         "sandbox",
-        safeDiagnosticMessage`prctl(NO_NEW_PRIVS) failed — running unconfined`,
+        safeDiagnosticMessage`Prctl no-new-privs failed; running unconfined.`,
       );
       return "error";
     }
@@ -427,7 +434,7 @@ const applyInner = async (opts?: TApplySandboxOpts): Promise<TSandboxState> => {
     );
     libc.close(rulesetFd);
     if (rc !== 0) {
-      logWarn("sandbox", `landlock_restrict_self failed (${rc})`);
+      logWarn("sandbox", "Landlock restrict-self failed.", { rc });
       return "error";
     }
     // Debug, not info: runs inside the per-spawn `--sandbox-exec` shim — at
@@ -439,10 +446,9 @@ const applyInner = async (opts?: TApplySandboxOpts): Promise<TSandboxState> => {
     });
     return "enforced";
   } catch (err) {
-    logWarn(
-      "sandbox",
-      `landlock setup threw (${err instanceof Error ? err.message : String(err)}) — running unconfined`,
-    );
+    logWarn("sandbox", "Landlock setup threw; running unconfined.", {
+      err: err instanceof Error ? err.message : String(err),
+    });
     return "error";
   }
 };
