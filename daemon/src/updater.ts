@@ -208,6 +208,9 @@ const swapBinary = async (
           actual,
         },
       );
+      // Transient backoff: a corrupt download clears on retry, a mis-publish
+      // keeps failing and the wait grows instead of re-downloading each tick.
+      recordUpdateFailure("cli", version, false);
       return false;
     }
     stage = "write";
