@@ -257,6 +257,20 @@ export const updateFailureBackoffMs = (failure: TUpdateFailure): number =>
       );
 
 /**
+ * In-process copy of the last failure per slot. `mutateState` swallows write
+ * errors (best-effort contract), and the cause of a failed update is often
+ * the very disk that `state.json` lives on, so persistence alone could lose
+ * the record and resume retrying every tick.
+ */
+const memoFailures: { daemon?: TUpdateFailure; cli?: TUpdateFailure } = {};
+
+const newerFailure = (
+  a: TUpdateFailure | undefined,
+  b: TUpdateFailure | undefined,
+): TUpdateFailure | undefined =>
+  a === undefined ? b : b === undefined || a.ts >= b.ts ? a : b;
+
+/**
  * True while a failed swap to `version` is still backing off. A different
  * version (a new release) is never blocked by an older version's failures.
  */
@@ -265,7 +279,10 @@ export const updateBlocked = (
   version: string,
   now: number = Date.now(),
 ): boolean => {
-  const failure = readState().updateFailures?.[slot];
+  const failure = newerFailure(
+    memoFailures[slot],
+    readState().updateFailures?.[slot],
+  );
   return (
     failure !== undefined &&
     failure.version === version &&
@@ -280,20 +297,25 @@ export const recordUpdateFailure = (
   permanent: boolean,
 ): void => {
   mutateState((s) => {
-    const prior = s.updateFailures?.[slot];
+    const prior = newerFailure(memoFailures[slot], s.updateFailures?.[slot]);
     const count = prior?.version === version ? prior.count + 1 : 1;
+    const failure: TUpdateFailure = {
+      version,
+      ts: Date.now(),
+      count,
+      permanent,
+    };
+    memoFailures[slot] = failure;
     return {
       ...s,
-      updateFailures: {
-        ...s.updateFailures,
-        [slot]: { version, ts: Date.now(), count, permanent },
-      },
+      updateFailures: { ...s.updateFailures, [slot]: failure },
     };
   });
 };
 
 /** Drop `slot`'s failure record after a successful swap. */
 export const clearUpdateFailure = (slot: TUpdateSlot): void => {
+  delete memoFailures[slot];
   mutateState((s) => {
     if (s.updateFailures?.[slot] === undefined) return s;
     const { [slot]: _cleared, ...rest } = s.updateFailures;
