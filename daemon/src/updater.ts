@@ -35,6 +35,7 @@ import { dirname, join } from "node:path";
 import { autoUpdateEnabled } from "./auto-update-pref";
 import { binarySignature } from "./bin-signature";
 import { drainDisposableChildren } from "./child-supervisor";
+import type { TSafeDiagnosticMessage } from "./doctor-report/message";
 import { daemonEnv, stateDir } from "./env";
 import { hardenMacBinary } from "./harden-binary";
 import { logError, logInfo, logWarn, safeDiagnosticMessage } from "./logger";
@@ -46,7 +47,13 @@ import {
   waitUntilIdle,
   withSelfUpdateApply,
 } from "./self-update";
-import { recentlyAttempted, recordAttempt } from "./state-file";
+import {
+  clearUpdateFailure,
+  recentlyAttempted,
+  recordAttempt,
+  recordUpdateFailure,
+  updateBlocked,
+} from "./state-file";
 import { DAEMON_FINGERPRINT, DAEMON_VERSION } from "./version";
 
 // NOTE: never import `../../manifest` here. The daemon half's code fingerprint
@@ -114,6 +121,47 @@ export const daemonCodeChanged = async (
   return onDisk !== running;
 };
 
+/** The step of a swap that threw: fetching bytes, writing the temp file, or
+ *  renaming it over the installed binary. */
+type TSwapStage = "download" | "write" | "install";
+
+/** Filesystem errors that recur on every retry until the user acts. */
+const PERMANENT_FS_CODES: ReadonlySet<string> = new Set([
+  "EACCES",
+  "EPERM",
+  "EROFS",
+  "ENOSPC",
+  "EDQUOT",
+]);
+
+const errorCode = (err: unknown): string | null =>
+  typeof err === "object" &&
+  err !== null &&
+  typeof (err as { code?: unknown }).code === "string"
+    ? (err as { code: string }).code
+    : null;
+
+/**
+ * Closed, sanitizer-safe message per failure class — the only part of a swap
+ * failure that leaves the device, so it has to name the cause on its own.
+ */
+const swapFailureMessage = (
+  stage: TSwapStage,
+  code: string | null,
+): TSafeDiagnosticMessage => {
+  if (stage === "download")
+    return safeDiagnosticMessage`Binary update download failed.`;
+  if (code === "EACCES" || code === "EPERM")
+    return safeDiagnosticMessage`Binary update failed: no permission to replace the installed binary.`;
+  if (code === "EROFS")
+    return safeDiagnosticMessage`Binary update failed: the install location is read-only.`;
+  if (code === "ENOSPC" || code === "EDQUOT")
+    return safeDiagnosticMessage`Binary update failed: the disk is full.`;
+  return stage === "write"
+    ? safeDiagnosticMessage`Binary update failed writing the new binary.`
+    : safeDiagnosticMessage`Binary update failed installing the new binary.`;
+};
+
 type TSwapBinaryDeps = {
   readonly probeFingerprint: TProbeFingerprint;
   readonly harden: (path: string) => void;
@@ -136,6 +184,7 @@ const swapBinary = async (
     return false;
   }
   const tmp = join(dirname(dest), `.openllm.update.${process.pid}.tmp`);
+  let stage: TSwapStage = "download";
   try {
     const base = `${daemonEnv().cloudOrigin}/api/cli/binary/${target}`;
     const [bytes, expected] = await Promise.all([
@@ -156,6 +205,7 @@ const swapBinary = async (
       );
       return false;
     }
+    stage = "write";
     writeFileSync(tmp, bytes, { mode: 0o755 });
     chmodSync(tmp, 0o755); // force mode regardless of umask
     // The file being replaced IS the daemon (the service execs it). Only ever
@@ -171,17 +221,28 @@ const swapBinary = async (
       recordAttempt("cli", version); // back off; retrying won't change the bytes
       return false;
     }
+    stage = "install";
     renameSync(tmp, dest); // atomic; the running daemon keeps its old inode
     deps.harden(dest); // dequarantine + ad-hoc sign so arm64 can exec it
-    // Record only AFTER a swap — a transient failure retries next tick, but a
-    // swap that never converges (mis-publish) must back off.
+    // A swap that never converges (mis-publish) must back off too.
     recordAttempt("cli", version);
+    clearUpdateFailure("cli");
     logInfo("update", `updated openllm ${from} → ${version}`);
     return true;
   } catch (err) {
-    logError("update", safeDiagnosticMessage`Binary update apply failed.`, {
+    // Every failure backs off: a permanent one (the user must fix the install)
+    // waits a day, a transient one doubles its wait per repeat. Without this
+    // a failing device re-downloaded the whole binary on every tick.
+    const code = errorCode(err);
+    const permanent =
+      stage !== "download" && PERMANENT_FS_CODES.has(code ?? "");
+    recordUpdateFailure("cli", version, permanent);
+    logError("update", swapFailureMessage(stage, code), {
       target,
       version,
+      stage,
+      code,
+      permanent,
       error: err instanceof Error ? err.message : String(err),
     });
     try {
@@ -266,7 +327,9 @@ export const createBinaryUpdater = (): TBinaryUpdater => {
         latest !== null &&
         latest.length > 0 &&
         latest !== deps.version &&
-        !recentlyAttempted("cli", latest);
+        !recentlyAttempted("cli", latest) &&
+        // An explicit "update now" retries past a failure's backoff.
+        (opts.force === true || !updateBlocked("cli", latest));
       if (wantSwap) {
         await swapBinary(dest, latest, deps.version, {
           probeFingerprint,

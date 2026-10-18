@@ -35,6 +35,18 @@ export type TUpdateSlot = "daemon" | "cli";
 export type TUpdateAttempt = { readonly version: string; readonly ts: number };
 
 /**
+ * A swap that threw before the new binary was in place. `permanent` marks a
+ * failure retrying won't fix on its own (no permission, read-only or full
+ * disk); a transient one (network) backs off exponentially by `count`.
+ */
+export type TUpdateFailure = {
+  readonly version: string;
+  readonly ts: number;
+  readonly count: number;
+  readonly permanent: boolean;
+};
+
+/**
  * Liveness sentinel for the RTC native-crash breaker. Written at boot, cleared
  * on ANY graceful exit (a `process.on("exit")` hook). A native signal
  * (SIGSEGV/SIGBUS/SIGKILL) runs NO exit hook, so a sentinel that SURVIVES to the
@@ -54,6 +66,11 @@ export type TDaemonState = {
     readonly cli?: TUpdateAttempt;
   };
   readonly bootHistory: readonly number[];
+  /** The last failed swap per slot; cleared by a successful one. */
+  readonly updateFailures?: {
+    readonly daemon?: TUpdateFailure;
+    readonly cli?: TUpdateFailure;
+  };
   /**
    * Seed-derived device-access public key (SPKI DER, base64) pinned from
    * bootstrap. `null` means explicitly un-provisioned; absent means never
@@ -85,6 +102,13 @@ const isAttempt = (v: unknown): v is TUpdateAttempt =>
   typeof (v as TUpdateAttempt).version === "string" &&
   typeof (v as TUpdateAttempt).ts === "number";
 
+const isFailure = (v: unknown): v is TUpdateFailure =>
+  isAttempt(v) &&
+  typeof (v as TUpdateFailure).count === "number" &&
+  Number.isInteger((v as TUpdateFailure).count) &&
+  (v as TUpdateFailure).count > 0 &&
+  typeof (v as TUpdateFailure).permanent === "boolean";
+
 const numberList = (v: unknown): number[] =>
   Array.isArray(v) ? v.filter((n): n is number => typeof n === "number") : [];
 
@@ -102,6 +126,7 @@ const coerceState = (v: unknown): TDaemonState => {
   if (typeof v !== "object" || v === null) return DEFAULT_STATE;
   const raw = v as {
     updateAttempts?: unknown;
+    updateFailures?: unknown;
     bootHistory?: unknown;
     deviceAccessPubkey?: unknown;
     rtcRun?: unknown;
@@ -112,6 +137,14 @@ const coerceState = (v: unknown): TDaemonState => {
     typeof raw.updateAttempts === "object" && raw.updateAttempts !== null
       ? (raw.updateAttempts as { daemon?: unknown; cli?: unknown })
       : {};
+  const failures =
+    typeof raw.updateFailures === "object" && raw.updateFailures !== null
+      ? (raw.updateFailures as { daemon?: unknown; cli?: unknown })
+      : {};
+  const updateFailures = {
+    ...(isFailure(failures.daemon) ? { daemon: failures.daemon } : {}),
+    ...(isFailure(failures.cli) ? { cli: failures.cli } : {}),
+  };
   const pubkey =
     raw.deviceAccessPubkey === null
       ? null
@@ -130,6 +163,7 @@ const coerceState = (v: unknown): TDaemonState => {
       ...(isAttempt(attempts.daemon) ? { daemon: attempts.daemon } : {}),
       ...(isAttempt(attempts.cli) ? { cli: attempts.cli } : {}),
     },
+    ...(Object.keys(updateFailures).length > 0 ? { updateFailures } : {}),
     bootHistory: numberList(raw.bootHistory),
     ...(pubkey !== undefined ? { deviceAccessPubkey: pubkey } : {}),
     ...(isRtcRun(raw.rtcRun) ? { rtcRun: raw.rtcRun } : {}),
@@ -206,6 +240,65 @@ export const recordAttempt = (slot: TUpdateSlot, version: string): void => {
       [slot]: { version, ts: Date.now() },
     },
   }));
+};
+
+/** First retry delay after a transient swap failure; doubles per failure. */
+export const UPDATE_FAILURE_BASE_BACKOFF_MS = 5 * 60 * 1000;
+/** Ceiling for transient backoff, and the fixed wait after a permanent one. */
+export const UPDATE_FAILURE_MAX_BACKOFF_MS = 24 * 60 * 60 * 1000;
+
+/** How long `failure` keeps its version from being retried. */
+export const updateFailureBackoffMs = (failure: TUpdateFailure): number =>
+  failure.permanent
+    ? UPDATE_FAILURE_MAX_BACKOFF_MS
+    : Math.min(
+        UPDATE_FAILURE_BASE_BACKOFF_MS * 2 ** (failure.count - 1),
+        UPDATE_FAILURE_MAX_BACKOFF_MS,
+      );
+
+/**
+ * True while a failed swap to `version` is still backing off. A different
+ * version (a new release) is never blocked by an older version's failures.
+ */
+export const updateBlocked = (
+  slot: TUpdateSlot,
+  version: string,
+  now: number = Date.now(),
+): boolean => {
+  const failure = readState().updateFailures?.[slot];
+  return (
+    failure !== undefined &&
+    failure.version === version &&
+    now - failure.ts < updateFailureBackoffMs(failure)
+  );
+};
+
+/** Record a failed swap; repeat failures on the same version grow `count`. */
+export const recordUpdateFailure = (
+  slot: TUpdateSlot,
+  version: string,
+  permanent: boolean,
+): void => {
+  mutateState((s) => {
+    const prior = s.updateFailures?.[slot];
+    const count = prior?.version === version ? prior.count + 1 : 1;
+    return {
+      ...s,
+      updateFailures: {
+        ...s.updateFailures,
+        [slot]: { version, ts: Date.now(), count, permanent },
+      },
+    };
+  });
+};
+
+/** Drop `slot`'s failure record after a successful swap. */
+export const clearUpdateFailure = (slot: TUpdateSlot): void => {
+  mutateState((s) => {
+    if (s.updateFailures?.[slot] === undefined) return s;
+    const { [slot]: _cleared, ...rest } = s.updateFailures;
+    return { ...s, updateFailures: rest };
+  });
 };
 
 /** Boot timestamps for the crash-loop breaker (`boot-guard.ts`). */
