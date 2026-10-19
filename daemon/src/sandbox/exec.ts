@@ -76,12 +76,20 @@ const isDevSourceRun = (): boolean => DAEMON_VERSION === "0.0.0-dev";
  *  `packages/cli/daemon/src/main.ts` no longer resolves: every wrapped dev spawn
  *  died with "Module not found" instead of running confined, silently
  *  diverging `dev:sb` from the shipped binary's sandbox behaviour. */
+const absolute = (path: string | undefined): string | undefined =>
+  path === undefined || path.length === 0
+    ? undefined
+    : isAbsolute(path)
+      ? path
+      : resolve(path);
+
+/** `OPENLLM_DAEMON_SANDBOX_ENTRY` names the daemon entry explicitly. A host
+ *  whose `argv[1]` is not the daemon (`bun test` puts the TEST FILE there)
+ *  would otherwise re-exec that script as the shim, and every wrapped child
+ *  dies before running. */
 const DEV_ENTRY: string | undefined =
-  process.argv[1] !== undefined
-    ? isAbsolute(process.argv[1])
-      ? process.argv[1]
-      : resolve(process.argv[1])
-    : undefined;
+  absolute(process.env.OPENLLM_DAEMON_SANDBOX_ENTRY) ??
+  absolute(process.argv[1]);
 
 /**
  * Wrap a child argv for sandboxed execution via the `--sandbox-exec` shim.
