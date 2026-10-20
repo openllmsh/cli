@@ -1616,10 +1616,47 @@ export const startControlChannel = (options?: TControlChannelOptions): void => {
   };
 };
 
+/**
+ * Hint carried on a planned-restart beacon. Origin presence grace waits up to
+ * 15s today; measured planned gaps were ~50–90s before make-before-break, so
+ * the hint is intentionally generous for dashboards / future grace tuning.
+ * The relay keeps `last_seen` fresh regardless of this value.
+ */
+export const PLANNED_RESTART_EXPECT_BACK_MS = 60_000;
+
+/** Set once a planned-restart beacon has been (or is about to be) sent so a
+ *  subsequent SIGTERM/`stopControlChannel` does not flip the key offline. */
+let plannedRestartAnnounced = false;
+
+/**
+ * Announce a planned self-update restart to the relay: `active:false` WITH
+ * `reason:"restarting"` so the row stays routable. Idempotent. Best-effort —
+ * a closed socket simply means the ungraceful path (tick-derived presence).
+ * Call BEFORE exiting / kickstarting so the successor gap is covered.
+ */
+export const announcePlannedRestart = (
+  expectBackMs: number = PLANNED_RESTART_EXPECT_BACK_MS,
+): void => {
+  plannedRestartAnnounced = true;
+  if (ws !== null && ws.readyState === ws.OPEN) {
+    send({
+      type: "status",
+      active: false,
+      reason: "restarting",
+      expect_back_ms: expectBackMs,
+    });
+  }
+};
+
+/** True after {@link announcePlannedRestart} in this process. */
+export const isPlannedRestartAnnounced = (): boolean => plannedRestartAnnounced;
+
 /** Graceful-exit beacon: flip the key offline, then close. Best-effort.
  *  Also returns the module to a cold start so a later `startControlChannel`
  *  in the same process (suite re-entry, daemon restart) does not inherit
- *  generation, dedup, backoff, or probe state from the prior socket. */
+ *  generation, dedup, backoff, or probe state from the prior socket.
+ *  A planned restart that already announced stays routable — do not send a
+ *  bare `active:false` CERTAIN-death beacon on top. */
 export const stopControlChannel = async (): Promise<void> => {
   stopWatcher();
   stopMigrationCheck();
@@ -1628,7 +1665,9 @@ export const stopControlChannel = async (): Promise<void> => {
   authStatusEdgeObserver.dispose();
   clearAuthGap();
   if (ws !== null) {
-    if (ws.readyState === ws.OPEN) send({ type: "status", active: false });
+    if (ws.readyState === ws.OPEN && !plannedRestartAnnounced) {
+      send({ type: "status", active: false });
+    }
     // Tear relay-scoped transports before nulling the socket so in-flight
     // tunnels/mux/unmounted RTC do not outlive process stop. Mounted RTC is
     // intentionally kept by resetUnmountedRtcSessions — full process exit
@@ -1664,4 +1703,5 @@ export const stopControlChannel = async (): Promise<void> => {
   migrationEnabled = false;
   migrationInFlight = null;
   supersedeBackoff = createControlSupersedeBackoff();
+  plannedRestartAnnounced = false;
 };

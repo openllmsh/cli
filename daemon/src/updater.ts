@@ -286,12 +286,24 @@ export type TConvergeDeps = {
    * and the drain share one counter.
    */
   readonly waitUntilIdle?: (opts?: TWaitUntilIdleOpts) => Promise<boolean>;
+  /**
+   * Announce a planned restart on the control channel before exit so the
+   * relay keeps the key routable. Defaults to the live control-channel
+   * helper; tests stub it.
+   */
+  readonly announcePlannedRestart?: () => void | Promise<void>;
+};
+
+const defaultAnnouncePlannedRestart = async (): Promise<void> => {
+  const { announcePlannedRestart } = await import("./control-channel");
+  announcePlannedRestart();
 };
 
 const defaultDeps = (): TConvergeDeps => ({
   version: DAEMON_VERSION,
   fingerprint: DAEMON_FINGERPRINT,
   exit: () => process.exit(0),
+  announcePlannedRestart: defaultAnnouncePlannedRestart,
 });
 
 export type TBinaryUpdater = {
@@ -366,6 +378,9 @@ export const createBinaryUpdater = (): TBinaryUpdater => {
         // The new binary is in place; bounded cleanup must not block the exit
         // that lets launchd/systemd start the replacement daemon.
         await drainDisposableChildren();
+        // Tell the relay this is a planned restart BEFORE exit so it does not
+        // flip `daemon_active=false` — origin presence grace absorbs the gap.
+        await (deps.announcePlannedRestart ?? defaultAnnouncePlannedRestart)();
         deps.exit();
       });
     } finally {
