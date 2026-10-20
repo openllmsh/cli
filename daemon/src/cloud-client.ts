@@ -27,6 +27,7 @@ import {
   DAEMON_BOOTSTRAP_CAPS_HEADER,
   DAEMON_DEVICE_ID_HEADER,
   DAEMON_DEVICE_LABEL_HEADER,
+  DAEMON_PLATFORM_HEADER,
   DaemonPlanResponse,
   encodeMediaDefaultPlanQuery,
   encodePlanSurfaceQueryValue,
@@ -219,6 +220,8 @@ const authHeaders = (): Record<string, string> => {
     // `docs/proposals/daemon-device-aware-this-machine.md`.
     [DAEMON_DEVICE_ID_HEADER]: deviceId(),
     [DAEMON_DEVICE_LABEL_HEADER]: deviceLabel(),
+    // OS platform for cloud analytics (`daemon_connected`); metadata only.
+    [DAEMON_PLATFORM_HEADER]: process.platform,
     // Capability negotiation (never version-gated): open model capabilities
     // list (post image_editing/realtime widening).
     [DAEMON_BOOTSTRAP_CAPS_HEADER]: [MODEL_CAPABILITIES_OPEN_CAP].join(","),
