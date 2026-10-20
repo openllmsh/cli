@@ -1375,6 +1375,9 @@ const channelUrl = async (): Promise<string> => {
   const deviceLimitDelay = deviceLimitBackoff.nextDelayMs();
   if (deviceLimitDelay > 0) {
     await sleep(deviceLimitDelay);
+  } else if (skipReconnectDelayOnce) {
+    // Planned relay_moved: dial the successor as soon as we are idle.
+    skipReconnectDelayOnce = false;
   } else if (hasConnected) {
     // De-sync fleet reconnect storms (relay redeploy). First connect is
     // immediate; only re-dials are delayed. Normally that is plain jitter;
@@ -1492,11 +1495,26 @@ const RELAY_MOVE_POLL_MS = 1_000;
 let relayMoveTimer: ReturnType<typeof setTimeout> | null = null;
 
 /**
+ * When set, the next `channelUrl` dial skips reconnect jitter / supersede
+ * stand-down: a planned `relay_moved` must re-register on the successor
+ * immediately once idle, not after 1–30s of partysocket backoff.
+ */
+let skipReconnectDelayOnce = false;
+
+/**
  * Move to the current relay box without cutting a request in flight: redial
  * now (no backoff) when no mux stream is open, otherwise wait for the streams
  * to finish. The superseded box keeps serving them and closes us with 4010 at
  * its drain deadline regardless. Fenced to `generation` so a reconnect that
  * already happened is never bounced again.
+ *
+ * Make-before-break (dual-socket: dial successor, welcome, THEN close the
+ * old socket) is still deferred — the connection state in this module is
+ * single-socket throughout, and the retiring box already finishes in-flight
+ * streams until its drain deadline. What we DO here: once idle, skip the
+ * reconnect jitter so the break→dial gap is one channel fetch + WSS upgrade
+ * (~1–4s) rather than that plus 0–30s of backoff. See
+ * `docs/plans/relay-handover.md` step 4 and the deploy-zero-downtime audit.
  */
 const moveRelayWhenIdle = (
   socket: ReconnectingWebSocket,
@@ -1511,6 +1529,7 @@ const moveRelayWhenIdle = (
       relayMoveTimer.unref?.();
       return;
     }
+    skipReconnectDelayOnce = true;
     socket.reconnect();
   };
   attempt();
