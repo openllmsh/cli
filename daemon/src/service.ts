@@ -667,6 +667,15 @@ export const serviceRestart = (): boolean => {
   return startServiceAfterCredentialGate(gate);
 };
 
+export type TKickstartSupervisedDaemonDeps = {
+  /**
+   * Command runner used instead of the real `launchctl` spawn. Tests MUST pass
+   * this on darwin so a suite never kickstarts the developer's installed
+   * daemon label.
+   */
+  readonly run?: (cmd: string, args: readonly string[]) => boolean;
+};
+
 /**
  * Re-launch the supervised daemon immediately on macOS via
  * `launchctl kickstart -k`, bypassing launchd's `ThrottleInterval` (that floor
@@ -678,9 +687,12 @@ export const serviceRestart = (): boolean => {
  * invoked successfully. Linux returns false — callers should `process.exit` and
  * let systemd's `RestartSec` (2s) relaunch.
  */
-export const kickstartSupervisedDaemon = (): boolean => {
+export const kickstartSupervisedDaemon = (
+  deps: TKickstartSupervisedDaemonDeps = {},
+): boolean => {
   if (!isMac) return false;
-  return tryRun("launchctl", ["kickstart", "-k", guiTarget()]);
+  const run = deps.run ?? tryRun;
+  return run("launchctl", ["kickstart", "-k", guiTarget()]);
 };
 
 /**
