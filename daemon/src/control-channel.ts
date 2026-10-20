@@ -353,6 +353,13 @@ let ticket = "";
  *  deploy that moved the relay to a new content-addressed sandbox. */
 let connectedWssOrigin: string | null = null;
 let lastFingerprint = "";
+/**
+ * Last status snapshot successfully put on the wire. Survives reconnect so the
+ * next hello can carry it (protocol optional `status`) and the relay can write
+ * matching presence+status session ids atomically — without waiting for the
+ * first pong + full provider probes. Cleared only on a cold `stopControlChannel`.
+ */
+let lastPublishedStatus: TDaemonStatus | null = null;
 /** Monotonic connection counter. Each `onopen` bumps this; stale hello/status
  *  continuations whose captured generation no longer matches simply bail. */
 let connectionGeneration = 0;
@@ -397,6 +404,11 @@ const statusPublishCoalescer = createStatusPublishCoalescer({
   send: (status, active, trigger) => {
     const ordered = supportsOrderedStatus === true && daemonSessionId !== null;
     if (ordered) statusSeq += 1;
+    // Cache for the next hello — only a full snapshot, never the graceful
+    // `active:false` exit beacon (which may omit or empty the provider set).
+    if (active !== false) {
+      lastPublishedStatus = status as TDaemonStatus;
+    }
     send({
       type: "status",
       ...(active === undefined ? {} : { active }),
@@ -448,8 +460,9 @@ let binaryFrameQueueDepth = 0;
  *  can resolve its `computeStatus` between the socket opening and the hello's
  *  own snapshot resolving — putting a `status` frame on the wire first and
  *  killing the handshake. So `send` drops every non-hello frame until the
- *  hello is out; the dropped status is lossless (the hello carries a fresh
- *  snapshot, and the periodic observer re-pushes on change). */
+ *  hello is out; the dropped status is lossless (the hello carries the last
+ *  published snapshot when we have one, and the post-pong observer re-pushes
+ *  a fresh compute on change). */
 let helloSent = false;
 /** Whether the socket has opened at least once — lets `onopen` log a first
  *  "connected" vs a recovery "reconnected", so the log shows the channel coming
@@ -1535,15 +1548,19 @@ export const startControlChannel = (options?: TControlChannelOptions): void => {
     probesArmed = false;
     pendingWelcomeStatus = false;
     // Do not block registration on provider/CLI probes. The relay needs identity
-    // first; welcome supplies this connection's session before status starts.
-    // Ping only AFTER hello is on the wire — `send` drops non-hello frames until
-    // then. Watcher + welcome `pushStatus` wait for the first pong (P1-A).
+    // first; welcome supplies this connection's session before a FRESH status
+    // compute starts. Carry the last-known snapshot on hello when we have one so
+    // presence+status session ids stay matched across the reconnect handoff
+    // (cloud falls back for older daemons that omit it). Ping only AFTER hello
+    // is on the wire — `send` drops non-hello frames until then. Watcher +
+    // welcome `pushStatus` wait for the first pong (P1-A).
     helloSent = true;
     send({
       type: "hello",
       ticket,
       protocol_version: RELAY_PROTOCOL_VERSION,
       caps: currentDaemonCaps(),
+      ...(lastPublishedStatus !== null ? { status: lastPublishedStatus } : {}),
     });
     flushAuthGap();
     heartbeat.start();
@@ -1629,6 +1646,7 @@ export const stopControlChannel = async (): Promise<void> => {
   ticket = "";
   connectedWssOrigin = null;
   lastFingerprint = "";
+  lastPublishedStatus = null;
   probesArmed = false;
   pendingWelcomeStatus = false;
   daemonSessionId = null;
