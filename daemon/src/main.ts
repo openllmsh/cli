@@ -585,17 +585,25 @@ export const main = async (): Promise<void> => {
     logError("child-supervisor", err);
   });
 
-  // Reconcile the durable session-host registry BEFORE the relay is dialed so
-  // command handlers cannot race an in-flight reap. Discovery is bounded and
-  // async (it yields), but `main` awaits it at this boot boundary. A live
-  // socket directory belongs to an independent session process and is adopted
-  // (kept); only incomplete or dead entries are removed. Identity timeouts stay
-  // unknown and never authorize deletion.
+  // Dial the control channel as soon as the listener is bound so a planned
+  // restart reconnects in seconds, not after session-host reconcile. Commands
+  // stay deferred until reconcile finishes (handlers must not race that pass).
+  // See `docs/audit/2026-10-20-deploy-zero-downtime.md` fix #3.
+  const cc = await loadControlChannel();
+  cc.startControlChannel({ deferCommandsUntilReady: true });
+
+  // Reconcile the durable session-host registry before releasing commands so
+  // handlers cannot race an in-flight reap. Discovery is bounded and async (it
+  // yields), but `main` awaits it at this boot boundary. A live socket directory
+  // belongs to an independent session process and is adopted (kept); only
+  // incomplete or dead entries are removed. Identity timeouts stay unknown and
+  // never authorize deletion.
   try {
     await reconcileSessionHostsAtBoot();
   } catch (err) {
     logError("session", err);
   }
+  cc.markControlChannelCommandsReady();
 
   // Local discovery is demand-adjacent and not required to bind the port —
   // load it after listen so its probe graph stays off the cold boot path (§3).
@@ -604,13 +612,6 @@ export const main = async (): Promise<void> => {
       m.startLocalServerDiscovery();
     })
     .catch((err) => logError("main", err));
-
-  // Dial OUT to the cloud relay over a WebSocket: it delivers dashboard
-  // commands and marks this key's daemon "online" server-side — so the
-  // dashboard never reaches loopback (no Private Network Access prompt). See
-  // `docs/proposals/daemon-relay-websocket-push.md`.
-  const cc = await loadControlChannel();
-  cc.startControlChannel();
 
   // Bootstrap is intentionally last: the listener is already bound and relay
   // presence can only be published after it is routeable. Keep cloud-dependent

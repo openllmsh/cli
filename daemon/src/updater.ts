@@ -292,6 +292,12 @@ export type TConvergeDeps = {
    * helper; tests stub it.
    */
   readonly announcePlannedRestart?: () => void | Promise<void>;
+  /**
+   * macOS: `launchctl kickstart -k` so launchd relaunches without paying
+   * `ThrottleInterval`. Returns whether kickstart ran. Defaults to
+   * {@link kickstartSupervisedDaemon}; tests stub it. Linux no-ops → exit.
+   */
+  readonly kickstartSupervisedDaemon?: () => boolean | Promise<boolean>;
 };
 
 const defaultAnnouncePlannedRestart = async (): Promise<void> => {
@@ -299,11 +305,19 @@ const defaultAnnouncePlannedRestart = async (): Promise<void> => {
   announcePlannedRestart();
 };
 
+const defaultKickstartSupervisedDaemon = async (): Promise<boolean> => {
+  // Lazy: service.ts pulls credential-gate / install paths unused by most
+  // converge ticks; only a real restart needs it.
+  const { kickstartSupervisedDaemon } = await import("./service");
+  return kickstartSupervisedDaemon();
+};
+
 const defaultDeps = (): TConvergeDeps => ({
   version: DAEMON_VERSION,
   fingerprint: DAEMON_FINGERPRINT,
   exit: () => process.exit(0),
   announcePlannedRestart: defaultAnnouncePlannedRestart,
+  kickstartSupervisedDaemon: defaultKickstartSupervisedDaemon,
 });
 
 export type TBinaryUpdater = {
@@ -381,6 +395,12 @@ export const createBinaryUpdater = (): TBinaryUpdater => {
         // Tell the relay this is a planned restart BEFORE exit so it does not
         // flip `daemon_active=false` — origin presence grace absorbs the gap.
         await (deps.announcePlannedRestart ?? defaultAnnouncePlannedRestart)();
+        // macOS: kickstart bypasses KeepAlive's ThrottleInterval (10s). Always
+        // exit afterwards as a safety net (unsupervised / kickstart failure /
+        // Linux RestartSec path).
+        await (
+          deps.kickstartSupervisedDaemon ?? defaultKickstartSupervisedDaemon
+        )();
         deps.exit();
       });
     } finally {

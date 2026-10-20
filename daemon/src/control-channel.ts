@@ -270,6 +270,13 @@ export type TControlChannelOptions = {
   readonly reconnectJitterMs?: number;
   readonly random?: () => number;
   readonly socketOptions?: Partial<Omit<TControlSocketOptions, "WebSocket">>;
+  /**
+   * When true, inbound `command` frames are queued until
+   * {@link markControlChannelCommandsReady} — used at boot so the relay can
+   * dial (and publish presence) before session-host reconcile finishes,
+   * without racing command handlers against that reap/adopt pass.
+   */
+  readonly deferCommandsUntilReady?: boolean;
 };
 
 export const controlSocketOptions = (
@@ -1136,9 +1143,33 @@ const onFrame = (frame: TRelayFrame): void => {
   }
 };
 
+/** When false, inbound dashboard `command` frames queue (see
+ *  `deferCommandsUntilReady`). Presence / hello / mux stay live. */
+let commandsReady = true;
+const pendingCommands: TRelayFrame[] = [];
+
+/**
+ * Release the boot-time command gate. Flushes any frames queued while
+ * session-host reconcile ran. Idempotent; no-op when commands were never
+ * deferred.
+ */
+export const markControlChannelCommandsReady = (): void => {
+  commandsReady = true;
+  const queued = pendingCommands.splice(0, pendingCommands.length);
+  for (const frame of queued) {
+    onCommand(frame).catch(() => {
+      // best-effort: a command failure is reflected by the next status push
+    });
+  }
+};
+
 const dispatchFrame = (frame: TRelayFrame): void => {
   switch (frame.type) {
     case "command":
+      if (!commandsReady) {
+        pendingCommands.push(frame);
+        return;
+      }
       onCommand(frame).catch(() => {
         // best-effort: a command failure is reflected by the next status push
       });
@@ -1496,6 +1527,14 @@ export const startControlChannel = (options?: TControlChannelOptions): void => {
     },
   });
   if (ws !== null) return;
+  // Boot may dial before session-host reconcile finishes; queue commands until
+  // `markControlChannelCommandsReady` so handlers cannot race that pass.
+  if (options?.deferCommandsUntilReady === true) {
+    commandsReady = false;
+    pendingCommands.length = 0;
+  } else {
+    commandsReady = true;
+  }
   // Apply reconnect timing at start so production keeps defaults and callers
   // (including tests) can pass jitter / socket overrides without module seams.
   supersedeBackoff = createControlSupersedeBackoff(options);
@@ -1704,4 +1743,6 @@ export const stopControlChannel = async (): Promise<void> => {
   migrationInFlight = null;
   supersedeBackoff = createControlSupersedeBackoff();
   plannedRestartAnnounced = false;
+  commandsReady = true;
+  pendingCommands.length = 0;
 };

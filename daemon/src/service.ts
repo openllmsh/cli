@@ -668,6 +668,22 @@ export const serviceRestart = (): boolean => {
 };
 
 /**
+ * Re-launch the supervised daemon immediately on macOS via
+ * `launchctl kickstart -k`, bypassing launchd's `ThrottleInterval` (that floor
+ * only applies to KeepAlive respawns after a natural exit — the ~10s macOS
+ * self-update gap in `docs/audit/2026-10-20-deploy-zero-downtime.md`).
+ *
+ * Does NOT touch the crash-loop floor: `ThrottleInterval` stays in the plist,
+ * and `boot-guard.ts` remains the hard ceiling. Returns whether kickstart was
+ * invoked successfully. Linux returns false — callers should `process.exit` and
+ * let systemd's `RestartSec` (2s) relaunch.
+ */
+export const kickstartSupervisedDaemon = (): boolean => {
+  if (!isMac) return false;
+  return tryRun("launchctl", ["kickstart", "-k", guiTarget()]);
+};
+
+/**
  * Stop the service AND remove its registration entirely (full uninstall) —
  * stronger than `stop`, which only disables self-restore but leaves the launch
  * agent / systemd unit file on disk. Stops the running daemon + any self-restore
