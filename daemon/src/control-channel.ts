@@ -1146,18 +1146,26 @@ const onFrame = (frame: TRelayFrame): void => {
 /** When false, inbound dashboard `command` frames queue (see
  *  `deferCommandsUntilReady`). Presence / hello / mux stay live. */
 let commandsReady = true;
-const pendingCommands: TRelayFrame[] = [];
+type TPendingCommand = {
+  readonly frame: TRelayFrame;
+  /** Relay session generation that received the frame. */
+  readonly generation: number;
+};
+const pendingCommands: TPendingCommand[] = [];
 
 /**
  * Release the boot-time command gate. Flushes any frames queued while
  * session-host reconcile ran. Idempotent; no-op when commands were never
- * deferred.
+ * deferred. Frames captured on a prior connectionGeneration are discarded —
+ * a reconnect while the gate was closed must not execute obsolete work on
+ * the replacement session.
  */
 export const markControlChannelCommandsReady = (): void => {
   commandsReady = true;
   const queued = pendingCommands.splice(0, pendingCommands.length);
-  for (const frame of queued) {
-    onCommand(frame).catch(() => {
+  for (const entry of queued) {
+    if (entry.generation !== connectionGeneration) continue;
+    onCommand(entry.frame).catch(() => {
       // best-effort: a command failure is reflected by the next status push
     });
   }
@@ -1167,7 +1175,10 @@ const dispatchFrame = (frame: TRelayFrame): void => {
   switch (frame.type) {
     case "command":
       if (!commandsReady) {
-        pendingCommands.push(frame);
+        pendingCommands.push({
+          frame,
+          generation: connectionGeneration,
+        });
         return;
       }
       onCommand(frame).catch(() => {
