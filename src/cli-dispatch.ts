@@ -353,18 +353,15 @@ export const runCli = async (argv: readonly string[]): Promise<void> => {
         return process.exit(await runDoctorReportCommand(rest));
       }
       if (verb === "launchers") {
-        const { runDoctorLaunchers, DOCTOR_LAUNCHERS_USAGE } = await import(
-          "./doctor-launchers-cmd"
-        );
-        if (wantsHelp(rest.slice(1))) {
-          process.stdout.write(`${DOCTOR_LAUNCHERS_USAGE}\n`);
-          return process.exit(0);
-        }
+        // Help lives in runDoctorLaunchers (DOCTOR_LAUNCHERS_USAGE) — one source.
+        const { runDoctorLaunchers } = await import("./doctor-launchers-cmd");
         return process.exit(await runDoctorLaunchers(rest.slice(1)));
       }
       if (wantsHelp(rest)) {
+        // DOCTOR_REPORT_USAGE already lists `doctor launchers` — do not append
+        // a third copy (CodeRabbit 4341596181 / audit item 7).
         process.stdout.write(
-          `${DOCTOR_REPORT_USAGE}\n  openllm doctor launchers   per-provider launcher resolution chain\nLegacy leftover scan (does not upload diagnostics):\n  openllm doctor [--fix] [--ai] [--model <alias>] [-c]\n`,
+          `${DOCTOR_REPORT_USAGE}\nLegacy leftover scan (does not upload diagnostics):\n  openllm doctor [--fix] [--ai] [--model <alias>] [-c]\n`,
         );
         return process.exit(0);
       }

@@ -13,10 +13,7 @@ import {
   hostCliCandidates,
 } from "../daemon/src/cli-paths";
 import type { TLauncherKind } from "../daemon/src/launcher-resolution";
-import {
-  createLauncherResolver,
-  launcherProfileOf,
-} from "../daemon/src/launcher-resolution";
+import { createLauncherResolver } from "../daemon/src/launcher-resolution";
 import { createManagerRegistry } from "../daemon/src/manager-resolution";
 
 export type TLauncherDoctorRow = {
@@ -38,6 +35,22 @@ For each subscription provider, print the launcher resolution chain
 isolated HOME/XDG/TMPDIR env would apply on the next delegated spawn.
 `;
 
+const collapsedKind = (
+  kind: TLauncherKind | null,
+): "binary" | "script" | "shim" | "wrapper" | "?" => {
+  if (kind === null) return "?";
+  if (kind.startsWith("shim:")) return "shim";
+  return kind as "binary" | "script" | "wrapper";
+};
+
+const adapterLabel = (row: TLauncherDoctorRow): string => {
+  if (row.adapterId !== null) return ` adapter=${row.adapterId}`;
+  if (row.kind !== null && row.kind.startsWith("shim:")) {
+    return ` adapter=${row.kind.slice("shim:".length)}`;
+  }
+  return "";
+};
+
 export const formatLauncherDoctorReport = (
   rows: readonly TLauncherDoctorRow[],
 ): string => {
@@ -47,31 +60,11 @@ export const formatLauncherDoctorReport = (
       lines.push(`${row.provider}: not installed`);
       continue;
     }
-    const profile =
-      row.kind === null
-        ? null
-        : launcherProfileOf({
-            kind: row.kind,
-            path: row.resolvedPath ?? row.candidate ?? "",
-            fingerprint: "doctor",
-            underManagerRoot: row.underManagerRoot,
-            ...(row.adapterId !== null ? { adapterId: row.adapterId } : {}),
-            ...(row.interpreter !== null
-              ? { interpreter: row.interpreter }
-              : {}),
-          });
-    const kind = profile?.kind ?? row.kind ?? "?";
-    const adapter =
-      profile?.adapter_id !== undefined && profile.adapter_id !== null
-        ? ` adapter=${profile.adapter_id}`
-        : row.adapterId !== null
-          ? ` adapter=${row.adapterId}`
-          : "";
     lines.push(
       `${row.provider}:`,
       `  candidate=${row.candidate ?? "?"}`,
       `  resolved=${row.resolvedPath ?? "?"}`,
-      `  kind=${kind}${adapter}`,
+      `  kind=${collapsedKind(row.kind)}${adapterLabel(row)}`,
       `  interpreter=${row.interpreter ?? "(none)"}`,
       `  under_manager_root=${row.underManagerRoot ? "yes" : "no"}`,
       `  isolated_env=${row.isolatedEnvApplies ? "yes" : "no"}`,
@@ -128,6 +121,7 @@ export const collectLauncherDoctorRows = async (): Promise<
         adapterId: probed.adapterId ?? null,
         interpreter: probed.interpreter ?? null,
         underManagerRoot: probed.underManagerRoot,
+        // L2 isolatedRuntimeEnv applies to every provider on the next spawn.
         isolatedEnvApplies: true,
       });
       continue;
@@ -136,30 +130,34 @@ export const collectLauncherDoctorRows = async (): Promise<
       demand: true,
       enableShellProbe: false,
     });
+    // Truthful: isolation applies iff the provider is installed (every
+    // provider gets shared L2 XDG/HOME/TMPDIR via cliEnv). Unresolved
+    // content still installs the link path — still isolated on spawn.
+    const installed = true;
     if (resolved === null) {
       rows.push({
         provider,
-        installed: true,
+        installed,
         candidate,
         resolvedPath: null,
         kind: null,
         adapterId: null,
         interpreter: null,
         underManagerRoot: false,
-        isolatedEnvApplies: true,
+        isolatedEnvApplies: installed,
       });
       continue;
     }
     rows.push({
       provider,
-      installed: true,
+      installed,
       candidate,
       resolvedPath: resolved.path,
       kind: resolved.kind,
       adapterId: resolved.adapterId ?? null,
       interpreter: resolved.interpreter ?? null,
       underManagerRoot: resolved.underManagerRoot,
-      isolatedEnvApplies: true,
+      isolatedEnvApplies: installed,
     });
   }
   return rows;
