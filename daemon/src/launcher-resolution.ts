@@ -342,17 +342,27 @@ const readStdoutCapped = async (
   const chunks: Uint8Array[] = [];
   let total = 0;
   const deadlineAt = Date.now() + Math.max(0, deadlineMs);
+  // The shell already exited before this reader runs; a newline-terminated
+  // buffered line is its complete answer even when a background helper still
+  // holds the pipe open past the deadline.
+  const partial = (): string | null => {
+    if (total === 0) return null;
+    const text = Buffer.concat(chunks.map((c) => Buffer.from(c))).toString(
+      "utf8",
+    );
+    return text.includes("\n") ? text : null;
+  };
   try {
     for (;;) {
       const remaining = deadlineAt - Date.now();
-      if (remaining <= 0) return null;
+      if (remaining <= 0) return partial();
       const next = await Promise.race([
         reader.read(),
         new Promise<"timeout">((resolve) => {
           setTimeout(() => resolve("timeout"), remaining).unref?.();
         }),
       ]);
-      if (next === "timeout") return null;
+      if (next === "timeout") return partial();
       if (next.done) break;
       const value = next.value;
       if (value.byteLength === 0) continue;
