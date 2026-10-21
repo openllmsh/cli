@@ -339,12 +339,87 @@ const envMs = (name: string, fallback: number): number => {
   return Number.isFinite(n) && n >= 0 ? n : fallback;
 };
 
+const SHELL_PROBE_MAX_BYTES = 4_096;
+
+const killShellProbeTree = (proc: ReturnType<typeof Bun.spawn>): void => {
+  // Prefer the process group so a login-shell rc that backgrounds a helper
+  // holding stdout cannot outlive the probe (CodeRabbit 4341596181).
+  if (typeof proc.pid === "number" && proc.pid > 0) {
+    try {
+      process.kill(-proc.pid, "SIGKILL");
+      return;
+    } catch {
+      // Not a group leader / already reaped — fall through to the root pid.
+    }
+  }
+  try {
+    proc.kill();
+  } catch {
+    // already dead
+  }
+};
+
+/**
+ * Read stdout up to `maxBytes`, racing against `deadlineMs` from now. Stops
+ * early on EOF, byte cap, or deadline — never awaits an unbounded stream
+ * drain after the child has already exited with a background holder on the
+ * pipe.
+ */
+const readStdoutCapped = async (
+  stdout: ReadableStream<Uint8Array> | number | null | undefined,
+  maxBytes: number,
+  deadlineMs: number,
+): Promise<string | null> => {
+  if (stdout === null || stdout === undefined || typeof stdout === "number") {
+    return null;
+  }
+  const reader = stdout.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  const deadlineAt = Date.now() + Math.max(0, deadlineMs);
+  try {
+    for (;;) {
+      const remaining = deadlineAt - Date.now();
+      if (remaining <= 0) return null;
+      const next = await Promise.race([
+        reader.read(),
+        new Promise<"timeout">((resolve) => {
+          setTimeout(() => resolve("timeout"), remaining).unref?.();
+        }),
+      ]);
+      if (next === "timeout") return null;
+      if (next.done) break;
+      const value = next.value;
+      if (value.byteLength === 0) continue;
+      if (total + value.byteLength > maxBytes) return null;
+      chunks.push(value);
+      total += value.byteLength;
+      if (total >= maxBytes) break;
+    }
+  } catch {
+    return null;
+  } finally {
+    try {
+      await reader.cancel();
+    } catch {
+      // ignore
+    }
+  }
+  if (total === 0) return "";
+  return Buffer.concat(chunks.map((c) => Buffer.from(c))).toString("utf8");
+};
+
 /**
  * Default `$SHELL -lc 'command -v <cmd>'` probe. Bounded, stdin closed, output
  * capped. Implemented with a direct `Bun.spawn` (not `runCaptureResult`) so
  * this module does not import `delegation/spawn` and create an init cycle
  * through `cli-paths`. Only an absolute-path single-line answer is accepted;
  * anything else (timeout, relative, multiline, failure) → null.
+ *
+ * The stdout read is raced against the remaining timeout and capped at
+ * {@link SHELL_PROBE_MAX_BYTES}: a login-shell rc that backgrounds a process
+ * holding stdout must not hang `openllm doctor launchers` forever
+ * (CodeRabbit 4341596181). On timeout the process group is SIGKILL'd.
  */
 export const defaultShellProbe: TLauncherShellProbe = async (
   cmd,
@@ -355,21 +430,20 @@ export const defaultShellProbe: TLauncherShellProbe = async (
   const shell = process.env.SHELL?.trim() || "/bin/sh";
   if (!isAbsolute(shell) || !existsSync(shell)) return null;
   if (opts.signal?.aborted) return null;
+  const startedAt = Date.now();
   try {
     const proc = Bun.spawn([shell, "-lc", `command -v ${cmd}`], {
       stdin: "ignore",
       stdout: "pipe",
       stderr: "ignore",
+      // New session/process group so timeout can SIGKILL the whole tree.
+      ...(process.platform === "win32" ? {} : { detached: true }),
     });
     const unbind =
       opts.signal !== undefined
         ? (() => {
             const onAbort = (): void => {
-              try {
-                proc.kill();
-              } catch {
-                // already dead
-              }
+              killShellProbeTree(proc);
             };
             opts.signal?.addEventListener("abort", onAbort, { once: true });
             return (): void =>
@@ -384,18 +458,23 @@ export const defaultShellProbe: TLauncherShellProbe = async (
       timeout,
     ]);
     if (settled === "timeout") {
-      try {
-        proc.kill();
-      } catch {
-        // ignore
-      }
+      killShellProbeTree(proc);
+      unbind();
+      return null;
+    }
+    const remaining = opts.timeoutMs - (Date.now() - startedAt);
+    const raw = await readStdoutCapped(
+      proc.stdout,
+      SHELL_PROBE_MAX_BYTES,
+      remaining,
+    );
+    if (raw === null) {
+      killShellProbeTree(proc);
       unbind();
       return null;
     }
     unbind();
     if (settled.code !== 0) return null;
-    const raw = await new Response(proc.stdout).text();
-    if (raw.length > 4_096) return null;
     const answer = raw.trim();
     if (answer.length === 0 || /[\r\n\0]/.test(answer)) return null;
     if (!isAbsolute(answer)) return null;
