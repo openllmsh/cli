@@ -147,6 +147,59 @@ export type THostCliRuntime = {
 
 const SHEBANG_READ_BYTES = 512;
 
+type TExecutableHeaderCache = {
+  readonly path: string;
+  readonly mtimeMs: number;
+  readonly size: number;
+  readonly header: Buffer | null;
+};
+
+let executableHeaderCache: TExecutableHeaderCache | null = null;
+
+/**
+ * Read the first {@link SHEBANG_READ_BYTES} of an executable. Shared by
+ * shebang inspection and launcher classification so a demand path that
+ * calls `isHostCliRunnable` then `classifyLauncherContent` does not open
+ * the same file twice for the same mtime/size.
+ */
+export const readExecutableHeader = (binPath: string): Buffer | null => {
+  let st;
+  try {
+    st = statSync(binPath);
+    if (!st.isFile()) return null;
+  } catch {
+    return null;
+  }
+  const cached = executableHeaderCache;
+  if (
+    cached !== null &&
+    cached.path === binPath &&
+    cached.mtimeMs === st.mtimeMs &&
+    cached.size === st.size
+  ) {
+    return cached.header;
+  }
+  let fd: number | null = null;
+  let header: Buffer | null = null;
+  try {
+    fd = openSync(binPath, "r");
+    const buf = Buffer.alloc(SHEBANG_READ_BYTES);
+    const read = readSync(fd, buf, 0, SHEBANG_READ_BYTES, 0);
+    header = Buffer.from(buf.subarray(0, read));
+  } catch {
+    header = null;
+  } finally {
+    if (fd !== null) closeSync(fd);
+  }
+  executableHeaderCache = {
+    path: binPath,
+    mtimeMs: st.mtimeMs,
+    size: st.size,
+    header,
+  };
+  return header;
+};
+
 /**
  * Parse `#!…` into the interpreter the kernel/`env` would try to exec.
  * Supports `#!/usr/bin/env node`, `#!/usr/bin/env -S node --flag`, and absolute
@@ -208,32 +261,19 @@ const parseShebang = (shebangLine: string): TShebang | null => {
 };
 
 const readShebangLine = (binPath: string): string | null => {
-  let fd: number | null = null;
-  try {
-    // Directories / FIFOs / devices are never a host CLI — and opening a FIFO
-    // would block discovery.
-    if (!statSync(binPath).isFile()) return null;
-    // Read only the header: a native CLI can be hundreds of MB.
-    fd = openSync(binPath, "r");
-    const buf = Buffer.alloc(SHEBANG_READ_BYTES);
-    const read = readSync(fd, buf, 0, SHEBANG_READ_BYTES, 0);
-    const slice = buf.subarray(0, read);
-    if (slice.length < 2 || slice[0] !== 0x23 || slice[1] !== 0x21) {
-      return null;
-    }
-    let end = slice.length;
-    for (let i = 2; i < slice.length; i += 1) {
-      if (slice[i] === 0x0a) {
-        end = i;
-        break;
-      }
-    }
-    return Buffer.from(slice.subarray(0, end)).toString("utf8");
-  } catch {
+  const slice = readExecutableHeader(binPath);
+  if (slice === null) return null;
+  if (slice.length < 2 || slice[0] !== 0x23 || slice[1] !== 0x21) {
     return null;
-  } finally {
-    if (fd !== null) closeSync(fd);
   }
+  let end = slice.length;
+  for (let i = 2; i < slice.length; i += 1) {
+    if (slice[i] === 0x0a) {
+      end = i;
+      break;
+    }
+  }
+  return Buffer.from(slice.subarray(0, end)).toString("utf8");
 };
 
 const interpreterResolves = (

@@ -21,11 +21,8 @@
  */
 import {
   accessSync,
-  closeSync,
   constants,
   existsSync,
-  openSync,
-  readSync,
   realpathSync,
   statSync,
 } from "node:fs";
@@ -44,6 +41,7 @@ import { allManagerRootMarkers } from "./launcher-roots";
 import {
   managerPackagerBinDirs,
   parseShebangInterpreter,
+  readExecutableHeader,
   resolveOnPath,
   spawnPathDirs,
 } from "./path-utils";
@@ -133,7 +131,6 @@ export type TCreateLauncherResolverDeps = {
 // Magic / fingerprint helpers
 // ---------------------------------------------------------------------------
 
-const HEADER_BYTES = 512;
 
 const ELF_MAGIC = [0x7f, 0x45, 0x4c, 0x46] as const;
 /** Mach-O 32/64 + fat (incl. byte-swapped). */
@@ -158,20 +155,8 @@ const isNativeBinaryMagic = (buf: Buffer): boolean => {
   return MACHO_MAGICS.some((m) => magicEquals(buf, m));
 };
 
-const readHeader = (path: string): Buffer | null => {
-  let fd: number | null = null;
-  try {
-    if (!statSync(path).isFile()) return null;
-    fd = openSync(path, "r");
-    const buf = Buffer.alloc(HEADER_BYTES);
-    const n = readSync(fd, buf, 0, HEADER_BYTES, 0);
-    return buf.subarray(0, n);
-  } catch {
-    return null;
-  } finally {
-    if (fd !== null) closeSync(fd);
-  }
-};
+/** Reuses {@link readExecutableHeader} so a prior `isHostCliRunnable` hit is free. */
+const readHeader = (path: string): Buffer | null => readExecutableHeader(path);
 
 /** Cheap `mtimeMs:size` fingerprint; `null` when the path can't be statted. */
 export const fileFingerprint = (path: string): string | null => {
@@ -546,15 +531,10 @@ export const createLauncherResolver = (
     }
   >();
 
-  // Seed from disk once at construction (Phase 4 / L1 persist).
-  if (persist) {
-    for (const rec of loadLauncherResolutionCache()) {
-      cache.set(rec.candidate, {
-        fingerprint: rec.fingerprint,
-        resolution: recordToResolution(rec),
-      });
-    }
-  }
+  // Persist is lazy: first memory miss for a candidate may load the durable
+  // file (once per state dir). Construction of persist:true resolvers —
+  // including the process-wide default used by passive peeks — must not
+  // synchronously read launcher-resolution-cache.json for every user.
 
   const remember = (
     candidate: string,
@@ -565,11 +545,28 @@ export const createLauncherResolver = (
     if (persist) persistLauncherResolution(candidate, resolution);
   };
 
+  const seedFromPersist = (candidate: string): boolean => {
+    if (!persist) return false;
+    const rec = loadLauncherResolutionCache().find(
+      (r) => r.candidate === candidate,
+    );
+    if (rec === undefined) return false;
+    cache.set(candidate, {
+      fingerprint: rec.fingerprint,
+      resolution: recordToResolution(rec),
+    });
+    return true;
+  };
+
   const peekLauncherResolution = (
     candidate: string,
   ): TLauncherResolution | undefined => {
-    const hit = cache.get(candidate);
-    if (hit === undefined) return undefined;
+    let hit = cache.get(candidate);
+    if (hit === undefined) {
+      if (!seedFromPersist(candidate)) return undefined;
+      hit = cache.get(candidate);
+      if (hit === undefined) return undefined;
+    }
     const own = fileFingerprint(candidate);
     if (own === null) {
       cache.delete(candidate);
