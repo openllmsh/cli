@@ -13079,6 +13079,263 @@
         }
       }
     },
+    "/gravity/chat-ad": {
+      "post": {
+        "tags": [
+          "gravity"
+        ],
+        "operationId": "gravity.chatAd",
+        "parameters": [],
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "ad"
+                  ],
+                  "properties": {
+                    "ad": {
+                      "anyOf": [
+                        {
+                          "type": "object",
+                          "required": [],
+                          "properties": {},
+                          "additionalProperties": {
+                            "$id": "/schemas/unknown",
+                            "title": "unknown"
+                          }
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    }
+                  },
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request did not match the expected schema",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/HttpApiDecodeError"
+                    },
+                    {
+                      "type": "object",
+                      "required": [
+                        "error"
+                      ],
+                      "properties": {
+                        "error": {
+                          "type": "object",
+                          "required": [
+                            "message"
+                          ],
+                          "properties": {
+                            "message": {
+                              "type": "string"
+                            },
+                            "type": {
+                              "type": "string"
+                            },
+                            "code": {
+                              "type": "string"
+                            }
+                          },
+                          "additionalProperties": false
+                        }
+                      },
+                      "additionalProperties": false
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "error"
+                  ],
+                  "properties": {
+                    "error": {
+                      "type": "object",
+                      "required": [
+                        "message"
+                      ],
+                      "properties": {
+                        "message": {
+                          "type": "string"
+                        },
+                        "type": {
+                          "type": "string"
+                        },
+                        "code": {
+                          "type": "string"
+                        }
+                      },
+                      "additionalProperties": false
+                    }
+                  },
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "error"
+                  ],
+                  "properties": {
+                    "error": {
+                      "type": "object",
+                      "required": [
+                        "message"
+                      ],
+                      "properties": {
+                        "message": {
+                          "type": "string"
+                        },
+                        "type": {
+                          "type": "string"
+                        },
+                        "code": {
+                          "type": "string"
+                        }
+                      },
+                      "additionalProperties": false
+                    }
+                  },
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "error"
+                  ],
+                  "properties": {
+                    "error": {
+                      "type": "object",
+                      "required": [
+                        "message"
+                      ],
+                      "properties": {
+                        "message": {
+                          "type": "string"
+                        },
+                        "type": {
+                          "type": "string"
+                        },
+                        "code": {
+                          "type": "string"
+                        }
+                      },
+                      "additionalProperties": false
+                    }
+                  },
+                  "additionalProperties": false
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "session_id",
+                  "messages"
+                ],
+                "properties": {
+                  "session_id": {
+                    "type": "string",
+                    "description": "a string at most 200 character(s) long",
+                    "title": "maxLength(200)",
+                    "minLength": 1,
+                    "maxLength": 200
+                  },
+                  "messages": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "required": [
+                        "role",
+                        "content"
+                      ],
+                      "properties": {
+                        "role": {
+                          "type": "string",
+                          "enum": [
+                            "user",
+                            "assistant"
+                          ]
+                        },
+                        "content": {
+                          "type": "string",
+                          "description": "a string at most 8000 character(s) long",
+                          "title": "maxLength(8000)",
+                          "maxLength": 8000
+                        }
+                      },
+                      "additionalProperties": false
+                    },
+                    "description": "an array of at most 6 item(s)",
+                    "title": "maxItems(6)",
+                    "minItems": 1,
+                    "maxItems": 6
+                  },
+                  "gravity_context": {
+                    "anyOf": [
+                      {
+                        "type": "object",
+                        "required": [],
+                        "properties": {},
+                        "additionalProperties": {
+                          "$id": "/schemas/unknown",
+                          "title": "unknown"
+                        }
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  }
+                },
+                "additionalProperties": false
+              }
+            }
+          },
+          "required": true
+        }
+      }
+    },
     "/marketing-consent": {
       "post": {
         "tags": [

@@ -192,6 +192,18 @@ export const API_OPERATIONS: readonly TApiOperation[] = [
     "hasBody": true
   },
   {
+    "id": "gravity.chatAd",
+    "method": "post",
+    "path": "/gravity/chat-ad",
+    "summary": "",
+    "tags": [
+      "gravity"
+    ],
+    "pathParams": [],
+    "queryParams": [],
+    "hasBody": true
+  },
+  {
     "id": "health.ping",
     "method": "get",
     "path": "/health",
