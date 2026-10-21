@@ -15,6 +15,8 @@
  * host-binary candidate paths live in `cli-paths.ts` (`hostCliCandidates`).
  */
 import {
+  accessSync,
+  constants,
   existsSync,
   readdirSync,
   readlinkSync,
@@ -46,6 +48,7 @@ import {
 } from "./launcher-profile-state";
 import type { TLauncherResolver } from "./launcher-resolution";
 import { defaultLauncherResolver } from "./launcher-resolution";
+import type { TLauncherResolution } from "./launcher-resolution-types";
 import { logWarn, safeDiagnosticMessage } from "./logger";
 import type { TManagerRegistry } from "./manager-resolution";
 import { defaultManagerRegistry } from "./manager-resolution";
@@ -277,6 +280,54 @@ const noteLauncherResolution = (
   rememberInterpreterDir(provider, pathForDir);
 };
 
+const isExecutableAbsolutePath = (path: string): boolean => {
+  if (!isAbsolute(path)) return false;
+  try {
+    accessSync(path, constants.X_OK);
+    return true;
+  } catch {
+    return false;
+  }
+};
+
+/**
+ * Runnability for a launcher resolution. Scripts are accepted only when
+ * `resolveLauncher` proved an executable interpreter path (sibling /
+ * manager) — a remembered interpreter *directory* alone is not enough.
+ * Native / shim / wrapper keep the spawnPathDirs check.
+ */
+const isResolvedLauncherRunnable = (
+  resolution: TLauncherResolution,
+): boolean => {
+  if (resolution.kind === "script") {
+    return (
+      resolution.interpreter !== undefined &&
+      isExecutableAbsolutePath(resolution.interpreter)
+    );
+  }
+  return isHostCliRunnable(resolution.path);
+};
+
+const cachedLauncherForTarget = (
+  launchers: TLauncherResolver,
+  provider: TCliProvider,
+  linkedTarget: string,
+): TLauncherResolution | undefined => {
+  const direct = launchers.peekLauncherResolution(linkedTarget);
+  if (direct !== undefined) return direct;
+  for (const candidate of hostCliCandidates(provider)) {
+    const peeked = launchers.peekLauncherResolution(candidate);
+    if (peeked === undefined) continue;
+    if (peeked.path === linkedTarget) return peeked;
+    try {
+      if (realpathSync(peeked.path) === linkedTarget) return peeked;
+    } catch {
+      // keep scanning
+    }
+  }
+  return undefined;
+};
+
 const resolveHostBinary = async (
   provider: TCliProvider,
   opts?: TCliInstallStateOpts,
@@ -296,40 +347,43 @@ const resolveHostBinary = async (
   // only hit — that falls through to the isolated vendor-install flow.
   for (const candidate of hostCliCandidates(provider)) {
     if (!existsSync(candidate)) continue;
-    if (!isHostCliRunnable(candidate)) continue;
 
-    // Demand path: generic launcher resolution (shell probe off here — we
-    // already have an absolute candidate from hostCliCandidates). Relinks to
-    // the resolved real executable for binary/shim; records interpreter for
-    // script so cliEnv can extend PATH. Passiveuses the manager registry for
-    // known shim layouts.
-    if (launchers !== undefined) {
-      if (opts?.demand === true) {
-        const launcher = await launchers.resolveLauncher(candidate, {
-          demand: true,
-          ...(opts.signal !== undefined ? { signal: opts.signal } : {}),
-        });
-        if (launcher !== null) {
-          noteLauncherResolution(provider, launcher);
-          if (!isHostCliRunnable(launcher.path)) continue;
-          return launcher.path;
-        }
-        // resolveLauncher already ran resolveManagerCandidate for this
-        // candidate (and returned null on unresolved shim / unreadable
-        // content). Do NOT re-enter the legacy manager path — that was a
-        // redundant second spawn/lookup (CodeRabbit 4341596146).
-        continue;
+    // Demand path: resolve FIRST. `isHostCliRunnable` only searches
+    // spawnPathDirs; demand `resolveLauncher` also searches manager shim
+    // dirs and can prove a sibling interpreter. Gating before resolve
+    // would reject those scripts permanently.
+    if (launchers !== undefined && opts?.demand === true) {
+      const launcher = await launchers.resolveLauncher(candidate, {
+        demand: true,
+        ...(opts.signal !== undefined ? { signal: opts.signal } : {}),
+      });
+      if (launcher !== null) {
+        if (!isResolvedLauncherRunnable(launcher)) continue;
+        noteLauncherResolution(provider, launcher);
+        return launcher.path;
       }
+      // resolveLauncher already ran resolveManagerCandidate for this
+      // candidate (and returned null on unresolved shim / unreadable
+      // content). Do NOT re-enter the legacy manager path — that was a
+      // redundant second spawn/lookup (CodeRabbit 4341596146).
+      continue;
+    }
+
+    if (launchers !== undefined) {
       // Passive: reuse a prior demand resolution when the fingerprint still
-      // matches; never spawn. Miss → fall through to peekManagerResolution
-      // below (ordinary hosts / cached shims) — still no spawn.
+      // matches; never spawn. A cached script keeps its interpreter-aware
+      // check (not spawnPathDirs alone). Miss → fall through.
       const peeked = launchers.peekLauncherResolution(candidate);
       if (peeked !== undefined) {
+        if (!isResolvedLauncherRunnable(peeked)) continue;
         noteLauncherResolution(provider, peeked);
-        if (!isHostCliRunnable(peeked.path)) continue;
         return peeked.path;
       }
     }
+
+    // Passive miss / no launchers: keep the existing spawnPathDirs gate —
+    // never spawn to prove a sibling/manager interpreter.
+    if (!isHostCliRunnable(candidate)) continue;
 
     // Demand + launchers already handled above (continue on null). This
     // demand branch only runs when tests inject managers without launchers.
@@ -562,13 +616,27 @@ const probeCliInstallStateBody = async (
   // A leftover isolated link at an unrunnable shebang (npm shim without node
   // on the daemon PATH) must not keep reporting installed / burn version
   // probes — drop it so the next demand can take the vendor-install path.
+  // Demand-proven scripts reuse the interpreter-aware check: spawnPathDirs
+  // alone would false-negative after resolveLauncher found a manager/sibling
+  // interpreter.
   let linkedTarget = bin;
   try {
     linkedTarget = realpathSync(bin);
   } catch {
     linkedTarget = bin;
   }
-  if (!isHostCliRunnable(linkedTarget)) {
+  const linkLaunchers =
+    opts?.launchers ??
+    (opts?.managers !== undefined ? undefined : defaultLauncherResolver);
+  const cached =
+    linkLaunchers !== undefined
+      ? cachedLauncherForTarget(linkLaunchers, provider, linkedTarget)
+      : undefined;
+  const linkedRunnable =
+    cached !== undefined
+      ? isResolvedLauncherRunnable(cached)
+      : isHostCliRunnable(linkedTarget);
+  if (!linkedRunnable) {
     try {
       rmSync(bin, { force: true });
     } catch {
