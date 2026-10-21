@@ -2242,20 +2242,19 @@ export const createKeychainRuntime = (
       );
       return true;
     }
+    const failed = !keyOk ? keyRes : genpRes;
     logWarn(
       "keychain",
       safeDiagnosticMessage`partition-list grant failed`,
       {
-        exit_code: keyRes.code !== 0 ? keyRes.code : genpRes.code,
-        stderr_excerpt: redactSecurityStderr(
-          keyRes.code !== 0 ? keyRes.stderr : genpRes.stderr,
-        ),
+        exit_code: failed.code,
+        stderr_excerpt: redactSecurityStderr(failed.stderr),
       },
       toStoreObservation({
         operation: "grant",
         stage: "final",
-        result: storeResultOf(keyRes.code !== 0 ? keyRes : genpRes),
-        exitCode: keyRes.code !== 0 ? keyRes.code : genpRes.code,
+        result: storeResultOf(failed),
+        exitCode: failed.code,
       }),
     );
     return false;

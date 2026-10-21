@@ -49,6 +49,7 @@ import { logWarn, safeDiagnosticMessage } from "./logger";
 import type { TManagerRegistry } from "./manager-resolution";
 import { defaultManagerRegistry } from "./manager-resolution";
 import { isHostCliRunnable } from "./path-utils";
+import { isMacKeychainProvider } from "./sandbox/policy";
 
 export type TCliInstallState = {
   readonly installed: boolean;
@@ -148,9 +149,11 @@ export const linkIsolatedCli = async (
 };
 
 /** Re-grant isolated-keychain ACLs after a demand-time launcher relink. */
-const regrantKeychainAfterRelink = (provider: TCliProvider): void => {
-  if (platform() !== "darwin") return;
-  void grantKeychainToolAccess(cliHome(provider)).catch(() => {});
+const regrantKeychainAfterRelink = async (
+  provider: TCliProvider,
+): Promise<void> => {
+  if (platform() !== "darwin" || !isMacKeychainProvider(provider)) return;
+  await grantKeychainToolAccess(cliHome(provider)).catch(() => false);
 };
 
 /**
@@ -427,7 +430,7 @@ const probeCliInstallState = async (
     }
     const linked = await linkIsolatedCli(provider, host);
     if (demand && linked.targetChanged) {
-      regrantKeychainAfterRelink(provider);
+      await regrantKeychainAfterRelink(provider);
     }
     cliInstallReconcileUntil.set(
       installKey(provider),
@@ -482,7 +485,7 @@ const probeCliInstallState = async (
       ) {
         const linked = await linkIsolatedCli(provider, resolved.target);
         if (demand && linked.targetChanged) {
-          regrantKeychainAfterRelink(provider);
+          await regrantKeychainAfterRelink(provider);
         }
       }
     }
@@ -514,7 +517,7 @@ const probeCliInstallState = async (
           linked = await linkIsolatedCli(provider, host);
         }
         if (demand && linked?.targetChanged === true) {
-          regrantKeychainAfterRelink(provider);
+          await regrantKeychainAfterRelink(provider);
         }
       }
     }

@@ -41,6 +41,10 @@ const MAC_KEYCHAIN_PROVIDERS: ReadonlySet<string> = new Set([
   "cursor",
 ]);
 
+/** True when the provider's macOS credential store is the login keychain. */
+export const isMacKeychainProvider = (provider: string): boolean =>
+  MAC_KEYCHAIN_PROVIDERS.has(provider);
+
 /**
  * Does a KEYCHAIN-DEPENDENT spawn run unconfined here? True only on macOS, and
  * (when a provider is given) only for the keychain-backed providers. The
@@ -54,4 +58,4 @@ const MAC_KEYCHAIN_PROVIDERS: ReadonlySet<string> = new Set([
  */
 export const unwrapKeychainSpawn = (provider?: string): boolean =>
   process.platform === "darwin" &&
-  (provider === undefined || MAC_KEYCHAIN_PROVIDERS.has(provider));
+  (provider === undefined || isMacKeychainProvider(provider));

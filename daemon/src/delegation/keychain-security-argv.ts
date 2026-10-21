@@ -28,6 +28,24 @@ const ALLOWED = new Set<string>(ALLOWED_SECURITY_SUBCOMMANDS);
 /** Subcommands that operate on a keychain file and MUST name it explicitly. */
 const REQUIRES_KEYCHAIN_PATH = new Set<string>(ALLOWED_SECURITY_SUBCOMMANDS);
 
+/**
+ * Flags that consume the following argv element as a value, per subcommand.
+ * Used so a service/password that happens to contain `.keychain` cannot satisfy
+ * the explicit-path rule (that would let `security` search the default list).
+ */
+const VALUE_TAKING_FLAGS: Readonly<
+  Record<TAllowedSecuritySubcommand, ReadonlySet<string>>
+> = {
+  "create-keychain": new Set(["-p"]),
+  "unlock-keychain": new Set(["-p"]),
+  "set-keychain-settings": new Set(["-t"]),
+  "show-keychain-info": new Set(),
+  "dump-keychain": new Set(),
+  "find-generic-password": new Set(["-a", "-s", "-c", "-D", "-G", "-l"]),
+  "set-key-partition-list": new Set(["-S", "-k"]),
+  "set-generic-password-partition-list": new Set(["-S", "-k", "-s", "-a"]),
+};
+
 /** Rejected dump-keychain flags (decrypt / ACL dump / interactive ACL edit). */
 const FORBIDDEN_DUMP_FLAGS = new Set(["-d", "-a", "-i"]);
 
@@ -50,16 +68,50 @@ const isFlag = (arg: string): boolean => arg.startsWith("-");
 export const looksLikeKeychainPath = (arg: string): boolean => {
   if (arg.length === 0 || isFlag(arg)) return false;
   const name = basename(arg).toLowerCase();
-  return (
-    name.endsWith(".keychain-db") ||
-    name.endsWith(".keychain") ||
-    name.includes(".keychain-db") ||
-    name.includes(".keychain")
-  );
+  return name.endsWith(".keychain-db") || name.endsWith(".keychain");
 };
 
-const hasExplicitKeychainPath = (argv: ReadonlyArray<string>): boolean =>
-  argv.some(looksLikeKeychainPath);
+/**
+ * Last positional argv element after skipping flags and their values.
+ * Production builders always place the keychain path last; a flag value that
+ * merely looks like a keychain path is not a positional operand.
+ */
+const finalKeychainOperand = (
+  argv: ReadonlyArray<string>,
+  sub: TAllowedSecuritySubcommand,
+): string | undefined => {
+  const valueFlags = VALUE_TAKING_FLAGS[sub];
+  let lastPositional: string | undefined;
+  for (let i = 1; i < argv.length; ) {
+    const arg = argv[i];
+    if (arg === undefined) break;
+    if (isFlag(arg)) {
+      const short = arg.length >= 2 ? arg.slice(0, 2) : arg;
+      if (arg.length > 2 && !arg.startsWith("--") && valueFlags.has(short)) {
+        // Glued `-pVALUE` / `-kVALUE`.
+        i += 1;
+        continue;
+      }
+      if (valueFlags.has(arg)) {
+        i += 2;
+        continue;
+      }
+      i += 1;
+      continue;
+    }
+    lastPositional = arg;
+    i += 1;
+  }
+  return lastPositional;
+};
+
+const hasExplicitKeychainPath = (
+  argv: ReadonlyArray<string>,
+  sub: TAllowedSecuritySubcommand,
+): boolean => {
+  const last = finalKeychainOperand(argv, sub);
+  return last !== undefined && looksLikeKeychainPath(last);
+};
 
 const hasFlag = (argv: ReadonlyArray<string>, flag: string): boolean => {
   for (let i = 1; i < argv.length; i++) {
@@ -108,15 +160,19 @@ export const assertSafeSecurityArgv = (
       argv,
     );
   }
+  const allowedSub = sub as TAllowedSecuritySubcommand;
 
-  if (REQUIRES_KEYCHAIN_PATH.has(sub) && !hasExplicitKeychainPath(argv)) {
+  if (
+    REQUIRES_KEYCHAIN_PATH.has(allowedSub) &&
+    !hasExplicitKeychainPath(argv, allowedSub)
+  ) {
     throw new SecurityArgvRejectedError(
-      `${sub} requires an explicit keychain path`,
+      `${allowedSub} requires an explicit keychain path`,
       argv,
     );
   }
 
-  if (sub === "create-keychain") {
+  if (allowedSub === "create-keychain") {
     if (hasFlag(argv, "-P")) {
       throw new SecurityArgvRejectedError(
         "create-keychain must not use interactive -P",
@@ -131,7 +187,7 @@ export const assertSafeSecurityArgv = (
     }
   }
 
-  if (sub === "unlock-keychain") {
+  if (allowedSub === "unlock-keychain") {
     if (!hasFlag(argv, "-p")) {
       throw new SecurityArgvRejectedError(
         "unlock-keychain requires non-interactive -p",
@@ -141,18 +197,18 @@ export const assertSafeSecurityArgv = (
   }
 
   if (
-    sub === "set-key-partition-list" ||
-    sub === "set-generic-password-partition-list"
+    allowedSub === "set-key-partition-list" ||
+    allowedSub === "set-generic-password-partition-list"
   ) {
     if (!hasFlag(argv, "-k")) {
       throw new SecurityArgvRejectedError(
-        `${sub} requires non-interactive -k`,
+        `${allowedSub} requires non-interactive -k`,
         argv,
       );
     }
   }
 
-  if (sub === "dump-keychain") {
+  if (allowedSub === "dump-keychain") {
     const bad = hasForbiddenDumpFlag(argv);
     if (bad !== null) {
       throw new SecurityArgvRejectedError(
@@ -162,5 +218,5 @@ export const assertSafeSecurityArgv = (
     }
   }
 
-  return sub as TAllowedSecuritySubcommand;
+  return allowedSub;
 };
