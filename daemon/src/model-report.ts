@@ -19,6 +19,8 @@
 import type {
   TAuthEvent,
   TDaemonModelReportEntry,
+  TDaemonModelsReason,
+  TDaemonModelsStatus,
   TDaemonProviderConnection,
   TProviderModelEntry,
   TSubscriptionProviderSlug,
@@ -129,17 +131,98 @@ const lastAttempt = new Map<string, TAttempt>();
 const autoFlights = new Map<string, Promise<TListed>>();
 const forceFlights = new Map<string, Promise<TListed>>();
 
+type TModelsOutcome =
+  | { readonly status: "ok" }
+  | { readonly status: "unavailable"; readonly reason: TDaemonModelsReason };
+
+/** Latest list/discover outcome per slug — drives `models_status` on status. */
+const lastModelsOutcome = new Map<string, TModelsOutcome>();
+
+const toWireModelsReason = (
+  reason: TListModelsNullReason | undefined,
+): TDaemonModelsReason => {
+  if (reason === undefined) return "error";
+  if (
+    reason === "token_unavailable" ||
+    reason === "version_unresolved" ||
+    reason === "empty_after_filter" ||
+    reason === "error" ||
+    reason === "http_401" ||
+    reason === "http_403" ||
+    reason === "http_404" ||
+    reason === "http_429" ||
+    reason === "http_500" ||
+    reason === "http_502" ||
+    reason === "http_503"
+  ) {
+    return reason;
+  }
+  return "http_error";
+};
+
+const noteModelsOutcome = (listed: TListed): void => {
+  if (listed.outcome.kind === "skipped") return;
+  if (
+    listed.outcome.kind === "success" &&
+    listed.outcome.models.length > 0 &&
+    listed.postError === undefined
+  ) {
+    lastModelsOutcome.set(listed.slug, { status: "ok" });
+    return;
+  }
+  if (listed.outcome.kind === "failed") {
+    lastModelsOutcome.set(listed.slug, {
+      status: "unavailable",
+      reason: toWireModelsReason(listed.outcome.reason),
+    });
+    return;
+  }
+  // success with empty models (should be rare — callers coerce to failed)
+  lastModelsOutcome.set(listed.slug, {
+    status: "unavailable",
+    reason: "empty_after_filter",
+  });
+};
+
+/** Models-status fields for one provider; empty when never attempted. */
+export const modelsStatusFieldsFor = (
+  slug: string,
+): {
+  readonly models_status?: TDaemonModelsStatus;
+  readonly models_reason?: TDaemonModelsReason;
+} => {
+  const outcome = lastModelsOutcome.get(slug);
+  if (outcome === undefined) return {};
+  if (outcome.status === "ok") return { models_status: "ok" };
+  return {
+    models_status: "unavailable",
+    models_reason: outcome.reason,
+  };
+};
+
+/** Overlay latest model-list outcomes onto a status connections array. */
+export const attachModelsStatusToConnections = (
+  connections: ReadonlyArray<TDaemonProviderConnection>,
+): TDaemonProviderConnection[] =>
+  connections.map((conn) => {
+    const fields = modelsStatusFieldsFor(conn.provider);
+    if (fields.models_status === undefined) return conn;
+    return { ...conn, ...fields };
+  });
+
 /** Reset the throttle — all slugs, or one (post-connect / tests). */
 export const resetModelReportThrottle = (slug?: string): void => {
   if (slug === undefined) {
     lastAttempt.clear();
     autoFlights.clear();
     forceFlights.clear();
+    lastModelsOutcome.clear();
     return;
   }
   lastAttempt.delete(slug);
   autoFlights.delete(slug);
   forceFlights.delete(slug);
+  lastModelsOutcome.delete(slug);
 };
 
 const isDue = (
@@ -269,6 +352,7 @@ const stampAttempt = (listed: TListed, now: number): void => {
     ok: listed.outcome.kind === "success" && listed.postError === undefined,
     ...(listed.cliVersion ? { cliVersion: listed.cliVersion } : {}),
   });
+  noteModelsOutcome(listed);
 };
 
 const runAutoDiscoverAndReport = (

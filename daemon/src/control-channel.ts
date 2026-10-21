@@ -36,7 +36,10 @@ import {
   notifySessionLost,
 } from "./cloud-client";
 import { runCommandInner } from "./control-relay";
-import { noteConnectionsForModelReport } from "./model-report";
+import {
+  attachModelsStatusToConnections,
+  noteConnectionsForModelReport,
+} from "./model-report";
 import {
   markCredentialStoresDirtyIfChanged,
   resetCredentialStoreFingerprint,
@@ -388,11 +391,16 @@ const statusPublishCoalescer = createStatusPublishCoalescer({
     const skipProviderProbes =
       trigger === "watcher" && watcherSkipProviderProbes;
     watcherSkipProviderProbes = false;
-    const status = await computeStatusFresh({
+    const fresh = await computeStatusFresh({
       trigger,
       ...(trigger === "late-probe" ? { reuseSettledSlugProbes: true } : {}),
       ...(skipProviderProbes ? { skipProviderProbes: true } : {}),
     });
+    // Overlay latest listModels/discoverModels outcomes (omit when unknown).
+    const status = {
+      ...fresh,
+      connections: attachModelsStatusToConnections(fresh.connections),
+    };
     return { status, fingerprint: statusChangeKey(status) };
   },
   canSend: (jobEpoch) =>
