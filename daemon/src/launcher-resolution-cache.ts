@@ -59,6 +59,14 @@ let cacheState: TCacheState | null = null;
 export const launcherResolutionCacheFilePath = (): string =>
   join(stateDir(), "launcher-resolution-cache.json");
 
+/** A persisted `kind` must be a real {@link TLauncherKind}: one of the closed
+ *  kinds, or `shim:<adapter id>` with a non-empty id. */
+const isLauncherKind = (k: string): boolean =>
+  k === "binary" ||
+  k === "script" ||
+  k === "wrapper" ||
+  /^shim:[\w.-]+$/.test(k);
+
 const isRecord = (v: unknown): v is TLauncherResolutionPersistRecord => {
   if (typeof v !== "object" || v === null) return false;
   const r = v as TLauncherResolutionPersistRecord;
@@ -70,8 +78,8 @@ const isRecord = (v: unknown): v is TLauncherResolutionPersistRecord => {
     r.path.length > 0 &&
     r.path.length <= MAX_PATH_CHARS &&
     typeof r.kind === "string" &&
-    r.kind.length > 0 &&
     r.kind.length <= 64 &&
+    isLauncherKind(r.kind) &&
     (r.adapterId === null || typeof r.adapterId === "string") &&
     (r.interpreter === null ||
       (typeof r.interpreter === "string" &&
@@ -147,7 +155,7 @@ const writePersistAtomic = (
   );
   const body: TPersistFile = { v: SCHEMA_V, records };
   try {
-    mkdirSync(st.dir, { recursive: true });
+    mkdirSync(st.dir, { recursive: true, mode: 0o700 });
     writeFileSync(tmp, JSON.stringify(body), { mode: 0o600 });
     renameSync(tmp, st.file);
   } catch {
@@ -168,9 +176,10 @@ const flushPersist = (st: TCacheState): void => {
   try {
     do {
       st.persistQueued = false;
-      writePersistAtomic(st, [...st.memory.values()].slice(
-        -LAUNCHER_RESOLUTION_CACHE_MAX_RECORDS,
-      ));
+      writePersistAtomic(
+        st,
+        [...st.memory.values()].slice(-LAUNCHER_RESOLUTION_CACHE_MAX_RECORDS),
+      );
     } while (st.persistQueued);
   } finally {
     st.persistLocked = false;
