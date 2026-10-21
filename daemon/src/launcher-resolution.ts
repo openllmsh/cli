@@ -29,9 +29,9 @@ import {
   realpathSync,
   statSync,
 } from "node:fs";
-import { createRequire } from "node:module";
 import { homedir } from "node:os";
 import { basename, delimiter, isAbsolute, join, sep } from "node:path";
+import { registerLauncherResolutionInvalidator } from "./launcher-invalidate-hook";
 import {
   dropPersistedLauncherResolution,
   loadLauncherResolutionCache,
@@ -40,9 +40,8 @@ import {
 } from "./launcher-resolution-cache";
 import type { TLauncherResolution } from "./launcher-resolution-types";
 import type { TManagerAdapter, TManagerRegistry } from "./manager-resolution";
+import { defaultManagerRegistry } from "./manager-resolution";
 import { parseShebangInterpreter, resolveOnPath } from "./path-utils";
-
-const requireFromHere = createRequire(import.meta.url);
 
 /** Cache fingerprint for a shim resolution: candidate shape + manager selection. */
 const shimCacheFingerprint = (
@@ -426,22 +425,11 @@ export const createLauncherResolver = (
   deps: TCreateLauncherResolverDeps = {},
 ): TLauncherResolver => {
   const shellProbe = deps.shellProbe ?? defaultShellProbe;
-  let resolvedManagers: TManagerRegistry | undefined = deps.managers;
-  /**
-   * Sync manager load for peek (selection fingerprint) and demand resolve.
-   * Lazy + createRequire (not a top-level import) so the
-   * launcher-resolution → manager-resolution → spawn →
-   * launcher-exec-invalidate → launcher-resolution init cycle stays broken.
-   */
-  const ensureManagers = (): TManagerRegistry => {
-    if (resolvedManagers !== undefined) return resolvedManagers;
-    const mod = requireFromHere("./manager-resolution") as {
-      defaultManagerRegistry: TManagerRegistry;
-    };
-    resolvedManagers = mod.defaultManagerRegistry;
-    return resolvedManagers;
-  };
-  const managersOf = async (): Promise<TManagerRegistry> => ensureManagers();
+  // Static import is safe: launcher-exec-invalidate no longer imports this
+  // module (it goes through launcher-invalidate-hook), so the old
+  // launcher-resolution → manager-resolution → spawn →
+  // launcher-exec-invalidate → launcher-resolution cycle is gone.
+  const managers: TManagerRegistry = deps.managers ?? defaultManagerRegistry;
   const shellProbeTimeoutMs = (): number =>
     deps.shellProbeTimeoutMs ??
     envMs("OPENLLM_LAUNCHER_SHELL_PROBE_TIMEOUT_MS", 3_000);
@@ -492,7 +480,6 @@ export const createLauncherResolver = (
     if (hit.resolution.kind.startsWith("shim:")) {
       // Include the manager's selection fingerprint so `mise use -g` (shim
       // file unchanged, old target still on disk) invalidates the peek.
-      const managers = ensureManagers();
       const adapter =
         managers.listManagerAdapters().find((a) => a.recognizes(candidate)) ??
         managers
@@ -564,7 +551,6 @@ export const createLauncherResolver = (
 
     // Manager shim? Prefer adapter resolution (unsandboxed) over treating
     // the shim script as a wrapper.
-    const managers = await managersOf();
     const managed = await managers.resolveManagerCandidate(start, {
       ...(opts?.signal !== undefined ? { signal: opts.signal } : {}),
     });
@@ -638,8 +624,7 @@ export const createLauncherResolver = (
 
 /**
  * Production resolver (default manager registry + real shell probe + disk
- * persistence). Lazily constructed on first access so module init cannot race
- * the manager-resolution registry's own initialization.
+ * persistence). Lazily constructed on first access.
  */
 let cachedDefaultResolver: TLauncherResolver | undefined;
 export const defaultLauncherResolver: TLauncherResolver = {
@@ -656,3 +641,9 @@ export const defaultLauncherResolver: TLauncherResolver = {
     cachedDefaultResolver.invalidateLauncherResolution(candidate);
   },
 };
+
+// Register after the proxy exists so spawn-side invalidation never needs to
+// import this module (see launcher-invalidate-hook.ts).
+registerLauncherResolutionInvalidator((candidate) => {
+  defaultLauncherResolver.invalidateLauncherResolution(candidate);
+});

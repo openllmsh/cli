@@ -2,10 +2,17 @@
  * Phase 4 / L1: when exec of a resolved launcher fails with ENOENT/EACCES,
  * drop the cached resolution so the next demand call re-resolves (self-heal
  * after `mise use -g`, `volta install`, `nix profile upgrade`, …).
+ *
+ * Does NOT import `launcher-resolution` — that would re-create the init cycle
+ * through manager-resolution → spawn. Production uses the leaf hook registered
+ * by the resolver; tests pass an explicit target.
  */
 import { realpathSync } from "node:fs";
-import type { TLauncherResolver } from "./launcher-resolution";
-import { defaultLauncherResolver } from "./launcher-resolution";
+import { registeredLauncherResolutionInvalidator } from "./launcher-invalidate-hook";
+
+export type TLauncherInvalidateTarget = {
+  readonly invalidateLauncherResolution: (candidate: string) => void;
+};
 
 const isErrno = (
   err: unknown,
@@ -40,19 +47,28 @@ export const isLauncherExecFailure = (err: unknown): boolean => {
   return err.code === "ENOENT" || err.code === "EACCES";
 };
 
+const resolveInvalidator = (
+  resolver: TLauncherInvalidateTarget | undefined,
+): ((candidate: string) => void) | undefined => {
+  if (resolver !== undefined) {
+    return (candidate) => resolver.invalidateLauncherResolution(candidate);
+  }
+  return registeredLauncherResolutionInvalidator();
+};
+
 /**
  * Invalidate the cached resolution for the argv's exec target when `err` is
- * ENOENT/EACCES. No-op otherwise. `resolver` defaults to the process-wide
- * production resolver (overridable in tests).
+ * ENOENT/EACCES. No-op otherwise. When `resolver` is omitted, uses the
+ * production invalidator registered by `launcher-resolution`.
  */
 const invalidateTarget = (
   target: string,
-  resolver: TLauncherResolver,
+  invalidate: (candidate: string) => void,
 ): void => {
-  resolver.invalidateLauncherResolution(target);
+  invalidate(target);
   try {
     const real = realpathSync(target);
-    if (real !== target) resolver.invalidateLauncherResolution(real);
+    if (real !== target) invalidate(real);
   } catch {
     // Target already gone — the candidate key drop above is enough.
   }
@@ -61,12 +77,14 @@ const invalidateTarget = (
 export const maybeInvalidateLauncherOnExecFailure = (
   argv: readonly string[],
   err: unknown,
-  resolver: TLauncherResolver = defaultLauncherResolver,
+  resolver?: TLauncherInvalidateTarget,
 ): void => {
   if (!isLauncherExecFailure(err)) return;
   const target = resolvedSpawnTarget(argv);
   if (target === undefined) return;
-  invalidateTarget(target, resolver);
+  const invalidate = resolveInvalidator(resolver);
+  if (invalidate === undefined) return;
+  invalidateTarget(target, invalidate);
 };
 
 /**
@@ -76,10 +94,12 @@ export const maybeInvalidateLauncherOnExecFailure = (
 export const maybeInvalidateLauncherOnExitCode = (
   argv: readonly string[],
   exitCode: number | null,
-  resolver: TLauncherResolver = defaultLauncherResolver,
+  resolver?: TLauncherInvalidateTarget,
 ): void => {
   if (exitCode !== 127) return;
   const target = resolvedSpawnTarget(argv);
   if (target === undefined) return;
-  invalidateTarget(target, resolver);
+  const invalidate = resolveInvalidator(resolver);
+  if (invalidate === undefined) return;
+  invalidateTarget(target, invalidate);
 };
