@@ -30,7 +30,7 @@ import {
   statSync,
 } from "node:fs";
 import { homedir } from "node:os";
-import { basename, delimiter, isAbsolute, join, sep } from "node:path";
+import { basename, delimiter, dirname, isAbsolute, join, sep } from "node:path";
 import { registerLauncherResolutionInvalidator } from "./launcher-invalidate-hook";
 import {
   dropPersistedLauncherResolution,
@@ -438,6 +438,39 @@ export const createLauncherResolver = (
   const underManagerRoot = deps.underManagerRoot ?? pathUnderManagerRoot;
   const persist = deps.persist === true;
 
+  /**
+   * Prefer a real interpreter next to the script (npm globals under a manager
+   * install), else resolve a recognized manager shim on the demand path so
+   * `cliEnv` does not put an isolated-HOME-blind shim dir first on PATH.
+   */
+  const refineScriptInterpreter = async (
+    scriptReal: string,
+    interpreter: string | undefined,
+    signal?: AbortSignal,
+  ): Promise<string | undefined> => {
+    if (interpreter === undefined) return undefined;
+    const sibling = join(dirname(scriptReal), basename(interpreter));
+    if (existsSync(sibling)) {
+      try {
+        accessSync(sibling, constants.X_OK);
+        return sibling;
+      } catch {
+        // fall through to manager resolution
+      }
+    }
+    const recognized = managers
+      .listManagerAdapters()
+      .some((adapter) => adapter.recognizes(interpreter));
+    if (!recognized) return interpreter;
+    const viaManager = await managers.resolveManagerCandidate(interpreter, {
+      ...(signal !== undefined ? { signal } : {}),
+    });
+    if (viaManager.kind === "resolved" && viaManager.target !== null) {
+      return viaManager.target;
+    }
+    return interpreter;
+  };
+
   const cache = new Map<
     string,
     {
@@ -580,6 +613,11 @@ export const createLauncherResolver = (
       // Fold selection state into the cache fingerprint so a plain
       // `mise use -g` (shim bytes unchanged) invalidates passive peeks.
       const fp = shimCacheFingerprint(own, adapter, start);
+      const interpreter = await refineScriptInterpreter(
+        targetReal,
+        classified?.interpreter,
+        opts?.signal,
+      );
       const resolution: TLauncherResolution = {
         kind: `shim:${adapterName}`,
         path: targetReal,
@@ -587,9 +625,7 @@ export const createLauncherResolver = (
         fingerprint: fp,
         underManagerRoot:
           underManagerRoot(targetReal) || underManagerRoot(start),
-        ...(classified?.interpreter !== undefined
-          ? { interpreter: classified.interpreter }
-          : {}),
+        ...(interpreter !== undefined ? { interpreter } : {}),
       };
       const fingerprintAfter = fileFingerprint(start);
       if (fingerprintAfter === fingerprintBefore) {
@@ -605,14 +641,26 @@ export const createLauncherResolver = (
       pathDirs: opts?.probePathDirs ?? defaultPathDirs(),
     });
     if (classified === null) return null;
+    const interpreter = await refineScriptInterpreter(
+      real,
+      classified.interpreter,
+      opts?.signal,
+    );
+    const resolution: TLauncherResolution =
+      interpreter === classified.interpreter
+        ? classified
+        : {
+            ...classified,
+            ...(interpreter !== undefined ? { interpreter } : {}),
+          };
     const fingerprintAfter = fileFingerprint(start);
     if (fingerprintAfter === fingerprintBefore) {
-      remember(start, classified.fingerprint, classified);
+      remember(start, resolution.fingerprint, resolution);
       if (start !== candidate) {
-        remember(candidate, classified.fingerprint, classified);
+        remember(candidate, resolution.fingerprint, resolution);
       }
     }
-    return classified;
+    return resolution;
   };
 
   return {

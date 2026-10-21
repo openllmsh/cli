@@ -24,7 +24,7 @@ import {
 } from "node:fs";
 import { mkdir, rm } from "node:fs/promises";
 import { platform } from "node:os";
-import { basename, dirname, join } from "node:path";
+import { basename, dirname, isAbsolute, join } from "node:path";
 import { projectDoctorOutcomeLedger } from "@openllmsh/protocol";
 import type { TCliProvider } from "./cli-paths";
 import {
@@ -116,6 +116,14 @@ const ensureIsolatedDirs = async (provider: TCliProvider): Promise<void> => {
  * always-granted state dir (`<stateDir>/cli/<provider>/`); it merely READS the
  * host binary, so it needs no grant on the host CLI's own dir.
  */
+/**
+ * Per-provider "re-grant pending" — set whenever a relink changes the target
+ * (passive OR demand). Keychain work stays demand-only: a passive call that
+ * relinks must not spawn `security`, but the next demand call must still
+ * re-grant even when that later call does not itself relink.
+ */
+const regrantPending = new Set<TCliProvider>();
+
 export const linkIsolatedCli = async (
   provider: TCliProvider,
   hostBin: string,
@@ -123,9 +131,16 @@ export const linkIsolatedCli = async (
   await ensureIsolatedDirs(provider);
   const dst = cliBin(provider);
   let previousReal: string | null = null;
-  if (existsSync(dst)) {
+  try {
+    previousReal = realpathSync(dst);
+  } catch {
     try {
-      previousReal = realpathSync(dst);
+      // Dangling link: existsSync is false, but the prior target still
+      // identifies a change (version switch / self-update removed the old bin).
+      const previousLink = readlinkSync(dst);
+      previousReal = isAbsolute(previousLink)
+        ? previousLink
+        : join(dirname(dst), previousLink);
     } catch {
       previousReal = null;
     }
@@ -141,19 +156,20 @@ export const linkIsolatedCli = async (
     nextReal = hostBin;
   }
   // Target change (incl. replacing a prior binary) leaves keychain items ACL'd
-  // to the previous executable path. Callers on a DEMAND path re-grant; passive
-  // status must not spawn `security` here.
+  // to the previous executable path. Record pending here; demand callers flush
+  // via regrantKeychainAfterRelink — passive status must not spawn `security`.
   const targetChanged =
     previousReal !== null && nextReal !== null && previousReal !== nextReal;
+  if (targetChanged) regrantPending.add(provider);
   return { targetChanged };
 };
 
 /** Re-grant isolated-keychain ACLs after a demand-time launcher relink. */
 const regrantKeychainAfterRelink = async (
   provider: TCliProvider,
-): Promise<void> => {
-  if (platform() !== "darwin" || !isMacKeychainProvider(provider)) return;
-  await grantKeychainToolAccess(cliHome(provider)).catch(() => false);
+): Promise<boolean> => {
+  if (platform() !== "darwin" || !isMacKeychainProvider(provider)) return true;
+  return grantKeychainToolAccess(cliHome(provider)).catch(() => false);
 };
 
 /**
@@ -414,6 +430,25 @@ const probeCliInstallState = async (
   const now = Date.now();
   const bin = cliBin(provider);
   const demand = opts?.demand === true;
+  try {
+    return await probeCliInstallStateBody(provider, opts, now, bin, demand);
+  } finally {
+    // Flush a pending re-grant only on demand, and only clear after success so
+    // a failed grant stays queued for the next demand call.
+    if (demand && regrantPending.has(provider)) {
+      const ok = await regrantKeychainAfterRelink(provider);
+      if (ok) regrantPending.delete(provider);
+    }
+  }
+};
+
+const probeCliInstallStateBody = async (
+  provider: TCliProvider,
+  opts: TCliInstallStateOpts | undefined,
+  now: number,
+  bin: string,
+  demand: boolean,
+): Promise<TCliInstallState> => {
   if (!existsSync(bin)) {
     // No isolated link exists yet. A PASSIVE call here must NOT spawn a
     // manager subprocess, even once — cold bootstrap is not exempt from the
@@ -428,10 +463,7 @@ const probeCliInstallState = async (
     if (host === undefined) {
       return { installed: false, version: null };
     }
-    const linked = await linkIsolatedCli(provider, host);
-    if (demand && linked.targetChanged) {
-      await regrantKeychainAfterRelink(provider);
-    }
+    await linkIsolatedCli(provider, host);
     cliInstallReconcileUntil.set(
       installKey(provider),
       now + CLI_INSTALL_STATE_TTL_MS,
@@ -483,10 +515,7 @@ const probeCliInstallState = async (
         resolved.target !== null &&
         resolved.target !== immediateTarget
       ) {
-        const linked = await linkIsolatedCli(provider, resolved.target);
-        if (demand && linked.targetChanged) {
-          await regrantKeychainAfterRelink(provider);
-        }
+        await linkIsolatedCli(provider, resolved.target);
       }
     }
 
@@ -508,16 +537,12 @@ const probeCliInstallState = async (
       );
       const host = await resolveHostBinary(provider, opts);
       if (host !== undefined) {
-        let linked: { readonly targetChanged: boolean } | null = null;
         try {
           if (realpathSync(bin) !== realpathSync(host)) {
-            linked = await linkIsolatedCli(provider, host);
+            await linkIsolatedCli(provider, host);
           }
         } catch {
-          linked = await linkIsolatedCli(provider, host);
-        }
-        if (demand && linked?.targetChanged === true) {
-          await regrantKeychainAfterRelink(provider);
+          await linkIsolatedCli(provider, host);
         }
       }
     }

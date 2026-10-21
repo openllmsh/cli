@@ -126,6 +126,12 @@ export const parseGrokModelList = (
   return parseGrokModelRows(asRecords(rec.data ?? rec.models));
 };
 
+/** Map an HTTP status onto the closed listModels null reason. */
+export const httpNullReason = (status: number): TListModelsNullReason =>
+  Number.isInteger(status) && status >= 100 && status <= 599
+    ? (`http_${status}` as const)
+    : "error";
+
 /**
  * Shared fetch for delegate `listModels()` implementations: bounded
  * timeout, JSON body handed to the caller's provider-specific `parse`,
@@ -147,14 +153,7 @@ export const fetchModelListDetailed = async (
       signal: AbortSignal.timeout(MODEL_LIST_FETCH_TIMEOUT_MS),
     });
     if (!resp.ok) {
-      const status = resp.status;
-      return {
-        kind: "null",
-        reason:
-          Number.isInteger(status) && status >= 100 && status <= 599
-            ? (`http_${status}` as const)
-            : "error",
-      };
+      return { kind: "null", reason: httpNullReason(resp.status) };
     }
     const entries = parse(await resp.json());
     if (entries.length === 0) {

@@ -72,6 +72,7 @@ import {
   cachedCliSemver,
   credentialHasFetchLifetime,
   fetchModelList,
+  httpNullReason,
   listWithReason,
   modelDiscoveryFromList,
   parseGrokModelList,
@@ -724,14 +725,7 @@ const fetchModelRowsDetailed = async (): Promise<TGrokModelRowsDetailed> => {
       signal: AbortSignal.timeout(MODEL_LIST_FETCH_TIMEOUT_MS),
     });
     if (!resp.ok) {
-      const status = resp.status;
-      return {
-        kind: "null",
-        reason:
-          Number.isInteger(status) && status >= 100 && status <= 599
-            ? (`http_${status}` as const)
-            : "error",
-      };
+      return { kind: "null", reason: httpNullReason(resp.status) };
     }
     // OpenAI-wire `{ data: [...] }`; tolerate `{ models: [...] }` too.
     const b = (await resp.json()) as {
