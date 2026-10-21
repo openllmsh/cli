@@ -113,15 +113,27 @@ const hasExplicitKeychainPath = (
   return last !== undefined && looksLikeKeychainPath(last);
 };
 
-const hasFlag = (argv: ReadonlyArray<string>, flag: string): boolean => {
+const hasFlag = (
+  argv: ReadonlyArray<string>,
+  sub: TAllowedSecuritySubcommand,
+  flag: string,
+): boolean => {
+  const valueFlags = VALUE_TAKING_FLAGS[sub];
   for (let i = 1; i < argv.length; i++) {
     const arg = argv[i];
     if (arg === undefined) continue;
+    if (!isFlag(arg)) continue; // positional or an already-skipped value
     if (arg === flag) return true;
     // `-pVALUE` / `-kVALUE` glued forms
     if (flag.length === 2 && arg.startsWith(flag) && arg.length > 2)
       return true;
     if (arg.startsWith(`${flag}=`)) return true;
+    // Glued value-taking flag (`-pVALUE`) consumes no following token.
+    const short = arg.length >= 2 ? arg.slice(0, 2) : arg;
+    if (arg.length > 2 && !arg.startsWith("--") && valueFlags.has(short)) {
+      continue;
+    }
+    if (valueFlags.has(arg)) i += 1; // skip this flag's value
   }
   return false;
 };
@@ -173,13 +185,13 @@ export const assertSafeSecurityArgv = (
   }
 
   if (allowedSub === "create-keychain") {
-    if (hasFlag(argv, "-P")) {
+    if (hasFlag(argv, allowedSub, "-P")) {
       throw new SecurityArgvRejectedError(
         "create-keychain must not use interactive -P",
         argv,
       );
     }
-    if (!hasFlag(argv, "-p")) {
+    if (!hasFlag(argv, allowedSub, "-p")) {
       throw new SecurityArgvRejectedError(
         "create-keychain requires non-interactive -p",
         argv,
@@ -188,7 +200,7 @@ export const assertSafeSecurityArgv = (
   }
 
   if (allowedSub === "unlock-keychain") {
-    if (!hasFlag(argv, "-p")) {
+    if (!hasFlag(argv, allowedSub, "-p")) {
       throw new SecurityArgvRejectedError(
         "unlock-keychain requires non-interactive -p",
         argv,
@@ -200,7 +212,7 @@ export const assertSafeSecurityArgv = (
     allowedSub === "set-key-partition-list" ||
     allowedSub === "set-generic-password-partition-list"
   ) {
-    if (!hasFlag(argv, "-k")) {
+    if (!hasFlag(argv, allowedSub, "-k")) {
       throw new SecurityArgvRejectedError(
         `${allowedSub} requires non-interactive -k`,
         argv,
