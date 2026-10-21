@@ -484,23 +484,41 @@ export const createLauncherResolver = (
   const persist = deps.persist === true;
 
   /**
-   * Prefer a real interpreter next to the script (npm globals under a manager
-   * install), else resolve a recognized manager shim on the demand path so
-   * `cliEnv` does not put an isolated-HOME-blind shim dir first on PATH.
+   * Prefer a real interpreter next to the unresolved launcher (npm globals:
+   * `<prefix>/bin/codex` → package script, with `node` beside the launcher),
+   * then beside the realpath'd script, else resolve a recognized manager shim
+   * on the demand path so `cliEnv` does not put an isolated-HOME-blind shim
+   * dir first on PATH.
    */
   const refineScriptInterpreter = async (
     scriptReal: string,
     interpreter: string | undefined,
     signal?: AbortSignal,
+    launcherPath?: string,
   ): Promise<string | undefined> => {
     if (interpreter === undefined) return undefined;
-    const sibling = join(dirname(scriptReal), basename(interpreter));
-    if (existsSync(sibling)) {
+    // Realpath each search dir (the directory itself — not the launcher
+    // symlink) so macOS /var vs /private/var collapses, while npm-global
+    // layouts still see `<prefix>/bin` before the package script dir.
+    const searchDir = (filePath: string): string => {
+      const dir = dirname(filePath);
+      try {
+        return realpathSync(dir);
+      } catch {
+        return dir;
+      }
+    };
+    const dirs = [
+      ...(launcherPath !== undefined ? [searchDir(launcherPath)] : []),
+      searchDir(scriptReal),
+    ];
+    for (const dir of new Set(dirs)) {
+      const sibling = join(dir, basename(interpreter));
       try {
         accessSync(sibling, constants.X_OK);
         return sibling;
       } catch {
-        // fall through to manager resolution
+        // try next / fall through to manager resolution
       }
     }
     const recognized = managers
@@ -685,6 +703,7 @@ export const createLauncherResolver = (
         targetReal,
         classified?.interpreter,
         opts?.signal,
+        start,
       );
       const resolution: TLauncherResolution = {
         kind: `shim:${adapterName}`,
@@ -715,6 +734,7 @@ export const createLauncherResolver = (
       real,
       classified.interpreter,
       opts?.signal,
+      start,
     );
     const resolution: TLauncherResolution =
       interpreter === classified.interpreter
