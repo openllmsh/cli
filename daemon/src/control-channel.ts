@@ -37,10 +37,6 @@ import {
 } from "./cloud-client";
 import { runCommandInner } from "./control-relay";
 import {
-  attachModelsStatusToConnections,
-  noteConnectionsForModelReport,
-} from "./model-report";
-import {
   markCredentialStoresDirtyIfChanged,
   resetCredentialStoreFingerprint,
 } from "./credential-store-dirty";
@@ -60,6 +56,10 @@ import {
   logWarn,
   safeDiagnosticMessage,
 } from "./logger";
+import {
+  attachModelsStatusToConnections,
+  noteConnectionsForModelReport,
+} from "./model-report";
 import {
   acceptChannel,
   closeChannelFromRelay,
