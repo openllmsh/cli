@@ -57,7 +57,17 @@ export const formatLauncherDoctorReport = (
   const lines: string[] = ["Launcher resolution", ""];
   for (const row of rows) {
     if (!row.installed) {
-      lines.push(`${row.provider}: not installed`);
+      if (row.candidate !== null) {
+        // Candidate exists on disk but demand resolution returned null
+        // (e.g. recognized manager shim whose query failed).
+        lines.push(
+          `${row.provider}: not installed`,
+          `  candidate=${row.candidate}`,
+          `  resolved=unresolved`,
+        );
+      } else {
+        lines.push(`${row.provider}: not installed`);
+      }
       continue;
     }
     lines.push(
@@ -130,33 +140,33 @@ export const collectLauncherDoctorRows = async (): Promise<
         demand: true,
         enableShellProbe: false,
       });
-      // Truthful: isolation applies iff the provider is installed (every
-      // provider gets shared L2 XDG/HOME/TMPDIR via cliEnv). Unresolved
-      // content still installs the link path — still isolated on spawn.
-      const installed = true;
       if (resolved === null) {
+        // Daemon demand resolution skips a null result (cli-install
+        // resolveHostBinary `continue`s — no isolated link is created), so
+        // the provider is not installed from the daemon's view.
         return {
           provider,
-          installed,
+          installed: false,
           candidate,
           resolvedPath: null,
           kind: null,
           adapterId: null,
           interpreter: null,
           underManagerRoot: false,
-          isolatedEnvApplies: installed,
+          isolatedEnvApplies: false,
         };
       }
       return {
         provider,
-        installed,
+        installed: true,
         candidate,
         resolvedPath: resolved.path,
         kind: resolved.kind,
         adapterId: resolved.adapterId ?? null,
         interpreter: resolved.interpreter ?? null,
         underManagerRoot: resolved.underManagerRoot,
-        isolatedEnvApplies: installed,
+        // L2 isolatedRuntimeEnv applies to every installed provider on spawn.
+        isolatedEnvApplies: true,
       };
     }),
   );
