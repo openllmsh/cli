@@ -72,8 +72,33 @@ const voltaDataRoot = (home: string, env: NodeJS.ProcessEnv): string =>
 const protoDataRoot = (home: string, env: NodeJS.ProcessEnv): string =>
   nonEmpty(env.PROTO_HOME) ?? join(home, ".proto");
 
+/**
+ * Ordered fnm data-root candidates matching Schniz/fnm `directories.rs`
+ * `default_base_dir`: explicit `FNM_DIR`, else modern XDG
+ * (`$XDG_DATA_HOME/fnm` or `~/.local/share/fnm`), legacy `~/.fnm`, and on
+ * macOS the install-script / Apple-strategy path under Application Support.
+ * Callers existence-filter; fnm itself picks the first existing, else modern.
+ */
+export const fnmDataRootCandidates = (
+  home: string,
+  env: NodeJS.ProcessEnv,
+): readonly string[] => {
+  const explicit = nonEmpty(env.FNM_DIR);
+  if (explicit !== undefined) return [explicit];
+  const modern = join(
+    nonEmpty(env.XDG_DATA_HOME) ?? join(home, ".local", "share"),
+    "fnm",
+  );
+  const out: string[] = [modern, join(home, ".fnm")];
+  if (process.platform === "darwin") {
+    out.push(join(home, "Library", "Application Support", "fnm"));
+  }
+  return out;
+};
+
+/** Primary fnm root (FNM_DIR or the modern XDG default create-target). */
 const fnmDataRoot = (home: string, env: NodeJS.ProcessEnv): string | null =>
-  nonEmpty(env.FNM_DIR) ?? join(home, ".local", "share", "fnm");
+  fnmDataRootCandidates(home, env)[0] ?? null;
 
 export const LAUNCHER_MANAGERS: readonly TLauncherManagerSpec[] = [
   {
@@ -147,10 +172,10 @@ export const LAUNCHER_MANAGERS: readonly TLauncherManagerSpec[] = [
     dataRoot: fnmDataRoot,
     // Default alias bin is a real node dir (not a shim wrapper).
     shimDirs: () => [],
-    binDirs: (home, env) => {
-      const root = fnmDataRoot(home, env);
-      return root !== null ? [join(root, "aliases", "default", "bin")] : [];
-    },
+    binDirs: (home, env) =>
+      fnmDataRootCandidates(home, env).map((root) =>
+        join(root, "aliases", "default", "bin"),
+      ),
     managerBinCandidates: () => [],
     rootMarkers: [],
   },
@@ -255,6 +280,12 @@ export const allManagerDataRoots = (
   push(mise.cacheDir);
   for (const m of LAUNCHER_MANAGERS) {
     if (m.id === "mise" || m.id === "snap" || m.id === "npm") continue;
+    // fnm may live under XDG, legacy ~/.fnm, or (macOS) Application Support —
+    // grant every candidate; launcherDataRoots existence-filters.
+    if (m.id === "fnm") {
+      for (const root of fnmDataRootCandidates(home, env)) push(root);
+      continue;
+    }
     push(m.dataRoot(home, env));
     if (m.id === "nix") push("/nix/var/nix/profiles/default");
     if (m.id === "linuxbrew") push("/home/linuxbrew/.linuxbrew");
