@@ -111,8 +111,14 @@ export const SENSITIVE_ROOTS = (home: string): readonly string[] => [
   join(home, ".claude"),
 ];
 
-export const existing = (paths: readonly string[]): string[] => {
-  const home = homedir();
+export const existing = (
+  paths: readonly string[],
+  // The home the working set was BUILT for — not `homedir()`. Under
+  // `--sandbox-exec --home <real>` this process's `HOME` is the child's
+  // isolated one, so `homedir()` would miss the real home and let a missing
+  // leaf climb onto the whole real home tree.
+  home: string = homedir(),
+): string[] => {
   const sensitiveRoots = SENSITIVE_ROOTS(home);
   const underSensitiveRoot = (p: string): boolean =>
     sensitiveRoots.some((root) => p.startsWith(`${root}/`));

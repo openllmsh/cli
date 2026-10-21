@@ -32,9 +32,9 @@ import type { TWorkingSet } from "./base";
 import { baseWorkingSet, existing } from "./base";
 import { browserChatLayer } from "./browser-chat";
 import {
-  MAC_SEATBELT_RUNTIME_WRITE_EXTRAS,
   delegatedCliRuntimeSet,
   launcherDataRoots,
+  MAC_SEATBELT_RUNTIME_WRITE_EXTRAS,
 } from "./delegated-cli-runtime";
 import { fleetLayer } from "./fleet";
 import { vendorCliTunnelLayer } from "./vendor-cli-tunnel";
@@ -42,9 +42,9 @@ import { vendorCliTunnelLayer } from "./vendor-cli-tunnel";
 export type { TWorkingSet } from "./base";
 export { daemonTempDir, resolveCliExecDirs } from "./base";
 export {
-  MAC_SEATBELT_RUNTIME_WRITE_EXTRAS,
   delegatedCliRuntimeSet,
   launcherDataRoots,
+  MAC_SEATBELT_RUNTIME_WRITE_EXTRAS,
 };
 
 /** The four sub-process sandbox layers M2's `--sub` bootstrap selects between. */
@@ -68,7 +68,10 @@ const LAYER_BUILDERS: Readonly<
  *  keep the lists disjoint (a read-write grant subsumes a read-only one), then
  *  `existing()` both (drop/normalize missing paths so a not-yet-created leaf
  *  never widens onto bare `$HOME`). */
-const composeWorkingSet = (parts: readonly TWorkingSet[]): TWorkingSet => {
+const composeWorkingSet = (
+  parts: readonly TWorkingSet[],
+  home: string,
+): TWorkingSet => {
   const readWrite = new Set<string>();
   const readOnly = new Set<string>();
   for (const part of parts) {
@@ -78,8 +81,8 @@ const composeWorkingSet = (parts: readonly TWorkingSet[]): TWorkingSet => {
   // A read-write grant subsumes a read-only one — keep the lists disjoint.
   for (const rw of readWrite) readOnly.delete(rw);
   return {
-    readWrite: existing([...readWrite]),
-    readOnly: existing([...readOnly]),
+    readWrite: existing([...readWrite], home),
+    readOnly: existing([...readOnly], home),
   };
 };
 
@@ -95,13 +98,16 @@ const composeWorkingSet = (parts: readonly TWorkingSet[]): TWorkingSet => {
  */
 export const daemonWorkingSet = (homeOverride?: string): TWorkingSet => {
   const home = homeOverride ?? homedir();
-  return composeWorkingSet([
-    baseWorkingSet(homeOverride),
-    authStateLayer(home),
-    browserChatLayer(home),
-    fleetLayer(home),
-    vendorCliTunnelLayer(home),
-  ]);
+  return composeWorkingSet(
+    [
+      baseWorkingSet(homeOverride),
+      authStateLayer(home),
+      browserChatLayer(home),
+      fleetLayer(home),
+      vendorCliTunnelLayer(home),
+    ],
+    home,
+  );
 };
 
 /**
@@ -115,10 +121,10 @@ export const workingSetForLayer = (
   homeOverride?: string,
 ): TWorkingSet => {
   const home = homeOverride ?? homedir();
-  return composeWorkingSet([
-    baseWorkingSet(homeOverride),
-    LAYER_BUILDERS[layer](home),
-  ]);
+  return composeWorkingSet(
+    [baseWorkingSet(homeOverride), LAYER_BUILDERS[layer](home)],
+    home,
+  );
 };
 
 /**
