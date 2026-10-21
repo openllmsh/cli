@@ -313,17 +313,22 @@ const resolveHostBinary = async (
           if (!isHostCliRunnable(launcher.path)) continue;
           return launcher.path;
         }
-        // Classifier returned null — fall through to the legacy manager path.
-      } else {
-        // Passive: reuse a prior demand resolution when the fingerprint still
-        // matches; never spawn.
-        const peeked = launchers.peekLauncherResolution(candidate);
-        if (peeked !== undefined) {
-          noteLauncherResolution(provider, peeked);
-          if (!isHostCliRunnable(peeked.path)) continue;
-          return peeked.path;
-        }
+        // resolveLauncher already ran resolveManagerCandidate for this
+        // candidate (and returned null on unresolved shim / unreadable
+        // content). Do NOT re-enter the legacy manager path — that was a
+        // redundant second spawn/lookup (CodeRabbit 4341596146).
+        continue;
       }
+      // Passive: reuse a prior demand resolution when the fingerprint still
+      // matches; never spawn. Miss → try the manager peek cache below only
+      // when tests inject managers without a launcher layer.
+      const peeked = launchers.peekLauncherResolution(candidate);
+      if (peeked !== undefined) {
+        noteLauncherResolution(provider, peeked);
+        if (!isHostCliRunnable(peeked.path)) continue;
+        return peeked.path;
+      }
+      continue;
     }
 
     const resolved =
