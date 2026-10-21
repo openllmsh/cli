@@ -321,17 +321,18 @@ const resolveHostBinary = async (
         continue;
       }
       // Passive: reuse a prior demand resolution when the fingerprint still
-      // matches; never spawn. Miss → try the manager peek cache below only
-      // when tests inject managers without a launcher layer.
+      // matches; never spawn. Miss → fall through to peekManagerResolution
+      // below (ordinary hosts / cached shims) — still no spawn.
       const peeked = launchers.peekLauncherResolution(candidate);
       if (peeked !== undefined) {
         noteLauncherResolution(provider, peeked);
         if (!isHostCliRunnable(peeked.path)) continue;
         return peeked.path;
       }
-      continue;
     }
 
+    // Demand + launchers already handled above (continue on null). This
+    // demand branch only runs when tests inject managers without launchers.
     const resolved =
       opts?.demand === true
         ? await managers.resolveManagerCandidate(candidate, {
