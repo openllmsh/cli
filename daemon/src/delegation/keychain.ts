@@ -2228,32 +2228,37 @@ export const createKeychainRuntime = (
     );
     noteKeychainIoResult(kc, keyRes);
 
-    // Best-effort genp grant. Failures never flip the return value; see above.
-    const genpRes = await spawnSecurity(
-      ["set-generic-password-partition-list", "-S", partitions, "-k", "", kc],
-      home,
-      { stdout: "ignore", stderr: "pipe" },
-    );
-    noteKeychainIoResult(kc, genpRes);
-    const genpOk = genpRes.code === 0 || noKeyToPartition(genpRes.stderr);
-    if (!genpOk) {
-      const conclusive = isConclusivePartitionRefusal(genpRes.stderr);
-      logWarn(
-        "keychain",
-        conclusive
-          ? safeDiagnosticMessage`keychain grant degraded`
-          : safeDiagnosticMessage`generic-password partition-list grant failed`,
-        {
-          exit_code: genpRes.code,
-          stderr_excerpt: redactSecurityStderr(genpRes.stderr),
-        },
-        toStoreObservation({
-          operation: "grant",
-          stage: "final",
-          result: storeResultOf(genpRes),
-          exitCode: genpRes.code,
-        }),
+    const keyOk = keyRes.code === 0 || noKeyToPartition(keyRes.stderr);
+    // A conclusive key refusal means the store refused us; do not issue a
+    // second grant against it (never retry — a retry can raise UI).
+    if (keyOk || !isConclusivePartitionRefusal(keyRes.stderr)) {
+      // Best-effort genp grant. Failures never flip the return value; see above.
+      const genpRes = await spawnSecurity(
+        ["set-generic-password-partition-list", "-S", partitions, "-k", "", kc],
+        home,
+        { stdout: "ignore", stderr: "pipe" },
       );
+      noteKeychainIoResult(kc, genpRes);
+      const genpOk = genpRes.code === 0 || noKeyToPartition(genpRes.stderr);
+      if (!genpOk) {
+        const conclusive = isConclusivePartitionRefusal(genpRes.stderr);
+        logWarn(
+          "keychain",
+          conclusive
+            ? safeDiagnosticMessage`keychain grant degraded`
+            : safeDiagnosticMessage`generic-password partition-list grant failed`,
+          {
+            exit_code: genpRes.code,
+            stderr_excerpt: redactSecurityStderr(genpRes.stderr),
+          },
+          toStoreObservation({
+            operation: "grant",
+            stage: "final",
+            result: storeResultOf(genpRes),
+            exitCode: genpRes.code,
+          }),
+        );
+      }
     }
 
     // KEY partition — identical to `dev`: success / no-key-skip → true; else false.
