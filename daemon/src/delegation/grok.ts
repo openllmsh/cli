@@ -72,7 +72,7 @@ import {
   cachedCliSemver,
   credentialHasFetchLifetime,
   fetchModelList,
-  httpNullReason,
+  fetchModelListDetailed,
   listWithReason,
   modelDiscoveryFromList,
   parseGrokModelList,
@@ -710,37 +710,37 @@ const fetchModelRowsDetailed = async (): Promise<TGrokModelRowsDetailed> => {
   if (token === null) {
     return { kind: "null", reason: "token_unavailable" };
   }
-  try {
-    // Host derived from the CAPTURED inference URL via `resolveProviderUrl`;
-    // bearer + our own `openllm/<ver>` identity (+ the gate version header),
-    // mirroring the usage read.
-    const resp = await fetch(await resolveProviderUrl(PROVIDER, "/v1/models"), {
-      method: "GET",
-      headers: {
-        authorization: `Bearer ${token.accessToken}`,
-        "user-agent": OPENLLM_USER_AGENT,
-        "x-grok-client-version": await clientVersion(),
-        accept: "application/json",
-      },
-      signal: AbortSignal.timeout(MODEL_LIST_FETCH_TIMEOUT_MS),
-    });
-    if (!resp.ok) {
-      return { kind: "null", reason: httpNullReason(resp.status) };
-    }
-    // OpenAI-wire `{ data: [...] }`; tolerate `{ models: [...] }` too.
-    const b = (await resp.json()) as {
-      data?: ReadonlyArray<TGrokModelRow>;
-      models?: ReadonlyArray<TGrokModelRow>;
-    };
-    const rows = b.data ?? b.models ?? [];
-    if (rows.length === 0) {
-      return { kind: "null", reason: "empty_after_filter" };
-    }
-    modelRowsCache = { at: Date.now(), rows };
-    return { kind: "ok", rows };
-  } catch {
-    return { kind: "null", reason: "error" };
+  // Route through the shared fetch/timeout/reason helper; keep the raw-row
+  // cache for supportsReasoningEffort (which needs vendor fields listModels
+  // strips). Capture rows inside `parse` before they are projected.
+  let capturedRows: ReadonlyArray<TGrokModelRow> = [];
+  const detailed = await fetchModelListDetailed(
+    await resolveProviderUrl(PROVIDER, "/v1/models"),
+    {
+      authorization: `Bearer ${token.accessToken}`,
+      "user-agent": OPENLLM_USER_AGENT,
+      "x-grok-client-version": await clientVersion(),
+      accept: "application/json",
+    },
+    (body) => {
+      if (body !== null && typeof body === "object") {
+        const rec = body as { data?: unknown; models?: unknown };
+        const raw = rec.data ?? rec.models;
+        if (Array.isArray(raw)) {
+          capturedRows = raw.filter(
+            (row): row is TGrokModelRow =>
+              row !== null && typeof row === "object",
+          );
+        }
+      }
+      return parseGrokModelList(body);
+    },
+  );
+  if (detailed.kind === "null") {
+    return { kind: "null", reason: detailed.reason };
   }
+  modelRowsCache = { at: Date.now(), rows: capturedRows };
+  return { kind: "ok", rows: capturedRows };
 };
 
 const modelRowsDetailed = async (): Promise<TGrokModelRowsDetailed> => {
