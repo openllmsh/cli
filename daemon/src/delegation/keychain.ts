@@ -2191,15 +2191,30 @@ export const createKeychainRuntime = (
     /could not be found in the keychain/i.test(stderr);
 
   /**
+   * Conclusive ACL / password / interaction refusals from a partition-list
+   * grant. Anything else is treated as non-conclusive (log + continue). Never
+   * used to decide a retry — a retry can raise the GUI password dialog.
+   */
+  const isConclusivePartitionRefusal = (stderr: string): boolean =>
+    isInteractionNotAllowed(stderr) ||
+    /errSecAuthFailed/i.test(stderr) ||
+    /SecKeychainItemCopyAccess/i.test(stderr) ||
+    matchUnlockFailureToken(stderr) !== null;
+
+  /**
    * macOS only: grant command-line tools prompt-free access to the items in
    * the isolated keychain. Run AFTER a login writes them, and again after a
    * launcher relink (the ACL still names the previous binary path). Gated on
-   * readiness. Covers BOTH item classes vendors use:
-   *   - symmetric keys → `set-key-partition-list`
-   *   - generic passwords (Claude / Cursor OAuth blobs) →
-   *     `set-generic-password-partition-list`
-   * Returns whether the keychain ended up in the granted state (true off macOS,
-   * and true when there was nothing to partition — see {@link noKeyToPartition}).
+   * readiness.
+   *
+   * `set-key-partition-list` keeps the `dev` semantics (its result is the
+   * return value). `set-generic-password-partition-list` is best-effort /
+   * NON-FATAL: Claude / Cursor store OAuth blobs as genp, but a genp grant
+   * miss must not false-fail a login whose credential already landed. A
+   * conclusive genp refusal is logged as "keychain grant degraded" and the
+   * grant still returns success when the key partition succeeded (prefer
+   * login success; never probe readability — a find after interaction-not-
+   * allowed can prompt). Never retry either grant.
    */
   const grantKeychainToolAccess = async (home: string): Promise<boolean> => {
     if (!MAC) return true;
@@ -2212,49 +2227,76 @@ export const createKeychainRuntime = (
       { stdout: "ignore", stderr: "pipe" },
     );
     noteKeychainIoResult(kc, keyRes);
+
+    // Best-effort genp grant. Failures never flip the return value; see above.
     const genpRes = await spawnSecurity(
       ["set-generic-password-partition-list", "-S", partitions, "-k", "", kc],
       home,
       { stdout: "ignore", stderr: "pipe" },
     );
     noteKeychainIoResult(kc, genpRes);
-
-    const keyOk = keyRes.code === 0 || noKeyToPartition(keyRes.stderr);
     const genpOk = genpRes.code === 0 || noKeyToPartition(genpRes.stderr);
-    if (keyOk && genpOk) {
-      const skippedOnly =
-        keyRes.code !== 0 &&
-        genpRes.code !== 0 &&
-        noKeyToPartition(keyRes.stderr) &&
-        noKeyToPartition(genpRes.stderr);
+    if (!genpOk) {
+      const conclusive = isConclusivePartitionRefusal(genpRes.stderr);
+      logWarn(
+        "keychain",
+        conclusive
+          ? safeDiagnosticMessage`keychain grant degraded`
+          : safeDiagnosticMessage`generic-password partition-list grant failed`,
+        {
+          exit_code: genpRes.code,
+          stderr_excerpt: redactSecurityStderr(genpRes.stderr),
+        },
+        toStoreObservation({
+          operation: "grant",
+          stage: "final",
+          result: storeResultOf(genpRes),
+          exitCode: genpRes.code,
+        }),
+      );
+    }
+
+    // KEY partition — identical to `dev`: success / no-key-skip → true; else false.
+    if (keyRes.code === 0) {
       logInfo(
         "keychain",
-        skippedOnly
-          ? safeDiagnosticMessage`keychain grant skipped; no key to partition`
-          : safeDiagnosticMessage`keychain grant persisted`,
+        safeDiagnosticMessage`keychain grant persisted`,
         undefined,
         toStoreObservation({
           operation: "grant",
           stage: "final",
-          result: skippedOnly ? "skipped" : "succeeded",
-          exitCode: keyRes.code === 0 ? keyRes.code : genpRes.code,
+          result: "succeeded",
+          exitCode: keyRes.code,
         }),
       );
       return true;
     }
-    const failed = !keyOk ? keyRes : genpRes;
+    if (noKeyToPartition(keyRes.stderr)) {
+      logInfo(
+        "keychain",
+        safeDiagnosticMessage`keychain grant skipped; no key to partition`,
+        undefined,
+        toStoreObservation({
+          operation: "grant",
+          stage: "final",
+          result: "skipped",
+          exitCode: keyRes.code,
+        }),
+      );
+      return true;
+    }
     logWarn(
       "keychain",
       safeDiagnosticMessage`partition-list grant failed`,
       {
-        exit_code: failed.code,
-        stderr_excerpt: redactSecurityStderr(failed.stderr),
+        exit_code: keyRes.code,
+        stderr_excerpt: redactSecurityStderr(keyRes.stderr),
       },
       toStoreObservation({
         operation: "grant",
         stage: "final",
-        result: storeResultOf(failed),
-        exitCode: failed.code,
+        result: storeResultOf(keyRes),
+        exitCode: keyRes.code,
       }),
     );
     return false;

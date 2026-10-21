@@ -902,7 +902,8 @@ export const finishInBackground = async (opts: {
   /** Finite verification watchdog. Default {@link LOGIN_VERIFY_WATCHDOG_MS}. */
   readonly verifyWatchdogMs?: number;
   /** Runs after a credential lands. Returning `false` marks the login FAILED
-   *  (e.g. the keychain partition-list grant was refused) — see below. */
+   *  (observed `set-key-partition-list` refusal only — genp grant misses are
+   *  non-fatal inside `grantKeychainToolAccess`) — see below. */
   readonly onConnected?: () =>
     | boolean
     | void
@@ -982,11 +983,12 @@ export const finishInBackground = async (opts: {
       return;
     }
   }
-  // An `onConnected` that returns `false` is an OBSERVED refusal (the keychain
-  // partition-list grant), not a best-effort miss: the credential landed but the
-  // daemon can't read it prompt-free, so the login is failed + retryable rather
-  // than reported as succeeded. A THROW stays best-effort (swallowed) so cleanup
-  // still runs and `clearPendingAuth` is never skipped.
+  // An `onConnected` that returns `false` is an OBSERVED refusal of the
+  // `set-key-partition-list` grant (dev semantics), not a best-effort genp
+  // miss: `grantKeychainToolAccess` already treats genp failures as non-fatal
+  // (degraded telemetry) so Claude/Cursor logins whose credential landed are
+  // not false-failed. A THROW stays best-effort (swallowed) so cleanup still
+  // runs and `clearPendingAuth` is never skipped.
   let grantDenied = false;
   if (sampled.state === "connected" && opts.onConnected !== undefined) {
     try {
