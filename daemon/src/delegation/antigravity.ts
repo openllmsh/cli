@@ -29,7 +29,6 @@ import { request as httpRequest } from "node:http";
 import { join } from "node:path";
 import type {
   TDaemonProviderConnection,
-  TProviderModelEntry,
   TProviderUsageSnapshot,
 } from "@openllmsh/protocol";
 import { noteAuthStoreIdentityChange } from "../auth-user-action";
@@ -65,6 +64,7 @@ import {
 import { daemonTempDir } from "../sandbox/working-set";
 import { readAntigravityUsage } from "./antigravity-usage";
 import { loginWiring } from "./delegate-shared";
+import { detailedFromCliList, listWithReason } from "./fetch-model-list";
 import type { TConnectResult } from "./login-flow";
 import {
   emitLoginFailed,
@@ -77,6 +77,7 @@ import {
   resolveLoginFlow,
 } from "./login-flow";
 import type {
+  TListModelsOptions,
   TModelDiscoveryOptions,
   TModelDiscoveryResult,
   TProviderDelegate,
@@ -478,8 +479,13 @@ export const antigravityDelegate: TProviderDelegate = {
     const models = readAntigravityModels(geminiHome());
     return models === null ? { kind: "skipped" } : { kind: "success", models };
   },
-  listModels: async (): Promise<ReadonlyArray<TProviderModelEntry> | null> =>
-    readAntigravityModels(geminiHome()),
+  listModels: (opts?: TListModelsOptions) =>
+    listWithReason(opts, async () => {
+      if (!tokenPresent()) {
+        return { kind: "null", reason: "token_unavailable" };
+      }
+      return detailedFromCliList(readAntigravityModels(geminiHome()));
+    }),
 
   // Quota windows via Google's Code Assist quota endpoints with the agent's
   // own token — the t3code approach (see `./antigravity-usage.ts`).

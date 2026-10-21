@@ -3,6 +3,7 @@ import { MODEL_LIST_FETCH_TIMEOUT_MS } from "@openllmsh/protocol";
 import type {
   TFetchModelListDetailed,
   TListModelsNullReason,
+  TListModelsOptions,
   TModelDiscoveryResult,
 } from "./types";
 
@@ -172,6 +173,36 @@ export const fetchModelList = async (
 ): Promise<ReadonlyArray<TProviderModelEntry> | null> => {
   const detailed = await fetchModelListDetailed(url, headers, parse);
   return detailed.kind === "ok" ? detailed.models : null;
+};
+
+/**
+ * Run a detailed listModels attempt, forward a closed null reason through
+ * `opts.onNullReason`, and keep the null-never-empty contract.
+ */
+export const listWithReason = async (
+  opts: TListModelsOptions | undefined,
+  run: () => Promise<TFetchModelListDetailed>,
+): Promise<ReadonlyArray<TProviderModelEntry> | null> => {
+  const detailed = await run();
+  if (detailed.kind === "null") {
+    opts?.onNullReason?.(detailed.reason);
+    return null;
+  }
+  return detailed.models;
+};
+
+/**
+ * Map a CLI/subprocess listing (null = exec failure, [] = empty) onto the
+ * shared detailed shape used by {@link listWithReason}.
+ */
+export const detailedFromCliList = (
+  listed: ReadonlyArray<TProviderModelEntry> | null,
+): TFetchModelListDetailed => {
+  if (listed === null) return { kind: "null", reason: "error" };
+  if (listed.length === 0) {
+    return { kind: "null", reason: "empty_after_filter" };
+  }
+  return { kind: "ok", models: listed };
 };
 
 /**

@@ -45,6 +45,7 @@ import {
   credentialHasFetchLifetime,
   fetchModelList,
   fetchModelListDetailed,
+  listWithReason,
   modelDiscoveryFromList,
   parseChatgptModelList,
   skippedModelDiscovery,
@@ -633,14 +634,9 @@ export const chatgptDelegate: TProviderDelegate = {
     }),
 
   listModels: (opts?: TListModelsOptions) =>
-    withRefreshCaller("models", async () => {
-      const detailed = await listChatgptModelsDetailed();
-      if (detailed.kind === "null") {
-        opts?.onNullReason?.(detailed.reason);
-        return null;
-      }
-      return detailed.models;
-    }),
+    withRefreshCaller("models", () =>
+      listWithReason(opts, listChatgptModelsDetailed),
+    ),
 
   discoverModels: async (
     options: TModelDiscoveryOptions,

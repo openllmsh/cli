@@ -72,6 +72,7 @@ import {
   cachedCliSemver,
   credentialHasFetchLifetime,
   fetchModelList,
+  listWithReason,
   modelDiscoveryFromList,
   parseGrokModelList,
   parseGrokModelRows,
@@ -90,7 +91,10 @@ import {
   withRefreshCaller,
 } from "./refresh";
 import type {
+  TFetchModelListDetailed,
   TImageCredential,
+  TListModelsNullReason,
+  TListModelsOptions,
   TModelDiscoveryOptions,
   TModelDiscoveryResult,
   TProviderDelegate,
@@ -694,58 +698,75 @@ let modelRowsCache: {
 // Single-flight: concurrent cold/expired callers (the walker calls
 // `supportsReasoningEffort` per request) share ONE in-flight `/v1/models`
 // fetch instead of each spawning their own. Cleared when it settles.
-let modelRowsInflight: Promise<ReadonlyArray<TGrokModelRow> | null> | null =
-  null;
+type TGrokModelRowsDetailed =
+  | { readonly kind: "ok"; readonly rows: ReadonlyArray<TGrokModelRow> }
+  | { readonly kind: "null"; readonly reason: TListModelsNullReason };
 
-const fetchModelRows =
-  async (): Promise<ReadonlyArray<TGrokModelRow> | null> => {
-    const token = await readToken();
-    if (token === null) return null;
-    try {
-      // Host derived from the CAPTURED inference URL via `resolveProviderUrl`;
-      // bearer + our own `openllm/<ver>` identity (+ the gate version header),
-      // mirroring the usage read.
-      const resp = await fetch(
-        await resolveProviderUrl(PROVIDER, "/v1/models"),
-        {
-          method: "GET",
-          headers: {
-            authorization: `Bearer ${token.accessToken}`,
-            "user-agent": OPENLLM_USER_AGENT,
-            "x-grok-client-version": await clientVersion(),
-            accept: "application/json",
-          },
-          signal: AbortSignal.timeout(MODEL_LIST_FETCH_TIMEOUT_MS),
-        },
-      );
-      if (!resp.ok) return null;
-      // OpenAI-wire `{ data: [...] }`; tolerate `{ models: [...] }` too.
-      const b = (await resp.json()) as {
-        data?: ReadonlyArray<TGrokModelRow>;
-        models?: ReadonlyArray<TGrokModelRow>;
+let modelRowsInflight: Promise<TGrokModelRowsDetailed> | null = null;
+
+const fetchModelRowsDetailed = async (): Promise<TGrokModelRowsDetailed> => {
+  const token = await readToken();
+  if (token === null) {
+    return { kind: "null", reason: "token_unavailable" };
+  }
+  try {
+    // Host derived from the CAPTURED inference URL via `resolveProviderUrl`;
+    // bearer + our own `openllm/<ver>` identity (+ the gate version header),
+    // mirroring the usage read.
+    const resp = await fetch(await resolveProviderUrl(PROVIDER, "/v1/models"), {
+      method: "GET",
+      headers: {
+        authorization: `Bearer ${token.accessToken}`,
+        "user-agent": OPENLLM_USER_AGENT,
+        "x-grok-client-version": await clientVersion(),
+        accept: "application/json",
+      },
+      signal: AbortSignal.timeout(MODEL_LIST_FETCH_TIMEOUT_MS),
+    });
+    if (!resp.ok) {
+      const status = resp.status;
+      return {
+        kind: "null",
+        reason:
+          Number.isInteger(status) && status >= 100 && status <= 599
+            ? (`http_${status}` as const)
+            : "error",
       };
-      const rows = b.data ?? b.models ?? [];
-      if (rows.length === 0) return null;
-      modelRowsCache = { at: Date.now(), rows };
-      return rows;
-    } catch {
-      return null;
     }
-  };
+    // OpenAI-wire `{ data: [...] }`; tolerate `{ models: [...] }` too.
+    const b = (await resp.json()) as {
+      data?: ReadonlyArray<TGrokModelRow>;
+      models?: ReadonlyArray<TGrokModelRow>;
+    };
+    const rows = b.data ?? b.models ?? [];
+    if (rows.length === 0) {
+      return { kind: "null", reason: "empty_after_filter" };
+    }
+    modelRowsCache = { at: Date.now(), rows };
+    return { kind: "ok", rows };
+  } catch {
+    return { kind: "null", reason: "error" };
+  }
+};
 
-const modelRows = async (): Promise<ReadonlyArray<TGrokModelRow> | null> => {
+const modelRowsDetailed = async (): Promise<TGrokModelRowsDetailed> => {
   if (
     modelRowsCache !== null &&
     Date.now() - modelRowsCache.at < MODEL_ROWS_TTL_MS
   ) {
-    return modelRowsCache.rows;
+    return { kind: "ok", rows: modelRowsCache.rows };
   }
   if (modelRowsInflight === null) {
-    modelRowsInflight = fetchModelRows().finally(() => {
+    modelRowsInflight = fetchModelRowsDetailed().finally(() => {
       modelRowsInflight = null;
     });
   }
   return modelRowsInflight;
+};
+
+const modelRows = async (): Promise<ReadonlyArray<TGrokModelRow> | null> => {
+  const detailed = await modelRowsDetailed();
+  return detailed.kind === "ok" ? detailed.rows : null;
 };
 
 /**
@@ -918,18 +939,19 @@ export const grokDelegate: TProviderDelegate = {
         : { ...snapshot, plan, plan_source: "private-client" };
     }),
 
-  listModels: (): ReturnType<NonNullable<TProviderDelegate["listModels"]>> =>
-    withRefreshCaller(
-      "models",
-      async (): ReturnType<NonNullable<TProviderDelegate["listModels"]>> => {
+  listModels: (opts?: TListModelsOptions) =>
+    withRefreshCaller("models", () =>
+      listWithReason(opts, async (): Promise<TFetchModelListDetailed> => {
         // Live `/v1/models` rows via the shared cached fetch (both Grok Build
         // models report `api_backend` through it). Metadata only; null on any
         // failure (never an empty list).
-        const rows = await modelRows();
-        if (rows === null) return null;
-        const entries = parseGrokModelRows(rows);
-        return entries.length > 0 ? entries : null;
-      },
+        const detailed = await modelRowsDetailed();
+        if (detailed.kind === "null") return detailed;
+        const entries = parseGrokModelRows(detailed.rows);
+        return entries.length > 0
+          ? { kind: "ok", models: entries }
+          : { kind: "null", reason: "empty_after_filter" };
+      }),
     ),
 
   discoverModels: async (
