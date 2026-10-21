@@ -6,24 +6,60 @@ import { homedir } from "node:os";
 import { basename, delimiter, isAbsolute, join } from "node:path";
 
 /**
- * Standard user bin dirs the daemon prepends to a spawned integration's PATH.
- * The daemon runs as a background service with a minimal inherited PATH, so
- * user-installed CLIs the bundled scripts call (`claude` lands in ~/.local/bin;
- * `bun` lands in ~/.bun/bin via the official installer; many tools live under
- * Homebrew) aren't found and a script that relies on one half-applies or acks
- * `status:error`. Every entry is within the OS-sandbox working set (`/opt`,
- * `/usr`, ~/.local/bin, ~/.bun — see `sandbox/working-set/`), so a spawn never
- * hits a Landlock denial; absent dirs are simply ignored by the shell.
+ * Standard user + launcher shim/bin dirs the daemon prepends to a spawned
+ * child's PATH. The daemon runs as a background service with a minimal
+ * inherited PATH, so user-installed CLIs (`claude` in ~/.local/bin; `bun` in
+ * ~/.bun/bin; mise/asdf/volta/fnm/nix/linuxbrew/snap shims) aren't found and a
+ * script that relies on one half-applies or acks `status:error`.
  *
- * Computed per call (not module-load) so a test that overrides `HOME` sees the
- * overridden dirs — production HOME is stable for the process lifetime.
+ * One data-driven candidate list (not per-launcher branches), filtered to
+ * dirs that EXIST. Relocated roots (`MISE_DATA_DIR`, `ASDF_DATA_DIR`,
+ * `VOLTA_HOME`, `npm_config_prefix`) are honoured when set. Computed per call
+ * so a test that overrides `HOME` / those env vars sees the overridden dirs.
  */
-export const defaultBinDirs = (): readonly string[] => [
-  "/opt/homebrew/bin",
-  "/usr/local/bin",
-  `${homedir()}/.local/bin`,
-  `${homedir()}/.bun/bin`,
-];
+export const defaultBinDirs = (): readonly string[] => {
+  // Prefer `$HOME` when set so tests (and atypical service units) can redirect
+  // the scan; fall back to `os.homedir()` (passwd entry) otherwise. Bun's
+  // `homedir()` does not always honour `$HOME`.
+  const home = process.env.HOME?.trim() || homedir();
+  const npmPrefix =
+    process.env.npm_config_prefix?.trim() ||
+    process.env.NPM_CONFIG_PREFIX?.trim() ||
+    "";
+  const miseData = process.env.MISE_DATA_DIR?.trim() || "";
+  const asdfData = process.env.ASDF_DATA_DIR?.trim() || "";
+  const voltaHome = process.env.VOLTA_HOME?.trim() || "";
+  const candidates: readonly string[] = [
+    "/opt/homebrew/bin",
+    "/usr/local/bin",
+    join(home, ".local", "bin"),
+    join(home, ".bun", "bin"),
+    // Version-manager shims / bins (audit L2 / F3).
+    join(home, ".local", "share", "mise", "shims"),
+    miseData.length > 0 ? join(miseData, "shims") : "",
+    join(home, ".asdf", "shims"),
+    asdfData.length > 0 ? join(asdfData, "shims") : "",
+    join(home, ".volta", "bin"),
+    voltaHome.length > 0 ? join(voltaHome, "bin") : "",
+    join(home, ".local", "share", "fnm", "aliases", "default", "bin"),
+    // Nix profiles + Linuxbrew + snap.
+    join(home, ".nix-profile", "bin"),
+    "/nix/var/nix/profiles/default/bin",
+    "/home/linuxbrew/.linuxbrew/bin",
+    join(home, ".linuxbrew", "bin"),
+    "/snap/bin",
+    // npm global prefix bin when cheaply known from env (no `npm config` spawn).
+    npmPrefix.length > 0 ? join(npmPrefix, "bin") : "",
+  ];
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const dir of candidates) {
+    if (dir.length === 0 || seen.has(dir)) continue;
+    seen.add(dir);
+    if (existsSync(dir)) out.push(dir);
+  }
+  return out;
+};
 
 /** @deprecated Prefer {@link defaultBinDirs}; kept as a snapshot alias. */
 export const DEFAULT_BIN_DIRS: readonly string[] = defaultBinDirs();
