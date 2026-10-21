@@ -24,7 +24,11 @@ import {
 import { homedir } from "node:os";
 import { basename, isAbsolute, join, sep } from "node:path";
 import type { TDoctorFailureSignature } from "@openllmsh/protocol";
-import { classifyFailureOutput } from "@openllmsh/protocol";
+import {
+  classifyFailureOutput,
+  DOCTOR_LAUNCHER_ADAPTERS,
+} from "@openllmsh/protocol";
+import { SHIM_LAUNCHER_ADAPTERS } from "./launcher-roots";
 import { runCaptureResult, spawnCwd } from "./delegation/spawn";
 import { logWarn, safeDiagnosticMessage } from "./logger";
 import { envMs } from "./env-ms";
@@ -714,13 +718,19 @@ export const protoManagerAdapter: TManagerAdapter = {
   },
 };
 
-/** Production default adapter set: mise first, then asdf/volta/proto. */
-export const defaultManagerAdapters: readonly TManagerAdapter[] = [
-  miseManagerAdapter,
-  asdfManagerAdapter,
-  voltaManagerAdapter,
-  protoManagerAdapter,
-];
+/** Production default adapter set — order matches {@link DOCTOR_LAUNCHER_ADAPTERS}. */
+const SHIM_ADAPTER_BY_ID = {
+  mise: miseManagerAdapter,
+  asdf: asdfManagerAdapter,
+  volta: voltaManagerAdapter,
+  proto: protoManagerAdapter,
+} as const satisfies Record<
+  (typeof DOCTOR_LAUNCHER_ADAPTERS)[number],
+  TManagerAdapter
+>;
+
+export const defaultManagerAdapters: readonly TManagerAdapter[] =
+  SHIM_LAUNCHER_ADAPTERS.map((id) => SHIM_ADAPTER_BY_ID[id]);
 
 /** The production registry (default adapters). Callers that need a different
  *  adapter set build their own with {@link createManagerRegistry} and pass it

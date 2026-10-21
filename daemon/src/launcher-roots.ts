@@ -9,7 +9,11 @@
  * their documented default roots here.
  */
 import { join } from "node:path";
+import { DOCTOR_LAUNCHER_ADAPTERS } from "@openllmsh/protocol";
 import { misePaths } from "./mise-paths";
+
+/** The four shim adapters doctor + manager-resolution share — never re-list. */
+export const SHIM_LAUNCHER_ADAPTERS = DOCTOR_LAUNCHER_ADAPTERS;
 
 const nonEmpty = (v: string | undefined): string | undefined => {
   const t = v?.trim();
