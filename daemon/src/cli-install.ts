@@ -37,6 +37,12 @@ import {
 } from "./cli-paths";
 import { cliVersion } from "./delegation/util";
 import type { TSafeDiagnosticMessage } from "./doctor-report/message";
+import {
+  rememberInterpreterDir,
+  rememberLauncherProfile,
+} from "./launcher-profile-state";
+import type { TLauncherResolver } from "./launcher-resolution";
+import { defaultLauncherResolver } from "./launcher-resolution";
 import { logWarn, safeDiagnosticMessage } from "./logger";
 import type { TManagerRegistry } from "./manager-resolution";
 import { defaultManagerRegistry } from "./manager-resolution";
@@ -205,11 +211,27 @@ const linkSidecars = (isolatedBin: string): void => {
  *     (non-manager) candidate is unaffected either way, since
  *     `peekManagerResolution` answers it without ever needing a cache entry.
  */
+const noteLauncherResolution = (
+  provider: TCliProvider,
+  resolution: Awaited<ReturnType<TLauncherResolver["resolveLauncher"]>>,
+): void => {
+  rememberLauncherProfile(provider, resolution);
+  rememberInterpreterDir(provider, resolution?.interpreter);
+};
+
 const resolveHostBinary = async (
   provider: TCliProvider,
   opts?: TCliInstallStateOpts,
 ): Promise<string | undefined> => {
   const managers = opts?.managers ?? defaultManagerRegistry;
+  // Production uses the process-wide default launcher resolver (stable
+  // fingerprint cache). Hermetic tests that inject `managers` without a
+  // matching `launchers` skip the generic layer so demand/passive gating
+  // assertions against the injected registry stay accurate — a fresh
+  // per-call resolver would drop the cache between calls.
+  const launchers =
+    opts?.launchers ??
+    (opts?.managers !== undefined ? undefined : defaultLauncherResolver);
   // Walk every candidate: a PATH-hit shebang whose interpreter is missing
   // (npm `@openai/codex` → `#!/usr/bin/env node` under nvm) must not win over
   // a later native install, and must not count as "installed" when it is the
@@ -217,6 +239,36 @@ const resolveHostBinary = async (
   for (const candidate of hostCliCandidates(provider)) {
     if (!existsSync(candidate)) continue;
     if (!isHostCliRunnable(candidate)) continue;
+
+    // Demand path: generic launcher resolution (shell probe off here — we
+    // already have an absolute candidate from hostCliCandidates). Relinks to
+    // the resolved real executable for binary/shim; records interpreter for
+    // script so cliEnv can extend PATH. Passiveuses the manager registry for
+    // known shim layouts.
+    if (launchers !== undefined) {
+      if (opts?.demand === true) {
+        const launcher = await launchers.resolveLauncher(candidate, {
+          demand: true,
+          ...(opts.signal !== undefined ? { signal: opts.signal } : {}),
+        });
+        if (launcher !== null) {
+          noteLauncherResolution(provider, launcher);
+          if (!isHostCliRunnable(launcher.path)) continue;
+          return launcher.path;
+        }
+        // Classifier returned null — fall through to the legacy manager path.
+      } else {
+        // Passive: reuse a prior demand resolution when the fingerprint still
+        // matches; never spawn.
+        const peeked = launchers.peekLauncherResolution(candidate);
+        if (peeked !== undefined) {
+          noteLauncherResolution(provider, peeked);
+          if (!isHostCliRunnable(peeked.path)) continue;
+          return peeked.path;
+        }
+      }
+    }
+
     const resolved =
       opts?.demand === true
         ? await managers.resolveManagerCandidate(candidate, {
@@ -319,6 +371,9 @@ export type TCliInstallStateOpts = {
   /** Manager-shim registry to resolve candidates through. Defaults to the
    *  production {@link defaultManagerRegistry}. */
   readonly managers?: TManagerRegistry;
+  /** Generic launcher resolver (audit L1). Defaults to
+   *  {@link defaultLauncherResolver}. */
+  readonly launchers?: TLauncherResolver;
 };
 
 const probeCliInstallState = async (

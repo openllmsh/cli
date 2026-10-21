@@ -134,11 +134,12 @@ export type TManagerRegistryDeps = {
 export const createManagerRegistry = (
   deps: TManagerRegistryDeps = {},
 ): TManagerRegistry => {
-  // `deps.adapters` defaults to the production mise-only set. Called lazily
-  // (function body, not a default-param expression), so `miseManagerAdapter`
-  // below is always initialized by the time any call runs — no TDZ risk.
+  // `deps.adapters` defaults to the production set (mise + asdf/volta/proto).
+  // Called lazily (function body, not a default-param expression), so the
+  // adapter consts below are always initialized by the time any call runs —
+  // no TDZ risk.
   const adapters: TManagerAdapter[] = [
-    ...(deps.adapters ?? [miseManagerAdapter]),
+    ...(deps.adapters ?? defaultManagerAdapters),
   ];
 
   /**
@@ -544,7 +545,147 @@ export const createMiseManagerAdapter = (
  */
 export const miseManagerAdapter: TManagerAdapter = createMiseManagerAdapter();
 
+// ---------------------------------------------------------------------------
+// Lightweight asdf / volta / proto adapters (Phase 3 / L1)
+// Same TManagerAdapter shape as mise; path-segment recognize + bounded
+// `which`/`bin` query. Skipped automatically when the manager binary is
+// absent — `resolve` returns null → coordinator reports "unresolved".
+// ---------------------------------------------------------------------------
+
+const managerResolveTimeoutMs = (): number =>
+  envMsLocal("OPENLLM_MANAGER_RESOLVE_TIMEOUT_MS", 2_000);
+
+const isShimUnderNamedRoot = (
+  candidate: string,
+  rootName: string,
+  shimSegment: string,
+): boolean => {
+  const segments = candidate.split(sep);
+  const shimsIdx = segments.lastIndexOf(shimSegment);
+  if (shimsIdx <= 0) return false;
+  return segments[shimsIdx - 1] === rootName;
+};
+
+const acceptAbsoluteExecutable = (
+  answer: string,
+  candidate: string,
+  isShim: (p: string) => boolean,
+): string | null => {
+  const trimmed = answer.trim();
+  if (trimmed.length === 0 || /[\r\n\0]/.test(trimmed)) return null;
+  if (!isAbsolute(trimmed)) return null;
+  if (trimmed === candidate) return null;
+  if (isShim(trimmed)) return null;
+  let real: string;
+  try {
+    real = realpathSync(trimmed);
+  } catch {
+    return null;
+  }
+  try {
+    if (!statSync(real).isFile()) return null;
+    accessSync(real, constants.X_OK);
+  } catch {
+    return null;
+  }
+  if (real === candidate || isShim(real)) return null;
+  return real;
+};
+
+const resolveViaManagerBin = async (
+  managerCmd: string,
+  argv: readonly string[],
+  candidate: string,
+  isShim: (p: string) => boolean,
+  signal?: AbortSignal,
+): Promise<string | null> => {
+  const bins = resolveOnPath(managerCmd);
+  const bin = bins.find((p) => existsSync(p));
+  if (bin === undefined) return null;
+  const result = await runCaptureResult([bin, ...argv], undefined, {
+    probe: true,
+    timeoutMs: managerResolveTimeoutMs(),
+    maxBytes: 4_096,
+    ...(signal !== undefined ? { signal } : {}),
+  });
+  if (result.kind !== "ok") return null;
+  return acceptAbsoluteExecutable(result.text, candidate, isShim);
+};
+
+const isAsdfShimPath = (candidate: string): boolean =>
+  isShimUnderNamedRoot(candidate, "asdf", "shims");
+
+export const asdfManagerAdapter: TManagerAdapter = {
+  name: "asdf",
+  recognizes: isAsdfShimPath,
+  resolve: async (candidate, signal): Promise<string | null> => {
+    const cmd = basename(candidate);
+    if (cmd.length === 0) return null;
+    return resolveViaManagerBin(
+      "asdf",
+      ["which", cmd],
+      candidate,
+      isAsdfShimPath,
+      signal,
+    );
+  },
+};
+
+/** Volta shims live under `…/volta/bin/<cmd>` (not a `shims/` segment). */
+const isVoltaShimPath = (candidate: string): boolean => {
+  const segments = candidate.split(sep);
+  const binIdx = segments.lastIndexOf("bin");
+  if (binIdx <= 0) return false;
+  return segments[binIdx - 1] === "volta";
+};
+
+export const voltaManagerAdapter: TManagerAdapter = {
+  name: "volta",
+  recognizes: isVoltaShimPath,
+  resolve: async (candidate, signal): Promise<string | null> => {
+    const cmd = basename(candidate);
+    if (cmd.length === 0) return null;
+    return resolveViaManagerBin(
+      "volta",
+      ["which", cmd],
+      candidate,
+      isVoltaShimPath,
+      signal,
+    );
+  },
+};
+
+const isProtoShimPath = (candidate: string): boolean =>
+  isShimUnderNamedRoot(candidate, "proto", "shims") ||
+  isShimUnderNamedRoot(candidate, "proto", "bin");
+
+export const protoManagerAdapter: TManagerAdapter = {
+  name: "proto",
+  recognizes: isProtoShimPath,
+  resolve: async (candidate, signal): Promise<string | null> => {
+    const cmd = basename(candidate);
+    if (cmd.length === 0) return null;
+    return resolveViaManagerBin(
+      "proto",
+      ["bin", cmd],
+      candidate,
+      isProtoShimPath,
+      signal,
+    );
+  },
+};
+
+/** Production default adapter set: mise first, then asdf/volta/proto. */
+export const defaultManagerAdapters: readonly TManagerAdapter[] = [
+  miseManagerAdapter,
+  asdfManagerAdapter,
+  voltaManagerAdapter,
+  protoManagerAdapter,
+];
+
 /** The production registry (default adapters). Callers that need a different
  *  adapter set build their own with {@link createManagerRegistry} and pass it
  *  through `TCliInstallStateOpts.managers`. */
-export const defaultManagerRegistry: TManagerRegistry = createManagerRegistry();
+export const defaultManagerRegistry: TManagerRegistry = createManagerRegistry({
+  adapters: defaultManagerAdapters,
+});

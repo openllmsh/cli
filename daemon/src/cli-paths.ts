@@ -23,7 +23,7 @@ import {
   statSync,
 } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join } from "node:path";
+import { delimiter, dirname, join } from "node:path";
 import type { TSubscriptionProviderSlug } from "@openllmsh/protocol";
 import {
   ANTIGRAVITY_HARNESS,
@@ -31,7 +31,8 @@ import {
   antigravityManagedExecutable,
 } from "./antigravity-layout";
 import { stateDir } from "./env";
-import { resolveOnPath } from "./path-utils";
+import { interpreterDirFor } from "./launcher-profile-state";
+import { augmentSpawnPath, resolveOnPath } from "./path-utils";
 import { daemonTempDir } from "./sandbox/working-set";
 
 /** The providers with an isolated CLI — exactly the closed
@@ -563,9 +564,22 @@ export const cliEnv = (provider: TCliProvider): Record<string, string> => {
   // The daemon-owned, sandbox-granted staging dir for `mktemp -d` (see above).
   const tmp = verifiedDaemonTempDir();
   ensureIsolatedRuntimeDirs(home);
-  return {
+  const base = {
     ...isolatedRuntimeEnv(home, tmp),
     ...launcherDataRootEnv(),
     ...SPECS[provider].env({ home, root, config, tmp }),
   };
+  // Phase 3 / L1: when demand resolution recorded a shebang interpreter,
+  // prepend its directory so `#!/usr/bin/env node` (etc.) still resolves
+  // under the isolated child's PATH.
+  const interpDir = interpreterDirFor(provider);
+  if (interpDir !== undefined && interpDir.length > 0) {
+    const inherited = process.env.PATH;
+    const composed = [interpDir, augmentSpawnPath(inherited)]
+      .filter((d) => d.length > 0)
+      .join(delimiter);
+    // Prefer an explicit PATH from the provider env if it set one, else ours.
+    return { ...base, PATH: base.PATH ?? composed };
+  }
+  return base;
 };

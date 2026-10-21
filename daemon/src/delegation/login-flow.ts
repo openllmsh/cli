@@ -23,6 +23,8 @@ import type {
   TAuthLoginMode,
   TDaemonProviderReasonCode,
   TDoctorAuthPhase,
+  TDoctorLauncherAdapter,
+  TDoctorLauncherKind,
 } from "@openllmsh/protocol";
 import {
   classifyFailureOutput,
@@ -35,6 +37,7 @@ import {
 } from "../auth-events";
 import { noteAuthStoreIdentityChange } from "../auth-user-action";
 import { opaqueDoctorCorrelation } from "../doctor-report/correlation";
+import { launcherProfileFor } from "../launcher-profile-state";
 import { logInfo, logWarn, safeDiagnosticMessage } from "../logger";
 import type { TLoginCommandContext } from "../op-context";
 import {
@@ -398,6 +401,30 @@ const loginFailureMessage = (
   return safeDiagnosticMessage`Login ended in an unexpected failure.`;
 };
 
+/** Map a remembered launcher profile onto closed doctor ledger fields. */
+const doctorLauncherFields = (
+  slug: string,
+): {
+  readonly launcher_kind?: TDoctorLauncherKind;
+  readonly launcher_adapter?: TDoctorLauncherAdapter;
+  readonly timings?: { readonly launcher_under_manager_root: boolean };
+} => {
+  const profile = launcherProfileFor(slug);
+  if (profile === undefined) return {};
+  const adapter =
+    profile.adapter_id === "mise" ||
+    profile.adapter_id === "asdf" ||
+    profile.adapter_id === "volta" ||
+    profile.adapter_id === "proto"
+      ? profile.adapter_id
+      : undefined;
+  return {
+    launcher_kind: profile.kind,
+    ...(adapter !== undefined ? { launcher_adapter: adapter } : {}),
+    timings: { launcher_under_manager_root: profile.under_manager_root },
+  };
+};
+
 export const emitLoginFailed = (
   flow: TLoginFlowCtx,
   fail: {
@@ -414,6 +441,7 @@ export const emitLoginFailed = (
   if (fail.code !== "user_cancelled") {
     try {
       const correlation_id = opaqueDoctorCorrelation(flow.flowId);
+      const launcher = doctorLauncherFields(flow.slug);
       logWarn(
         "login-flow",
         loginFailureMessage(fail.code, fail.reason_code),
@@ -429,7 +457,16 @@ export const emitLoginFailed = (
             ...(fail.reason_code !== undefined
               ? { reason_code: fail.reason_code }
               : {}),
+            ...(launcher.launcher_kind !== undefined
+              ? { launcher_kind: launcher.launcher_kind }
+              : {}),
+            ...(launcher.launcher_adapter !== undefined
+              ? { launcher_adapter: launcher.launcher_adapter }
+              : {}),
           }),
+          ...(launcher.timings !== undefined
+            ? { timings: launcher.timings }
+            : {}),
         },
       );
     } catch {
@@ -1262,6 +1299,7 @@ export const spawnStreamLogin = async <T>(
       typeof target === "string" ? inspectHostCliRuntime(target) : null;
     if (runtime !== null) {
       const correlation_id = opaqueDoctorCorrelation(flow.flowId);
+      const launcher = doctorLauncherFields(flow.slug);
       logInfo(
         "login-flow",
         safeDiagnosticMessage`Login spawn prepared.`,
@@ -1272,10 +1310,17 @@ export const spawnStreamLogin = async <T>(
             provider: flow.slug,
             operation_kind: "login",
             phase: "start",
+            ...(launcher.launcher_kind !== undefined
+              ? { launcher_kind: launcher.launcher_kind }
+              : {}),
+            ...(launcher.launcher_adapter !== undefined
+              ? { launcher_adapter: launcher.launcher_adapter }
+              : {}),
           }),
           timings: {
             cli_is_script: runtime.kind === "script",
             interpreter_resolved: runtime.interpreterResolved,
+            ...(launcher.timings !== undefined ? launcher.timings : {}),
           },
         },
       );
