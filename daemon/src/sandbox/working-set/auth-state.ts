@@ -17,7 +17,7 @@ import { existsSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { cliConfigDir } from "../../cli-paths";
 import type { TWorkingSet } from "./base";
-import { miseDirs, vendorExecDirs } from "./base";
+import { vendorExecDirs } from "./base";
 import { delegatedCliRuntimeSet } from "./delegated-cli-runtime";
 
 /**
@@ -53,15 +53,11 @@ export const authStateLayer = (home: string): TWorkingSet => {
       // best-effort — see the claude-dir loop above.
     }
   }
-  // mise's global roots: login/usage delegation resolves and execs
-  // mise-managed vendor CLIs (see `miseDirs`).
-  const mise = miseDirs(home);
-  // L3 shared delegated-CLI runtime (isolated homes + state tmp + launcher
-  // data roots). Landlock gets the isolated-home write surface from here so a
-  // wrapper that honors HOME/XDG/TMPDIR succeeds on Linux the same way.
+  // L3 shared delegated-CLI runtime owns isolated homes + state tmp +
+  // launcher data roots (incl. mise via launcher-roots). One owner — do not
+  // also union `miseDirs` here (was a duplicate RO grant source).
   const runtime = delegatedCliRuntimeSet(home);
   const readWrite = new Set<string>([
-    ...mise.readWrite,
     ...runtime.readWrite,
     //   bun's global install cache ONLY (the SPLIT ~/.bun grant — audit §5-B):
     //   a plugin install running `bun install` populates
@@ -77,7 +73,6 @@ export const authStateLayer = (home: string): TWorkingSet => {
     // symlink-chain resolution). The daemon RUNS the vendor CLIs (login/usage
     // delegation) but never WRITES them: installs are user-run + unsandboxed.
     ...vendorExecDirs(home),
-    ...mise.readOnly,
     ...runtime.readOnly,
     // bun's BINARY dir — read+exec only (the split ~/.bun grant, audit §5-B):
     // the plugin install must EXEC `bun`, but a write grant here would let a

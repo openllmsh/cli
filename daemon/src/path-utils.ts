@@ -27,6 +27,16 @@ import { allManagerResolutionBinDirs } from "./launcher-roots";
  * overrides `HOME` sees the overridden dirs — production HOME is stable for
  * the process lifetime.
  */
+/** Cheap `mtimeMs:size` fingerprint; `null` when the path can't be statted. */
+export const fileFingerprint = (path: string): string | null => {
+  try {
+    const st = statSync(path);
+    return `${st.mtimeMs}:${st.size}`;
+  } catch {
+    return null;
+  }
+};
+
 export const defaultBinDirs = (): readonly string[] => {
   const home = process.env.HOME?.trim() || homedir();
   return [

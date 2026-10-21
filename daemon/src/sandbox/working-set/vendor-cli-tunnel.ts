@@ -20,7 +20,7 @@
  */
 
 import type { TWorkingSet } from "./base";
-import { miseDirs, vendorExecDirs } from "./base";
+import { vendorExecDirs } from "./base";
 import { delegatedCliRuntimeSet } from "./delegated-cli-runtime";
 
 /**
@@ -28,21 +28,15 @@ import { delegatedCliRuntimeSet } from "./delegated-cli-runtime";
  * `index.ts` runs `existing()`).
  */
 export const vendorCliTunnelLayer = (home: string): TWorkingSet => {
-  // A mise-managed vendor CLI runs through mise's roots (see `miseDirs`).
-  const mise = miseDirs(home);
-  // L3: same delegated-CLI runtime set auth-state carries, so a PTY session
-  // that honors HOME/XDG/TMPDIR has the isolated-home write surface on Linux.
+  // L3: same delegated-CLI runtime set auth-state carries (isolated homes +
+  // launcher data roots incl. mise). One owner — no parallel `miseDirs` union.
   const runtime = delegatedCliRuntimeSet(home);
-  const readWrite = new Set<string>([
-    ...mise.readWrite,
-    ...runtime.readWrite,
-  ]);
+  const readWrite = new Set<string>([...runtime.readWrite]);
   const readOnly = new Set<string>([
     // The vendor-CLI binary dirs — READ+EXEC only. A device PTY session execs
     // the real vendor binary; the daemon never writes it (installs are
     // user-run + unsandboxed). Shared with `auth-state` via the base helper.
     ...vendorExecDirs(home),
-    ...mise.readOnly,
     ...runtime.readOnly,
   ]);
   for (const rw of readWrite) readOnly.delete(rw);

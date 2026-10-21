@@ -23,17 +23,14 @@
  * persisted nulls are discarded so a poisoned identity can recover without
  * replacing the CLI.
  */
-import {
-  mkdirSync,
-  readFileSync,
-  renameSync,
-  rmSync,
-  statSync,
-  writeFileSync,
-} from "node:fs";
 import { join } from "node:path";
 import { resolveVersionBinary, versionBinaryStamp } from "./cli-version-stamp";
 import { stateDir } from "./env";
+import { envMsOptional } from "./env-ms";
+import {
+  readJsonStateFile,
+  writeJsonStateAtomic,
+} from "./json-state-cache";
 import { withoutCommandReplayContext } from "./op-context";
 
 export type TCliVersionOpts = {
@@ -59,15 +56,6 @@ const MAX_FILE_BYTES =
   CLI_VERSION_CACHE_MAX_RECORDS *
     (MAX_PATH_CHARS + CLI_VERSION_OUTPUT_MAX_BYTES);
 
-let persistTmpSeq = 0;
-
-const envMs = (name: string, fallback: number): number | undefined => {
-  const raw = process.env[name];
-  if (raw === undefined) return undefined;
-  const n = Number.parseInt(raw, 10);
-  return Number.isFinite(n) && n >= 0 ? n : fallback;
-};
-
 /**
  * Timeout for a NEW probe. `undefined` means runCapture's 5s default.
  * First caller of an in-flight identity wins; this is not re-read for joiners.
@@ -76,7 +64,7 @@ export const versionProbeTimeoutMs = (
   override: number | undefined,
 ): number | undefined => {
   if (override !== undefined) return override;
-  return envMs("OPENLLM_CLI_VERSION_PROBE_TIMEOUT_MS", 5_000);
+  return envMsOptional("OPENLLM_CLI_VERSION_PROBE_TIMEOUT_MS", 5_000);
 };
 
 type TPersistRecord = {
@@ -150,26 +138,8 @@ const coerceFile = (v: unknown): TPersistRecord[] => {
 const loadPersist = (st: TCacheState): void => {
   if (st.persistLoaded) return;
   st.persistLoaded = true;
-  const path = st.file;
-  try {
-    const st = statSync(path);
-    if (st.size > MAX_FILE_BYTES) return;
-  } catch {
-    return;
-  }
-  let raw: string;
-  try {
-    raw = readFileSync(path, "utf-8");
-  } catch {
-    return;
-  }
-  if (raw.length > MAX_FILE_BYTES) return;
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(raw);
-  } catch {
-    return;
-  }
+  const parsed = readJsonStateFile(st.file, MAX_FILE_BYTES);
+  if (parsed === null) return;
   for (const rec of coerceFile(parsed)) {
     st.memory.set(identityKey(rec.path, rec.stamp), rec);
   }
@@ -179,29 +149,6 @@ const durableRecordsFromMemory = (st: TCacheState): TPersistRecord[] =>
   [...st.memory.values()]
     .filter((rec) => rec.output !== null)
     .slice(-CLI_VERSION_CACHE_MAX_RECORDS);
-
-const writePersistAtomic = (
-  st: TCacheState,
-  records: readonly TPersistRecord[],
-): void => {
-  persistTmpSeq += 1;
-  const tmp = join(
-    st.dir,
-    `.cli-version-cache.json.${process.pid}.${persistTmpSeq}.tmp`,
-  );
-  const body: TPersistFile = { v: SCHEMA_V, records };
-  try {
-    mkdirSync(st.dir, { recursive: true });
-    writeFileSync(tmp, JSON.stringify(body), { mode: 0o600 });
-    renameSync(tmp, st.file);
-  } catch {
-    try {
-      rmSync(tmp, { force: true });
-    } catch {
-      // best-effort temp cleanup
-    }
-  }
-};
 
 /** Snapshot the in-memory map (no disk RMW). Serialized; unique tmp names. */
 const flushPersist = (st: TCacheState): void => {
@@ -213,7 +160,11 @@ const flushPersist = (st: TCacheState): void => {
   try {
     do {
       st.persistQueued = false;
-      writePersistAtomic(st, durableRecordsFromMemory(st));
+      const body: TPersistFile = {
+        v: SCHEMA_V,
+        records: durableRecordsFromMemory(st),
+      };
+      writeJsonStateAtomic(st.dir, st.file, body);
     } while (st.persistQueued);
   } finally {
     st.persistLocked = false;

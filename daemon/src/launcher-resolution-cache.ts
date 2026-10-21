@@ -5,16 +5,12 @@
  * can peek without re-spawning managers. Fingerprint drift or an explicit
  * invalidate drops the row; never persists a miss.
  */
-import {
-  mkdirSync,
-  readFileSync,
-  renameSync,
-  rmSync,
-  statSync,
-  writeFileSync,
-} from "node:fs";
 import { join } from "node:path";
 import { stateDir } from "./env";
+import {
+  readJsonStateFile,
+  writeJsonStateAtomic,
+} from "./json-state-cache";
 import type {
   TLauncherKind,
   TLauncherResolution,
@@ -26,8 +22,6 @@ const MAX_PATH_CHARS = 4_096;
 const MAX_FILE_BYTES =
   64 * 1024 +
   LAUNCHER_RESOLUTION_CACHE_MAX_RECORDS * (MAX_PATH_CHARS * 3 + 256);
-
-let persistTmpSeq = 0;
 
 export type TLauncherResolutionPersistRecord = {
   readonly candidate: string;
@@ -120,50 +114,10 @@ const stateOf = (): TCacheState => {
 const loadPersist = (st: TCacheState): void => {
   if (st.persistLoaded) return;
   st.persistLoaded = true;
-  try {
-    const info = statSync(st.file);
-    if (info.size > MAX_FILE_BYTES) return;
-  } catch {
-    return;
-  }
-  let raw: string;
-  try {
-    raw = readFileSync(st.file, "utf-8");
-  } catch {
-    return;
-  }
-  if (raw.length > MAX_FILE_BYTES) return;
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(raw);
-  } catch {
-    return;
-  }
+  const parsed = readJsonStateFile(st.file, MAX_FILE_BYTES);
+  if (parsed === null) return;
   for (const rec of coerceFile(parsed)) {
     st.memory.set(rec.candidate, rec);
-  }
-};
-
-const writePersistAtomic = (
-  st: TCacheState,
-  records: readonly TLauncherResolutionPersistRecord[],
-): void => {
-  persistTmpSeq += 1;
-  const tmp = join(
-    st.dir,
-    `.launcher-resolution-cache.json.${process.pid}.${persistTmpSeq}.tmp`,
-  );
-  const body: TPersistFile = { v: SCHEMA_V, records };
-  try {
-    mkdirSync(st.dir, { recursive: true, mode: 0o700 });
-    writeFileSync(tmp, JSON.stringify(body), { mode: 0o600 });
-    renameSync(tmp, st.file);
-  } catch {
-    try {
-      rmSync(tmp, { force: true });
-    } catch {
-      // best-effort temp cleanup
-    }
   }
 };
 
@@ -176,10 +130,13 @@ const flushPersist = (st: TCacheState): void => {
   try {
     do {
       st.persistQueued = false;
-      writePersistAtomic(
-        st,
-        [...st.memory.values()].slice(-LAUNCHER_RESOLUTION_CACHE_MAX_RECORDS),
-      );
+      const body: TPersistFile = {
+        v: SCHEMA_V,
+        records: [...st.memory.values()].slice(
+          -LAUNCHER_RESOLUTION_CACHE_MAX_RECORDS,
+        ),
+      };
+      writeJsonStateAtomic(st.dir, st.file, body);
     } while (st.persistQueued);
   } finally {
     st.persistLocked = false;
@@ -219,15 +176,6 @@ export const loadLauncherResolutionCache =
     loadPersist(st);
     return [...st.memory.values()];
   };
-
-export const peekPersistedLauncherResolution = (
-  candidate: string,
-): TLauncherResolution | undefined => {
-  const st = stateOf();
-  loadPersist(st);
-  const rec = st.memory.get(candidate);
-  return rec === undefined ? undefined : recordToResolution(rec);
-};
 
 export const persistLauncherResolution = (
   candidate: string,

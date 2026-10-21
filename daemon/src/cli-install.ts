@@ -48,6 +48,7 @@ import { defaultLauncherResolver } from "./launcher-resolution";
 import { logWarn, safeDiagnosticMessage } from "./logger";
 import type { TManagerRegistry } from "./manager-resolution";
 import { defaultManagerRegistry } from "./manager-resolution";
+import { envMs } from "./env-ms";
 import { isHostCliRunnable } from "./path-utils";
 import { isMacKeychainProvider } from "./sandbox/policy";
 
@@ -369,15 +370,6 @@ const resolveHostBinary = async (
  * The short TTL only throttles how often periodic status observations re-stat /
  * re-reconcile the isolated link; it never pins or expires a version.
  */
-
-/** Numeric env override — returns `fallback` unless the var parses to a
- *  non-negative integer. */
-const envMs = (name: string, fallback: number): number => {
-  const raw = process.env[name];
-  if (raw === undefined) return fallback;
-  const n = Number.parseInt(raw, 10);
-  return Number.isFinite(n) && n >= 0 ? n : fallback;
-};
 
 /** Cache TTL — 30 s throttles the re-stat / re-reconcile on the hot status
  *  path. Version identity is NOT gated here. */

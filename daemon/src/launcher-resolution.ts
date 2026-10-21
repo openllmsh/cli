@@ -37,14 +37,18 @@ import {
 import type { TLauncherResolution } from "./launcher-resolution-types";
 import type { TManagerAdapter, TManagerRegistry } from "./manager-resolution";
 import { defaultManagerRegistry } from "./manager-resolution";
+import { envMs } from "./env-ms";
 import { allManagerRootMarkers } from "./launcher-roots";
 import {
+  fileFingerprint,
   managerPackagerBinDirs,
   parseShebangInterpreter,
   readExecutableHeader,
   resolveOnPath,
   spawnPathDirs,
 } from "./path-utils";
+
+export { fileFingerprint };
 
 /** Cache fingerprint for a shim resolution: candidate shape + manager selection. */
 const shimCacheFingerprint = (
@@ -158,15 +162,6 @@ const isNativeBinaryMagic = (buf: Buffer): boolean => {
 /** Reuses {@link readExecutableHeader} so a prior `isHostCliRunnable` hit is free. */
 const readHeader = (path: string): Buffer | null => readExecutableHeader(path);
 
-/** Cheap `mtimeMs:size` fingerprint; `null` when the path can't be statted. */
-export const fileFingerprint = (path: string): string | null => {
-  try {
-    const st = statSync(path);
-    return `${st.mtimeMs}:${st.size}`;
-  } catch {
-    return null;
-  }
-};
 
 const SHELL_INTERPRETERS = new Set([
   "sh",
@@ -316,13 +311,6 @@ export const classifyLauncherContent = (
 // ---------------------------------------------------------------------------
 // Login-shell probe
 // ---------------------------------------------------------------------------
-
-const envMs = (name: string, fallback: number): number => {
-  const raw = process.env[name];
-  if (raw === undefined) return fallback;
-  const n = Number.parseInt(raw, 10);
-  return Number.isFinite(n) && n >= 0 ? n : fallback;
-};
 
 const SHELL_PROBE_MAX_BYTES = 4_096;
 

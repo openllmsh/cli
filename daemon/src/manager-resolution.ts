@@ -27,9 +27,10 @@ import type { TDoctorFailureSignature } from "@openllmsh/protocol";
 import { classifyFailureOutput } from "@openllmsh/protocol";
 import { runCaptureResult, spawnCwd } from "./delegation/spawn";
 import { logWarn, safeDiagnosticMessage } from "./logger";
+import { envMs } from "./env-ms";
 import { launcherManagerById } from "./launcher-roots";
 import { misePaths } from "./mise-paths";
-import { resolveOnPath } from "./path-utils";
+import { fileFingerprint, resolveOnPath } from "./path-utils";
 
 export type TManagerResolutionKind =
   | "ordinary" // not recognized as any manager shim
@@ -82,14 +83,10 @@ const candidateFingerprint = (candidate: string): string | null => {
   try {
     return `link:${readlinkSync(candidate)}`;
   } catch {
-    // not a symlink — fall through to a plain stat
+    // not a symlink — fall through to the shared mtime:size fingerprint
   }
-  try {
-    const st = statSync(candidate);
-    return `stat:${st.mtimeMs}:${st.size}`;
-  } catch {
-    return null;
-  }
+  const fp = fileFingerprint(candidate);
+  return fp === null ? null : `stat:${fp}`;
 };
 
 /**
@@ -284,18 +281,10 @@ export const createManagerRegistry = (
 // mise adapter (A3)
 // ---------------------------------------------------------------------------
 
-/** Numeric env override (operator knob) — mirrors `cli-install.ts`'s `envMs`. */
-const envMsLocal = (name: string, fallback: number): number => {
-  const raw = process.env[name];
-  if (raw === undefined) return fallback;
-  const n = Number.parseInt(raw, 10);
-  return Number.isFinite(n) && n >= 0 ? n : fallback;
-};
-
 /** Bounded deadline for the `mise which <cmd>` explicit-argv query. Resolved
  *  lazily (per-call) so a `.env`-loaded override applies. */
 const miseResolveTimeoutMs = (): number =>
-  envMsLocal("OPENLLM_MISE_RESOLVE_TIMEOUT_MS", 2_000);
+  envMs("OPENLLM_MISE_RESOLVE_TIMEOUT_MS", 2_000);
 
 /** A mise-managed shim lives at `.../mise/shims/<cmd>` (asdf-compatible
  *  layout mise also honors: `.../<data-dir>/shims/<cmd>` where the parent
@@ -556,7 +545,7 @@ export const miseManagerAdapter: TManagerAdapter = createMiseManagerAdapter();
 // ---------------------------------------------------------------------------
 
 const managerResolveTimeoutMs = (): number =>
-  envMsLocal("OPENLLM_MANAGER_RESOLVE_TIMEOUT_MS", 2_000);
+  envMs("OPENLLM_MANAGER_RESOLVE_TIMEOUT_MS", 2_000);
 
 const isShimUnderNamedRoot = (
   candidate: string,
