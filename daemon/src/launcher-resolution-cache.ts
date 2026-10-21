@@ -7,10 +7,7 @@
  */
 import { join } from "node:path";
 import { stateDir } from "./env";
-import {
-  readJsonStateFile,
-  writeJsonStateAtomic,
-} from "./json-state-cache";
+import { readJsonStateFile, writeJsonStateAtomic } from "./json-state-cache";
 import type {
   TLauncherKind,
   TLauncherResolution,

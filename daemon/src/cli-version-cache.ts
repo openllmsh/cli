@@ -27,10 +27,7 @@ import { join } from "node:path";
 import { resolveVersionBinary, versionBinaryStamp } from "./cli-version-stamp";
 import { stateDir } from "./env";
 import { envMsOptional } from "./env-ms";
-import {
-  readJsonStateFile,
-  writeJsonStateAtomic,
-} from "./json-state-cache";
+import { readJsonStateFile, writeJsonStateAtomic } from "./json-state-cache";
 import { withoutCommandReplayContext } from "./op-context";
 
 export type TCliVersionOpts = {

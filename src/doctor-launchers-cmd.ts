@@ -45,7 +45,7 @@ const collapsedKind = (
 
 const adapterLabel = (row: TLauncherDoctorRow): string => {
   if (row.adapterId !== null) return ` adapter=${row.adapterId}`;
-  if (row.kind !== null && row.kind.startsWith("shim:")) {
+  if (row.kind?.startsWith("shim:")) {
     return ` adapter=${row.kind.slice("shim:".length)}`;
   }
   return "";

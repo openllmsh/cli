@@ -39,12 +39,12 @@ export type TLauncherManagerSpec = {
    */
   readonly dataRootEnvVar: string | null;
   /** Absolute data/home root, or `null` when not applicable / unknown. */
-  readonly dataRoot: (
+  readonly dataRoot: (home: string, env: NodeJS.ProcessEnv) => string | null;
+  /** Shim dirs that belong on a RESOLUTION search PATH when they exist. */
+  readonly shimDirs: (
     home: string,
     env: NodeJS.ProcessEnv,
-  ) => string | null;
-  /** Shim dirs that belong on a RESOLUTION search PATH when they exist. */
-  readonly shimDirs: (home: string, env: NodeJS.ProcessEnv) => readonly string[];
+  ) => readonly string[];
   /** Bin dirs (non-shim) for RESOLUTION search PATH / sandbox. */
   readonly binDirs: (home: string, env: NodeJS.ProcessEnv) => readonly string[];
   /**
@@ -84,10 +84,7 @@ export const LAUNCHER_MANAGERS: readonly TLauncherManagerSpec[] = [
     binDirs: (home, env) => [join(misePaths(home, env).dataDir, "bin")],
     managerBinCandidates: (home, env) => {
       const data = misePaths(home, env).dataDir;
-      return [
-        join(home, ".local", "bin", "mise"),
-        join(data, "bin", "mise"),
-      ];
+      return [join(home, ".local", "bin", "mise"), join(data, "bin", "mise")];
     },
     rootMarkers: [
       ["mise", "installs"],

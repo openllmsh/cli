@@ -39,6 +39,7 @@ import {
 import { grantKeychainToolAccess } from "./delegation/keychain";
 import { cliVersion } from "./delegation/util";
 import type { TSafeDiagnosticMessage } from "./doctor-report/message";
+import { envMs } from "./env-ms";
 import {
   rememberInterpreterDir,
   rememberLauncherProfile,
@@ -48,7 +49,6 @@ import { defaultLauncherResolver } from "./launcher-resolution";
 import { logWarn, safeDiagnosticMessage } from "./logger";
 import type { TManagerRegistry } from "./manager-resolution";
 import { defaultManagerRegistry } from "./manager-resolution";
-import { envMs } from "./env-ms";
 import { isHostCliRunnable } from "./path-utils";
 import { isMacKeychainProvider } from "./sandbox/policy";
 

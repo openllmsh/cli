@@ -26,13 +26,12 @@ import { basename, isAbsolute, join, sep } from "node:path";
 import type { TDoctorFailureSignature } from "@openllmsh/protocol";
 import {
   classifyFailureOutput,
-  DOCTOR_LAUNCHER_ADAPTERS,
+  type DOCTOR_LAUNCHER_ADAPTERS,
 } from "@openllmsh/protocol";
-import { SHIM_LAUNCHER_ADAPTERS } from "./launcher-roots";
 import { runCaptureResult, spawnCwd } from "./delegation/spawn";
-import { logWarn, safeDiagnosticMessage } from "./logger";
 import { envMs } from "./env-ms";
-import { launcherManagerById } from "./launcher-roots";
+import { launcherManagerById, SHIM_LAUNCHER_ADAPTERS } from "./launcher-roots";
+import { logWarn, safeDiagnosticMessage } from "./logger";
 import { misePaths } from "./mise-paths";
 import { fileFingerprint, resolveOnPath } from "./path-utils";
 

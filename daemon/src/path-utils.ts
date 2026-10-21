@@ -173,7 +173,7 @@ let executableHeaderCache: TExecutableHeaderCache | null = null;
  * the same file twice for the same mtime/size.
  */
 export const readExecutableHeader = (binPath: string): Buffer | null => {
-  let st;
+  let st: ReturnType<typeof statSync>;
   try {
     st = statSync(binPath);
     if (!st.isFile()) return null;

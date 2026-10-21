@@ -27,6 +27,7 @@ import {
   statSync,
 } from "node:fs";
 import { basename, dirname, isAbsolute, join, sep } from "node:path";
+import { envMs } from "./env-ms";
 import { registerLauncherResolutionInvalidator } from "./launcher-invalidate-hook";
 import {
   dropPersistedLauncherResolution,
@@ -35,10 +36,9 @@ import {
   recordToResolution,
 } from "./launcher-resolution-cache";
 import type { TLauncherResolution } from "./launcher-resolution-types";
+import { allManagerRootMarkers } from "./launcher-roots";
 import type { TManagerAdapter, TManagerRegistry } from "./manager-resolution";
 import { defaultManagerRegistry } from "./manager-resolution";
-import { envMs } from "./env-ms";
-import { allManagerRootMarkers } from "./launcher-roots";
 import {
   fileFingerprint,
   managerPackagerBinDirs,
@@ -135,7 +135,6 @@ export type TCreateLauncherResolverDeps = {
 // Magic / fingerprint helpers
 // ---------------------------------------------------------------------------
 
-
 const ELF_MAGIC = [0x7f, 0x45, 0x4c, 0x46] as const;
 /** Mach-O 32/64 + fat (incl. byte-swapped). */
 const MACHO_MAGICS: ReadonlyArray<ReadonlyArray<number>> = [
@@ -161,7 +160,6 @@ const isNativeBinaryMagic = (buf: Buffer): boolean => {
 
 /** Reuses {@link readExecutableHeader} so a prior `isHostCliRunnable` hit is free. */
 const readHeader = (path: string): Buffer | null => readExecutableHeader(path);
-
 
 const SHELL_INTERPRETERS = new Set([
   "sh",

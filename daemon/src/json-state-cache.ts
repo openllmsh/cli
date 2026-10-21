@@ -20,7 +20,9 @@ export const writeJsonStateAtomic = (
   body: unknown,
 ): void => {
   tmpSeq += 1;
-  const base = file.includes("/") ? file.slice(file.lastIndexOf("/") + 1) : file;
+  const base = file.includes("/")
+    ? file.slice(file.lastIndexOf("/") + 1)
+    : file;
   const tmp = join(dir, `.${base}.${process.pid}.${tmpSeq}.tmp`);
   try {
     mkdirSync(dir, { recursive: true, mode: 0o700 });
