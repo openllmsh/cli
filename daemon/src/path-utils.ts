@@ -9,13 +9,15 @@ import { basename, delimiter, isAbsolute, join } from "node:path";
  * Standard user + launcher shim/bin dirs the daemon prepends to a spawned
  * child's PATH. The daemon runs as a background service with a minimal
  * inherited PATH, so user-installed CLIs (`claude` in ~/.local/bin; `bun` in
- * ~/.bun/bin; mise/asdf/volta/fnm/nix/linuxbrew/snap shims) aren't found and a
- * script that relies on one half-applies or acks `status:error`.
+ * ~/.bun/bin; mise/asdf/volta/proto/fnm/nix/linuxbrew/snap shims) aren't found
+ * and a script that relies on one half-applies or acks `status:error`.
  *
  * One data-driven candidate list (not per-launcher branches), filtered to
  * dirs that EXIST. Relocated roots (`MISE_DATA_DIR`, `ASDF_DATA_DIR`,
- * `VOLTA_HOME`, `npm_config_prefix`) are honoured when set. Computed per call
- * so a test that overrides `HOME` / those env vars sees the overridden dirs.
+ * `VOLTA_HOME`, `PROTO_HOME`, `npm_config_prefix`) are honoured when set —
+ * and the matching default root is omitted so a stale leftover install cannot
+ * shadow the configured one. Computed per call so a test that overrides
+ * `HOME` / those env vars sees the overridden dirs.
  */
 export const defaultBinDirs = (): readonly string[] => {
   // Prefer `$HOME` when set so tests (and atypical service units) can redirect
@@ -29,18 +31,34 @@ export const defaultBinDirs = (): readonly string[] => {
   const miseData = process.env.MISE_DATA_DIR?.trim() || "";
   const asdfData = process.env.ASDF_DATA_DIR?.trim() || "";
   const voltaHome = process.env.VOLTA_HOME?.trim() || "";
+  const protoHome = process.env.PROTO_HOME?.trim() || "";
+  // Configured root replaces the default when set — never both, or an old
+  // default shim dir left behind after relocation would win PATH order.
+  const miseShims =
+    miseData.length > 0
+      ? join(miseData, "shims")
+      : join(home, ".local", "share", "mise", "shims");
+  const asdfShims =
+    asdfData.length > 0
+      ? join(asdfData, "shims")
+      : join(home, ".asdf", "shims");
+  const voltaBin =
+    voltaHome.length > 0
+      ? join(voltaHome, "bin")
+      : join(home, ".volta", "bin");
+  const protoRoot = protoHome.length > 0 ? protoHome : join(home, ".proto");
   const candidates: readonly string[] = [
     "/opt/homebrew/bin",
     "/usr/local/bin",
     join(home, ".local", "bin"),
     join(home, ".bun", "bin"),
     // Version-manager shims / bins (audit L2 / F3).
-    join(home, ".local", "share", "mise", "shims"),
-    miseData.length > 0 ? join(miseData, "shims") : "",
-    join(home, ".asdf", "shims"),
-    asdfData.length > 0 ? join(asdfData, "shims") : "",
-    join(home, ".volta", "bin"),
-    voltaHome.length > 0 ? join(voltaHome, "bin") : "",
+    miseShims,
+    asdfShims,
+    voltaBin,
+    // proto exposes both `shims/` and `bin/` (see protoManagerAdapter).
+    join(protoRoot, "shims"),
+    join(protoRoot, "bin"),
     join(home, ".local", "share", "fnm", "aliases", "default", "bin"),
     // Nix profiles + Linuxbrew + snap.
     join(home, ".nix-profile", "bin"),
