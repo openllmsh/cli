@@ -6,7 +6,7 @@
  * keychain op without an explicit path) is rejected BEFORE spawn. Callers never
  * see a prompt from a policy violation — they see {@link SecurityArgvRejectedError}.
  */
-import { basename } from "node:path";
+import { basename, isAbsolute } from "node:path";
 
 /** Subcommands OpenLLM is allowed to issue. Everything else is rejected. */
 export const ALLOWED_SECURITY_SUBCOMMANDS = [
@@ -29,9 +29,12 @@ const ALLOWED = new Set<string>(ALLOWED_SECURITY_SUBCOMMANDS);
 const REQUIRES_KEYCHAIN_PATH = new Set<string>(ALLOWED_SECURITY_SUBCOMMANDS);
 
 /**
- * Flags that consume the following argv element as a value, per subcommand.
- * Used so a service/password that happens to contain `.keychain` cannot satisfy
- * the explicit-path rule (that would let `security` search the default list).
+ * Flags that consume the next argv token as a value, aligned with `man
+ * security` for each allowlisted subcommand. Used so a service/password that
+ * happens to contain `.keychain` cannot satisfy the explicit-path rule.
+ * Boolean switches (e.g. `set-key-partition-list -s` for symmetric keys)
+ * must NOT appear here — listing them would swallow the following `-k` /
+ * path and defeat the explicit-path rule.
  */
 const VALUE_TAKING_FLAGS: Readonly<
   Record<TAllowedSecuritySubcommand, ReadonlySet<string>>
@@ -41,9 +44,35 @@ const VALUE_TAKING_FLAGS: Readonly<
   "set-keychain-settings": new Set(["-t"]),
   "show-keychain-info": new Set(),
   "dump-keychain": new Set(),
-  "find-generic-password": new Set(["-a", "-s", "-c", "-D", "-G", "-l"]),
+  // find-generic-password: -a account, -c creator, -C type, -D kind,
+  // -G value, -j comment, -l label, -s service (man security).
+  "find-generic-password": new Set([
+    "-a",
+    "-s",
+    "-c",
+    "-C",
+    "-D",
+    "-G",
+    "-j",
+    "-l",
+  ]),
+  // set-key-partition-list: -S partitions, -k password. `-s` is a BOOLEAN
+  // (symmetric keys), not a value flag.
   "set-key-partition-list": new Set(["-S", "-k"]),
-  "set-generic-password-partition-list": new Set(["-S", "-k", "-s", "-a"]),
+  // set-generic-password-partition-list: same attribute selectors as find,
+  // plus -S / -k (man security).
+  "set-generic-password-partition-list": new Set([
+    "-S",
+    "-k",
+    "-s",
+    "-a",
+    "-c",
+    "-C",
+    "-D",
+    "-G",
+    "-j",
+    "-l",
+  ]),
 };
 
 /** Rejected dump-keychain flags (decrypt / ACL dump / interactive ACL edit). */
@@ -64,9 +93,14 @@ export class SecurityArgvRejectedError extends Error {
 
 const isFlag = (arg: string): boolean => arg.startsWith("-");
 
-/** A keychain operand: ends with a known keychain suffix, never a flag. */
+/**
+ * A keychain operand: absolute path ending in a known keychain suffix, never
+ * a flag. Basename-only values (e.g. `login.keychain-db`) are rejected —
+ * `security` would resolve them against the default search list, not the
+ * isolated keychain (CodeRabbit item 9 / comment on looksLikeKeychainPath).
+ */
 export const looksLikeKeychainPath = (arg: string): boolean => {
-  if (arg.length === 0 || isFlag(arg)) return false;
+  if (arg.length === 0 || isFlag(arg) || !isAbsolute(arg)) return false;
   const name = basename(arg).toLowerCase();
   return name.endsWith(".keychain-db") || name.endsWith(".keychain");
 };
