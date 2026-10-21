@@ -610,14 +610,55 @@ const acceptAbsoluteExecutable = (
   return real;
 };
 
+const managerUserHome = (): string => process.env.HOME?.trim() || homedir();
+
+/**
+ * Explicit manager-binary locations checked before PATH. `defaultBinDirs`
+ * adds asdf's *shims* dir (not `bin/`), so a classic `~/.asdf/bin/asdf`
+ * install is invisible to `resolveOnPath("asdf")` alone — same class of gap
+ * mise already closed with `miseBinCandidates`. Volta/proto bin dirs are on
+ * the PATH allowlist today, but keep the same explicit roots so a relocated
+ * env root or a future allowlist change cannot reopen the hole.
+ */
+const asdfBinCandidates = (): readonly string[] => {
+  const out: string[] = [];
+  const dataDir = process.env.ASDF_DATA_DIR?.trim();
+  if (dataDir !== undefined && dataDir.length > 0) {
+    out.push(join(dataDir, "bin", "asdf"));
+  }
+  out.push(join(managerUserHome(), ".asdf", "bin", "asdf"));
+  return out;
+};
+
+const voltaBinCandidates = (): readonly string[] => {
+  const out: string[] = [];
+  const voltaHome = process.env.VOLTA_HOME?.trim();
+  if (voltaHome !== undefined && voltaHome.length > 0) {
+    out.push(join(voltaHome, "bin", "volta"));
+  }
+  out.push(join(managerUserHome(), ".volta", "bin", "volta"));
+  return out;
+};
+
+const protoBinCandidates = (): readonly string[] => {
+  const out: string[] = [];
+  const protoHome = process.env.PROTO_HOME?.trim();
+  if (protoHome !== undefined && protoHome.length > 0) {
+    out.push(join(protoHome, "bin", "proto"));
+  }
+  out.push(join(managerUserHome(), ".proto", "bin", "proto"));
+  return out;
+};
+
 const resolveViaManagerBin = async (
   managerCmd: string,
   argv: readonly string[],
   candidate: string,
   isShim: (p: string) => boolean,
   signal?: AbortSignal,
+  extraBins: readonly string[] = [],
 ): Promise<string | null> => {
-  const bins = resolveOnPath(managerCmd);
+  const bins = [...extraBins, ...resolveOnPath(managerCmd)];
   const bin = bins.find((p) => existsSync(p));
   if (bin === undefined) return null;
   const result = await runCaptureResult([bin, ...argv], undefined, {
@@ -646,6 +687,7 @@ export const asdfManagerAdapter: TManagerAdapter = {
       candidate,
       isAsdfShimPath,
       signal,
+      asdfBinCandidates(),
     );
   },
 };
@@ -667,6 +709,7 @@ export const voltaManagerAdapter: TManagerAdapter = {
       candidate,
       isVoltaShimPath,
       signal,
+      voltaBinCandidates(),
     );
   },
 };
@@ -689,6 +732,7 @@ export const protoManagerAdapter: TManagerAdapter = {
       candidate,
       isProtoShimPath,
       signal,
+      protoBinCandidates(),
     );
   },
 };

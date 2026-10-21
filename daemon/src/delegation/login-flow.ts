@@ -28,8 +28,10 @@ import type {
 } from "@openllmsh/protocol";
 import {
   classifyFailureOutput,
+  DoctorLauncherAdapter,
   projectDoctorOutcomeLedger,
 } from "@openllmsh/protocol";
+import { Schema as S } from "effect";
 import {
   admitVerifiedLogin,
   emitAuth,
@@ -412,10 +414,8 @@ const doctorLauncherFields = (
   const profile = launcherProfileFor(slug);
   if (profile === undefined) return {};
   const adapter =
-    profile.adapter_id === "mise" ||
-    profile.adapter_id === "asdf" ||
-    profile.adapter_id === "volta" ||
-    profile.adapter_id === "proto"
+    profile.adapter_id !== null &&
+    S.is(DoctorLauncherAdapter)(profile.adapter_id)
       ? profile.adapter_id
       : undefined;
   return {

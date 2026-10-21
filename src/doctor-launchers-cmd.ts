@@ -6,8 +6,13 @@
  * login shell would resolve.
  */
 import { existsSync } from "node:fs";
-import { CLI_PROVIDERS, cliCommand, hostCliCandidates } from "../daemon/src/cli-paths";
 import type { TCliProvider } from "../daemon/src/cli-paths";
+import {
+  CLI_PROVIDERS,
+  cliCommand,
+  hostCliCandidates,
+} from "../daemon/src/cli-paths";
+import type { TLauncherKind } from "../daemon/src/launcher-resolution";
 import {
   createLauncherResolver,
   launcherProfileOf,
@@ -19,7 +24,7 @@ export type TLauncherDoctorRow = {
   readonly installed: boolean;
   readonly candidate: string | null;
   readonly resolvedPath: string | null;
-  readonly kind: string | null;
+  readonly kind: TLauncherKind | null;
   readonly adapterId: string | null;
   readonly interpreter: string | null;
   readonly underManagerRoot: boolean;
@@ -46,7 +51,7 @@ export const formatLauncherDoctorReport = (
       row.kind === null
         ? null
         : launcherProfileOf({
-            kind: row.kind as "binary" | "script" | "wrapper" | `shim:${string}`,
+            kind: row.kind,
             path: row.resolvedPath ?? row.candidate ?? "",
             fingerprint: "doctor",
             underManagerRoot: row.underManagerRoot,

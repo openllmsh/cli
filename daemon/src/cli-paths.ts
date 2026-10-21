@@ -457,10 +457,8 @@ export const sessionEnv = (): Record<string, string> => {
  * so the read location and the `cliEnv` run location never drift.
  *   claude → <home>/.claude   codex → <home>/.codex   kimi → <home>/.kimi-code
  */
-export const cliConfigDir = (
-  provider: TCliProvider,
-  home?: string,
-): string => SPECS[provider].configDir(cliHome(provider, home));
+export const cliConfigDir = (provider: TCliProvider, home?: string): string =>
+  SPECS[provider].configDir(cliHome(provider, home));
 
 /**
  * Shared isolated runtime env applied to EVERY delegated CLI (audit L2).
@@ -510,9 +508,9 @@ const nonEmptyEnv = (v: string | undefined): string | undefined =>
  * state/cache — do NOT add config/state/cache overrides here):
  *   - `MISE_DATA_DIR` — explicit, else derived from ambient `XDG_DATA_HOME`
  *     (or `~/.local/share/mise`) when that data dir exists
- *   - `ASDF_DATA_DIR`
- *   - `VOLTA_HOME`
- *   - `FNM_DIR`
+ *   - `ASDF_DATA_DIR` — explicit, else `~/.asdf` when that dir exists
+ *   - `VOLTA_HOME` — explicit, else `~/.volta` when that dir exists
+ *   - `FNM_DIR` — explicit only (default alias bin is PATH-added directly)
  *
  * Never grants write on real `~/.config/mise` — config/state/cache fall to the
  * redirected XDG dirs automatically.
@@ -526,8 +524,18 @@ export const launcherDataRootEnv = (
     const v = nonEmptyEnv(ambient[key]);
     if (v !== undefined) out[key] = v;
   };
-  pass("ASDF_DATA_DIR");
-  pass("VOLTA_HOME");
+  // asdf/volta shims on PATH still consult these roots. When unset they fall
+  // back to `$HOME/.asdf` / `$HOME/.volta`, which under isolatedRuntimeEnv is
+  // the *isolated* home — so pass the real default roots when they exist.
+  const passOrDefault = (key: string, fallback: string): void => {
+    const v = nonEmptyEnv(ambient[key]);
+    if (v !== undefined) out[key] = v;
+    else if (existsSync(fallback)) out[key] = fallback;
+  };
+  passOrDefault("ASDF_DATA_DIR", join(realHome, ".asdf"));
+  passOrDefault("VOLTA_HOME", join(realHome, ".volta"));
+  // fnm: defaultBinDirs adds the alias bin directly (real node), so an unset
+  // FNM_DIR does not need a default — only an explicit relocate is forwarded.
   pass("FNM_DIR");
 
   const explicitMise = nonEmptyEnv(ambient.MISE_DATA_DIR);
