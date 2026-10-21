@@ -33546,6 +33546,9 @@
                             },
                             "interpreter_resolved": {
                               "type": "boolean"
+                            },
+                            "launcher_under_manager_root": {
+                              "type": "boolean"
                             }
                           },
                           "additionalProperties": false
@@ -33724,6 +33727,24 @@
                           "type": "string",
                           "description": "a string matching the pattern ^[0-9A-Za-z]{1,16}$",
                           "pattern": "^[0-9A-Za-z]{1,16}$"
+                        },
+                        "launcher_kind": {
+                          "type": "string",
+                          "enum": [
+                            "binary",
+                            "script",
+                            "shim",
+                            "wrapper"
+                          ]
+                        },
+                        "launcher_adapter": {
+                          "type": "string",
+                          "enum": [
+                            "mise",
+                            "asdf",
+                            "volta",
+                            "proto"
+                          ]
                         }
                       },
                       "additionalProperties": false
