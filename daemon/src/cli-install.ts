@@ -296,7 +296,7 @@ const isExecutableAbsolutePath = (path: string): boolean => {
  * alone is not enough. Native / shim / wrapper without an interpreter keep
  * the spawnPathDirs check.
  */
-const isResolvedLauncherRunnable = (
+export const isResolvedLauncherRunnable = (
   resolution: TLauncherResolution,
 ): boolean => {
   if (resolution.interpreter !== undefined) {
@@ -306,6 +306,30 @@ const isResolvedLauncherRunnable = (
     return false;
   }
   return isHostCliRunnable(resolution.path);
+};
+
+export type TRunnableHostPick = {
+  readonly candidate: string;
+  readonly resolution: TLauncherResolution;
+};
+
+/**
+ * Walk host candidates the demand path uses: skip missing paths, null
+ * `resolveLauncher` results, and non-runnable resolutions; return the first
+ * runnable pick. Shared by {@link resolveHostBinary} and `doctor launchers`.
+ */
+export const pickFirstRunnableHostCandidate = async (
+  candidates: readonly string[],
+  resolveLauncher: (candidate: string) => Promise<TLauncherResolution | null>,
+): Promise<TRunnableHostPick | null> => {
+  for (const candidate of candidates) {
+    if (!existsSync(candidate)) continue;
+    const resolution = await resolveLauncher(candidate);
+    if (resolution === null) continue;
+    if (!isResolvedLauncherRunnable(resolution)) continue;
+    return { candidate, resolution };
+  }
+  return null;
 };
 
 const cachedLauncherForTarget = (
@@ -341,33 +365,31 @@ const resolveHostBinary = async (
   const launchers =
     opts?.launchers ??
     (opts?.managers !== undefined ? undefined : defaultLauncherResolver);
-  // Walk every candidate: a PATH-hit shebang whose interpreter is missing
-  // (npm `@openai/codex` → `#!/usr/bin/env node` under nvm) must not win over
-  // a later native install, and must not count as "installed" when it is the
-  // only hit — that falls through to the isolated vendor-install flow.
+  // Demand + launchers: walk every candidate via the shared helper (doctor
+  // uses the same decision). A PATH-hit shebang whose interpreter is missing
+  // must not win over a later native install, and must not count as
+  // "installed" when it is the only hit. resolveLauncher already ran
+  // resolveManagerCandidate — do NOT re-enter the legacy manager path
+  // (CodeRabbit 4341596146).
+  if (launchers !== undefined && opts?.demand === true) {
+    const pick = await pickFirstRunnableHostCandidate(
+      hostCliCandidates(provider),
+      (candidate) =>
+        launchers.resolveLauncher(candidate, {
+          demand: true,
+          ...(opts.signal !== undefined ? { signal: opts.signal } : {}),
+        }),
+    );
+    if (pick !== null) {
+      noteLauncherResolution(provider, pick.resolution);
+      return pick.resolution.path;
+    }
+    return undefined;
+  }
+
+  // Passive / no-launchers: walk candidates with cache peek + spawnPathDirs.
   for (const candidate of hostCliCandidates(provider)) {
     if (!existsSync(candidate)) continue;
-
-    // Demand path: resolve FIRST. `isHostCliRunnable` only searches
-    // spawnPathDirs; demand `resolveLauncher` also searches manager shim
-    // dirs and can prove a sibling interpreter. Gating before resolve
-    // would reject those scripts permanently.
-    if (launchers !== undefined && opts?.demand === true) {
-      const launcher = await launchers.resolveLauncher(candidate, {
-        demand: true,
-        ...(opts.signal !== undefined ? { signal: opts.signal } : {}),
-      });
-      if (launcher !== null) {
-        if (!isResolvedLauncherRunnable(launcher)) continue;
-        noteLauncherResolution(provider, launcher);
-        return launcher.path;
-      }
-      // resolveLauncher already ran resolveManagerCandidate for this
-      // candidate (and returned null on unresolved shim / unreadable
-      // content). Do NOT re-enter the legacy manager path — that was a
-      // redundant second spawn/lookup (CodeRabbit 4341596146).
-      continue;
-    }
 
     if (launchers !== undefined) {
       // Passive: reuse a prior demand resolution when the fingerprint still

@@ -6,6 +6,10 @@
  * login shell would resolve.
  */
 import { existsSync } from "node:fs";
+import {
+  isResolvedLauncherRunnable,
+  pickFirstRunnableHostCandidate,
+} from "../daemon/src/cli-install";
 import type { TCliProvider } from "../daemon/src/cli-paths";
 import {
   CLI_PROVIDERS,
@@ -103,51 +107,59 @@ export const collectLauncherDoctorRows = async (): Promise<
   // stable regardless of which resolve finishes first.
   return Promise.all(
     CLI_PROVIDERS.map(async (provider): Promise<TLauncherDoctorRow> => {
-      const candidate = firstExistingCandidate(provider);
-      if (candidate === null) {
-        // Try a login-shell probe on the bare command name.
-        const probed = await resolver.resolveLauncher(cliCommand(provider), {
-          demand: true,
-          enableShellProbe: true,
-        });
-        if (probed === null) {
-          return {
-            provider,
-            installed: false,
-            candidate: null,
-            resolvedPath: null,
-            kind: null,
-            adapterId: null,
-            interpreter: null,
-            underManagerRoot: false,
-            isolatedEnvApplies: false,
-          };
-        }
+      // Same walk as daemon resolveHostBinary demand: skip null /
+      // non-runnable resolutions and accept a later candidate.
+      const pick = await pickFirstRunnableHostCandidate(
+        hostCliCandidates(provider),
+        (candidate) =>
+          resolver.resolveLauncher(candidate, {
+            demand: true,
+            enableShellProbe: false,
+          }),
+      );
+      if (pick !== null) {
+        const { candidate, resolution } = pick;
         return {
           provider,
           installed: true,
-          candidate: cliCommand(provider),
-          resolvedPath: probed.path,
-          kind: probed.kind,
-          adapterId: probed.adapterId ?? null,
-          interpreter: probed.interpreter ?? null,
-          underManagerRoot: probed.underManagerRoot,
-          // L2 isolatedRuntimeEnv applies to every provider on the next spawn.
+          candidate,
+          resolvedPath: resolution.path,
+          kind: resolution.kind,
+          adapterId: resolution.adapterId ?? null,
+          interpreter: resolution.interpreter ?? null,
+          underManagerRoot: resolution.underManagerRoot,
+          // L2 isolatedRuntimeEnv applies to every installed provider on spawn.
           isolatedEnvApplies: true,
         };
       }
-      const resolved = await resolver.resolveLauncher(candidate, {
-        demand: true,
-        enableShellProbe: false,
-      });
-      if (resolved === null) {
-        // Daemon demand resolution skips a null result (cli-install
-        // resolveHostBinary `continue`s — no isolated link is created), so
-        // the provider is not installed from the daemon's view.
+
+      const existing = firstExistingCandidate(provider);
+      if (existing !== null) {
+        // Something was on disk but every candidate was null / not runnable
+        // (e.g. shim query failed, or script with no proven interpreter).
         return {
           provider,
           installed: false,
-          candidate,
+          candidate: existing,
+          resolvedPath: null,
+          kind: null,
+          adapterId: null,
+          interpreter: null,
+          underManagerRoot: false,
+          isolatedEnvApplies: false,
+        };
+      }
+
+      // Try a login-shell probe on the bare command name.
+      const probed = await resolver.resolveLauncher(cliCommand(provider), {
+        demand: true,
+        enableShellProbe: true,
+      });
+      if (probed === null || !isResolvedLauncherRunnable(probed)) {
+        return {
+          provider,
+          installed: false,
+          candidate: null,
           resolvedPath: null,
           kind: null,
           adapterId: null,
@@ -159,13 +171,13 @@ export const collectLauncherDoctorRows = async (): Promise<
       return {
         provider,
         installed: true,
-        candidate,
-        resolvedPath: resolved.path,
-        kind: resolved.kind,
-        adapterId: resolved.adapterId ?? null,
-        interpreter: resolved.interpreter ?? null,
-        underManagerRoot: resolved.underManagerRoot,
-        // L2 isolatedRuntimeEnv applies to every installed provider on spawn.
+        candidate: cliCommand(provider),
+        resolvedPath: probed.path,
+        kind: probed.kind,
+        adapterId: probed.adapterId ?? null,
+        interpreter: probed.interpreter ?? null,
+        underManagerRoot: probed.underManagerRoot,
+        // L2 isolatedRuntimeEnv applies to every provider on the next spawn.
         isolatedEnvApplies: true,
       };
     }),
