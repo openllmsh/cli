@@ -33691,6 +33691,9 @@
                           "enum": [
                             "mise_permission_denied",
                             "mise_error",
+                            "launcher_write_denied",
+                            "launcher_interpreter_missing",
+                            "launcher_unresolved",
                             "permission_denied",
                             "sandbox_denied",
                             "not_found",

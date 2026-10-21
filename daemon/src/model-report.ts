@@ -21,12 +21,15 @@ import type {
   TDaemonModelReportEntry,
   TDaemonProviderConnection,
   TProviderModelEntry,
+  TSubscriptionProviderSlug,
 } from "@openllmsh/protocol";
 import { normalizeProviderConnection } from "@openllmsh/protocol";
 import { addAuthObserver } from "./auth-events";
 import { reportModels } from "./cloud-client";
 import type { TProviderDelegate } from "./delegation";
-import { DELEGATES, getDelegate } from "./delegation";
+import { DELEGATES, getDelegate, isOAuthSlug } from "./delegation";
+import type { TListModelsNullReason } from "./delegation/types";
+import { logWarn, safeDiagnosticMessage } from "./logger";
 import {
   MODEL_REPORT_FAILURE_RETRY_MS,
   MODEL_REPORT_TTL_MS,
@@ -62,8 +65,59 @@ type TListed = {
         readonly models: ReadonlyArray<TProviderModelEntry>;
       }
     | { readonly kind: "skipped" }
-    | { readonly kind: "failed" };
+    | {
+        readonly kind: "failed";
+        readonly reason?: TListModelsNullReason;
+      };
   readonly postError?: string;
+};
+
+const listModelsNullMessage = (
+  reason: TListModelsNullReason,
+): ReturnType<typeof safeDiagnosticMessage> => {
+  switch (reason) {
+    case "token_unavailable":
+      return safeDiagnosticMessage`Connected provider model listing returned null (token_unavailable).`;
+    case "version_unresolved":
+      return safeDiagnosticMessage`Connected provider model listing returned null (version_unresolved).`;
+    case "empty_after_filter":
+      return safeDiagnosticMessage`Connected provider model listing returned null (empty_after_filter).`;
+    case "error":
+      return safeDiagnosticMessage`Connected provider model listing returned null (error).`;
+    default:
+      if (reason === "http_401") {
+        return safeDiagnosticMessage`Connected provider model listing returned null (http_401).`;
+      }
+      if (reason === "http_403") {
+        return safeDiagnosticMessage`Connected provider model listing returned null (http_403).`;
+      }
+      if (reason === "http_404") {
+        return safeDiagnosticMessage`Connected provider model listing returned null (http_404).`;
+      }
+      if (reason === "http_429") {
+        return safeDiagnosticMessage`Connected provider model listing returned null (http_429).`;
+      }
+      if (reason === "http_500") {
+        return safeDiagnosticMessage`Connected provider model listing returned null (http_500).`;
+      }
+      if (reason === "http_502") {
+        return safeDiagnosticMessage`Connected provider model listing returned null (http_502).`;
+      }
+      if (reason === "http_503") {
+        return safeDiagnosticMessage`Connected provider model listing returned null (http_503).`;
+      }
+      return safeDiagnosticMessage`Connected provider model listing returned null (http_error).`;
+  }
+};
+
+const noteConnectedListModelsNull = (
+  slug: string,
+  reason: TListModelsNullReason,
+): void => {
+  logWarn("model-report", listModelsNullMessage(reason), undefined, {
+    provider: slug as TSubscriptionProviderSlug,
+    observation: "connected",
+  });
 };
 
 /** The result of collecting and attempting one due model-list report. */
@@ -179,13 +233,31 @@ const runForceList = (due: TDueModelReport): Promise<TListed> => {
   if (existing !== undefined) return existing;
   const flight = (async (): Promise<TListed> => {
     try {
-      const models = await (due.delegate.listModels?.() ??
-        Promise.resolve(null));
-      if (models === null) {
+      const detailed = due.delegate.listModelsDetailed;
+      if (detailed !== undefined) {
+        const result = await detailed();
+        if (result.kind === "null") {
+          noteConnectedListModelsNull(due.slug, result.reason);
+          return {
+            slug: due.slug,
+            cliVersion: due.cliVersion,
+            outcome: { kind: "failed", reason: result.reason },
+          };
+        }
         return {
           slug: due.slug,
           cliVersion: due.cliVersion,
-          outcome: { kind: "failed" },
+          outcome: { kind: "success", models: result.models },
+        };
+      }
+      const models = await (due.delegate.listModels?.() ??
+        Promise.resolve(null));
+      if (models === null) {
+        noteConnectedListModelsNull(due.slug, "error");
+        return {
+          slug: due.slug,
+          cliVersion: due.cliVersion,
+          outcome: { kind: "failed", reason: "error" },
         };
       }
       return {
@@ -194,10 +266,11 @@ const runForceList = (due: TDueModelReport): Promise<TListed> => {
         outcome: { kind: "success", models },
       };
     } catch {
+      noteConnectedListModelsNull(due.slug, "error");
       return {
         slug: due.slug,
         cliVersion: due.cliVersion,
-        outcome: { kind: "failed" },
+        outcome: { kind: "failed", reason: "error" },
       };
     }
   })();
@@ -424,3 +497,40 @@ export const observeLoginModelReports = (): void => {
   loginObserverInstalled = true;
   addAuthObserver(onAuthEvent);
 };
+
+type TConnectedBaseline = {
+  readonly connected: boolean;
+};
+
+/**
+ * Observe status snapshots and demand-report models on any oauth transition
+ * into `connected` — including credentials that appear out-of-band (native
+ * CLI login). Deduped by the per-slug throttle / single-flight; does NOT
+ * reset the throttle (login.succeeded still does, so a just-landed
+ * credential is never held back by a prior failure stamp).
+ */
+export type TConnectedModelReportTracker = (
+  connections: ReadonlyArray<TDaemonProviderConnection>,
+) => void;
+
+export const createConnectedModelReportTracker =
+  (): TConnectedModelReportTracker => {
+    const last = new Map<string, TConnectedBaseline>();
+    return (connections) => {
+      for (const conn of connections) {
+        if (!isOAuthSlug(conn.provider)) continue;
+        const connected =
+          normalizeProviderConnection(conn).observation === "connected";
+        const was = last.get(conn.provider)?.connected === true;
+        last.set(conn.provider, { connected });
+        if (!connected || was) continue;
+        void maybeReportModels(Date.now(), conn.provider, "force").catch(
+          () => {},
+        );
+      }
+    };
+  };
+
+/** Process-wide tracker — one baseline Map for the daemon lifetime. */
+export const noteConnectionsForModelReport: TConnectedModelReportTracker =
+  createConnectedModelReportTracker();

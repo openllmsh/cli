@@ -36,6 +36,7 @@ import {
   notifySessionLost,
 } from "./cloud-client";
 import { runCommandInner } from "./control-relay";
+import { noteConnectionsForModelReport } from "./model-report";
 import {
   markCredentialStoresDirtyIfChanged,
   resetCredentialStoreFingerprint,
@@ -671,12 +672,14 @@ const enqueueStatusPublish = (opts: {
 
 /**
  * Shared observer choreography for a computed status snapshot: local
- * `auth.session.lost` emit, cloud POST on `→ disconnected`, then quota.
+ * `auth.session.lost` emit, demand model report on `→ connected`, cloud
+ * POST on `→ disconnected`, then quota.
  */
 const observeNotificationTransitions = (
   connections: ReadonlyArray<TDaemonProviderConnection>,
 ): void => {
   noteConnectionsForSessionLost(connections);
+  noteConnectionsForModelReport(connections);
   authStatusEdgeObserver.observe(connections);
   for (const transition of noteConnectionsForQuota(connections)) {
     void notifyQuotaStatus(transition);

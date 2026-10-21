@@ -56,6 +56,27 @@ export type TModelDiscoveryResult =
   | { readonly kind: "skipped" }
   | { readonly kind: "failed" };
 
+/**
+ * Why `listModels` collapsed to null. Closed tokens for doctor telemetry —
+ * never raw URLs, bodies, or headers.
+ */
+export type TListModelsNullReason =
+  | "token_unavailable"
+  | "version_unresolved"
+  | "empty_after_filter"
+  | "error"
+  | `http_${number}`;
+
+export type TFetchModelListDetailed =
+  | {
+      readonly kind: "ok";
+      readonly models: ReadonlyArray<TProviderModelEntry>;
+    }
+  | {
+      readonly kind: "null";
+      readonly reason: TListModelsNullReason;
+    };
+
 export type TProviderDelegate = {
   readonly slug: string;
   /** Primary native login is browser unless the provider is device-code only. */
@@ -155,6 +176,13 @@ export type TProviderDelegate = {
    * empty list.
    */
   listModels?: () => Promise<ReadonlyArray<TProviderModelEntry> | null>;
+
+  /**
+   * Same contract as {@link listModels}, with a closed null-reason for
+   * doctor telemetry. Optional — callers fall back to `listModels` and
+   * treat a bare null as `error`.
+   */
+  listModelsDetailed?: () => Promise<TFetchModelListDetailed>;
 
   /**
    * Automatic model discovery: existing unexpired credential only, no

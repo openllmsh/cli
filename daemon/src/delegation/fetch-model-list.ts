@@ -1,6 +1,12 @@
 import type { TProviderModelEntry } from "@openllmsh/protocol";
 import { MODEL_LIST_FETCH_TIMEOUT_MS } from "@openllmsh/protocol";
-import type { TModelDiscoveryResult } from "./types";
+import type {
+  TFetchModelListDetailed,
+  TListModelsNullReason,
+  TModelDiscoveryResult,
+} from "./types";
+
+export type { TFetchModelListDetailed, TListModelsNullReason };
 
 /**
  * Coerce a provider-reported value into a positive integer, or
@@ -125,25 +131,47 @@ export const parseGrokModelList = (
  * and `null` on ANY failure (non-2xx / timeout / parse / empty) —
  * never an empty list, so a vendor hiccup can't wipe a user's cached
  * entries. Common behavior (like this timeout) lives here once instead
- * of per delegate.
+ * of per delegate. Prefer {@link fetchModelListDetailed} when the caller
+ * needs a closed null-reason for doctor telemetry.
  */
-export const fetchModelList = async (
+export const fetchModelListDetailed = async (
   url: string,
   headers: Readonly<Record<string, string>>,
   parse: (body: unknown) => ReadonlyArray<TProviderModelEntry>,
-): Promise<ReadonlyArray<TProviderModelEntry> | null> => {
+): Promise<TFetchModelListDetailed> => {
   try {
     const resp = await fetch(url, {
       method: "GET",
       headers,
       signal: AbortSignal.timeout(MODEL_LIST_FETCH_TIMEOUT_MS),
     });
-    if (!resp.ok) return null;
+    if (!resp.ok) {
+      const status = resp.status;
+      return {
+        kind: "null",
+        reason:
+          Number.isInteger(status) && status >= 100 && status <= 599
+            ? (`http_${status}` as const)
+            : "error",
+      };
+    }
     const entries = parse(await resp.json());
-    return entries.length > 0 ? entries : null;
+    if (entries.length === 0) {
+      return { kind: "null", reason: "empty_after_filter" };
+    }
+    return { kind: "ok", models: entries };
   } catch {
-    return null;
+    return { kind: "null", reason: "error" };
   }
+};
+
+export const fetchModelList = async (
+  url: string,
+  headers: Readonly<Record<string, string>>,
+  parse: (body: unknown) => ReadonlyArray<TProviderModelEntry>,
+): Promise<ReadonlyArray<TProviderModelEntry> | null> => {
+  const detailed = await fetchModelListDetailed(url, headers, parse);
+  return detailed.kind === "ok" ? detailed.models : null;
 };
 
 /**
