@@ -72,42 +72,35 @@ type TListed = {
   readonly postError?: string;
 };
 
+/**
+ * Closed reason → privacy-safe message. `safeDiagnosticMessage` forbids
+ * interpolation, so each closed token gets one frozen template; unknown
+ * `http_*` collapses to `http_error`.
+ */
+const LIST_MODELS_NULL_MESSAGES = {
+  token_unavailable: safeDiagnosticMessage`Connected provider model listing returned null (token_unavailable).`,
+  version_unresolved: safeDiagnosticMessage`Connected provider model listing returned null (version_unresolved).`,
+  empty_after_filter: safeDiagnosticMessage`Connected provider model listing returned null (empty_after_filter).`,
+  error: safeDiagnosticMessage`Connected provider model listing returned null (error).`,
+  http_401: safeDiagnosticMessage`Connected provider model listing returned null (http_401).`,
+  http_403: safeDiagnosticMessage`Connected provider model listing returned null (http_403).`,
+  http_404: safeDiagnosticMessage`Connected provider model listing returned null (http_404).`,
+  http_429: safeDiagnosticMessage`Connected provider model listing returned null (http_429).`,
+  http_500: safeDiagnosticMessage`Connected provider model listing returned null (http_500).`,
+  http_502: safeDiagnosticMessage`Connected provider model listing returned null (http_502).`,
+  http_503: safeDiagnosticMessage`Connected provider model listing returned null (http_503).`,
+  http_error: safeDiagnosticMessage`Connected provider model listing returned null (http_error).`,
+} as const;
+
 const listModelsNullMessage = (
   reason: TListModelsNullReason,
 ): ReturnType<typeof safeDiagnosticMessage> => {
-  switch (reason) {
-    case "token_unavailable":
-      return safeDiagnosticMessage`Connected provider model listing returned null (token_unavailable).`;
-    case "version_unresolved":
-      return safeDiagnosticMessage`Connected provider model listing returned null (version_unresolved).`;
-    case "empty_after_filter":
-      return safeDiagnosticMessage`Connected provider model listing returned null (empty_after_filter).`;
-    case "error":
-      return safeDiagnosticMessage`Connected provider model listing returned null (error).`;
-    default:
-      if (reason === "http_401") {
-        return safeDiagnosticMessage`Connected provider model listing returned null (http_401).`;
-      }
-      if (reason === "http_403") {
-        return safeDiagnosticMessage`Connected provider model listing returned null (http_403).`;
-      }
-      if (reason === "http_404") {
-        return safeDiagnosticMessage`Connected provider model listing returned null (http_404).`;
-      }
-      if (reason === "http_429") {
-        return safeDiagnosticMessage`Connected provider model listing returned null (http_429).`;
-      }
-      if (reason === "http_500") {
-        return safeDiagnosticMessage`Connected provider model listing returned null (http_500).`;
-      }
-      if (reason === "http_502") {
-        return safeDiagnosticMessage`Connected provider model listing returned null (http_502).`;
-      }
-      if (reason === "http_503") {
-        return safeDiagnosticMessage`Connected provider model listing returned null (http_503).`;
-      }
-      return safeDiagnosticMessage`Connected provider model listing returned null (http_error).`;
+  if (Object.hasOwn(LIST_MODELS_NULL_MESSAGES, reason)) {
+    return LIST_MODELS_NULL_MESSAGES[
+      reason as keyof typeof LIST_MODELS_NULL_MESSAGES
+    ];
   }
+  return LIST_MODELS_NULL_MESSAGES.http_error;
 };
 
 const noteConnectedListModelsNull = (
