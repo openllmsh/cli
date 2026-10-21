@@ -77,6 +77,15 @@ export type TFetchModelListDetailed =
       readonly reason: TListModelsNullReason;
     };
 
+/** Optional extras for {@link TProviderDelegate.listModels}. */
+export type TListModelsOptions = {
+  /**
+   * Invoked when the listing collapses to `null`, with a closed reason for
+   * doctor telemetry. Callers that omit it treat every null as `error`.
+   */
+  readonly onNullReason?: (reason: TListModelsNullReason) => void;
+};
+
 export type TProviderDelegate = {
   readonly slug: string;
   /** Primary native login is browser unless the provider is device-code only. */
@@ -173,16 +182,12 @@ export type TProviderDelegate = {
    * subscription actually serves (live-provider-model-catalog proposal
    * §4). Absent on providers without a listing endpoint (they keep the
    * static-catalog fallback). Returns `null` on any failure — never an
-   * empty list.
+   * empty list. Pass `onNullReason` to capture a closed doctor reason
+   * when the listing collapses to null (default reason is `error`).
    */
-  listModels?: () => Promise<ReadonlyArray<TProviderModelEntry> | null>;
-
-  /**
-   * Same contract as {@link listModels}, with a closed null-reason for
-   * doctor telemetry. Optional — callers fall back to `listModels` and
-   * treat a bare null as `error`.
-   */
-  listModelsDetailed?: () => Promise<TFetchModelListDetailed>;
+  listModels?: (
+    opts?: TListModelsOptions,
+  ) => Promise<ReadonlyArray<TProviderModelEntry> | null>;
 
   /**
    * Automatic model discovery: existing unexpired credential only, no

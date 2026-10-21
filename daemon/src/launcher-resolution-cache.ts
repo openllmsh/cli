@@ -250,8 +250,3 @@ export const dropPersistedLauncherResolution = (candidate: string): void => {
   st.memory.delete(candidate);
   flushPersist(st);
 };
-
-/** Test-only: drop the process-local cache so the next call re-reads disk. */
-export const resetLauncherResolutionCacheForTests = (): void => {
-  cacheState = null;
-};

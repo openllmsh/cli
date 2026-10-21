@@ -233,31 +233,19 @@ const runForceList = (due: TDueModelReport): Promise<TListed> => {
   if (existing !== undefined) return existing;
   const flight = (async (): Promise<TListed> => {
     try {
-      const detailed = due.delegate.listModelsDetailed;
-      if (detailed !== undefined) {
-        const result = await detailed();
-        if (result.kind === "null") {
-          noteConnectedListModelsNull(due.slug, result.reason);
-          return {
-            slug: due.slug,
-            cliVersion: due.cliVersion,
-            outcome: { kind: "failed", reason: result.reason },
-          };
-        }
-        return {
-          slug: due.slug,
-          cliVersion: due.cliVersion,
-          outcome: { kind: "success", models: result.models },
-        };
-      }
-      const models = await (due.delegate.listModels?.() ??
-        Promise.resolve(null));
+      let nullReason: TListModelsNullReason | undefined;
+      const models = await (due.delegate.listModels?.({
+        onNullReason: (reason) => {
+          nullReason = reason;
+        },
+      }) ?? Promise.resolve(null));
       if (models === null) {
-        noteConnectedListModelsNull(due.slug, "error");
+        const reason = nullReason ?? "error";
+        noteConnectedListModelsNull(due.slug, reason);
         return {
           slug: due.slug,
           cliVersion: due.cliVersion,
-          outcome: { kind: "failed", reason: "error" },
+          outcome: { kind: "failed", reason },
         };
       }
       return {
