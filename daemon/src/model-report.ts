@@ -25,7 +25,10 @@ import type {
   TProviderModelEntry,
   TSubscriptionProviderSlug,
 } from "@openllmsh/protocol";
-import { normalizeProviderConnection } from "@openllmsh/protocol";
+import {
+  DaemonModelsReason,
+  normalizeProviderConnection,
+} from "@openllmsh/protocol";
 import { addAuthObserver } from "./auth-events";
 import { reportModels } from "./cloud-client";
 import type { TProviderDelegate } from "./delegation";
@@ -78,9 +81,14 @@ type TListed = {
 /**
  * Closed reason → privacy-safe message. `safeDiagnosticMessage` forbids
  * interpolation, so each closed token gets one frozen template; unknown
- * `http_*` collapses to `http_error`.
+ * `http_*` collapses to `http_error` via {@link toWireModelsReason}.
+ * Typed as `Record<TDaemonModelsReason, …>` so every wire reason requires a
+ * message when `DaemonModelsReason` grows.
  */
-const LIST_MODELS_NULL_MESSAGES = {
+const LIST_MODELS_NULL_MESSAGES: Record<
+  TDaemonModelsReason,
+  ReturnType<typeof safeDiagnosticMessage>
+> = {
   token_unavailable: safeDiagnosticMessage`Connected provider model listing returned null (token_unavailable).`,
   version_unresolved: safeDiagnosticMessage`Connected provider model listing returned null (version_unresolved).`,
   empty_after_filter: safeDiagnosticMessage`Connected provider model listing returned null (empty_after_filter).`,
@@ -93,18 +101,23 @@ const LIST_MODELS_NULL_MESSAGES = {
   http_502: safeDiagnosticMessage`Connected provider model listing returned null (http_502).`,
   http_503: safeDiagnosticMessage`Connected provider model listing returned null (http_503).`,
   http_error: safeDiagnosticMessage`Connected provider model listing returned null (http_error).`,
-} as const;
+};
+
+const WIRE_REASONS: ReadonlySet<string> = new Set(DaemonModelsReason.literals);
+const isWireReason = (r: string): r is TDaemonModelsReason =>
+  WIRE_REASONS.has(r);
+
+const toWireModelsReason = (
+  reason: TListModelsNullReason | undefined,
+): TDaemonModelsReason => {
+  if (reason === undefined) return "error";
+  return isWireReason(reason) ? reason : "http_error";
+};
 
 const listModelsNullMessage = (
   reason: TListModelsNullReason,
-): ReturnType<typeof safeDiagnosticMessage> => {
-  if (Object.hasOwn(LIST_MODELS_NULL_MESSAGES, reason)) {
-    return LIST_MODELS_NULL_MESSAGES[
-      reason as keyof typeof LIST_MODELS_NULL_MESSAGES
-    ];
-  }
-  return LIST_MODELS_NULL_MESSAGES.http_error;
-};
+): ReturnType<typeof safeDiagnosticMessage> =>
+  LIST_MODELS_NULL_MESSAGES[toWireModelsReason(reason)];
 
 const noteConnectedListModelsNull = (
   slug: string,
@@ -138,28 +151,6 @@ type TModelsOutcome =
 
 /** Latest list/discover outcome per slug — drives `models_status` on status. */
 const lastModelsOutcome = new Map<string, TModelsOutcome>();
-
-const toWireModelsReason = (
-  reason: TListModelsNullReason | undefined,
-): TDaemonModelsReason => {
-  if (reason === undefined) return "error";
-  if (
-    reason === "token_unavailable" ||
-    reason === "version_unresolved" ||
-    reason === "empty_after_filter" ||
-    reason === "error" ||
-    reason === "http_401" ||
-    reason === "http_403" ||
-    reason === "http_404" ||
-    reason === "http_429" ||
-    reason === "http_500" ||
-    reason === "http_502" ||
-    reason === "http_503"
-  ) {
-    return reason;
-  }
-  return "http_error";
-};
 
 const outcomeEqual = (
   a: TModelsOutcome | undefined,
