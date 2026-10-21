@@ -405,7 +405,6 @@ export const defaultShellProbe: TLauncherShellProbe = async (
   const shell = process.env.SHELL?.trim() || "/bin/sh";
   if (!isAbsolute(shell) || !existsSync(shell)) return null;
   if (opts.signal?.aborted) return null;
-  const startedAt = Date.now();
   try {
     const proc = Bun.spawn([shell, "-lc", `command -v ${cmd}`], {
       stdin: "ignore",
@@ -428,6 +427,14 @@ export const defaultShellProbe: TLauncherShellProbe = async (
     const timeout = new Promise<"timeout">((resolve) => {
       setTimeout(() => resolve("timeout"), opts.timeoutMs).unref?.();
     });
+    // Start the capped read immediately so the shell's newline-terminated
+    // answer is buffered even when a background rc helper holds the pipe
+    // open past exit (deadline then returns the partial line).
+    const rawPromise = readStdoutCapped(
+      proc.stdout,
+      SHELL_PROBE_MAX_BYTES,
+      opts.timeoutMs,
+    );
     const settled = await Promise.race([
       proc.exited.then((code) => ({ kind: "exit" as const, code })),
       timeout,
@@ -435,14 +442,10 @@ export const defaultShellProbe: TLauncherShellProbe = async (
     if (settled === "timeout") {
       killShellProbeTree(proc);
       unbind();
+      await rawPromise.catch(() => null);
       return null;
     }
-    const remaining = opts.timeoutMs - (Date.now() - startedAt);
-    const raw = await readStdoutCapped(
-      proc.stdout,
-      SHELL_PROBE_MAX_BYTES,
-      remaining,
-    );
+    const raw = await rawPromise;
     if (raw === null) {
       killShellProbeTree(proc);
       unbind();
