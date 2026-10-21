@@ -352,9 +352,19 @@ export const runCli = async (argv: readonly string[]): Promise<void> => {
       if (verb !== undefined && isDoctorReportingVerb(verb)) {
         return process.exit(await runDoctorReportCommand(rest));
       }
+      if (verb === "launchers") {
+        const { runDoctorLaunchers, DOCTOR_LAUNCHERS_USAGE } = await import(
+          "./doctor-launchers-cmd"
+        );
+        if (wantsHelp(rest.slice(1))) {
+          process.stdout.write(`${DOCTOR_LAUNCHERS_USAGE}\n`);
+          return process.exit(0);
+        }
+        return process.exit(await runDoctorLaunchers(rest.slice(1)));
+      }
       if (wantsHelp(rest)) {
         process.stdout.write(
-          `${DOCTOR_REPORT_USAGE}\nLegacy leftover scan (does not upload diagnostics):\n  openllm doctor [--fix] [--ai] [--model <alias>] [-c]\n`,
+          `${DOCTOR_REPORT_USAGE}\n  openllm doctor launchers   per-provider launcher resolution chain\nLegacy leftover scan (does not upload diagnostics):\n  openllm doctor [--fix] [--ai] [--model <alias>] [-c]\n`,
         );
         return process.exit(0);
       }

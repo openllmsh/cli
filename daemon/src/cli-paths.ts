@@ -457,8 +457,10 @@ export const sessionEnv = (): Record<string, string> => {
  * so the read location and the `cliEnv` run location never drift.
  *   claude → <home>/.claude   codex → <home>/.codex   kimi → <home>/.kimi-code
  */
-export const cliConfigDir = (provider: TCliProvider): string =>
-  SPECS[provider].configDir(cliHome(provider));
+export const cliConfigDir = (
+  provider: TCliProvider,
+  home?: string,
+): string => SPECS[provider].configDir(cliHome(provider, home));
 
 /**
  * Shared isolated runtime env applied to EVERY delegated CLI (audit L2).

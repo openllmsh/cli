@@ -31,11 +31,21 @@ import { authStateLayer } from "./auth-state";
 import type { TWorkingSet } from "./base";
 import { baseWorkingSet, existing } from "./base";
 import { browserChatLayer } from "./browser-chat";
+import {
+  MAC_SEATBELT_RUNTIME_WRITE_EXTRAS,
+  delegatedCliRuntimeSet,
+  launcherDataRoots,
+} from "./delegated-cli-runtime";
 import { fleetLayer } from "./fleet";
 import { vendorCliTunnelLayer } from "./vendor-cli-tunnel";
 
 export type { TWorkingSet } from "./base";
 export { daemonTempDir, resolveCliExecDirs } from "./base";
+export {
+  MAC_SEATBELT_RUNTIME_WRITE_EXTRAS,
+  delegatedCliRuntimeSet,
+  launcherDataRoots,
+};
 
 /** The four sub-process sandbox layers M2's `--sub` bootstrap selects between. */
 export type TWorkingSetLayer =
@@ -110,3 +120,24 @@ export const workingSetForLayer = (
     LAYER_BUILDERS[layer](home),
   ]);
 };
+
+/**
+ * Effective Landlock write allow-list (shared working set only — no macOS
+ * real-home / system-tmp extras).
+ */
+export const compileLandlockWriteAllow = (
+  homeOverride?: string,
+): readonly string[] => [...daemonWorkingSet(homeOverride).readWrite];
+
+/**
+ * Effective Seatbelt write allow-list: Landlock's set ∪
+ * {@link MAC_SEATBELT_RUNTIME_WRITE_EXTRAS}. `home` roots the macOS extras;
+ * `homeOverride` derives the shared working set (see `--sandbox-exec --home`).
+ */
+export const compileSeatbeltWriteAllow = (
+  home: string,
+  homeOverride?: string,
+): readonly string[] => [
+  ...daemonWorkingSet(homeOverride).readWrite,
+  ...MAC_SEATBELT_RUNTIME_WRITE_EXTRAS(home),
+];

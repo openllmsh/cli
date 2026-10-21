@@ -61,6 +61,7 @@ export const DOCTOR_REPORT_USAGE = `openllm doctor report [--dry-run]
 openllm doctor opt-out
 openllm doctor opt-in --yes
 openllm doctor reporting-status
+openllm doctor launchers
 
 Request a sanitized diagnostic flush from the running daemon.
 Does not run AI diagnosis and does not read raw daemon logs.
@@ -71,6 +72,7 @@ Enabled by default after accepting the current analytics-cookie policy, unless o
   openllm doctor opt-out           disable locally at once; then update the account
   openllm doctor opt-in --yes      re-enable from the current tail; cookie consent required
   openllm doctor reporting-status  local/account prefs, upload eligibility, pending upload, last attempt (this process)
+  openllm doctor launchers         per-provider launcher resolution chain (L1)
 `;
 
 type TUnavailableReason =

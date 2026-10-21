@@ -18,6 +18,7 @@ import { join } from "node:path";
 import { cliConfigDir } from "../../cli-paths";
 import type { TWorkingSet } from "./base";
 import { miseDirs, vendorExecDirs } from "./base";
+import { delegatedCliRuntimeSet } from "./delegated-cli-runtime";
 
 /**
  * The `auth-state` layer's unique working set (pre-normalization — `index.ts`
@@ -58,8 +59,13 @@ export const authStateLayer = (home: string): TWorkingSet => {
   // mise's global roots: login/usage delegation resolves and execs
   // mise-managed vendor CLIs (see `miseDirs`).
   const mise = miseDirs(home);
+  // L3 shared delegated-CLI runtime (isolated homes + state tmp + launcher
+  // data roots). Landlock gets the isolated-home write surface from here so a
+  // wrapper that honors HOME/XDG/TMPDIR succeeds on Linux the same way.
+  const runtime = delegatedCliRuntimeSet(home);
   const readWrite = new Set<string>([
     ...mise.readWrite,
+    ...runtime.readWrite,
     //   claude's XDG STATE + CACHE dirs — the isolated claude WRITES these at
     //   RUN time (logs/state + cache) on Linux; absent on macOS. Scoped to the
     //   claude subdirs (not the whole `~/.local/state` / `~/.cache`) — no
@@ -82,6 +88,7 @@ export const authStateLayer = (home: string): TWorkingSet => {
     // delegation) but never WRITES them: installs are user-run + unsandboxed.
     ...vendorExecDirs(home),
     ...mise.readOnly,
+    ...runtime.readOnly,
     // bun's BINARY dir — read+exec only (the split ~/.bun grant, audit §5-B):
     // the plugin install must EXEC `bun`, but a write grant here would let a
     // compromised daemon replace the user's `bun` launcher. The cache half
@@ -90,6 +97,8 @@ export const authStateLayer = (home: string): TWorkingSet => {
     // skipped at apply time — correct (nothing to exec anyway).
     join(home, ".bun", "bin"),
   ]);
+  // A read-write grant subsumes a read-only one.
+  for (const rw of readWrite) readOnly.delete(rw);
   return {
     readWrite: [...readWrite],
     readOnly: [...readOnly],

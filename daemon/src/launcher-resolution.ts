@@ -12,9 +12,12 @@
  *      requirement
  *
  * Results are fingerprint-cached (mtime+size) so a version-manager switch or
- * self-update invalidates without a TTL. Passive privacy-safe profile
- * ({@link TLauncherProfile}) is what doctor / telemetry may upload — never
- * raw paths.
+ * self-update invalidates without a TTL, and (Phase 4) optionally persisted
+ * under `<state>/launcher-resolution-cache.json` so a daemon restart can peek
+ * without re-spawning. Exec ENOENT/EACCES invalidates via
+ * `launcher-exec-invalidate.ts` so the next demand re-resolves. Passive
+ * privacy-safe profile ({@link TLauncherProfile}) is what doctor / telemetry
+ * may upload — never raw paths.
  */
 import {
   accessSync,
@@ -28,6 +31,12 @@ import {
 } from "node:fs";
 import { homedir } from "node:os";
 import { basename, delimiter, isAbsolute, join, sep } from "node:path";
+import {
+  dropPersistedLauncherResolution,
+  loadLauncherResolutionCache,
+  persistLauncherResolution,
+  recordToResolution,
+} from "./launcher-resolution-cache";
 import type { TLauncherResolution } from "./launcher-resolution-types";
 import type { TManagerRegistry } from "./manager-resolution";
 import { parseShebangInterpreter, resolveOnPath } from "./path-utils";
@@ -94,6 +103,13 @@ export type TCreateLauncherResolverDeps = {
     pathDirs: readonly string[],
   ) => string | null;
   readonly underManagerRoot?: (path: string) => boolean;
+  /**
+   * When true (default for the production resolver), seed the in-memory cache
+   * from `<state>/launcher-resolution-cache.json` and write through on every
+   * successful demand resolve. Hermetic tests pass `false` (or omit — tests
+   * that want disk pass `true` explicitly with a temp state dir).
+   */
+  readonly persist?: boolean;
 };
 
 // ---------------------------------------------------------------------------
@@ -398,6 +414,7 @@ export const createLauncherResolver = (
   const resolveInterpreter =
     deps.resolveInterpreter ?? defaultResolveInterpreter;
   const underManagerRoot = deps.underManagerRoot ?? pathUnderManagerRoot;
+  const persist = deps.persist === true;
 
   const cache = new Map<
     string,
@@ -407,6 +424,25 @@ export const createLauncherResolver = (
     }
   >();
 
+  // Seed from disk once at construction (Phase 4 / L1 persist).
+  if (persist) {
+    for (const rec of loadLauncherResolutionCache()) {
+      cache.set(rec.candidate, {
+        fingerprint: rec.fingerprint,
+        resolution: recordToResolution(rec),
+      });
+    }
+  }
+
+  const remember = (
+    candidate: string,
+    fingerprint: string,
+    resolution: TLauncherResolution,
+  ): void => {
+    cache.set(candidate, { fingerprint, resolution });
+    if (persist) persistLauncherResolution(candidate, resolution);
+  };
+
   const peekLauncherResolution = (
     candidate: string,
   ): TLauncherResolution | undefined => {
@@ -415,6 +451,7 @@ export const createLauncherResolver = (
     const fp = fileFingerprint(candidate);
     if (fp === null || fp !== hit.fingerprint) {
       cache.delete(candidate);
+      if (persist) dropPersistedLauncherResolution(candidate);
       return undefined;
     }
     // Also invalidate when the RESOLVED target itself changed (e.g. shim
@@ -426,13 +463,25 @@ export const createLauncherResolver = (
       (hit.resolution.path === candidate && targetFp !== hit.fingerprint)
     ) {
       cache.delete(candidate);
+      if (persist) dropPersistedLauncherResolution(candidate);
       return undefined;
     }
     return hit.resolution;
   };
 
   const invalidateLauncherResolution = (candidate: string): void => {
-    cache.delete(candidate);
+    // Drop the candidate key AND any entry whose resolved path is the
+    // failed target (host shim → resolved binary; isolated link → host).
+    const doomed = new Set<string>([candidate]);
+    for (const [key, hit] of cache) {
+      if (key === candidate || hit.resolution.path === candidate) {
+        doomed.add(key);
+      }
+    }
+    for (const key of doomed) {
+      cache.delete(key);
+      if (persist) dropPersistedLauncherResolution(key);
+    }
   };
 
   const resolveLauncher = async (
@@ -505,10 +554,8 @@ export const createLauncherResolver = (
       };
       const fingerprintAfter = fileFingerprint(start);
       if (fingerprintAfter === fingerprintBefore) {
-        cache.set(start, { fingerprint: fp, resolution });
-        if (start !== candidate) {
-          cache.set(candidate, { fingerprint: fp, resolution });
-        }
+        remember(start, fp, resolution);
+        if (start !== candidate) remember(candidate, fp, resolution);
       }
       return resolution;
     }
@@ -521,15 +568,9 @@ export const createLauncherResolver = (
     if (classified === null) return null;
     const fingerprintAfter = fileFingerprint(start);
     if (fingerprintAfter === fingerprintBefore) {
-      cache.set(start, {
-        fingerprint: classified.fingerprint,
-        resolution: classified,
-      });
+      remember(start, classified.fingerprint, classified);
       if (start !== candidate) {
-        cache.set(candidate, {
-          fingerprint: classified.fingerprint,
-          resolution: classified,
-        });
+        remember(candidate, classified.fingerprint, classified);
       }
     }
     return classified;
@@ -543,22 +584,22 @@ export const createLauncherResolver = (
 };
 
 /**
- * Production resolver (default manager registry + real shell probe).
- * Lazily constructed on first access so module init cannot race the
- * manager-resolution registry's own initialization.
+ * Production resolver (default manager registry + real shell probe + disk
+ * persistence). Lazily constructed on first access so module init cannot race
+ * the manager-resolution registry's own initialization.
  */
 let cachedDefaultResolver: TLauncherResolver | undefined;
 export const defaultLauncherResolver: TLauncherResolver = {
   resolveLauncher: (candidate, opts) => {
-    cachedDefaultResolver ??= createLauncherResolver();
+    cachedDefaultResolver ??= createLauncherResolver({ persist: true });
     return cachedDefaultResolver.resolveLauncher(candidate, opts);
   },
   peekLauncherResolution: (candidate) => {
-    cachedDefaultResolver ??= createLauncherResolver();
+    cachedDefaultResolver ??= createLauncherResolver({ persist: true });
     return cachedDefaultResolver.peekLauncherResolution(candidate);
   },
   invalidateLauncherResolution: (candidate) => {
-    cachedDefaultResolver ??= createLauncherResolver();
+    cachedDefaultResolver ??= createLauncherResolver({ persist: true });
     cachedDefaultResolver.invalidateLauncherResolution(candidate);
   },
 };
