@@ -37,8 +37,8 @@ import {
   MODEL_REPORT_TTL_MS,
 } from "./model-report-policy";
 import { withoutCommandReplayContext } from "./op-context";
-import { markStatusDirty } from "./status-dirty";
 import { computeStatus, peekLastKnownConnection } from "./status";
+import { markStatusDirty } from "./status-dirty";
 
 export {
   MODEL_REPORT_FAILURE_RETRY_MS,
