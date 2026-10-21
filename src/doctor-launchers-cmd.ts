@@ -89,78 +89,77 @@ export const collectLauncherDoctorRows = async (): Promise<
     managers: createManagerRegistry(),
     persist: false,
   });
-  const rows: TLauncherDoctorRow[] = [];
-  for (const provider of CLI_PROVIDERS) {
-    const candidate = firstExistingCandidate(provider);
-    if (candidate === null) {
-      // Try a login-shell probe on the bare command name.
-      const probed = await resolver.resolveLauncher(cliCommand(provider), {
-        demand: true,
-        enableShellProbe: true,
-      });
-      if (probed === null) {
-        rows.push({
+  // Probe providers concurrently; map over CLI_PROVIDERS so output order is
+  // stable regardless of which resolve finishes first.
+  return Promise.all(
+    CLI_PROVIDERS.map(async (provider): Promise<TLauncherDoctorRow> => {
+      const candidate = firstExistingCandidate(provider);
+      if (candidate === null) {
+        // Try a login-shell probe on the bare command name.
+        const probed = await resolver.resolveLauncher(cliCommand(provider), {
+          demand: true,
+          enableShellProbe: true,
+        });
+        if (probed === null) {
+          return {
+            provider,
+            installed: false,
+            candidate: null,
+            resolvedPath: null,
+            kind: null,
+            adapterId: null,
+            interpreter: null,
+            underManagerRoot: false,
+            isolatedEnvApplies: false,
+          };
+        }
+        return {
           provider,
-          installed: false,
-          candidate: null,
+          installed: true,
+          candidate: cliCommand(provider),
+          resolvedPath: probed.path,
+          kind: probed.kind,
+          adapterId: probed.adapterId ?? null,
+          interpreter: probed.interpreter ?? null,
+          underManagerRoot: probed.underManagerRoot,
+          // L2 isolatedRuntimeEnv applies to every provider on the next spawn.
+          isolatedEnvApplies: true,
+        };
+      }
+      const resolved = await resolver.resolveLauncher(candidate, {
+        demand: true,
+        enableShellProbe: false,
+      });
+      // Truthful: isolation applies iff the provider is installed (every
+      // provider gets shared L2 XDG/HOME/TMPDIR via cliEnv). Unresolved
+      // content still installs the link path — still isolated on spawn.
+      const installed = true;
+      if (resolved === null) {
+        return {
+          provider,
+          installed,
+          candidate,
           resolvedPath: null,
           kind: null,
           adapterId: null,
           interpreter: null,
           underManagerRoot: false,
-          isolatedEnvApplies: false,
-        });
-        continue;
+          isolatedEnvApplies: installed,
+        };
       }
-      rows.push({
-        provider,
-        installed: true,
-        candidate: cliCommand(provider),
-        resolvedPath: probed.path,
-        kind: probed.kind,
-        adapterId: probed.adapterId ?? null,
-        interpreter: probed.interpreter ?? null,
-        underManagerRoot: probed.underManagerRoot,
-        // L2 isolatedRuntimeEnv applies to every provider on the next spawn.
-        isolatedEnvApplies: true,
-      });
-      continue;
-    }
-    const resolved = await resolver.resolveLauncher(candidate, {
-      demand: true,
-      enableShellProbe: false,
-    });
-    // Truthful: isolation applies iff the provider is installed (every
-    // provider gets shared L2 XDG/HOME/TMPDIR via cliEnv). Unresolved
-    // content still installs the link path — still isolated on spawn.
-    const installed = true;
-    if (resolved === null) {
-      rows.push({
+      return {
         provider,
         installed,
         candidate,
-        resolvedPath: null,
-        kind: null,
-        adapterId: null,
-        interpreter: null,
-        underManagerRoot: false,
+        resolvedPath: resolved.path,
+        kind: resolved.kind,
+        adapterId: resolved.adapterId ?? null,
+        interpreter: resolved.interpreter ?? null,
+        underManagerRoot: resolved.underManagerRoot,
         isolatedEnvApplies: installed,
-      });
-      continue;
-    }
-    rows.push({
-      provider,
-      installed,
-      candidate,
-      resolvedPath: resolved.path,
-      kind: resolved.kind,
-      adapterId: resolved.adapterId ?? null,
-      interpreter: resolved.interpreter ?? null,
-      underManagerRoot: resolved.underManagerRoot,
-      isolatedEnvApplies: installed,
-    });
-  }
-  return rows;
+      };
+    }),
+  );
 };
 
 export const runDoctorLaunchers = async (
