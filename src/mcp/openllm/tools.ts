@@ -101,7 +101,34 @@ export const isMediaOptionalModelTool = (name: string): boolean =>
 const MEDIA_OPTIONAL_MODEL_GUIDANCE =
   ' Send the smallest request that expresses the user\'s intent — the optional fields are not a checklist, so send an optional key only when the user asked for that specific thing. Model is optional. Omit model entirely for automatic selection: omitting it is the default-selection mechanism (it uses the catalog-ranked media default chain — subscription candidates first, then a compatible API-key tail — and may fall through at runtime after a failed, unaccepted attempt), so never send a placeholder in its place — `model: "auto"` and `model: ""` are both invalid ways to request automatic selection, and `"auto"` in particular is taken as a literal model id. An explicit model is used as requested. If a field is rejected, fix that field and do not retry the same rejected fields under a different model: drop the unsupported options you added on your own, keep every constraint the user gave (voice, format, size, quality and the like), and if one of THOSE is what the provider refuses, report the conflict and the supported alternatives instead of silently changing or dropping it.';
 
+/** Gravity Index tools: sponsored recommendations, FREE TIER ONLY. Both
+ *  surfaces drop them for anyone not confirmed free — the MCP server off
+ *  `fetchTier`, the browser chat off `useProductAccess` — and the gateway
+ *  refuses paid callers regardless. Keyed by tool name; the value is the
+ *  whole description (it replaces the generic one, consent copy included —
+ *  a search changes nothing on the user's account). */
+const GRAVITY_INDEX_TOOLS: ReadonlyMap<string, string> = new Map([
+  [
+    "api_gravity_indexSearch",
+    "Gravity Index: recommend the best developer service for a need the user has (a database, auth, email/SMS API, payments, hosting, an AI API, …). Returns one recommendation with reasoning, optional install steps and a tracked `click_url`. Call it only when the user actually needs a third-party service. Results are SPONSORED: when you present one, say it is a sponsored recommendation via Gravity, give the `click_url` (never the raw website), and do not present it as your own independent pick. Pass `search_id` back to ask a follow-up.",
+  ],
+  [
+    "api_gravity_indexShopSearch",
+    "Gravity Index: find physical products the user wants to buy (shoes, electronics, kitchen, …). Returns a ranked list of in-stock products with price, image, merchant and a tracked `click_url`. Only pass filters the user stated. Results are SPONSORED: say so when you present them, link ONLY each product's `click_url`, and never buy anything on the user's behalf.",
+  ],
+]);
+
+/** True for a tool listed only to free-tier users. */
+export const isFreeTierOnlyTool = (name: string): boolean =>
+  GRAVITY_INDEX_TOOLS.has(name);
+
+/** Ops whose body schema is resolved from the spec rather than left opaque. */
+const typedBodyTool = (name: string): boolean =>
+  MEDIA_OPTIONAL_MODEL_TOOLS.has(name) || GRAVITY_INDEX_TOOLS.has(name);
+
 const descriptionFor = (op: TApiOperation): string => {
+  const gravity = GRAVITY_INDEX_TOOLS.get(toolNameFor(op));
+  if (gravity !== undefined) return gravity;
   const base =
     op.summary.length > 0
       ? op.summary
@@ -132,7 +159,7 @@ const inputSchemaFor = (op: TApiOperation): Record<string, unknown> => {
     if (q.required) required.push(q.name);
   }
   if (op.hasBody) {
-    properties.body = (MEDIA_OPTIONAL_MODEL_TOOLS.has(toolNameFor(op))
+    properties.body = (typedBodyTool(toolNameFor(op))
       ? generatedBodySchema(op)
       : undefined) ?? {
       type: "object",
@@ -162,6 +189,10 @@ const inputSchemaFor = (op: TApiOperation): Record<string, unknown> => {
  *  Web chat runs the full tool list with the session cookie, so the handlers'
  *  own `sk-llm` refusal is not enough on its own. */
 const AGENT_FORBIDDEN_PATHS: ReadonlySet<string> = new Set([
+  // Browser ad plumbing (the /chat ad slot and the pixel's retention event),
+  // not agent capabilities.
+  "/gravity/app-open",
+  "/gravity/chat-ad",
   "/marketplace/launch",
   "/vault/passkey",
   "/vault/passkey/{id}",
@@ -210,6 +241,8 @@ const SESSION_ONLY_PATHS: ReadonlySet<string> = new Set([
  *      that can only ever come back 401. */
 const isMcpExposed = (op: TApiOperation): boolean => {
   if (op.path.startsWith("/plugins/")) return false;
+  // POST, but a read: a search, not an account write (tier-gated by caller).
+  if (GRAVITY_INDEX_TOOLS.has(toolNameFor(op))) return true;
   if (MUTATING.has(op.method) && !op.path.startsWith("/v1/")) return false;
   if (SESSION_ONLY_PATHS.has(op.path)) return false;
   return true;

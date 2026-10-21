@@ -28,6 +28,7 @@ import {
 } from "./openllm/model-priority";
 import {
   handleOpenllmTool,
+  isFreeTierOnlyTool,
   isMcpListedTool,
   openllmToolDefs,
   TRANSCRIPTION_TOOL_NAME,
@@ -60,9 +61,14 @@ export const createMcpServer = ({
     gatewayUrl: config.baseUrl,
     gatewayApiKey: config.apiKey,
   };
+  // Free-tier-only tools need a CONFIRMED free tier: unknown (offline,
+  // billing unavailable) hides them, unlike the group gate's fail-open.
+  const openllmTools = openllmToolDefs.filter(
+    (tool) => tier === "free" || !isFreeTierOnlyTool(tool.name),
+  );
   const tools = [
     ...(groups.includes("openllm")
-      ? [...openllmToolDefs, ...localAuthToolDefs]
+      ? [...openllmTools, ...localAuthToolDefs]
       : []),
     ...(groups.includes("openllm-memory") ? memoryToolDefs : []),
   ];
@@ -86,7 +92,11 @@ export const createMcpServer = ({
         }
         if (groups.includes("openllm") && isLocalAuthTool(name))
           return handleLocalAuthTool(name, args);
-        if (groups.includes("openllm") && isMcpListedTool(name)) {
+        if (
+          groups.includes("openllm") &&
+          isMcpListedTool(name) &&
+          (tier === "free" || !isFreeTierOnlyTool(name))
+        ) {
           if (name === TRANSCRIPTION_TOOL_NAME)
             return transcribeAudio(args, config);
           const result = await handleOpenllmTool(name, args, config);

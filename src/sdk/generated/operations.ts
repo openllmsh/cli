@@ -204,6 +204,30 @@ export const API_OPERATIONS: readonly TApiOperation[] = [
     "hasBody": true
   },
   {
+    "id": "gravity.indexSearch",
+    "method": "post",
+    "path": "/gravity/index/search",
+    "summary": "",
+    "tags": [
+      "gravity"
+    ],
+    "pathParams": [],
+    "queryParams": [],
+    "hasBody": true
+  },
+  {
+    "id": "gravity.indexShopSearch",
+    "method": "post",
+    "path": "/gravity/index/shop-search",
+    "summary": "",
+    "tags": [
+      "gravity"
+    ],
+    "pathParams": [],
+    "queryParams": [],
+    "hasBody": true
+  },
+  {
     "id": "health.ping",
     "method": "get",
     "path": "/health",
