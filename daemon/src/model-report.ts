@@ -506,7 +506,23 @@ export type TConnectedModelReportTracker = (
 export const createConnectedModelReportTracker =
   (): TConnectedModelReportTracker => {
     const last = new Map<string, TConnectedBaseline>();
+    let seeded = false;
     return (connections) => {
+      // First status snapshot after daemon start: seed the baseline WITHOUT
+      // firing. Every already-connected provider would otherwise look like a
+      // rising edge and discoverModels would keychain-read on every boot.
+      if (!seeded) {
+        for (const conn of connections) {
+          if (!isOAuthSlug(conn.provider)) continue;
+          last.set(conn.provider, {
+            connected:
+              normalizeProviderConnection(conn).observation === "connected",
+          });
+        }
+        seeded = true;
+        return;
+      }
+      const now = Date.now();
       for (const conn of connections) {
         if (!isOAuthSlug(conn.provider)) continue;
         const connected =
@@ -514,9 +530,10 @@ export const createConnectedModelReportTracker =
         const was = last.get(conn.provider)?.connected === true;
         last.set(conn.provider, { connected });
         if (!connected || was) continue;
-        void maybeReportModels(Date.now(), conn.provider, "auto").catch(
-          () => {},
-        );
+        // Skip providers with a fresh last attempt — throttle already gates
+        // inside maybeReportModels, but avoid even scheduling a no-op flight.
+        if (!isDue(conn.provider, now, conn.cli_version)) continue;
+        void maybeReportModels(now, conn.provider, "auto").catch(() => {});
       }
     };
   };
