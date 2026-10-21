@@ -287,21 +287,11 @@ export const buildLauncherDataRootEnv = (
     else if (exists(fallback)) out[key] = fallback;
   };
 
-  passOrDefault("ASDF_DATA_DIR", join(realHome, ".asdf"));
-  passOrDefault("VOLTA_HOME", join(realHome, ".volta"));
-  passOrDefault("PROTO_HOME", join(realHome, ".proto"));
+  passOrDefault("ASDF_DATA_DIR", asdfDataRoot(realHome, ambient));
+  passOrDefault("VOLTA_HOME", voltaDataRoot(realHome, ambient));
+  passOrDefault("PROTO_HOME", protoDataRoot(realHome, ambient));
   pass("FNM_DIR");
-
-  const explicitMise = nonEmpty(ambient.MISE_DATA_DIR);
-  if (explicitMise !== undefined) {
-    out.MISE_DATA_DIR = explicitMise;
-  } else {
-    const derived = join(
-      nonEmpty(ambient.XDG_DATA_HOME) ?? join(realHome, ".local", "share"),
-      "mise",
-    );
-    if (exists(derived)) out.MISE_DATA_DIR = derived;
-  }
+  passOrDefault("MISE_DATA_DIR", misePaths(realHome, ambient).dataDir);
   return out;
 };
 
