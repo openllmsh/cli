@@ -89,8 +89,6 @@ export {
   SecurityArgvRejectedError,
 } from "./keychain-security-argv";
 
-const MAC = platform() === "darwin";
-
 /** Readiness = the shared tri-state: `present` (created + unlocked this call),
  *  `indeterminate` (create/unlock failed or the chain is unusable). Off macOS
  *  there is nothing to gate, so it is always `present`. */
@@ -431,6 +429,10 @@ export type TKeychainRuntimeDeps = {
   /** Supervised spawner for `security` children. Defaults to the daemon's
    *  process-wide child supervisor. */
   readonly superviseSpawn?: TChildSupervisor["superviseSpawn"];
+  /** Host platform. Injected so tests can exercise the macOS keychain path
+   *  without a process-global `mock.module("node:os")`. Defaults to
+   *  `platform` from `node:os`. */
+  readonly platform?: () => NodeJS.Platform;
 };
 
 export type TKeychainRuntime = {
@@ -484,6 +486,7 @@ export const createKeychainRuntime = (
   const timebase = deps.timebase ?? defaultDeadlineTimebase;
   const nowMs = timebase.nowMs;
   const spawnSupervised = deps.superviseSpawn ?? superviseSpawn;
+  const isMac = (deps.platform ?? platform)() === "darwin";
 
   let keychainCounters = emptyKeychainCounters();
   let lastWatcherSnapshot = emptyKeychainCounters();
@@ -596,7 +599,7 @@ export const createKeychainRuntime = (
     budget?: TDeadlineBudget,
     onSkip?: () => T,
   ): Promise<T> => {
-    if (!MAC) return operation();
+    if (!isMac) return operation();
     const previous = macosKeychainLane;
     let release = (): void => {};
     const occupied = new Promise<void>((resolve) => {
@@ -1101,7 +1104,7 @@ export const createKeychainRuntime = (
 
   const keychainStoreIdentity = (home: string): TKeychainStoreIdentity => {
     const path = loginKeychainPath(home);
-    if (!MAC) {
+    if (!isMac) {
       return {
         path,
         present: false,
@@ -2010,7 +2013,7 @@ export const createKeychainRuntime = (
     home: string,
     signal?: AbortSignal,
   ): Promise<TStoreRead<void>> => {
-    if (!MAC) return READY;
+    if (!isMac) return READY;
     const kc = loginKeychainPath(home);
     const backoff = transientTimeouts.get(kc);
     if (backoff !== undefined && backoff.nextAtMs > Date.now()) {
@@ -2091,7 +2094,7 @@ export const createKeychainRuntime = (
     home: string,
     signal?: AbortSignal,
   ): Promise<TStoreRead<void>> => {
-    if (!MAC) return READY;
+    if (!isMac) return READY;
     const kc = loginKeychainPath(home);
     const backoff = observeTransientTimeouts.get(kc);
     if (backoff !== undefined && backoff.nextAtMs > Date.now()) {
@@ -2158,7 +2161,7 @@ export const createKeychainRuntime = (
   const ensureIsolatedKeychain = async (
     home: string,
   ): Promise<TStoreRead<void>> => {
-    if (MAC) {
+    if (isMac) {
       const kc = loginKeychainPath(home);
       if (transientTimeouts.has(kc)) {
         transientTimeouts.delete(kc);
@@ -2217,7 +2220,7 @@ export const createKeychainRuntime = (
    * allowed can prompt). Never retry either grant.
    */
   const grantKeychainToolAccess = async (home: string): Promise<boolean> => {
-    if (!MAC) return true;
+    if (!isMac) return true;
     if ((await ensureKeychainReady(home)).kind !== "present") return false;
     const kc = loginKeychainPath(home);
     const partitions = "apple-tool:,apple:";
@@ -2498,7 +2501,7 @@ export const createKeychainRuntime = (
     signal?: AbortSignal,
     observeOnly = false,
   ): Promise<TStoreRead<string>> => {
-    if (!MAC) return { kind: "absent" };
+    if (!isMac) return { kind: "absent" };
     const key = `${loginKeychainPath(home)}\0${servicePrefix}\0${observeOnly ? "observe" : "mutate"}`;
     let op = inFlightKeychainReads.get(key);
     if (op === undefined) {
