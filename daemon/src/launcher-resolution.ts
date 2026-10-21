@@ -637,7 +637,11 @@ export const createLauncherResolver = (
     const shimFpBefore =
       fingerprintBefore === null
         ? null
-        : shimCacheFingerprint(fingerprintBefore, selectionAdapterBefore, start);
+        : shimCacheFingerprint(
+            fingerprintBefore,
+            selectionAdapterBefore,
+            start,
+          );
 
     let real: string;
     try {
