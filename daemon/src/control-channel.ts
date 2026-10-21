@@ -156,6 +156,8 @@ export const statusChangeKey = (status: TDaemonStatus): string => {
         c.usage === undefined || c.usage === null
           ? ""
           : JSON.stringify(c.usage),
+        c.models_status ?? "",
+        c.models_reason ?? "",
       ]),
     )
     .join("|");

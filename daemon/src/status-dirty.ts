@@ -21,6 +21,7 @@ export type TStatusDirtyReason =
   | "bootstrap"
   | "command"
   | "manual"
+  | "models"
   | "presence"
   | "unknown";
 

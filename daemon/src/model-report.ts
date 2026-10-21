@@ -37,6 +37,7 @@ import {
   MODEL_REPORT_TTL_MS,
 } from "./model-report-policy";
 import { withoutCommandReplayContext } from "./op-context";
+import { markStatusDirty } from "./status-dirty";
 import { computeStatus, peekLastKnownConnection } from "./status";
 
 export {
@@ -160,28 +161,43 @@ const toWireModelsReason = (
   return "http_error";
 };
 
-const noteModelsOutcome = (listed: TListed): void => {
-  if (listed.outcome.kind === "skipped") return;
+const outcomeEqual = (
+  a: TModelsOutcome | undefined,
+  b: TModelsOutcome,
+): boolean => {
+  if (a === undefined) return false;
+  if (a.status === "ok" && b.status === "ok") return true;
+  if (a.status === "unavailable" && b.status === "unavailable") {
+    return a.reason === b.reason;
+  }
+  return false;
+};
+
+const noteModelsOutcome = (listed: TListed): boolean => {
+  if (listed.outcome.kind === "skipped") return false;
+  let next: TModelsOutcome;
   if (
     listed.outcome.kind === "success" &&
     listed.outcome.models.length > 0 &&
     listed.postError === undefined
   ) {
-    lastModelsOutcome.set(listed.slug, { status: "ok" });
-    return;
-  }
-  if (listed.outcome.kind === "failed") {
-    lastModelsOutcome.set(listed.slug, {
+    next = { status: "ok" };
+  } else if (listed.outcome.kind === "failed") {
+    next = {
       status: "unavailable",
       reason: toWireModelsReason(listed.outcome.reason),
-    });
-    return;
+    };
+  } else {
+    // success with empty models (should be rare — callers coerce to failed)
+    next = {
+      status: "unavailable",
+      reason: "empty_after_filter",
+    };
   }
-  // success with empty models (should be rare — callers coerce to failed)
-  lastModelsOutcome.set(listed.slug, {
-    status: "unavailable",
-    reason: "empty_after_filter",
-  });
+  const prev = lastModelsOutcome.get(listed.slug);
+  if (outcomeEqual(prev, next)) return false;
+  lastModelsOutcome.set(listed.slug, next);
+  return true;
 };
 
 /** Models-status fields for one provider; empty when never attempted. */
@@ -352,7 +368,10 @@ const stampAttempt = (listed: TListed, now: number): void => {
     ok: listed.outcome.kind === "success" && listed.postError === undefined,
     ...(listed.cliVersion ? { cliVersion: listed.cliVersion } : {}),
   });
-  noteModelsOutcome(listed);
+  if (noteModelsOutcome(listed)) {
+    // Deduped dirty bit — watcher publishes once; no per-provider storm.
+    markStatusDirty("models");
+  }
 };
 
 const runAutoDiscoverAndReport = (
