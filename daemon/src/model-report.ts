@@ -493,9 +493,11 @@ type TConnectedBaseline = {
 /**
  * Observe status snapshots and demand-report models on any oauth transition
  * into `connected` — including credentials that appear out-of-band (native
- * CLI login). Deduped by the per-slug throttle / single-flight; does NOT
- * reset the throttle (login.succeeded still does, so a just-landed
- * credential is never held back by a prior failure stamp).
+ * CLI login). Uses `mode: "auto"` (discoverModels only — observe-only store
+ * reads, never `listModels` / native refresh) so a passive status edge cannot
+ * open a keychain-prompting path. Explicit `auth.login.succeeded` and
+ * `refresh_models` still force-list. Deduped by the per-slug throttle /
+ * single-flight; does NOT reset the throttle (login.succeeded still does).
  */
 export type TConnectedModelReportTracker = (
   connections: ReadonlyArray<TDaemonProviderConnection>,
@@ -512,7 +514,7 @@ export const createConnectedModelReportTracker =
         const was = last.get(conn.provider)?.connected === true;
         last.set(conn.provider, { connected });
         if (!connected || was) continue;
-        void maybeReportModels(Date.now(), conn.provider, "force").catch(
+        void maybeReportModels(Date.now(), conn.provider, "auto").catch(
           () => {},
         );
       }

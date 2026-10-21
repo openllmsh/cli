@@ -23,6 +23,7 @@ import {
   symlinkSync,
 } from "node:fs";
 import { mkdir, rm } from "node:fs/promises";
+import { platform } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { projectDoctorOutcomeLedger } from "@openllmsh/protocol";
 import type { TCliProvider } from "./cli-paths";
@@ -35,6 +36,7 @@ import {
   cliRoot,
   hostCliCandidates,
 } from "./cli-paths";
+import { grantKeychainToolAccess } from "./delegation/keychain";
 import { cliVersion } from "./delegation/util";
 import type { TSafeDiagnosticMessage } from "./doctor-report/message";
 import {
@@ -116,13 +118,39 @@ const ensureIsolatedDirs = async (provider: TCliProvider): Promise<void> => {
 export const linkIsolatedCli = async (
   provider: TCliProvider,
   hostBin: string,
-): Promise<void> => {
+): Promise<{ readonly targetChanged: boolean }> => {
   await ensureIsolatedDirs(provider);
   const dst = cliBin(provider);
+  let previousReal: string | null = null;
+  if (existsSync(dst)) {
+    try {
+      previousReal = realpathSync(dst);
+    } catch {
+      previousReal = null;
+    }
+  }
   await mkdir(dirname(dst), { recursive: true });
   await rm(dst, { force: true });
   symlinkSync(hostBin, dst);
   linkSidecars(dst);
+  let nextReal: string | null = null;
+  try {
+    nextReal = realpathSync(dst);
+  } catch {
+    nextReal = hostBin;
+  }
+  // Target change (incl. replacing a prior binary) leaves keychain items ACL'd
+  // to the previous executable path. Callers on a DEMAND path re-grant; passive
+  // status must not spawn `security` here.
+  const targetChanged =
+    previousReal !== null && nextReal !== null && previousReal !== nextReal;
+  return { targetChanged };
+};
+
+/** Re-grant isolated-keychain ACLs after a demand-time launcher relink. */
+const regrantKeychainAfterRelink = (provider: TCliProvider): void => {
+  if (platform() !== "darwin") return;
+  void grantKeychainToolAccess(cliHome(provider)).catch(() => {});
 };
 
 /**
@@ -397,7 +425,10 @@ const probeCliInstallState = async (
     if (host === undefined) {
       return { installed: false, version: null };
     }
-    await linkIsolatedCli(provider, host);
+    const linked = await linkIsolatedCli(provider, host);
+    if (demand && linked.targetChanged) {
+      regrantKeychainAfterRelink(provider);
+    }
     cliInstallReconcileUntil.set(
       installKey(provider),
       now + CLI_INSTALL_STATE_TTL_MS,
@@ -449,7 +480,10 @@ const probeCliInstallState = async (
         resolved.target !== null &&
         resolved.target !== immediateTarget
       ) {
-        await linkIsolatedCli(provider, resolved.target);
+        const linked = await linkIsolatedCli(provider, resolved.target);
+        if (demand && linked.targetChanged) {
+          regrantKeychainAfterRelink(provider);
+        }
       }
     }
 
@@ -471,12 +505,16 @@ const probeCliInstallState = async (
       );
       const host = await resolveHostBinary(provider, opts);
       if (host !== undefined) {
+        let linked: { readonly targetChanged: boolean } | null = null;
         try {
           if (realpathSync(bin) !== realpathSync(host)) {
-            await linkIsolatedCli(provider, host);
+            linked = await linkIsolatedCli(provider, host);
           }
         } catch {
-          await linkIsolatedCli(provider, host);
+          linked = await linkIsolatedCli(provider, host);
+        }
+        if (demand && linked?.targetChanged === true) {
+          regrantKeychainAfterRelink(provider);
         }
       }
     }
