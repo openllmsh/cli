@@ -628,6 +628,13 @@ export const createLauncherResolver = (
     // Fingerprint the candidate BEFORE any await so a concurrent mutation
     // during manager resolve cannot be cached under the new shape.
     const fingerprintBefore = fileFingerprint(start);
+    const selectionAdapterBefore = managers
+      .listManagerAdapters()
+      .find((a) => a.recognizes(start));
+    const shimFpBefore =
+      fingerprintBefore === null
+        ? null
+        : shimCacheFingerprint(fingerprintBefore, selectionAdapterBefore, start);
 
     let real: string;
     try {
@@ -682,7 +689,9 @@ export const createLauncherResolver = (
         ...(interpreter !== undefined ? { interpreter } : {}),
       };
       const fingerprintAfter = fileFingerprint(start);
-      if (fingerprintAfter === fingerprintBefore) {
+      // Mirror resolveManagerCandidate: only cache when the pre-await
+      // selection fingerprint is still current.
+      if (fingerprintAfter === fingerprintBefore && fp === shimFpBefore) {
         remember(start, fp, resolution);
         if (start !== candidate) remember(candidate, fp, resolution);
       }
