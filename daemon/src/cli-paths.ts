@@ -32,6 +32,7 @@ import {
 } from "./antigravity-layout";
 import { stateDir } from "./env";
 import { interpreterDirFor } from "./launcher-profile-state";
+import { buildLauncherDataRootEnv } from "./launcher-roots";
 import { augmentSpawnPath, resolveOnPath } from "./path-utils";
 import { daemonTempDir } from "./sandbox/working-set";
 
@@ -495,22 +496,12 @@ const ensureIsolatedRuntimeDirs = (home: string): void => {
   }
 };
 
-const nonEmptyEnv = (v: string | undefined): string | undefined =>
-  v !== undefined && v.length > 0 ? v : undefined;
-
 /**
  * Read-only *data-root* env vars passed into the isolated child so version-
  * manager shims can still FIND installs after `XDG_DATA_HOME` is redirected.
- * Manager resolution (`manager-resolution.ts` / `mise which`) continues to use
- * the REAL ambient `process.env`; the child only inherits these pointers.
- *
- * Allowlist (managers that keep install trees outside redirected XDG config/
- * state/cache — do NOT add config/state/cache overrides here):
- *   - `MISE_DATA_DIR` — explicit, else derived from ambient `XDG_DATA_HOME`
- *     (or `~/.local/share/mise`) when that data dir exists
- *   - `ASDF_DATA_DIR` — explicit, else `~/.asdf` when that dir exists
- *   - `VOLTA_HOME` — explicit, else `~/.volta` when that dir exists
- *   - `FNM_DIR` — explicit only (default alias bin is PATH-added directly)
+ * Derived from {@link buildLauncherDataRootEnv} (single roots module) — includes
+ * `PROTO_HOME` alongside mise/asdf/volta/fnm. Manager resolution continues to
+ * use the REAL ambient `process.env`; the child only inherits these pointers.
  *
  * Never grants write on real `~/.config/mise` — config/state/cache fall to the
  * redirected XDG dirs automatically.
@@ -518,38 +509,8 @@ const nonEmptyEnv = (v: string | undefined): string | undefined =>
 export const launcherDataRootEnv = (
   ambient: NodeJS.ProcessEnv = process.env,
   realHome: string = homedir(),
-): Record<string, string> => {
-  const out: Record<string, string> = {};
-  const pass = (key: string): void => {
-    const v = nonEmptyEnv(ambient[key]);
-    if (v !== undefined) out[key] = v;
-  };
-  // asdf/volta shims on PATH still consult these roots. When unset they fall
-  // back to `$HOME/.asdf` / `$HOME/.volta`, which under isolatedRuntimeEnv is
-  // the *isolated* home — so pass the real default roots when they exist.
-  const passOrDefault = (key: string, fallback: string): void => {
-    const v = nonEmptyEnv(ambient[key]);
-    if (v !== undefined) out[key] = v;
-    else if (existsSync(fallback)) out[key] = fallback;
-  };
-  passOrDefault("ASDF_DATA_DIR", join(realHome, ".asdf"));
-  passOrDefault("VOLTA_HOME", join(realHome, ".volta"));
-  // fnm: defaultBinDirs adds the alias bin directly (real node), so an unset
-  // FNM_DIR does not need a default — only an explicit relocate is forwarded.
-  pass("FNM_DIR");
-
-  const explicitMise = nonEmptyEnv(ambient.MISE_DATA_DIR);
-  if (explicitMise !== undefined) {
-    out.MISE_DATA_DIR = explicitMise;
-  } else {
-    const derived = join(
-      nonEmptyEnv(ambient.XDG_DATA_HOME) ?? join(realHome, ".local", "share"),
-      "mise",
-    );
-    if (existsSync(derived)) out.MISE_DATA_DIR = derived;
-  }
-  return out;
-};
+): Record<string, string> =>
+  buildLauncherDataRootEnv(ambient, realHome, existsSync);
 
 /**
  * Environment overrides that (1) isolate the CLI's runtime home + XDG base
@@ -559,7 +520,7 @@ export const launcherDataRootEnv = (
  *
  * Every provider gets the shared {@link isolatedRuntimeEnv} base (`HOME`,
  * `XDG_CONFIG_HOME` / `DATA` / `STATE` / `CACHE`, `TMPDIR` at `<state>/tmp`)
- * plus {@link launcherDataRootEnv} (real mise/asdf/volta/fnm data roots,
+ * plus {@link launcherDataRootEnv} (real mise/asdf/volta/proto/fnm data roots,
  * read-only). Providers then add only their own knobs (`CODEX_HOME`, …).
  *
  * The OS sandbox (`./sandbox/working-set/`) does NOT grant the system `/tmp`

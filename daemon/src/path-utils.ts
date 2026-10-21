@@ -4,6 +4,7 @@
 import { closeSync, existsSync, openSync, readSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, delimiter, isAbsolute, join } from "node:path";
+import { allManagerResolutionBinDirs } from "./launcher-roots";
 
 /**
  * Standard user bin dirs the daemon prepends to a spawned integration's PATH.
@@ -39,8 +40,9 @@ export const defaultBinDirs = (): readonly string[] => {
 /**
  * Manager/packager shim + bin dirs searched during launcher RESOLUTION only
  * (classify / interpreter lookup) — never prepended to every spawn PATH.
- * Existence-filtered with a short-lived cache so demand resolve does not
- * `existsSync` the same candidates repeatedly within a tick.
+ * Derived from {@link allManagerResolutionBinDirs}; existence-filtered with a
+ * short-lived cache so demand resolve does not `existsSync` the same
+ * candidates repeatedly within a tick.
  */
 const managerPackagerBinDirCache = new Map<
   string,
@@ -53,38 +55,16 @@ export const managerPackagerBinDirs = (
   now: () => number = Date.now,
 ): readonly string[] => {
   const home = env.HOME?.trim() || homedir();
-  const npmPrefix =
-    env.npm_config_prefix?.trim() || env.NPM_CONFIG_PREFIX?.trim() || "";
-  const miseData = env.MISE_DATA_DIR?.trim() || "";
-  const asdfData = env.ASDF_DATA_DIR?.trim() || "";
-  const voltaHome = env.VOLTA_HOME?.trim() || "";
-  const protoHome = env.PROTO_HOME?.trim() || "";
-  const fnmDir = env.FNM_DIR?.trim() || "";
-  // Configured root replaces the default when set — never both, or an old
-  // default shim dir left behind after relocation would win PATH order.
-  const miseShims =
-    miseData.length > 0
-      ? join(miseData, "shims")
-      : join(home, ".local", "share", "mise", "shims");
-  const asdfShims =
-    asdfData.length > 0
-      ? join(asdfData, "shims")
-      : join(home, ".asdf", "shims");
-  const voltaBin =
-    voltaHome.length > 0 ? join(voltaHome, "bin") : join(home, ".volta", "bin");
-  const protoRoot = protoHome.length > 0 ? protoHome : join(home, ".proto");
-  const fnmAliasBin =
-    fnmDir.length > 0
-      ? join(fnmDir, "aliases", "default", "bin")
-      : join(home, ".local", "share", "fnm", "aliases", "default", "bin");
   const cacheKey = [
     home,
-    miseData,
-    asdfData,
-    voltaHome,
-    protoHome,
-    fnmDir,
-    npmPrefix,
+    env.MISE_DATA_DIR ?? "",
+    env.ASDF_DATA_DIR ?? "",
+    env.VOLTA_HOME ?? "",
+    env.PROTO_HOME ?? "",
+    env.FNM_DIR ?? "",
+    env.npm_config_prefix ?? "",
+    env.NPM_CONFIG_PREFIX ?? "",
+    env.XDG_DATA_HOME ?? "",
   ].join("\0");
   const cached = managerPackagerBinDirCache.get(cacheKey);
   const t = now();
@@ -94,23 +74,9 @@ export const managerPackagerBinDirs = (
   ) {
     return cached.dirs;
   }
-  const candidates: readonly string[] = [
-    miseShims,
-    asdfShims,
-    voltaBin,
-    join(protoRoot, "shims"),
-    join(protoRoot, "bin"),
-    fnmAliasBin,
-    join(home, ".nix-profile", "bin"),
-    "/nix/var/nix/profiles/default/bin",
-    "/home/linuxbrew/.linuxbrew/bin",
-    join(home, ".linuxbrew", "bin"),
-    "/snap/bin",
-    npmPrefix.length > 0 ? join(npmPrefix, "bin") : "",
-  ];
   const out: string[] = [];
   const seen = new Set<string>();
-  for (const dir of candidates) {
+  for (const dir of allManagerResolutionBinDirs(home, env)) {
     if (dir.length === 0 || seen.has(dir)) continue;
     seen.add(dir);
     if (existsSync(dir)) out.push(dir);

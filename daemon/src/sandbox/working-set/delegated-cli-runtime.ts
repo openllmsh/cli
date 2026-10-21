@@ -9,7 +9,7 @@
  *
  * RW: isolated provider homes (incl. their XDG leaves from L2), state tmp,
  *     provider credential dirs under those homes.
- * RO: launcher data roots (mise/asdf/volta/fnm/nix/linuxbrew) when present.
+ * RO: launcher data roots (mise/asdf/volta/proto/fnm/nix/linuxbrew) when present.
  *
  * Never RW on the real `~/.config` or `~/.local/state` roots. macOS still
  * needs a small Seatbelt-only set for frameworks that ignore HOME/XDG/TMPDIR
@@ -22,7 +22,7 @@ import { execFileSync } from "node:child_process";
 import { existsSync, realpathSync } from "node:fs";
 import { dirname, isAbsolute, join } from "node:path";
 import { CLI_PROVIDERS, cliConfigDir, cliHome } from "../../cli-paths";
-import { misePaths } from "../../mise-paths";
+import { allManagerDataRoots } from "../../launcher-roots";
 import type { TWorkingSet } from "./base";
 import { daemonTempDir, SENSITIVE_ROOTS } from "./base";
 
@@ -115,29 +115,13 @@ export const launcherDataRoots = (
   home: string,
   env: NodeJS.ProcessEnv = process.env,
 ): readonly string[] => {
-  const nonEmpty = (v: string | undefined): string | undefined =>
-    v !== undefined && v.trim().length > 0 ? v.trim() : undefined;
-  const mise = misePaths(home, env);
-  const candidates: readonly string[] = [
-    mise.configDir,
-    mise.dataDir,
-    mise.stateDir,
-    mise.cacheDir,
-    nonEmpty(env.ASDF_DATA_DIR) ?? join(home, ".asdf"),
-    nonEmpty(env.VOLTA_HOME) ?? join(home, ".volta"),
-    nonEmpty(env.FNM_DIR) ?? join(home, ".local", "share", "fnm"),
-    join(home, ".nix-profile"),
-    "/nix/var/nix/profiles/default",
-    "/home/linuxbrew/.linuxbrew",
-    join(home, ".linuxbrew"),
-  ];
   const forbidden = new Set<string>(["/", home, ...SENSITIVE_ROOTS(home)]);
   for (let a = dirname(home); a !== dirname(a); a = dirname(a)) {
     forbidden.add(a);
   }
   const out: string[] = [];
   const seen = new Set<string>();
-  for (const d of candidates) {
+  for (const d of allManagerDataRoots(home, env)) {
     if (!isAbsolute(d) || forbidden.has(d) || seen.has(d)) continue;
     seen.add(d);
     if (existsSync(d)) out.push(d);

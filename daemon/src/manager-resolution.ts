@@ -27,6 +27,7 @@ import type { TDoctorFailureSignature } from "@openllmsh/protocol";
 import { classifyFailureOutput } from "@openllmsh/protocol";
 import { runCaptureResult, spawnCwd } from "./delegation/spawn";
 import { logWarn, safeDiagnosticMessage } from "./logger";
+import { launcherManagerById } from "./launcher-roots";
 import { misePaths } from "./mise-paths";
 import { resolveOnPath } from "./path-utils";
 
@@ -417,8 +418,10 @@ export const createMiseManagerAdapter = (
    * trusting an ambient override.
    */
   const miseBinCandidates = (): readonly string[] => [
-    join(miseHomeDir(), ".local", "bin", "mise"),
-    join(miseHomeDir(), ".local", "share", "mise", "bin", "mise"),
+    ...launcherManagerById("mise").managerBinCandidates(
+      miseHomeDir(),
+      process.env,
+    ),
     ...resolveOnPath("mise"),
   ];
 
@@ -613,42 +616,27 @@ const acceptAbsoluteExecutable = (
 const managerUserHome = (): string => process.env.HOME?.trim() || homedir();
 
 /**
- * Explicit manager-binary locations checked before PATH. `defaultBinDirs`
- * adds asdf's *shims* dir (not `bin/`), so a classic `~/.asdf/bin/asdf`
- * install is invisible to `resolveOnPath("asdf")` alone — same class of gap
- * mise already closed with `miseBinCandidates`. Volta/proto bin dirs are on
- * the PATH allowlist today, but keep the same explicit roots so a relocated
- * env root or a future allowlist change cannot reopen the hole.
+ * Explicit manager-binary locations checked before PATH — derived from
+ * {@link launcherManagerById} so relocated env roots cannot drift from the
+ * shared roots module.
  */
-const asdfBinCandidates = (): readonly string[] => {
-  const out: string[] = [];
-  const dataDir = process.env.ASDF_DATA_DIR?.trim();
-  if (dataDir !== undefined && dataDir.length > 0) {
-    out.push(join(dataDir, "bin", "asdf"));
-  }
-  out.push(join(managerUserHome(), ".asdf", "bin", "asdf"));
-  return out;
-};
+const asdfBinCandidates = (): readonly string[] =>
+  launcherManagerById("asdf").managerBinCandidates(
+    managerUserHome(),
+    process.env,
+  );
 
-const voltaBinCandidates = (): readonly string[] => {
-  const out: string[] = [];
-  const voltaHome = process.env.VOLTA_HOME?.trim();
-  if (voltaHome !== undefined && voltaHome.length > 0) {
-    out.push(join(voltaHome, "bin", "volta"));
-  }
-  out.push(join(managerUserHome(), ".volta", "bin", "volta"));
-  return out;
-};
+const voltaBinCandidates = (): readonly string[] =>
+  launcherManagerById("volta").managerBinCandidates(
+    managerUserHome(),
+    process.env,
+  );
 
-const protoBinCandidates = (): readonly string[] => {
-  const out: string[] = [];
-  const protoHome = process.env.PROTO_HOME?.trim();
-  if (protoHome !== undefined && protoHome.length > 0) {
-    out.push(join(protoHome, "bin", "proto"));
-  }
-  out.push(join(managerUserHome(), ".proto", "bin", "proto"));
-  return out;
-};
+const protoBinCandidates = (): readonly string[] =>
+  launcherManagerById("proto").managerBinCandidates(
+    managerUserHome(),
+    process.env,
+  );
 
 const resolveViaManagerBin = async (
   managerCmd: string,

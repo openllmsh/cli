@@ -29,8 +29,7 @@ import {
   realpathSync,
   statSync,
 } from "node:fs";
-import { homedir } from "node:os";
-import { basename, delimiter, dirname, isAbsolute, join, sep } from "node:path";
+import { basename, dirname, isAbsolute, join, sep } from "node:path";
 import { registerLauncherResolutionInvalidator } from "./launcher-invalidate-hook";
 import {
   dropPersistedLauncherResolution,
@@ -41,10 +40,12 @@ import {
 import type { TLauncherResolution } from "./launcher-resolution-types";
 import type { TManagerAdapter, TManagerRegistry } from "./manager-resolution";
 import { defaultManagerRegistry } from "./manager-resolution";
+import { allManagerRootMarkers } from "./launcher-roots";
 import {
   managerPackagerBinDirs,
   parseShebangInterpreter,
   resolveOnPath,
+  spawnPathDirs,
 } from "./path-utils";
 
 /** Cache fingerprint for a shim resolution: candidate shape + manager selection. */
@@ -195,26 +196,11 @@ const SHELL_INTERPRETERS = new Set([
 
 /**
  * Known manager install-root path segments. Used only for the privacy-safe
- * `under_manager_root` boolean — never uploaded as a path.
+ * `under_manager_root` boolean — never uploaded as a path. Derived from
+ * {@link allManagerRootMarkers}.
  */
-const MANAGER_ROOT_MARKERS: ReadonlyArray<readonly string[]> = [
-  ["mise", "installs"],
-  ["mise", "shims"],
-  ["asdf", "installs"],
-  ["asdf", "shims"],
-  [".asdf", "installs"],
-  [".asdf", "shims"],
-  ["volta", "tools"],
-  ["volta", "bin"],
-  [".volta", "tools"],
-  [".volta", "bin"],
-  ["proto", "tools"],
-  ["proto", "shims"],
-  ["proto", "bin"],
-  [".proto", "tools"],
-  [".proto", "shims"],
-  [".proto", "bin"],
-];
+const MANAGER_ROOT_MARKERS: ReadonlyArray<readonly string[]> =
+  allManagerRootMarkers();
 
 export const pathUnderManagerRoot = (path: string): boolean => {
   const segments = path.split(sep);
@@ -259,24 +245,15 @@ const defaultResolveInterpreter = (
 };
 
 /**
- * Dirs searched when classifying a shebang interpreter at DEMAND time.
- * Includes manager/packager shim bins so resolution can prove a need — those
- * dirs are NOT on every spawn PATH ({@link defaultBinDirs}); a proven
- * interpreter dir is prepended per provider via `cliEnv`.
+ * Dirs searched when classifying a shebang interpreter at DEMAND time:
+ * the daemon spawn PATH ({@link spawnPathDirs}) plus manager/packager shim
+ * bins so resolution can prove a need. Those manager dirs are NOT on every
+ * spawn PATH; a proven interpreter dir is prepended per provider via `cliEnv`.
  */
-const defaultPathDirs = (): string[] => {
-  const home = process.env.HOME?.trim() || homedir();
-  return [
-    ...(process.env.PATH?.split(delimiter) ?? []),
-    join(home, ".local", "bin"),
-    join(home, ".bun", "bin"),
-    "/opt/homebrew/bin",
-    "/usr/local/bin",
-    ...managerPackagerBinDirs(),
-    "/usr/bin",
-    "/bin",
-  ].filter((d) => d.length > 0);
-};
+const defaultPathDirs = (): string[] => [
+  ...spawnPathDirs(),
+  ...managerPackagerBinDirs(),
+];
 
 /**
  * Classify an already-realpath'd file by content. Does NOT consult manager
