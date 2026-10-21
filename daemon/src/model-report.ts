@@ -187,8 +187,16 @@ const noteModelsOutcome = (listed: TListed): boolean => {
       status: "unavailable",
       reason: toWireModelsReason(listed.outcome.reason),
     };
+  } else if (
+    listed.outcome.kind === "success" &&
+    listed.outcome.models.length > 0 &&
+    listed.postError !== undefined
+  ) {
+    // Provider listed models locally, but the cloud POST failed — tell the UI
+    // to refresh rather than pretending the catalog was empty.
+    next = { status: "unavailable", reason: "error" };
   } else {
-    // success with empty models (should be rare — callers coerce to failed)
+    // success with empty models (callers usually coerce to failed first)
     next = {
       status: "unavailable",
       reason: "empty_after_filter",
