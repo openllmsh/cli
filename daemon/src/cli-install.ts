@@ -291,19 +291,19 @@ const isExecutableAbsolutePath = (path: string): boolean => {
 };
 
 /**
- * Runnability for a launcher resolution. Scripts are accepted only when
- * `resolveLauncher` proved an executable interpreter path (sibling /
- * manager) — a remembered interpreter *directory* alone is not enough.
- * Native / shim / wrapper keep the spawnPathDirs check.
+ * Runnability for a launcher resolution. Any proven executable interpreter
+ * (script or shim→script) is accepted — a remembered interpreter *directory*
+ * alone is not enough. Native / shim / wrapper without an interpreter keep
+ * the spawnPathDirs check.
  */
 const isResolvedLauncherRunnable = (
   resolution: TLauncherResolution,
 ): boolean => {
+  if (resolution.interpreter !== undefined) {
+    return isExecutableAbsolutePath(resolution.interpreter);
+  }
   if (resolution.kind === "script") {
-    return (
-      resolution.interpreter !== undefined &&
-      isExecutableAbsolutePath(resolution.interpreter)
-    );
+    return false;
   }
   return isHostCliRunnable(resolution.path);
 };
