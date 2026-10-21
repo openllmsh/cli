@@ -19,13 +19,7 @@
  * privacy-safe profile ({@link TLauncherProfile}) is what doctor / telemetry
  * may upload — never raw paths.
  */
-import {
-  accessSync,
-  constants,
-  existsSync,
-  realpathSync,
-  statSync,
-} from "node:fs";
+import { accessSync, constants, existsSync, realpathSync } from "node:fs";
 import { basename, dirname, isAbsolute, join, sep } from "node:path";
 import { envMs } from "./env-ms";
 import { registerLauncherResolutionInvalidator } from "./launcher-invalidate-hook";
