@@ -397,11 +397,16 @@ export const createBinaryUpdater = (): TBinaryUpdater => {
         await (deps.announcePlannedRestart ?? defaultAnnouncePlannedRestart)();
         // macOS: kickstart bypasses KeepAlive's ThrottleInterval (10s). Always
         // exit afterwards as a safety net (unsupervised / kickstart failure /
-        // Linux RestartSec path).
-        await (
-          deps.kickstartSupervisedDaemon ?? defaultKickstartSupervisedDaemon
-        )();
-        deps.exit();
+        // Linux RestartSec path). Once announced, the relay has unregistered
+        // this socket — exit must run even if kickstart's lazy import throws,
+        // or the process stays up on an unroutable connection.
+        try {
+          await (
+            deps.kickstartSupervisedDaemon ?? defaultKickstartSupervisedDaemon
+          )();
+        } finally {
+          deps.exit();
+        }
       });
     } finally {
       running = false;
