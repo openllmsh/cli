@@ -29,6 +29,7 @@ import {
   realpathSync,
   statSync,
 } from "node:fs";
+import { createRequire } from "node:module";
 import { homedir } from "node:os";
 import { basename, delimiter, isAbsolute, join, sep } from "node:path";
 import {
@@ -38,8 +39,20 @@ import {
   recordToResolution,
 } from "./launcher-resolution-cache";
 import type { TLauncherResolution } from "./launcher-resolution-types";
-import type { TManagerRegistry } from "./manager-resolution";
+import type { TManagerAdapter, TManagerRegistry } from "./manager-resolution";
 import { parseShebangInterpreter, resolveOnPath } from "./path-utils";
+
+const requireFromHere = createRequire(import.meta.url);
+
+/** Cache fingerprint for a shim resolution: candidate shape + manager selection. */
+const shimCacheFingerprint = (
+  own: string,
+  adapter: TManagerAdapter | undefined,
+  candidate: string,
+): string => {
+  const sel = adapter?.fingerprint?.(candidate) ?? "";
+  return `${own}|sel:${sel}`;
+};
 
 export {
   interpreterDirFor,
@@ -186,10 +199,18 @@ const MANAGER_ROOT_MARKERS: ReadonlyArray<readonly string[]> = [
   ["mise", "shims"],
   ["asdf", "installs"],
   ["asdf", "shims"],
+  [".asdf", "installs"],
+  [".asdf", "shims"],
   ["volta", "tools"],
   ["volta", "bin"],
+  [".volta", "tools"],
+  [".volta", "bin"],
   ["proto", "tools"],
   ["proto", "shims"],
+  ["proto", "bin"],
+  [".proto", "tools"],
+  [".proto", "shims"],
+  [".proto", "bin"],
 ];
 
 export const pathUnderManagerRoot = (path: string): boolean => {
@@ -219,7 +240,11 @@ const defaultResolveInterpreter = (
     if (existsSync(p)) {
       try {
         accessSync(p, constants.X_OK);
-        return realpathSync(p);
+        // Keep the PATH hit, not its realpath. cliEnv prepends
+        // dirname(interpreter) so the child `#!/usr/bin/env X` can resolve X;
+        // a mise/asdf shim realpaths to the manager binary's directory, which
+        // does not contain X.
+        return p;
       } catch {
         // keep scanning
       }
@@ -402,12 +427,21 @@ export const createLauncherResolver = (
 ): TLauncherResolver => {
   const shellProbe = deps.shellProbe ?? defaultShellProbe;
   let resolvedManagers: TManagerRegistry | undefined = deps.managers;
-  const managersOf = async (): Promise<TManagerRegistry> => {
+  /**
+   * Sync manager load for peek (selection fingerprint) and demand resolve.
+   * Lazy + createRequire (not a top-level import) so the
+   * launcher-resolution → manager-resolution → spawn →
+   * launcher-exec-invalidate → launcher-resolution init cycle stays broken.
+   */
+  const ensureManagers = (): TManagerRegistry => {
     if (resolvedManagers !== undefined) return resolvedManagers;
-    const mod = await import("./manager-resolution");
+    const mod = requireFromHere("./manager-resolution") as {
+      defaultManagerRegistry: TManagerRegistry;
+    };
     resolvedManagers = mod.defaultManagerRegistry;
     return resolvedManagers;
   };
+  const managersOf = async (): Promise<TManagerRegistry> => ensureManagers();
   const shellProbeTimeoutMs = (): number =>
     deps.shellProbeTimeoutMs ??
     envMs("OPENLLM_LAUNCHER_SHELL_PROBE_TIMEOUT_MS", 3_000);
@@ -448,20 +482,33 @@ export const createLauncherResolver = (
   ): TLauncherResolution | undefined => {
     const hit = cache.get(candidate);
     if (hit === undefined) return undefined;
-    const fp = fileFingerprint(candidate);
-    if (fp === null || fp !== hit.fingerprint) {
+    const own = fileFingerprint(candidate);
+    if (own === null) {
       cache.delete(candidate);
       if (persist) dropPersistedLauncherResolution(candidate);
       return undefined;
     }
-    // Also invalidate when the RESOLVED target itself changed (e.g. shim
-    // still same bytes but manager pointed elsewhere — covered by manager
-    // fingerprint; for ordinary binaries the candidate IS the target).
+    let expectedFp = own;
+    if (hit.resolution.kind.startsWith("shim:")) {
+      // Include the manager's selection fingerprint so `mise use -g` (shim
+      // file unchanged, old target still on disk) invalidates the peek.
+      const managers = ensureManagers();
+      const adapter =
+        managers.listManagerAdapters().find((a) => a.recognizes(candidate)) ??
+        managers
+          .listManagerAdapters()
+          .find((a) => a.name === hit.resolution.adapterId);
+      expectedFp = shimCacheFingerprint(own, adapter, candidate);
+    }
+    if (expectedFp !== hit.fingerprint) {
+      cache.delete(candidate);
+      if (persist) dropPersistedLauncherResolution(candidate);
+      return undefined;
+    }
+    // Also invalidate when the RESOLVED target itself vanished. For ordinary
+    // binaries the candidate IS the target (own fingerprint already compared).
     const targetFp = fileFingerprint(hit.resolution.path);
-    if (
-      targetFp === null ||
-      (hit.resolution.path === candidate && targetFp !== hit.fingerprint)
-    ) {
+    if (targetFp === null) {
       cache.delete(candidate);
       if (persist) dropPersistedLauncherResolution(candidate);
       return undefined;
@@ -529,18 +576,24 @@ export const createLauncherResolver = (
       } catch {
         return null;
       }
+      const adapter =
+        managers.listManagerAdapters().find((a) => a.recognizes(start)) ??
+        managers
+          .listManagerAdapters()
+          .find((a) => a.name === managed.identity?.split(":")[0]);
       const adapterName =
-        managed.identity?.split(":")[0] ??
-        managers.listManagerAdapters().find((a) => a.recognizes(start))?.name ??
-        "manager";
+        managed.identity?.split(":")[0] ?? adapter?.name ?? "manager";
       const classified = classifyLauncherContent(targetReal, {
         resolveInterpreter,
         pathDirs: opts?.probePathDirs ?? defaultPathDirs(),
       });
       // Prefer the manager's answer even when the target is itself a script;
       // the kind is still shim:<adapter> so telemetry knows a manager ran.
-      const fp = fingerprintBefore ?? fileFingerprint(start);
-      if (fp === null) return null;
+      const own = fingerprintBefore ?? fileFingerprint(start);
+      if (own === null) return null;
+      // Fold selection state into the cache fingerprint so a plain
+      // `mise use -g` (shim bytes unchanged) invalidates passive peeks.
+      const fp = shimCacheFingerprint(own, adapter, start);
       const resolution: TLauncherResolution = {
         kind: `shim:${adapterName}`,
         path: targetReal,

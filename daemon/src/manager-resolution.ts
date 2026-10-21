@@ -563,7 +563,25 @@ const isShimUnderNamedRoot = (
   const segments = candidate.split(sep);
   const shimsIdx = segments.lastIndexOf(shimSegment);
   if (shimsIdx <= 0) return false;
-  return segments[shimsIdx - 1] === rootName;
+  const parent = segments[shimsIdx - 1];
+  // Default installs use dotted roots (`~/.asdf`, `~/.volta`, `~/.proto`);
+  // undotted names cover relocated/custom layouts literally named `asdf`/….
+  return parent === rootName || parent === `.${rootName}`;
+};
+
+/** True when `candidate` lives under `$envKey/<leaf>/…` (relocated manager root). */
+const isShimUnderEnvRoot = (
+  candidate: string,
+  envKey: string,
+  leaf: string,
+): boolean => {
+  const root = process.env[envKey]?.trim();
+  if (root === undefined || root.length === 0) return false;
+  const prefix = join(root, leaf);
+  return (
+    candidate === join(prefix, basename(candidate)) ||
+    candidate.startsWith(`${prefix}${sep}`)
+  );
 };
 
 const acceptAbsoluteExecutable = (
@@ -613,7 +631,8 @@ const resolveViaManagerBin = async (
 };
 
 const isAsdfShimPath = (candidate: string): boolean =>
-  isShimUnderNamedRoot(candidate, "asdf", "shims");
+  isShimUnderNamedRoot(candidate, "asdf", "shims") ||
+  isShimUnderEnvRoot(candidate, "ASDF_DATA_DIR", "shims");
 
 export const asdfManagerAdapter: TManagerAdapter = {
   name: "asdf",
@@ -632,12 +651,9 @@ export const asdfManagerAdapter: TManagerAdapter = {
 };
 
 /** Volta shims live under `…/volta/bin/<cmd>` (not a `shims/` segment). */
-const isVoltaShimPath = (candidate: string): boolean => {
-  const segments = candidate.split(sep);
-  const binIdx = segments.lastIndexOf("bin");
-  if (binIdx <= 0) return false;
-  return segments[binIdx - 1] === "volta";
-};
+const isVoltaShimPath = (candidate: string): boolean =>
+  isShimUnderNamedRoot(candidate, "volta", "bin") ||
+  isShimUnderEnvRoot(candidate, "VOLTA_HOME", "bin");
 
 export const voltaManagerAdapter: TManagerAdapter = {
   name: "volta",
@@ -657,7 +673,9 @@ export const voltaManagerAdapter: TManagerAdapter = {
 
 const isProtoShimPath = (candidate: string): boolean =>
   isShimUnderNamedRoot(candidate, "proto", "shims") ||
-  isShimUnderNamedRoot(candidate, "proto", "bin");
+  isShimUnderNamedRoot(candidate, "proto", "bin") ||
+  isShimUnderEnvRoot(candidate, "PROTO_HOME", "shims") ||
+  isShimUnderEnvRoot(candidate, "PROTO_HOME", "bin");
 
 export const protoManagerAdapter: TManagerAdapter = {
   name: "proto",
