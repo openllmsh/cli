@@ -41,7 +41,11 @@ import {
 import type { TLauncherResolution } from "./launcher-resolution-types";
 import type { TManagerAdapter, TManagerRegistry } from "./manager-resolution";
 import { defaultManagerRegistry } from "./manager-resolution";
-import { parseShebangInterpreter, resolveOnPath } from "./path-utils";
+import {
+  managerPackagerBinDirs,
+  parseShebangInterpreter,
+  resolveOnPath,
+} from "./path-utils";
 
 /** Cache fingerprint for a shim resolution: candidate shape + manager selection. */
 const shimCacheFingerprint = (
@@ -254,6 +258,12 @@ const defaultResolveInterpreter = (
   return hits[0] !== undefined ? hits[0] : null;
 };
 
+/**
+ * Dirs searched when classifying a shebang interpreter at DEMAND time.
+ * Includes manager/packager shim bins so resolution can prove a need — those
+ * dirs are NOT on every spawn PATH ({@link defaultBinDirs}); a proven
+ * interpreter dir is prepended per provider via `cliEnv`.
+ */
 const defaultPathDirs = (): string[] => {
   const home = process.env.HOME?.trim() || homedir();
   return [
@@ -262,6 +272,7 @@ const defaultPathDirs = (): string[] => {
     join(home, ".bun", "bin"),
     "/opt/homebrew/bin",
     "/usr/local/bin",
+    ...managerPackagerBinDirs(),
     "/usr/bin",
     "/bin",
   ].filter((d) => d.length > 0);

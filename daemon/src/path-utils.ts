@@ -6,32 +6,60 @@ import { homedir } from "node:os";
 import { basename, delimiter, isAbsolute, join } from "node:path";
 
 /**
- * Standard user + launcher shim/bin dirs the daemon prepends to a spawned
- * child's PATH. The daemon runs as a background service with a minimal
- * inherited PATH, so user-installed CLIs (`claude` in ~/.local/bin; `bun` in
- * ~/.bun/bin; mise/asdf/volta/proto/fnm/nix/linuxbrew/snap shims) aren't found
- * and a script that relies on one half-applies or acks `status:error`.
+ * Standard user bin dirs the daemon prepends to a spawned integration's PATH.
+ * The daemon runs as a background service with a minimal inherited PATH, so
+ * user-installed CLIs the bundled scripts call (`claude` lands in ~/.local/bin;
+ * `bun` lands in ~/.bun/bin via the official installer; many tools live under
+ * Homebrew) aren't found and a script that relies on one half-applies or acks
+ * `status:error`. Every entry is within the OS-sandbox working set (`/opt`,
+ * `/usr`, ~/.local/bin, ~/.bun — see `sandbox/working-set/`), so a spawn never
+ * hits a Landlock denial; absent dirs are simply ignored by the shell.
  *
- * One data-driven candidate list (not per-launcher branches), filtered to
- * dirs that EXIST. Relocated roots (`MISE_DATA_DIR`, `ASDF_DATA_DIR`,
- * `VOLTA_HOME`, `PROTO_HOME`, `npm_config_prefix`) are honoured when set —
- * and the matching default root is omitted so a stale leftover install cannot
- * shadow the configured one. Computed per call so a test that overrides
- * `HOME` / those env vars sees the overridden dirs.
+ * Manager/packager shim dirs (mise/asdf/volta/proto/…) are NOT on this list —
+ * a native install must not pick `node`/`python` from a shim dir on every
+ * spawn. Demand launcher resolution remembers the proven interpreter/shim dir
+ * per provider (`launcher-profile-state` → `cliEnv` PATH prepend) instead.
+ *
+ * Prefer `$HOME` when set so tests (and atypical service units) can redirect
+ * the scan; fall back to `os.homedir()` (passwd entry) otherwise. Bun's
+ * `homedir()` does not always honour `$HOME`. Computed per call so a test that
+ * overrides `HOME` sees the overridden dirs — production HOME is stable for
+ * the process lifetime.
  */
 export const defaultBinDirs = (): readonly string[] => {
-  // Prefer `$HOME` when set so tests (and atypical service units) can redirect
-  // the scan; fall back to `os.homedir()` (passwd entry) otherwise. Bun's
-  // `homedir()` does not always honour `$HOME`.
   const home = process.env.HOME?.trim() || homedir();
+  return [
+    "/opt/homebrew/bin",
+    "/usr/local/bin",
+    join(home, ".local", "bin"),
+    join(home, ".bun", "bin"),
+  ];
+};
+
+/**
+ * Manager/packager shim + bin dirs searched during launcher RESOLUTION only
+ * (classify / interpreter lookup) — never prepended to every spawn PATH.
+ * Existence-filtered with a short-lived cache so demand resolve does not
+ * `existsSync` the same candidates repeatedly within a tick.
+ */
+const managerPackagerBinDirCache = new Map<
+  string,
+  { readonly at: number; readonly dirs: readonly string[] }
+>();
+const MANAGER_PACKAGER_BIN_DIR_CACHE_MS = 2_000;
+
+export const managerPackagerBinDirs = (
+  env: NodeJS.ProcessEnv = process.env,
+  now: () => number = Date.now,
+): readonly string[] => {
+  const home = env.HOME?.trim() || homedir();
   const npmPrefix =
-    process.env.npm_config_prefix?.trim() ||
-    process.env.NPM_CONFIG_PREFIX?.trim() ||
-    "";
-  const miseData = process.env.MISE_DATA_DIR?.trim() || "";
-  const asdfData = process.env.ASDF_DATA_DIR?.trim() || "";
-  const voltaHome = process.env.VOLTA_HOME?.trim() || "";
-  const protoHome = process.env.PROTO_HOME?.trim() || "";
+    env.npm_config_prefix?.trim() || env.NPM_CONFIG_PREFIX?.trim() || "";
+  const miseData = env.MISE_DATA_DIR?.trim() || "";
+  const asdfData = env.ASDF_DATA_DIR?.trim() || "";
+  const voltaHome = env.VOLTA_HOME?.trim() || "";
+  const protoHome = env.PROTO_HOME?.trim() || "";
+  const fnmDir = env.FNM_DIR?.trim() || "";
   // Configured root replaces the default when set — never both, or an old
   // default shim dir left behind after relocation would win PATH order.
   const miseShims =
@@ -43,30 +71,41 @@ export const defaultBinDirs = (): readonly string[] => {
       ? join(asdfData, "shims")
       : join(home, ".asdf", "shims");
   const voltaBin =
-    voltaHome.length > 0
-      ? join(voltaHome, "bin")
-      : join(home, ".volta", "bin");
+    voltaHome.length > 0 ? join(voltaHome, "bin") : join(home, ".volta", "bin");
   const protoRoot = protoHome.length > 0 ? protoHome : join(home, ".proto");
+  const fnmAliasBin =
+    fnmDir.length > 0
+      ? join(fnmDir, "aliases", "default", "bin")
+      : join(home, ".local", "share", "fnm", "aliases", "default", "bin");
+  const cacheKey = [
+    home,
+    miseData,
+    asdfData,
+    voltaHome,
+    protoHome,
+    fnmDir,
+    npmPrefix,
+  ].join("\0");
+  const cached = managerPackagerBinDirCache.get(cacheKey);
+  const t = now();
+  if (
+    cached !== undefined &&
+    t - cached.at <= MANAGER_PACKAGER_BIN_DIR_CACHE_MS
+  ) {
+    return cached.dirs;
+  }
   const candidates: readonly string[] = [
-    "/opt/homebrew/bin",
-    "/usr/local/bin",
-    join(home, ".local", "bin"),
-    join(home, ".bun", "bin"),
-    // Version-manager shims / bins (audit L2 / F3).
     miseShims,
     asdfShims,
     voltaBin,
-    // proto exposes both `shims/` and `bin/` (see protoManagerAdapter).
     join(protoRoot, "shims"),
     join(protoRoot, "bin"),
-    join(home, ".local", "share", "fnm", "aliases", "default", "bin"),
-    // Nix profiles + Linuxbrew + snap.
+    fnmAliasBin,
     join(home, ".nix-profile", "bin"),
     "/nix/var/nix/profiles/default/bin",
     "/home/linuxbrew/.linuxbrew/bin",
     join(home, ".linuxbrew", "bin"),
     "/snap/bin",
-    // npm global prefix bin when cheaply known from env (no `npm config` spawn).
     npmPrefix.length > 0 ? join(npmPrefix, "bin") : "",
   ];
   const out: string[] = [];
@@ -76,6 +115,7 @@ export const defaultBinDirs = (): readonly string[] => {
     seen.add(dir);
     if (existsSync(dir)) out.push(dir);
   }
+  managerPackagerBinDirCache.set(cacheKey, { at: t, dirs: out });
   return out;
 };
 

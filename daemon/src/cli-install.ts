@@ -263,7 +263,17 @@ const noteLauncherResolution = (
   resolution: Awaited<ReturnType<TLauncherResolver["resolveLauncher"]>>,
 ): void => {
   rememberLauncherProfile(provider, resolution);
-  rememberInterpreterDir(provider, resolution?.interpreter);
+  // Prefer the shebang interpreter dir; otherwise, when demand proved a
+  // manager shim / under-manager install, remember that path so cliEnv can
+  // prepend its dirname onto THIS provider's PATH only.
+  const pathForDir =
+    resolution?.interpreter ??
+    (resolution !== null &&
+    resolution !== undefined &&
+    (resolution.kind.startsWith("shim:") || resolution.underManagerRoot)
+      ? resolution.path
+      : undefined);
+  rememberInterpreterDir(provider, pathForDir);
 };
 
 const resolveHostBinary = async (
