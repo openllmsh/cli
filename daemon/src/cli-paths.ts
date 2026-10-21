@@ -467,6 +467,14 @@ export const cliConfigDir = (provider: TCliProvider, home?: string): string =>
  * daemon-owned, sandbox-granted state temp — so ambient session `XDG_*` (common
  * on Omarchy/Arch) cannot steer a launcher's config/state/cache writes at the
  * real `~/.config` / `~/.local/state` (read-only in the working set).
+ *
+ * Kept for every provider (claude_code, chatgpt, kimi_code, grok, cursor, muse,
+ * antigravity). None of them need a real-home XDG credential/config READ
+ * passthrough into the isolated child: each pins its own config knob
+ * (`CLAUDE_CONFIG_DIR` / `CODEX_HOME` / `KIMI_CODE_HOME` / HOME-rooted `.grok` /
+ * isolated `XDG_CONFIG_HOME` for cursor+muse / `GEMINI_HOME`). Real-home paths
+ * that remain are EXEC-only (`vendorExecDirs`) and launcher data-root FIND
+ * pointers (`launcherDataRootEnv`) — never RW on real `~/.local/state`.
  */
 export const isolatedRuntimeEnv = (
   home: string,

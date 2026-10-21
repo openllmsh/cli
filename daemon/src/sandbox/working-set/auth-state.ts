@@ -25,24 +25,21 @@ import { delegatedCliRuntimeSet } from "./delegated-cli-runtime";
  * runs `existing()`).
  */
 export const authStateLayer = (home: string): TWorkingSet => {
-  // Pre-create claude's XDG STATE + CACHE dirs the isolated claude WRITES at run
-  // time. REQUIRED on Linux: Landlock can only grant an EXISTING path
-  // (`existing()` drops a missing leaf rather than widening onto bare $HOME), so
-  // a fresh box would leave these ungranted. macOS is a harmless no-op.
   // Muse's isolated auth store is `$XDG_CONFIG_HOME/muse` →
   // `<cliHome("muse")>/.config/muse` (auth.json). Pre-create that leaf so a
   // future decomposed `<state>/cli` grant can address it; today the whole
   // state dir already covers it.
-  for (const d of [
-    join(home, ".local", "state", "claude"),
-    join(home, ".cache", "claude"),
-    cliConfigDir("muse"),
-  ]) {
-    try {
-      mkdirSync(d, { recursive: true });
-    } catch {
-      // best-effort — an ungranted leaf just fails that vendor's run visibly.
-    }
+  //
+  // Claude's XDG STATE + CACHE are under the ISOLATED home
+  // (`cliEnv` pins XDG_STATE_HOME/XDG_CACHE_HOME → `<cliHome>/.local/state` /
+  // `.cache`). Do NOT mkdir or RW-grant the real-home
+  // `~/.local/state/claude` / `~/.cache/claude` — that contradicted L3
+  // ("never RW real ~/.local/state") once L2 isolation landed. Isolated
+  // leaves are covered by `delegatedCliRuntimeSet` → `cliHome` RW.
+  try {
+    mkdirSync(cliConfigDir("muse"), { recursive: true });
+  } catch {
+    // best-effort — an ungranted leaf just fails that vendor's run visibly.
   }
   // bun's global install cache — the RW half of the split ~/.bun grant. Only
   // pre-create it when bun IS installed: absent bun means the plugin install
@@ -66,13 +63,6 @@ export const authStateLayer = (home: string): TWorkingSet => {
   const readWrite = new Set<string>([
     ...mise.readWrite,
     ...runtime.readWrite,
-    //   claude's XDG STATE + CACHE dirs — the isolated claude WRITES these at
-    //   RUN time (logs/state + cache) on Linux; absent on macOS. Scoped to the
-    //   claude subdirs (not the whole `~/.local/state` / `~/.cache`) — no
-    //   secrets there. (`~/.local/share/claude`, the BINARY dir, is read+exec
-    //   in the readOnly set — the daemon execs but never writes it.)
-    join(home, ".local", "state", "claude"),
-    join(home, ".cache", "claude"),
     //   bun's global install cache ONLY (the SPLIT ~/.bun grant — audit §5-B):
     //   a plugin install running `bun install` populates
     //   ~/.bun/install/cache. The `bun` BINARY dir (~/.bun/bin) is read+exec in
