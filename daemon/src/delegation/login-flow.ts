@@ -30,6 +30,7 @@ import {
   classifyFailureOutput,
   DoctorLauncherAdapter,
   projectDoctorOutcomeLedger,
+  wireCompatibleFailureSignature,
 } from "@openllmsh/protocol";
 import { Schema as S } from "effect";
 import {
@@ -453,7 +454,9 @@ export const emitLoginFailed = (
             operation_kind: "login",
             outcome: "failed",
             login_failure_code: fail.code,
-            failure_signature: classifyFailureOutput(fail.message),
+            failure_signature: wireCompatibleFailureSignature(
+              classifyFailureOutput(fail.message),
+            ),
             ...(fail.reason_code !== undefined
               ? { reason_code: fail.reason_code }
               : {}),
@@ -543,7 +546,9 @@ export const finalizeLoginTerminal = (opts: {
         operation_kind: "login",
         outcome: "failed",
         login_failure_code: opts.event.code,
-        failure_signature: classifyFailureOutput(opts.event.message),
+        failure_signature: wireCompatibleFailureSignature(
+          classifyFailureOutput(opts.event.message),
+        ),
         ...(opts.event.reason_code !== undefined
           ? { reason_code: opts.event.reason_code }
           : {}),
@@ -582,7 +587,9 @@ export const finalizeLoginTerminal = (opts: {
       opts.event.kind === "failed"
         ? {
             login_failure_code: opts.event.code,
-            failure_signature: classifyFailureOutput(opts.event.message),
+            failure_signature: wireCompatibleFailureSignature(
+              classifyFailureOutput(opts.event.message),
+            ),
             ...(opts.event.reason_code !== undefined
               ? {
                   reason_code: opts.event.reason_code,
