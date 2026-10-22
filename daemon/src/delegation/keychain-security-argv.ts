@@ -17,7 +17,6 @@ export const ALLOWED_SECURITY_SUBCOMMANDS = [
   "dump-keychain",
   "find-generic-password",
   "set-key-partition-list",
-  "set-generic-password-partition-list",
 ] as const;
 
 export type TAllowedSecuritySubcommand =
@@ -59,20 +58,6 @@ const VALUE_TAKING_FLAGS: Readonly<
   // set-key-partition-list: -S partitions, -k password. `-s` is a BOOLEAN
   // (symmetric keys), not a value flag.
   "set-key-partition-list": new Set(["-S", "-k"]),
-  // set-generic-password-partition-list: same attribute selectors as find,
-  // plus -S / -k (man security).
-  "set-generic-password-partition-list": new Set([
-    "-S",
-    "-k",
-    "-s",
-    "-a",
-    "-c",
-    "-C",
-    "-D",
-    "-G",
-    "-j",
-    "-l",
-  ]),
 };
 
 /** Rejected dump-keychain flags (decrypt / ACL dump / interactive ACL edit). */
@@ -247,10 +232,7 @@ export const assertSafeSecurityArgv = (
     }
   }
 
-  if (
-    allowedSub === "set-key-partition-list" ||
-    allowedSub === "set-generic-password-partition-list"
-  ) {
+  if (allowedSub === "set-key-partition-list") {
     if (!hasFlag(argv, allowedSub, "-k")) {
       throw new SecurityArgvRejectedError(
         `${allowedSub} requires non-interactive -k`,

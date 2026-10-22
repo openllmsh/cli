@@ -1020,6 +1020,8 @@ export const createKeychainRuntime = (
   type TKeychainPayloads = {
     readonly values: ReadonlyArray<string>;
     readonly secretUnreadable: boolean;
+    /** True when any candidate service hit interaction-not-allowed. */
+    readonly interactionNotAllowed: boolean;
   };
 
   /** Complete credential reads, keyed by isolated keychain + service prefix. */
@@ -2194,78 +2196,33 @@ export const createKeychainRuntime = (
     /could not be found in the keychain/i.test(stderr);
 
   /**
-   * Conclusive ACL / password / interaction refusals from a partition-list
-   * grant. Anything else is treated as non-conclusive (log + continue). Never
-   * used to decide a retry — a retry can raise the GUI password dialog.
-   */
-  const isConclusivePartitionRefusal = (stderr: string): boolean =>
-    isInteractionNotAllowed(stderr) ||
-    /errSecAuthFailed/i.test(stderr) ||
-    /SecKeychainItemCopyAccess/i.test(stderr) ||
-    matchUnlockFailureToken(stderr) !== null;
-
-  /**
    * macOS only: grant command-line tools prompt-free access to the items in
    * the isolated keychain. Run AFTER a login writes them, and again after a
    * launcher relink (the ACL still names the previous binary path). Gated on
-   * readiness.
-   *
-   * `set-key-partition-list` keeps the `dev` semantics (its result is the
-   * return value). `set-generic-password-partition-list` is best-effort /
-   * NON-FATAL: Claude / Cursor store OAuth blobs as genp, but a genp grant
-   * miss must not false-fail a login whose credential already landed. A
-   * conclusive genp refusal is logged as "keychain grant degraded" and the
-   * grant still returns success when the key partition succeeded (prefer
-   * login success; never probe readability — a find after interaction-not-
-   * allowed can prompt). Never retry either grant.
+   * readiness. Returns whether the keychain ended up in the granted state
+   * (true off macOS, and true when there was no key to partition — see
+   * {@link noKeyToPartition}). Issues exactly one `set-key-partition-list`
+   * (dev parity) — never a genp partition-list grant.
    */
   const grantKeychainToolAccess = async (home: string): Promise<boolean> => {
     if (!isMac) return true;
     if ((await ensureKeychainReady(home)).kind !== "present") return false;
     const kc = loginKeychainPath(home);
-    const partitions = "apple-tool:,apple:";
-    const keyRes = await spawnSecurity(
-      ["set-key-partition-list", "-S", partitions, "-s", "-k", "", kc],
+    const res = await spawnSecurity(
+      [
+        "set-key-partition-list",
+        "-S",
+        "apple-tool:,apple:",
+        "-s",
+        "-k",
+        "",
+        kc,
+      ],
       home,
       { stdout: "ignore", stderr: "pipe" },
     );
-    noteKeychainIoResult(kc, keyRes);
-
-    const keyOk = keyRes.code === 0 || noKeyToPartition(keyRes.stderr);
-    // A conclusive key refusal means the store refused us; do not issue a
-    // second grant against it (never retry — a retry can raise UI).
-    if (keyOk || !isConclusivePartitionRefusal(keyRes.stderr)) {
-      // Best-effort genp grant. Failures never flip the return value; see above.
-      const genpRes = await spawnSecurity(
-        ["set-generic-password-partition-list", "-S", partitions, "-k", "", kc],
-        home,
-        { stdout: "ignore", stderr: "pipe" },
-      );
-      noteKeychainIoResult(kc, genpRes);
-      const genpOk = genpRes.code === 0 || noKeyToPartition(genpRes.stderr);
-      if (!genpOk) {
-        const conclusive = isConclusivePartitionRefusal(genpRes.stderr);
-        logWarn(
-          "keychain",
-          conclusive
-            ? safeDiagnosticMessage`keychain grant degraded`
-            : safeDiagnosticMessage`generic-password partition-list grant failed`,
-          {
-            exit_code: genpRes.code,
-            stderr_excerpt: redactSecurityStderr(genpRes.stderr),
-          },
-          toStoreObservation({
-            operation: "grant",
-            stage: "final",
-            result: storeResultOf(genpRes),
-            exitCode: genpRes.code,
-          }),
-        );
-      }
-    }
-
-    // KEY partition — identical to `dev`: success / no-key-skip → true; else false.
-    if (keyRes.code === 0) {
+    noteKeychainIoResult(kc, res);
+    if (res.code === 0) {
       logInfo(
         "keychain",
         safeDiagnosticMessage`keychain grant persisted`,
@@ -2274,12 +2231,12 @@ export const createKeychainRuntime = (
           operation: "grant",
           stage: "final",
           result: "succeeded",
-          exitCode: keyRes.code,
+          exitCode: res.code,
         }),
       );
       return true;
     }
-    if (noKeyToPartition(keyRes.stderr)) {
+    if (noKeyToPartition(res.stderr)) {
       logInfo(
         "keychain",
         safeDiagnosticMessage`keychain grant skipped; no key to partition`,
@@ -2288,7 +2245,7 @@ export const createKeychainRuntime = (
           operation: "grant",
           stage: "final",
           result: "skipped",
-          exitCode: keyRes.code,
+          exitCode: res.code,
         }),
       );
       return true;
@@ -2297,14 +2254,14 @@ export const createKeychainRuntime = (
       "keychain",
       safeDiagnosticMessage`partition-list grant failed`,
       {
-        exit_code: keyRes.code,
-        stderr_excerpt: redactSecurityStderr(keyRes.stderr),
+        exit_code: res.code,
+        stderr_excerpt: redactSecurityStderr(res.stderr),
       },
       toStoreObservation({
         operation: "grant",
         stage: "final",
-        result: storeResultOf(keyRes),
-        exitCode: keyRes.code,
+        result: storeResultOf(res),
+        exitCode: res.code,
       }),
     );
     return false;
@@ -2466,14 +2423,17 @@ export const createKeychainRuntime = (
 
     const values: string[] = [];
     let secretUnreadable = false;
+    let interactionNotAllowed = false;
     try {
       for (const service of services.value) {
         const secret = await readKeychainSecret(home, service);
+        // Per-service failure continues (dev parity): a later candidate may
+        // still yield a valid payload. Never retry interaction-not-allowed
+        // inside this call — readKeychainSecret also refuses to cache it.
         if (secret.kind === "interaction_not_allowed") {
-          return {
-            kind: "indeterminate",
-            cause: "keychain_interaction_not_allowed",
-          };
+          secretUnreadable = true;
+          interactionNotAllowed = true;
+          continue;
         }
         if (secret.kind === "inconclusive") {
           secretUnreadable = true;
@@ -2485,7 +2445,10 @@ export const createKeychainRuntime = (
           values.push(secret.value);
         }
       }
-      return { kind: "present", value: { values, secretUnreadable } };
+      return {
+        kind: "present",
+        value: { values, secretUnreadable, interactionNotAllowed },
+      };
     } catch (err) {
       return {
         kind: "indeterminate",
@@ -2528,6 +2491,12 @@ export const createKeychainRuntime = (
       if (validate === undefined || validate(payload)) {
         return { kind: "present", value: payload };
       }
+    }
+    if (payloads.value.interactionNotAllowed) {
+      return {
+        kind: "indeterminate",
+        cause: "keychain_interaction_not_allowed",
+      };
     }
     if (payloads.value.secretUnreadable) {
       return { kind: "indeterminate", cause: "keychain_secret_unreadable" };
