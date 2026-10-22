@@ -42,6 +42,7 @@ import type { TChatCompletionChunk } from "@openllmsh/protocol";
 import { logError, safeDiagnosticMessage } from "../logger";
 import {
   claudeCaptureDestinationPolicy,
+  claudeHelperRequestGate,
   commitFromChunkStream,
   declinedForNonOkCapturedResponse,
   startClaudeCaptureLoopback,
@@ -127,7 +128,10 @@ const runClaudeSdkFacadeCaptureCore = async (
     captureTimeoutMs: params.captureTimeoutMs,
     maxBodyBytes: params.maxBodyBytes,
   });
-  const loopback = startClaudeCaptureLoopback({ session });
+  const loopback = startClaudeCaptureLoopback({
+    session,
+    inferenceGate: claudeHelperRequestGate,
+  });
 
   let mcpServer: TClaudeFacadeMcpServerRef | null = null;
   let stopMcpServer: (() => void) | null = null;

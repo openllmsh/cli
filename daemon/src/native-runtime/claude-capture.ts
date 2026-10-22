@@ -164,6 +164,38 @@ export type TClaudeCaptureInferenceGate = (args: {
   | { readonly action: "settle_auxiliary"; readonly reason: string };
 
 /**
+ * Claude Code's own helper calls (session-title generation, from 2.1.307)
+ * ask for a JSON-schema answer through `output_config.format`; no turn the
+ * daemon drives ever does, so a structured-output Messages POST is never the
+ * caller's inference — whatever else the CLI decides to send first.
+ */
+export const claudeHelperRequestGate: TClaudeCaptureInferenceGate = ({
+  envelope,
+}) => {
+  if (envelope.body === null) return { action: "capture" };
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(new TextDecoder().decode(envelope.body));
+  } catch {
+    return { action: "capture" };
+  }
+  const config =
+    typeof parsed === "object" && parsed !== null
+      ? (parsed as { output_config?: unknown }).output_config
+      : undefined;
+  const structured =
+    typeof config === "object" &&
+    config !== null &&
+    (config as { format?: unknown }).format != null;
+  return structured
+    ? {
+        action: "settle_auxiliary",
+        reason: "structured-output helper request (e.g. session title)",
+      }
+    : { action: "capture" };
+};
+
+/**
  * Private loopback recorder for Claude Messages capture.
  *
  * Inference (`…/v1/messages`): full headers+body → `session.captureSend`, then

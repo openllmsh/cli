@@ -110,6 +110,12 @@ const facadeMcpConfigJson = (server: TClaudeFacadeMcpServerRef): string =>
     },
   });
 
+/** Naming the session up front stops the CLI generating a title for it: from
+ *  2.1.307 that is a separate `/v1/messages` POST sent BEFORE the turn, which
+ *  `sdk-facade-capture` would take as the answer and plain `sdk-facade` would
+ *  pay for. */
+export const CLAUDE_FACADE_SESSION_NAME = "openllm-facade";
+
 /**
  * The `claude -p --input-format stream-json --output-format stream-json …`
  * argv for the `sdk-facade` completion variant (H2/H3,
@@ -148,6 +154,8 @@ export const buildClaudeFacadeArgv = (
   "--permission-mode",
   "dontAsk",
   "--no-session-persistence",
+  "--name",
+  CLAUDE_FACADE_SESSION_NAME,
   "--model",
   params.providerModelId,
   ...(params.systemText !== null ? ["--system-prompt", params.systemText] : []),

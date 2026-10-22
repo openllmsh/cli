@@ -64,7 +64,9 @@ export const chunksFromFacadeCapturedResponse = (
         } else if (event.type === "content_block_stop") {
           const json = inputJson.get(event.index);
           const block = blocks.get(event.index);
-          if (json !== undefined && block !== undefined) {
+          // A tool called with no arguments streams one empty `partial_json`;
+          // the block keeps the `{}` its content_block_start carried.
+          if (json !== undefined && json.trim() !== "" && block !== undefined) {
             try {
               block.input = JSON.parse(json) as unknown;
             } catch {
