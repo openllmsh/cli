@@ -446,12 +446,11 @@ export const defaultShellProbe: TLauncherShellProbe = async (
       return null;
     }
     const raw = await rawPromise;
-    if (raw === null) {
-      killShellProbeTree(proc);
-      unbind();
-      return null;
-    }
+    // The shell has exited; reap any rc-spawned helper still in its group
+    // (deadline-truncated reads return a non-null line and used to skip this).
+    killShellProbeTree(proc);
     unbind();
+    if (raw === null) return null;
     if (settled.code !== 0) return null;
     const answer = raw.trim();
     if (answer.length === 0 || /[\r\n\0]/.test(answer)) return null;
