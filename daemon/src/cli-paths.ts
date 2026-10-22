@@ -494,7 +494,9 @@ const ensureIsolatedRuntimeDirs = (home: string): void => {
     join(home, ".config"),
     join(home, ".local", "share"),
     join(home, ".local", "state"),
+    join(home, ".local", "state", "mise"),
     join(home, ".cache"),
+    join(home, ".cache", "mise"),
   ]) {
     try {
       mkdirSync(d, { recursive: true });
@@ -514,12 +516,17 @@ const ensureIsolatedRuntimeDirs = (home: string): void => {
  * `MISE_CONFIG_DIR` / explicit `MISE_GLOBAL_CONFIG_FILE` pin the real global
  * config so shims still resolve versions after `XDG_CONFIG_HOME` redirects;
  * the sandbox grants those paths RO only (never RW).
+ *
+ * When `isolatedHome` is set, `MISE_CACHE_DIR` / `MISE_STATE_DIR` are pinned
+ * under that home (overriding ambient) so mise writes never hit the RO-granted
+ * real cache/state dirs.
  */
 export const launcherDataRootEnv = (
   ambient: NodeJS.ProcessEnv = process.env,
   realHome: string = homedir(),
+  isolatedHome?: string,
 ): Record<string, string> =>
-  buildLauncherDataRootEnv(ambient, realHome, existsSync);
+  buildLauncherDataRootEnv(ambient, realHome, existsSync, isolatedHome);
 
 /**
  * Environment overrides that (1) isolate the CLI's runtime home + XDG base
@@ -530,7 +537,8 @@ export const launcherDataRootEnv = (
  * Every provider gets the shared {@link isolatedRuntimeEnv} base (`HOME`,
  * `XDG_CONFIG_HOME` / `DATA` / `STATE` / `CACHE`, `TMPDIR` at `<state>/tmp`)
  * plus {@link launcherDataRootEnv} (real mise/asdf/volta/proto/fnm data roots,
- * read-only). Providers then add only their own knobs (`CODEX_HOME`, …).
+ * read-only; mise cache/state relocated under the isolated home). Providers
+ * then add only their own knobs (`CODEX_HOME`, …).
  *
  * The OS sandbox (`./sandbox/working-set/`) does NOT grant the system `/tmp`
  * — only `<state>/tmp`. Pinning `TMPDIR` keeps every isolated spawn's temp
@@ -546,7 +554,7 @@ export const cliEnv = (provider: TCliProvider): Record<string, string> => {
   ensureIsolatedRuntimeDirs(home);
   const base = {
     ...isolatedRuntimeEnv(home, tmp),
-    ...launcherDataRootEnv(),
+    ...launcherDataRootEnv(process.env, homedir(), home),
     ...SPECS[provider].env({ home, root, config, tmp }),
   };
   // Phase 3 / L1: when demand resolution recorded a shebang interpreter,

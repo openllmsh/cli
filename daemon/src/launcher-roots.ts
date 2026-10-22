@@ -320,11 +320,19 @@ export const allManagerDataRoots = (
  * Pass `MISE_CONFIG_DIR` (ambient or {@link misePaths}) and any explicit
  * `MISE_GLOBAL_CONFIG_FILE`. Project/session selector vars (`MISE_ENV`, …)
  * stay stripped — this allowlist never forwards them.
+ *
+ * Writable mise cache/state are the opposite: ambient `MISE_CACHE_DIR` /
+ * `MISE_STATE_DIR` (explicit, not XDG-derived) must NOT reach the child —
+ * those real dirs are RO-granted via {@link allManagerDataRoots}, so a write
+ * there is EACCES. When `isolatedHome` is set, pin both under that home
+ * (overriding any ambient value). asdf/volta/proto/fnm have no separate
+ * cache/state env vars; their mutable leaves live under the data root.
  */
 export const buildLauncherDataRootEnv = (
   ambient: NodeJS.ProcessEnv,
   realHome: string,
   exists: (path: string) => boolean,
+  isolatedHome?: string,
 ): Record<string, string> => {
   const out: Record<string, string> = {};
   const pass = (key: string): void => {
@@ -350,6 +358,12 @@ export const buildLauncherDataRootEnv = (
   passOrDefault("MISE_DATA_DIR", mise.dataDir);
   passOrDefault("MISE_CONFIG_DIR", mise.configDir);
   pass("MISE_GLOBAL_CONFIG_FILE");
+  // Always override ambient cache/state when we have an isolated home — never
+  // pass the real (RO-granted) locations through as writable targets.
+  if (isolatedHome !== undefined && isolatedHome.length > 0) {
+    out.MISE_CACHE_DIR = join(isolatedHome, ".cache", "mise");
+    out.MISE_STATE_DIR = join(isolatedHome, ".local", "state", "mise");
+  }
   return out;
 };
 
