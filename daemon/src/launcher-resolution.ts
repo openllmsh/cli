@@ -6,9 +6,12 @@
  * the interpreter / manager profile it needs:
  *
  *   1. optional login-shell probe (`$SHELL -lc 'command -v <cli>'`)
- *   2. realpath the symlink chain
- *   3. classify by content (ELF / Mach-O / shebang / known manager shim /
- *      opaque wrapper) — manager adapters are an optimisation, not a
+ *   2. manager-adapter recognition on the candidate AND each symlink hop
+ *      (BEFORE realpath) — real mise shims are `…/mise/shims/<cmd> → mise`,
+ *      so collapsing first would mis-classify them as an ordinary binary
+ *   3. realpath the symlink chain
+ *   4. classify by content (ELF / Mach-O / shebang / opaque wrapper) when
+ *      no manager hop matched — adapters are an optimisation, not a
  *      requirement
  *
  * Results are fingerprint-cached (mtime+size) so a version-manager switch or
@@ -32,7 +35,10 @@ import {
 import type { TLauncherResolution } from "./launcher-resolution-types";
 import { allManagerRootMarkers } from "./launcher-roots";
 import type { TManagerAdapter, TManagerRegistry } from "./manager-resolution";
-import { defaultManagerRegistry } from "./manager-resolution";
+import {
+  defaultManagerRegistry,
+  findRecognizingManagerHop,
+} from "./manager-resolution";
 import {
   fileFingerprint,
   managerPackagerBinDirs,
@@ -520,9 +526,7 @@ export const createLauncherResolver = (
     // both spellings of the dir: the realpath (macOS /var → /private/var)
     // can differ from the path an adapter was configured with.
     const isManagerShim = (path: string): boolean =>
-      managers
-        .listManagerAdapters()
-        .some((adapter) => adapter.recognizes(path));
+      findRecognizingManagerHop(path, managers.listManagerAdapters()) !== null;
     const seen = new Set<string>();
     for (const { raw, real } of dirs) {
       if (seen.has(real)) continue;
@@ -603,8 +607,11 @@ export const createLauncherResolver = (
     if (hit.resolution.kind.startsWith("shim:")) {
       // Include the manager's selection fingerprint so `mise use -g` (shim
       // file unchanged, old target still on disk) invalidates the peek.
+      // Walk symlink hops so a PATH hit like ~/.local/bin/codex →
+      // …/mise/shims/codex still finds the mise adapter.
       const adapter =
-        managers.listManagerAdapters().find((a) => a.recognizes(candidate)) ??
+        findRecognizingManagerHop(candidate, managers.listManagerAdapters())
+          ?.adapter ??
         managers
           .listManagerAdapters()
           .find((a) => a.name === hit.resolution.adapterId);
@@ -663,10 +670,14 @@ export const createLauncherResolver = (
 
     // Fingerprint the candidate BEFORE any await so a concurrent mutation
     // during manager resolve cannot be cached under the new shape.
+    // Recognition walks symlink hops BEFORE realpath so
+    // ~/.local/bin/codex → …/mise/shims/codex → mise is still shim:mise.
     const fingerprintBefore = fileFingerprint(start);
-    const selectionAdapterBefore = managers
-      .listManagerAdapters()
-      .find((a) => a.recognizes(start));
+    const selectionMatchBefore = findRecognizingManagerHop(
+      start,
+      managers.listManagerAdapters(),
+    );
+    const selectionAdapterBefore = selectionMatchBefore?.adapter;
     const shimFpBefore =
       fingerprintBefore === null
         ? null
@@ -684,7 +695,8 @@ export const createLauncherResolver = (
     }
 
     // Manager shim? Prefer adapter resolution (unsandboxed) over treating
-    // the shim script as a wrapper.
+    // the shim script as a wrapper. resolveManagerCandidate itself walks
+    // symlink hops before realpath classification.
     const managed = await managers.resolveManagerCandidate(start, {
       ...(opts?.signal !== undefined ? { signal: opts.signal } : {}),
     });
@@ -697,7 +709,8 @@ export const createLauncherResolver = (
         return null;
       }
       const adapter =
-        managers.listManagerAdapters().find((a) => a.recognizes(start)) ??
+        findRecognizingManagerHop(start, managers.listManagerAdapters())
+          ?.adapter ??
         managers
           .listManagerAdapters()
           .find((a) => a.name === managed.identity?.split(":")[0]);

@@ -22,7 +22,7 @@ import {
   statSync,
 } from "node:fs";
 import { homedir } from "node:os";
-import { basename, isAbsolute, join, sep } from "node:path";
+import { basename, dirname, isAbsolute, join, sep } from "node:path";
 import type { TDoctorFailureSignature } from "@openllmsh/protocol";
 import {
   classifyFailureOutput,
@@ -79,8 +79,8 @@ export type TManagerAdapter = {
 };
 
 /** Cheap, synchronous fingerprint of a candidate path: its symlink target
- *  when it is one (mise shims typically are not, but some manager layouts
- *  are), else its mtime+size. `null` when the path can't be stat'd at all
+ *  when it is one (real mise shims ARE symlinks to the mise binary itself),
+ *  else its mtime+size. `null` when the path can't be stat'd at all
  *  (caller must then treat any cache entry as stale). */
 const candidateFingerprint = (candidate: string): string | null => {
   try {
@@ -90,6 +90,50 @@ const candidateFingerprint = (candidate: string): string | null => {
   }
   const fp = fileFingerprint(candidate);
   return fp === null ? null : `stat:${fp}`;
+};
+
+/**
+ * Candidate path plus each hop of its symlink chain, BEFORE realpath
+ * collapses the chain onto a final binary. Real mise lays out
+ * `~/.local/bin/codex → …/mise/shims/codex → mise`; only the middle hop
+ * matches `isMiseShimPath`. Bounded, no filesystem writes, cycle-safe.
+ * Relative readlink targets resolve against the link's directory.
+ */
+export const symlinkChainHops = (start: string): readonly string[] => {
+  const hops: string[] = [start];
+  const seen = new Set<string>([start]);
+  let cur = start;
+  for (let i = 0; i < 32; i++) {
+    let next: string;
+    try {
+      next = readlinkSync(cur);
+    } catch {
+      break;
+    }
+    if (!isAbsolute(next)) next = join(dirname(cur), next);
+    if (seen.has(next)) break;
+    seen.add(next);
+    hops.push(next);
+    cur = next;
+  }
+  return hops;
+};
+
+/**
+ * First adapter that recognizes `candidate` or any hop of its symlink
+ * chain, plus the hop that matched. Recognition runs BEFORE realpath so a
+ * `…/mise/shims/<cmd>` link to the mise binary is still a manager shim.
+ */
+export const findRecognizingManagerHop = (
+  candidate: string,
+  adapters: readonly TManagerAdapter[],
+): { readonly adapter: TManagerAdapter; readonly hop: string } | null => {
+  for (const hop of symlinkChainHops(candidate)) {
+    for (const adapter of adapters) {
+      if (adapter.recognizes(hop)) return { adapter, hop };
+    }
+  }
+  return null;
 };
 
 /**
@@ -194,46 +238,50 @@ export const createManagerRegistry = (
     candidate: string,
     opts?: TResolveManagerCandidateOpts,
   ): Promise<TManagerResolution> => {
-    for (const adapter of adapters) {
-      if (!adapter.recognizes(candidate)) continue;
-      // Captured BEFORE the await: this is the candidate's shape at the
-      // moment we committed to resolving it. Reading it only AFTER
-      // `adapter.resolve` returns would fingerprint whatever the candidate
-      // looks like NOW, which can silently mismatch what it looked like
-      // when resolution actually ran — a shim re-created, or an
-      // interpreter/version switch, WHILE we were awaiting would otherwise
-      // get masked, letting an answer computed for the OLD state get cached
-      // and served as valid for the NEW one.
-      const fingerprintBeforeResolve = compositeFingerprint(adapter, candidate);
-      const target = await adapter.resolve(candidate, opts?.signal);
-      const resolution: TManagerResolution =
-        target === null
-          ? { kind: "unresolved", target: null, identity: adapter.name }
-          : {
-              kind: "resolved",
-              target,
-              identity: `${adapter.name}:${target}`,
-            };
-      // Cancellation is not evidence that the installation stopped resolving.
-      if (opts?.signal?.aborted) return resolution;
-      // Populate the passive-read cache as a side effect of this demand
-      // call — but ONLY if the candidate's composite fingerprint (its own
-      // on-disk shape AND the adapter's selection-state signal) is still
-      // identical to what it was right before we started resolving. Any
-      // mutation observed during the await means this resolution no longer
-      // describes the candidate's current state, so it must not be cached
-      // at all (the aborted-cache guard above is preserved unchanged: this
-      // check runs strictly after it, never in place of it).
-      const fingerprintAfterResolve = compositeFingerprint(adapter, candidate);
-      if (fingerprintAfterResolve === fingerprintBeforeResolve) {
-        peekCache.set(candidate, {
-          fingerprint: fingerprintAfterResolve,
-          resolution,
-        });
-      }
-      return resolution;
+    const match = findRecognizingManagerHop(candidate, adapters);
+    if (match === null) {
+      return { kind: "ordinary", target: candidate, identity: null };
     }
-    return { kind: "ordinary", target: candidate, identity: null };
+    const { adapter, hop } = match;
+    // Captured BEFORE the await: this is the candidate's shape at the
+    // moment we committed to resolving it. Reading it only AFTER
+    // `adapter.resolve` returns would fingerprint whatever the candidate
+    // looks like NOW, which can silently mismatch what it looked like
+    // when resolution actually ran — a shim re-created, or an
+    // interpreter/version switch, WHILE we were awaiting would otherwise
+    // get masked, letting an answer computed for the OLD state get cached
+    // and served as valid for the NEW one.
+    // Fingerprint the ORIGINAL candidate (PATH hit / host path) so a
+    // changed outer symlink also invalidates; resolve via the recognized
+    // hop so basename/`mise which` see `…/mise/shims/<cmd>`.
+    const fingerprintBeforeResolve = compositeFingerprint(adapter, candidate);
+    const target = await adapter.resolve(hop, opts?.signal);
+    const resolution: TManagerResolution =
+      target === null
+        ? { kind: "unresolved", target: null, identity: adapter.name }
+        : {
+            kind: "resolved",
+            target,
+            identity: `${adapter.name}:${target}`,
+          };
+    // Cancellation is not evidence that the installation stopped resolving.
+    if (opts?.signal?.aborted) return resolution;
+    // Populate the passive-read cache as a side effect of this demand
+    // call — but ONLY if the candidate's composite fingerprint (its own
+    // on-disk shape AND the adapter's selection-state signal) is still
+    // identical to what it was right before we started resolving. Any
+    // mutation observed during the await means this resolution no longer
+    // describes the candidate's current state, so it must not be cached
+    // at all (the aborted-cache guard above is preserved unchanged: this
+    // check runs strictly after it, never in place of it).
+    const fingerprintAfterResolve = compositeFingerprint(adapter, candidate);
+    if (fingerprintAfterResolve === fingerprintBeforeResolve) {
+      peekCache.set(candidate, {
+        fingerprint: fingerprintAfterResolve,
+        resolution,
+      });
+    }
+    return resolution;
   };
 
   /**
@@ -259,16 +307,17 @@ export const createManagerRegistry = (
   const peekManagerResolution = (
     candidate: string,
   ): TManagerResolution | undefined => {
-    for (const adapter of adapters) {
-      if (!adapter.recognizes(candidate)) continue;
-      const hit = peekCache.get(candidate);
-      if (hit === undefined) return undefined;
-      if (hit.fingerprint !== compositeFingerprint(adapter, candidate)) {
-        return undefined;
-      }
-      return hit.resolution;
+    const match = findRecognizingManagerHop(candidate, adapters);
+    if (match === null) {
+      return { kind: "ordinary", target: candidate, identity: null };
     }
-    return { kind: "ordinary", target: candidate, identity: null };
+    const { adapter } = match;
+    const hit = peekCache.get(candidate);
+    if (hit === undefined) return undefined;
+    if (hit.fingerprint !== compositeFingerprint(adapter, candidate)) {
+      return undefined;
+    }
+    return hit.resolution;
   };
 
   return {
