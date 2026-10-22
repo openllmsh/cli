@@ -18017,7 +18017,8 @@
                               "unit": {
                                 "type": "string",
                                 "enum": [
-                                  "tool_calls"
+                                  "tool_calls",
+                                  "tokens"
                                 ]
                               },
                               "free": {
@@ -18034,6 +18035,9 @@
                               }
                             },
                             "additionalProperties": false
+                          },
+                          "default_enabled": {
+                            "type": "boolean"
                           },
                           "mcp": {
                             "type": "object",
