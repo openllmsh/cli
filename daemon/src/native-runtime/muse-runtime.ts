@@ -45,7 +45,7 @@
  */
 
 import { chmodSync, existsSync } from "node:fs";
-import { mkdir, mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm } from "node:fs/promises";
 import { join } from "node:path";
 import type { TurnOutcome as TOfficialMuseTurnOutcome } from "@muse-code/sdk";
 import {
@@ -81,7 +81,7 @@ import { createMuseTurnState } from "./muse-events";
 import type { TMuseMcpServer, TMuseToolNameMap } from "./muse-mcp-server";
 import { buildMuseToolNameMap, startMuseMcpServer } from "./muse-mcp-server";
 import type { TMuseOverlay, TMuseWebSearchMode } from "./muse-overlay";
-import { createMuseExecutionOverlay } from "./muse-overlay";
+import { createMuseExecutionOverlay, mkdirPrivate } from "./muse-overlay";
 import type { TMuseCallerTool, TMuseInputPart } from "./muse-request";
 import type { TMuseApprovalRequest } from "./muse-web-search";
 import { decideMuseNativeApproval } from "./muse-web-search";
@@ -1174,9 +1174,11 @@ export type TMuseTurnDirs = {
   readonly runtimeParent: string;
 };
 
+type TMkdir = typeof import("node:fs/promises").mkdir;
+
 export type TAllocateMuseTurnDirsOptions = {
-  /** Directory creator; omitted → `fs/promises` `mkdir`. */
-  readonly mkdir?: typeof mkdir;
+  /** Directory creator; omitted → {@link mkdirPrivate} under the turn root. */
+  readonly mkdir?: TMkdir;
 };
 
 /**
@@ -1189,14 +1191,18 @@ export const allocateMuseTurnDirs = async (
   prefix: string,
   options: TAllocateMuseTurnDirsOptions = {},
 ): Promise<TMuseTurnDirs> => {
-  const doMkdir = options.mkdir ?? mkdir;
   const turnRoot = await mkdtemp(join(parent, prefix));
   try {
     chmodSync(turnRoot, 0o700);
     const workspaceRoot = join(turnRoot, "workspace");
     const runtimeParent = join(turnRoot, "runtime");
-    await doMkdir(workspaceRoot, { recursive: true, mode: 0o700 });
-    await doMkdir(runtimeParent, { recursive: true, mode: 0o700 });
+    if (options.mkdir !== undefined) {
+      await options.mkdir(workspaceRoot, { recursive: true, mode: 0o700 });
+      await options.mkdir(runtimeParent, { recursive: true, mode: 0o700 });
+    } else {
+      await mkdirPrivate(workspaceRoot, turnRoot);
+      await mkdirPrivate(runtimeParent, turnRoot);
+    }
     return { turnRoot, workspaceRoot, runtimeParent };
   } catch (error) {
     await rm(turnRoot, { recursive: true, force: true }).catch(() => {});
