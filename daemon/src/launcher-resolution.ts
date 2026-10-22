@@ -508,12 +508,31 @@ export const createLauncherResolver = (
         return dir;
       }
     };
-    const dirs = [
-      ...(launcherPath !== undefined ? [searchDir(launcherPath)] : []),
-      searchDir(scriptReal),
-    ];
-    for (const dir of new Set(dirs)) {
-      const sibling = join(dir, basename(interpreter));
+    const launcherDirs =
+      launcherPath !== undefined ? [launcherPath] : ([] as string[]);
+    const dirs = [...launcherDirs, scriptReal].map((p) => ({
+      raw: dirname(p),
+      real: searchDir(p),
+    }));
+    // A manager shim is never a usable interpreter: under the isolated
+    // HOME/XDG it can't read the user's version selection. That includes a
+    // sibling — `mise use -g npm:…` puts the `node` shim right beside the
+    // launcher shim — so skip recognized siblings and fall through. Check
+    // both spellings of the dir: the realpath (macOS /var → /private/var)
+    // can differ from the path an adapter was configured with.
+    const isManagerShim = (path: string): boolean =>
+      managers
+        .listManagerAdapters()
+        .some((adapter) => adapter.recognizes(path));
+    const seen = new Set<string>();
+    for (const { raw, real } of dirs) {
+      if (seen.has(real)) continue;
+      seen.add(real);
+      const name = basename(interpreter);
+      if (isManagerShim(join(raw, name)) || isManagerShim(join(real, name))) {
+        continue;
+      }
+      const sibling = join(real, name);
       try {
         accessSync(sibling, constants.X_OK);
         return sibling;
@@ -521,10 +540,7 @@ export const createLauncherResolver = (
         // try next / fall through to manager resolution
       }
     }
-    const recognized = managers
-      .listManagerAdapters()
-      .some((adapter) => adapter.recognizes(interpreter));
-    if (!recognized) return interpreter;
+    if (!isManagerShim(interpreter)) return interpreter;
     const viaManager = await managers.resolveManagerCandidate(interpreter, {
       ...(signal !== undefined ? { signal } : {}),
     });
