@@ -51,7 +51,10 @@ import { defaultLauncherResolver } from "./launcher-resolution";
 import type { TLauncherResolution } from "./launcher-resolution-types";
 import { logWarn, safeDiagnosticMessage } from "./logger";
 import type { TManagerRegistry } from "./manager-resolution";
-import { defaultManagerRegistry } from "./manager-resolution";
+import {
+  defaultManagerRegistry,
+  findRecognizingManagerHop,
+} from "./manager-resolution";
 import { isHostCliRunnable } from "./path-utils";
 import { isMacKeychainProvider } from "./sandbox/policy";
 
@@ -628,8 +631,34 @@ const probeCliInstallStateBody = async (
     // spawns on this cadence unless `opts.demand` is set — the TTL only
     // throttles how often this cheap re-derive/re-stat runs, it is never
     // itself a license to query a manager adapter.
+    //
+    // Demand exception: when a host candidate is a manager shim and the
+    // launcher peek is cold (selection fingerprint drifted — `mise use -g`
+    // leaves the shim file untouched), force a re-resolve even inside the
+    // TTL so the isolated link and version probe track the new selection.
     const until = cliInstallReconcileUntil.get(installKey(provider));
-    if (until === undefined || until <= now) {
+    const launchersForReconcile =
+      opts?.launchers ??
+      (opts?.managers !== undefined ? undefined : defaultLauncherResolver);
+    const managersForReconcile = opts?.managers ?? defaultManagerRegistry;
+    const shimSelectionStale =
+      demand &&
+      launchersForReconcile !== undefined &&
+      hostCliCandidates(provider).some((candidate) => {
+        if (!existsSync(candidate)) return false;
+        if (
+          findRecognizingManagerHop(
+            candidate,
+            managersForReconcile.listManagerAdapters(),
+          ) === null
+        ) {
+          return false;
+        }
+        return (
+          launchersForReconcile.peekLauncherResolution(candidate) === undefined
+        );
+      });
+    if (until === undefined || until <= now || shimSelectionStale) {
       cliInstallReconcileUntil.set(
         installKey(provider),
         now + CLI_INSTALL_STATE_TTL_MS,
@@ -696,9 +725,19 @@ const probeCliInstallStateBody = async (
     return { installed: true, version: installed };
   }
 
+  // For manager-shim resolutions, fold the launcher cache fingerprint
+  // (already includes the adapter selection fingerprint) into the version
+  // identity so `mise use -g` invalidates a cached --version even when the
+  // resolved binary's path/mtime/size are unchanged.
+  const versionIdentityExtra = cached?.kind.startsWith("shim:")
+    ? cached.fingerprint
+    : undefined;
   const out = await cliVersion(bin, cliEnv(provider), {
     timeoutMs: cliVersionProbeTimeoutMs(),
     ...(opts?.signal !== undefined ? { signal: opts.signal } : {}),
+    ...(versionIdentityExtra !== undefined
+      ? { identityExtra: versionIdentityExtra }
+      : {}),
   });
   const state = { installed: true, version: parseVendorVersion(out) };
   noteCliInstallProbeResult({

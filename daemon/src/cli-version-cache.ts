@@ -39,6 +39,14 @@ export type TCliVersionOpts = {
    * and reuse a successful stamp hit. Distinct from updater `force`.
    */
   readonly reprobe?: boolean;
+  /**
+   * Extra identity folded into the cache key after the binary stamp. For
+   * manager-shim resolutions this is the launcher cache fingerprint
+   * (`own|sel:…`, which already includes the adapter's selection
+   * fingerprint) so a plain `mise use -g` invalidates the version even
+   * when the resolved binary's path/mtime/size are unchanged.
+   */
+  readonly identityExtra?: string;
 };
 
 const SCHEMA_V1 = 1;
@@ -47,7 +55,9 @@ export const CLI_VERSION_CACHE_MAX_RECORDS = 64;
 /** Version stdout is a short banner; anything larger is treated as failure. */
 export const CLI_VERSION_OUTPUT_MAX_BYTES = 4_096;
 const MAX_PATH_CHARS = 4_096;
-const MAX_STAMP_CHARS = 256;
+/** Binary stamp alone is short; shim resolutions append `|x:` + launcher
+ *  fingerprint (`own|sel:…`), so allow room for a config path + mtimes. */
+const MAX_STAMP_CHARS = 1_024;
 const MAX_FILE_BYTES =
   64 * 1024 +
   CLI_VERSION_CACHE_MAX_RECORDS *
@@ -91,6 +101,15 @@ type TCacheState = {
 
 const identityKey = (path: string, stamp: string): string =>
   `${path}\n${stamp}`;
+
+/** Fold optional launcher/selection identity into the binary stamp. */
+const stampWithIdentityExtra = (
+  stamp: string,
+  identityExtra: string | undefined,
+): string =>
+  identityExtra !== undefined && identityExtra.length > 0
+    ? `${stamp}|x:${identityExtra}`
+    : stamp;
 
 export const cliVersionCacheFilePath = (): string =>
   join(stateDir(), "cli-version-cache.json");
@@ -246,6 +265,7 @@ const runProbe = async (
   stamp: string,
   env: Record<string, string> | undefined,
   timeoutMs: number | undefined,
+  identityExtra: string | undefined,
 ): Promise<string | null> => {
   let output: string | null;
   try {
@@ -255,7 +275,11 @@ const runProbe = async (
     // Observer abort never reaches here (joinObserver only).
     output = null;
   }
-  const stampAfter = versionBinaryStamp(bin);
+  const baseStampAfter = versionBinaryStamp(bin);
+  const stampAfter =
+    baseStampAfter === null
+      ? null
+      : stampWithIdentityExtra(baseStampAfter, identityExtra);
   const resolvedAfter = resolveVersionBinary(bin);
   if (stampAfter !== stamp || resolvedAfter !== resolved) {
     return output;
@@ -285,10 +309,12 @@ const cachedCliVersionIn = (
 ): Promise<string | null> => {
   loadPersist(st);
   const resolved = resolveVersionBinary(bin);
-  const stamp = versionBinaryStamp(bin);
-  if (resolved === null || stamp === null) {
+  const baseStamp = versionBinaryStamp(bin);
+  if (resolved === null || baseStamp === null) {
     return Promise.resolve(null);
   }
+  const identityExtra = opts?.identityExtra;
+  const stamp = stampWithIdentityExtra(baseStamp, identityExtra);
   const key = identityKey(resolved, stamp);
   const hit = st.memory.get(key);
   if (hit !== undefined) {
@@ -311,6 +337,7 @@ const cachedCliVersionIn = (
       stamp,
       env,
       versionProbeTimeoutMs(opts?.timeoutMs),
+      identityExtra,
     ).finally(() => {
       st.inflight.delete(key);
     }),
@@ -328,11 +355,13 @@ const invalidateMatchingIn = (
   st: TCacheState,
   bin: string,
   output: string,
+  identityExtra?: string,
 ): boolean => {
   loadPersist(st);
   const resolved = resolveVersionBinary(bin);
-  const stamp = versionBinaryStamp(bin);
-  if (resolved === null || stamp === null) return false;
+  const baseStamp = versionBinaryStamp(bin);
+  if (resolved === null || baseStamp === null) return false;
+  const stamp = stampWithIdentityExtra(baseStamp, identityExtra);
   const key = identityKey(resolved, stamp);
   const hit = st.memory.get(key);
   if (hit === undefined || hit.output !== output) return false;
@@ -355,6 +384,7 @@ export type TCliVersionCache = {
   readonly invalidateMatchingCliVersionOutput: (
     bin: string,
     output: string,
+    identityExtra?: string,
   ) => boolean;
 };
 
@@ -384,8 +414,8 @@ export const createCliVersionCache = (): TCliVersionCache => {
   return {
     cachedCliVersion: (bin, env, opts) =>
       cachedCliVersionIn(current(), bin, env, opts),
-    invalidateMatchingCliVersionOutput: (bin, output) =>
-      invalidateMatchingIn(current(), bin, output),
+    invalidateMatchingCliVersionOutput: (bin, output, identityExtra) =>
+      invalidateMatchingIn(current(), bin, output, identityExtra),
   };
 };
 
