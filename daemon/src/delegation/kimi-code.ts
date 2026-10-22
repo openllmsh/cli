@@ -53,6 +53,8 @@ import {
   cachedCliSemver,
   credentialHasFetchLifetime,
   fetchModelList,
+  fetchModelListDetailed,
+  listWithReason,
   modelDiscoveryFromList,
   parseKimiModelList,
   skippedModelDiscovery,
@@ -71,6 +73,7 @@ import {
   withRefreshCaller,
 } from "./refresh";
 import type {
+  TListModelsOptions,
   TModelDiscoveryOptions,
   TModelDiscoveryResult,
   TProviderDelegate,
@@ -901,26 +904,40 @@ export const kimiCodeDelegate: TProviderDelegate = {
       }
     }),
 
-  listModels: () =>
-    withRefreshCaller("models", async () => {
-      // Same `GET /coding/v1/models` call `provisionModelConfig` makes —
-      // the vendor's per-subscription list (ids + `context_length`),
-      // reported to the cloud's model cache so `/v1/models` reflects what
-      // THIS subscription actually serves. Metadata only; bounded + null
-      // on any failure via `fetchModelList`.
-      const token = await readToken();
-      if (token === null) return null;
-      const base = await resolveProviderUrl(PROVIDER, "/coding/v1");
-      return fetchModelList(
-        `${base}/models`,
-        {
-          authorization: `Bearer ${token.accessToken}`,
-          ...(await identityHeaders()),
-          accept: "application/json",
-        },
-        parseKimiModelList,
-      );
-    }),
+  listModels: (opts?: TListModelsOptions) =>
+    withRefreshCaller("models", () =>
+      listWithReason(opts, async () => {
+        // Same `GET /coding/v1/models` call `provisionModelConfig` makes —
+        // the vendor's per-subscription list (ids + `context_length`),
+        // reported to the cloud's model cache so `/v1/models` reflects what
+        // THIS subscription actually serves. Metadata only; bounded + null
+        // on any failure via `fetchModelListDetailed`.
+        const token = await readToken();
+        if (token === null) {
+          return { kind: "null", reason: "token_unavailable" };
+        }
+        // Resolve URL + identity headers BEFORE fetchModelListDetailed:
+        // awaits outside its try/catch would escape the null-reason contract.
+        let url: string;
+        let headers: Record<string, string>;
+        try {
+          const base = await resolveProviderUrl(PROVIDER, "/coding/v1");
+          url = `${base}/models`;
+          headers = await identityHeaders();
+        } catch {
+          return { kind: "null", reason: "error" };
+        }
+        return fetchModelListDetailed(
+          url,
+          {
+            authorization: `Bearer ${token.accessToken}`,
+            ...headers,
+            accept: "application/json",
+          },
+          parseKimiModelList,
+        );
+      }),
+    ),
 
   discoverModels: async (
     options: TModelDiscoveryOptions,

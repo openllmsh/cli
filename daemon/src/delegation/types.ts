@@ -56,6 +56,36 @@ export type TModelDiscoveryResult =
   | { readonly kind: "skipped" }
   | { readonly kind: "failed" };
 
+/**
+ * Why `listModels` collapsed to null. Closed tokens for doctor telemetry —
+ * never raw URLs, bodies, or headers.
+ */
+export type TListModelsNullReason =
+  | "token_unavailable"
+  | "version_unresolved"
+  | "empty_after_filter"
+  | "error"
+  | `http_${number}`;
+
+export type TFetchModelListDetailed =
+  | {
+      readonly kind: "ok";
+      readonly models: ReadonlyArray<TProviderModelEntry>;
+    }
+  | {
+      readonly kind: "null";
+      readonly reason: TListModelsNullReason;
+    };
+
+/** Optional extras for {@link TProviderDelegate.listModels}. */
+export type TListModelsOptions = {
+  /**
+   * Invoked when the listing collapses to `null`, with a closed reason for
+   * doctor telemetry. Callers that omit it treat every null as `error`.
+   */
+  readonly onNullReason?: (reason: TListModelsNullReason) => void;
+};
+
 export type TProviderDelegate = {
   readonly slug: string;
   /** Primary native login is browser unless the provider is device-code only. */
@@ -152,9 +182,12 @@ export type TProviderDelegate = {
    * subscription actually serves (live-provider-model-catalog proposal
    * §4). Absent on providers without a listing endpoint (they keep the
    * static-catalog fallback). Returns `null` on any failure — never an
-   * empty list.
+   * empty list. Pass `onNullReason` to capture a closed doctor reason
+   * when the listing collapses to null (default reason is `error`).
    */
-  listModels?: () => Promise<ReadonlyArray<TProviderModelEntry> | null>;
+  listModels?: (
+    opts?: TListModelsOptions,
+  ) => Promise<ReadonlyArray<TProviderModelEntry> | null>;
 
   /**
    * Automatic model discovery: existing unexpired credential only, no

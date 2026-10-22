@@ -72,12 +72,22 @@ import { currentLoginCommandCorrelation, currentTickId } from "../op-context";
 import { sandboxSpawnArgs } from "../sandbox/exec";
 import { unwrapKeychainSpawn } from "../sandbox/policy";
 import { isInteractionNotAllowed, parseAutoLockOff } from "./keychain-parse";
+import {
+  assertSafeSecurityArgv,
+  SecurityArgvRejectedError,
+} from "./keychain-security-argv";
 import { classifyStatError } from "./observation-cache";
 import { redactSensitiveArgv } from "./redact-sensitive-argv";
 import { bindAbort, logIfKilled, spawnCwd } from "./spawn";
 import type { TStoreRead } from "./util";
 
-const MAC = platform() === "darwin";
+export type { TAllowedSecuritySubcommand } from "./keychain-security-argv";
+export {
+  ALLOWED_SECURITY_SUBCOMMANDS,
+  assertSafeSecurityArgv,
+  looksLikeKeychainPath,
+  SecurityArgvRejectedError,
+} from "./keychain-security-argv";
 
 /** Readiness = the shared tri-state: `present` (created + unlocked this call),
  *  `indeterminate` (create/unlock failed or the chain is unusable). Off macOS
@@ -419,6 +429,10 @@ export type TKeychainRuntimeDeps = {
   /** Supervised spawner for `security` children. Defaults to the daemon's
    *  process-wide child supervisor. */
   readonly superviseSpawn?: TChildSupervisor["superviseSpawn"];
+  /** Host platform. Injected so tests can exercise the macOS keychain path
+   *  without a process-global `mock.module("node:os")`. Defaults to
+   *  `platform` from `node:os`. */
+  readonly platform?: () => NodeJS.Platform;
 };
 
 export type TKeychainRuntime = {
@@ -472,6 +486,7 @@ export const createKeychainRuntime = (
   const timebase = deps.timebase ?? defaultDeadlineTimebase;
   const nowMs = timebase.nowMs;
   const spawnSupervised = deps.superviseSpawn ?? superviseSpawn;
+  const isMac = (deps.platform ?? platform)() === "darwin";
 
   let keychainCounters = emptyKeychainCounters();
   let lastWatcherSnapshot = emptyKeychainCounters();
@@ -584,7 +599,7 @@ export const createKeychainRuntime = (
     budget?: TDeadlineBudget,
     onSkip?: () => T,
   ): Promise<T> => {
-    if (!MAC) return operation();
+    if (!isMac) return operation();
     const previous = macosKeychainLane;
     let release = (): void => {};
     const occupied = new Promise<void>((resolve) => {
@@ -773,6 +788,33 @@ export const createKeychainRuntime = (
     home: string,
     opts: TSecuritySpawnOpts,
   ): Promise<TSecurityResult> => {
+    // Structural no-prompt chokepoint: reject unsafe argv BEFORE the lane or
+    // any real `security` child. Callers see a failed spawn result; nothing
+    // interactive ever reaches SecurityAgent from a policy violation.
+    try {
+      assertSafeSecurityArgv(argv);
+    } catch (err) {
+      const reason =
+        err instanceof SecurityArgvRejectedError
+          ? err.reason
+          : err instanceof Error
+            ? err.message
+            : "security_argv_rejected";
+      logError(
+        "keychain",
+        safeDiagnosticMessage`security argv rejected before spawn`,
+        {
+          reason,
+          argv: redactSensitiveArgv(["security", ...argv]),
+        },
+      );
+      return {
+        ...FAILED_SPAWN,
+        stderr: `security_argv_rejected: ${reason}`,
+        timedOut: false,
+        aborted: false,
+      };
+    }
     const parentBudget = budgetFromSignal(opts.signal);
     const budget =
       parentBudget?.child(securitySpawnTimeoutMs()) ??
@@ -978,6 +1020,8 @@ export const createKeychainRuntime = (
   type TKeychainPayloads = {
     readonly values: ReadonlyArray<string>;
     readonly secretUnreadable: boolean;
+    /** True when any candidate service hit interaction-not-allowed. */
+    readonly interactionNotAllowed: boolean;
   };
 
   /** Complete credential reads, keyed by isolated keychain + service prefix. */
@@ -1062,7 +1106,7 @@ export const createKeychainRuntime = (
 
   const keychainStoreIdentity = (home: string): TKeychainStoreIdentity => {
     const path = loginKeychainPath(home);
-    if (!MAC) {
+    if (!isMac) {
       return {
         path,
         present: false,
@@ -1971,7 +2015,7 @@ export const createKeychainRuntime = (
     home: string,
     signal?: AbortSignal,
   ): Promise<TStoreRead<void>> => {
-    if (!MAC) return READY;
+    if (!isMac) return READY;
     const kc = loginKeychainPath(home);
     const backoff = transientTimeouts.get(kc);
     if (backoff !== undefined && backoff.nextAtMs > Date.now()) {
@@ -2052,7 +2096,7 @@ export const createKeychainRuntime = (
     home: string,
     signal?: AbortSignal,
   ): Promise<TStoreRead<void>> => {
-    if (!MAC) return READY;
+    if (!isMac) return READY;
     const kc = loginKeychainPath(home);
     const backoff = observeTransientTimeouts.get(kc);
     if (backoff !== undefined && backoff.nextAtMs > Date.now()) {
@@ -2119,7 +2163,7 @@ export const createKeychainRuntime = (
   const ensureIsolatedKeychain = async (
     home: string,
   ): Promise<TStoreRead<void>> => {
-    if (MAC) {
+    if (isMac) {
       const kc = loginKeychainPath(home);
       if (transientTimeouts.has(kc)) {
         transientTimeouts.delete(kc);
@@ -2153,12 +2197,15 @@ export const createKeychainRuntime = (
 
   /**
    * macOS only: grant command-line tools prompt-free access to the items in
-   * the isolated keychain. Run AFTER a login writes them. Gated on readiness.
-   * Returns whether the keychain ended up in the granted state (true off macOS,
-   * and true when there was no key to partition — see {@link noKeyToPartition}).
+   * the isolated keychain. Run AFTER a login writes them, and again after a
+   * launcher relink (the ACL still names the previous binary path). Gated on
+   * readiness. Returns whether the keychain ended up in the granted state
+   * (true off macOS, and true when there was no key to partition — see
+   * {@link noKeyToPartition}). Issues exactly one `set-key-partition-list`
+   * (dev parity) — never a genp partition-list grant.
    */
   const grantKeychainToolAccess = async (home: string): Promise<boolean> => {
-    if (!MAC) return true;
+    if (!isMac) return true;
     if ((await ensureKeychainReady(home)).kind !== "present") return false;
     const kc = loginKeychainPath(home);
     const res = await spawnSecurity(
@@ -2255,6 +2302,14 @@ export const createKeychainRuntime = (
       ...(signal !== undefined ? { signal } : {}),
     });
     noteKeychainIoResult(kc, dump);
+    // ACL / interaction-not-allowed: never retry (a retry can raise UI). Surface
+    // a typed needs-relogin cause so callers ask the user to reconnect instead.
+    if (isInteractionNotAllowed(dump.stderr)) {
+      return {
+        kind: "indeterminate",
+        cause: "keychain_interaction_not_allowed",
+      };
+    }
     if (dump.code !== 0) {
       return {
         kind: "indeterminate",
@@ -2277,11 +2332,16 @@ export const createKeychainRuntime = (
     return value;
   };
 
+  type TSecretRead =
+    | { readonly kind: "secret"; readonly value: string | null }
+    | { readonly kind: "interaction_not_allowed" }
+    | { readonly kind: "inconclusive" };
+
   const readKeychainSecret = async (
     home: string,
     service: string,
     signal?: AbortSignal,
-  ): Promise<string | null> => {
+  ): Promise<TSecretRead> => {
     const kc = loginKeychainPath(home);
     const mtimeMs = keychainMtimeMs(kc);
     const cacheKey = `${kc}\0${service}`;
@@ -2292,7 +2352,7 @@ export const createKeychainRuntime = (
       cached.mtimeMs === mtimeMs &&
       Date.now() - cached.storedAtMs < KEYCHAIN_SECRET_TTL_MS
     ) {
-      return cached.secret;
+      return { kind: "secret", value: cached.secret };
     }
     const found = await spawnSecurity(
       ["find-generic-password", "-s", service, "-w", kc],
@@ -2304,23 +2364,27 @@ export const createKeychainRuntime = (
       },
     );
     noteKeychainIoResult(kc, found);
+    // Never cache or retry interaction-not-allowed — a retry can raise UI.
+    // Callers treat this as needs-relogin (ACL stale after a binary relink).
+    if (isInteractionNotAllowed(found.stderr)) {
+      return { kind: "interaction_not_allowed" };
+    }
     if (found.code !== 0) {
       // Timeouts / aborts are inconclusive — caching `null` would suppress a
       // real secret for the TTL after a slow or cancelled `security` spawn.
       // Conclusive nonzero exits (item-not-found, decode errors, …) stay cached.
       // Skip the write when the cache was invalidated while we were in flight.
-      if (
-        !found.timedOut &&
-        !found.aborted &&
-        generation === secretCacheGeneration
-      ) {
+      if (found.timedOut || found.aborted) {
+        return { kind: "inconclusive" };
+      }
+      if (generation === secretCacheGeneration) {
         secretCache.set(cacheKey, {
           mtimeMs,
           storedAtMs: Date.now(),
           secret: null,
         });
       }
-      return null;
+      return { kind: "secret", value: null };
     }
     const { stdout } = found;
     const trimmed = stdout.trim();
@@ -2332,7 +2396,7 @@ export const createKeychainRuntime = (
         secret,
       });
     }
-    return secret;
+    return { kind: "secret", value: secret };
   };
 
   /**
@@ -2359,16 +2423,32 @@ export const createKeychainRuntime = (
 
     const values: string[] = [];
     let secretUnreadable = false;
+    let interactionNotAllowed = false;
     try {
       for (const service of services.value) {
         const secret = await readKeychainSecret(home, service);
-        if (secret === null) {
+        // Per-service failure continues (dev parity): a later candidate may
+        // still yield a valid payload. Never retry interaction-not-allowed
+        // inside this call — readKeychainSecret also refuses to cache it.
+        if (secret.kind === "interaction_not_allowed") {
+          secretUnreadable = true;
+          interactionNotAllowed = true;
+          continue;
+        }
+        if (secret.kind === "inconclusive") {
+          secretUnreadable = true;
+          continue;
+        }
+        if (secret.value === null) {
           secretUnreadable = true;
         } else {
-          values.push(secret);
+          values.push(secret.value);
         }
       }
-      return { kind: "present", value: { values, secretUnreadable } };
+      return {
+        kind: "present",
+        value: { values, secretUnreadable, interactionNotAllowed },
+      };
     } catch (err) {
       return {
         kind: "indeterminate",
@@ -2384,7 +2464,7 @@ export const createKeychainRuntime = (
     signal?: AbortSignal,
     observeOnly = false,
   ): Promise<TStoreRead<string>> => {
-    if (!MAC) return { kind: "absent" };
+    if (!isMac) return { kind: "absent" };
     const key = `${loginKeychainPath(home)}\0${servicePrefix}\0${observeOnly ? "observe" : "mutate"}`;
     let op = inFlightKeychainReads.get(key);
     if (op === undefined) {
@@ -2411,6 +2491,12 @@ export const createKeychainRuntime = (
       if (validate === undefined || validate(payload)) {
         return { kind: "present", value: payload };
       }
+    }
+    if (payloads.value.interactionNotAllowed) {
+      return {
+        kind: "indeterminate",
+        cause: "keychain_interaction_not_allowed",
+      };
     }
     if (payloads.value.secretUnreadable) {
       return { kind: "indeterminate", cause: "keychain_secret_unreadable" };

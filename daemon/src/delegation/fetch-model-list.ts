@@ -1,6 +1,13 @@
 import type { TProviderModelEntry } from "@openllmsh/protocol";
 import { MODEL_LIST_FETCH_TIMEOUT_MS } from "@openllmsh/protocol";
-import type { TModelDiscoveryResult } from "./types";
+import type {
+  TFetchModelListDetailed,
+  TListModelsNullReason,
+  TListModelsOptions,
+  TModelDiscoveryResult,
+} from "./types";
+
+export type { TFetchModelListDetailed, TListModelsNullReason };
 
 /**
  * Coerce a provider-reported value into a positive integer, or
@@ -119,31 +126,82 @@ export const parseGrokModelList = (
   return parseGrokModelRows(asRecords(rec.data ?? rec.models));
 };
 
+/** Map an HTTP status onto the closed listModels null reason. */
+export const httpNullReason = (status: number): TListModelsNullReason =>
+  Number.isInteger(status) && status >= 100 && status <= 599
+    ? (`http_${status}` as const)
+    : "error";
+
 /**
  * Shared fetch for delegate `listModels()` implementations: bounded
  * timeout, JSON body handed to the caller's provider-specific `parse`,
  * and `null` on ANY failure (non-2xx / timeout / parse / empty) —
  * never an empty list, so a vendor hiccup can't wipe a user's cached
  * entries. Common behavior (like this timeout) lives here once instead
- * of per delegate.
+ * of per delegate. Prefer {@link fetchModelListDetailed} when the caller
+ * needs a closed null-reason for doctor telemetry.
  */
-export const fetchModelList = async (
+export const fetchModelListDetailed = async (
   url: string,
   headers: Readonly<Record<string, string>>,
   parse: (body: unknown) => ReadonlyArray<TProviderModelEntry>,
-): Promise<ReadonlyArray<TProviderModelEntry> | null> => {
+): Promise<TFetchModelListDetailed> => {
   try {
     const resp = await fetch(url, {
       method: "GET",
       headers,
       signal: AbortSignal.timeout(MODEL_LIST_FETCH_TIMEOUT_MS),
     });
-    if (!resp.ok) return null;
+    if (!resp.ok) {
+      return { kind: "null", reason: httpNullReason(resp.status) };
+    }
     const entries = parse(await resp.json());
-    return entries.length > 0 ? entries : null;
+    if (entries.length === 0) {
+      return { kind: "null", reason: "empty_after_filter" };
+    }
+    return { kind: "ok", models: entries };
   } catch {
+    return { kind: "null", reason: "error" };
+  }
+};
+
+export const fetchModelList = async (
+  url: string,
+  headers: Readonly<Record<string, string>>,
+  parse: (body: unknown) => ReadonlyArray<TProviderModelEntry>,
+): Promise<ReadonlyArray<TProviderModelEntry> | null> => {
+  const detailed = await fetchModelListDetailed(url, headers, parse);
+  return detailed.kind === "ok" ? detailed.models : null;
+};
+
+/**
+ * Run a detailed listModels attempt, forward a closed null reason through
+ * `opts.onNullReason`, and keep the null-never-empty contract.
+ */
+export const listWithReason = async (
+  opts: TListModelsOptions | undefined,
+  run: () => Promise<TFetchModelListDetailed>,
+): Promise<ReadonlyArray<TProviderModelEntry> | null> => {
+  const detailed = await run();
+  if (detailed.kind === "null") {
+    opts?.onNullReason?.(detailed.reason);
     return null;
   }
+  return detailed.models;
+};
+
+/**
+ * Map a CLI/subprocess listing (null = exec failure, [] = empty) onto the
+ * shared detailed shape used by {@link listWithReason}.
+ */
+export const detailedFromCliList = (
+  listed: ReadonlyArray<TProviderModelEntry> | null,
+): TFetchModelListDetailed => {
+  if (listed === null) return { kind: "null", reason: "error" };
+  if (listed.length === 0) {
+    return { kind: "null", reason: "empty_after_filter" };
+  }
+  return { kind: "ok", models: listed };
 };
 
 /**

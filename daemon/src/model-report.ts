@@ -19,20 +19,29 @@
 import type {
   TAuthEvent,
   TDaemonModelReportEntry,
+  TDaemonModelsReason,
+  TDaemonModelsStatus,
   TDaemonProviderConnection,
   TProviderModelEntry,
+  TSubscriptionProviderSlug,
 } from "@openllmsh/protocol";
-import { normalizeProviderConnection } from "@openllmsh/protocol";
+import {
+  DaemonModelsReason,
+  normalizeProviderConnection,
+} from "@openllmsh/protocol";
 import { addAuthObserver } from "./auth-events";
 import { reportModels } from "./cloud-client";
 import type { TProviderDelegate } from "./delegation";
-import { DELEGATES, getDelegate } from "./delegation";
+import { DELEGATES, getDelegate, isOAuthSlug } from "./delegation";
+import type { TListModelsNullReason } from "./delegation/types";
+import { logWarn, safeDiagnosticMessage } from "./logger";
 import {
   MODEL_REPORT_FAILURE_RETRY_MS,
   MODEL_REPORT_TTL_MS,
 } from "./model-report-policy";
 import { withoutCommandReplayContext } from "./op-context";
 import { computeStatus, peekLastKnownConnection } from "./status";
+import { markStatusDirty } from "./status-dirty";
 
 export {
   MODEL_REPORT_FAILURE_RETRY_MS,
@@ -62,8 +71,62 @@ type TListed = {
         readonly models: ReadonlyArray<TProviderModelEntry>;
       }
     | { readonly kind: "skipped" }
-    | { readonly kind: "failed" };
+    | {
+        readonly kind: "failed";
+        readonly reason?: TListModelsNullReason;
+      };
   readonly postError?: string;
+};
+
+/**
+ * Closed reason → privacy-safe message. `safeDiagnosticMessage` forbids
+ * interpolation, so each closed token gets one frozen template; unknown
+ * `http_*` collapses to `http_error` via {@link toWireModelsReason}.
+ * Typed as `Record<TDaemonModelsReason, …>` so every wire reason requires a
+ * message when `DaemonModelsReason` grows.
+ */
+const LIST_MODELS_NULL_MESSAGES: Record<
+  TDaemonModelsReason,
+  ReturnType<typeof safeDiagnosticMessage>
+> = {
+  token_unavailable: safeDiagnosticMessage`Connected provider model listing returned null (token_unavailable).`,
+  version_unresolved: safeDiagnosticMessage`Connected provider model listing returned null (version_unresolved).`,
+  empty_after_filter: safeDiagnosticMessage`Connected provider model listing returned null (empty_after_filter).`,
+  error: safeDiagnosticMessage`Connected provider model listing returned null (error).`,
+  http_401: safeDiagnosticMessage`Connected provider model listing returned null (http_401).`,
+  http_403: safeDiagnosticMessage`Connected provider model listing returned null (http_403).`,
+  http_404: safeDiagnosticMessage`Connected provider model listing returned null (http_404).`,
+  http_429: safeDiagnosticMessage`Connected provider model listing returned null (http_429).`,
+  http_500: safeDiagnosticMessage`Connected provider model listing returned null (http_500).`,
+  http_502: safeDiagnosticMessage`Connected provider model listing returned null (http_502).`,
+  http_503: safeDiagnosticMessage`Connected provider model listing returned null (http_503).`,
+  http_error: safeDiagnosticMessage`Connected provider model listing returned null (http_error).`,
+};
+
+const WIRE_REASONS: ReadonlySet<string> = new Set(DaemonModelsReason.literals);
+const isWireReason = (r: string): r is TDaemonModelsReason =>
+  WIRE_REASONS.has(r);
+
+const toWireModelsReason = (
+  reason: TListModelsNullReason | undefined,
+): TDaemonModelsReason => {
+  if (reason === undefined) return "error";
+  return isWireReason(reason) ? reason : "http_error";
+};
+
+const listModelsNullMessage = (
+  reason: TListModelsNullReason,
+): ReturnType<typeof safeDiagnosticMessage> =>
+  LIST_MODELS_NULL_MESSAGES[toWireModelsReason(reason)];
+
+const noteConnectedListModelsNull = (
+  slug: string,
+  reason: TListModelsNullReason,
+): void => {
+  logWarn("model-report", listModelsNullMessage(reason), undefined, {
+    provider: slug as TSubscriptionProviderSlug,
+    observation: "connected",
+  });
 };
 
 /** The result of collecting and attempting one due model-list report. */
@@ -82,17 +145,99 @@ const lastAttempt = new Map<string, TAttempt>();
 const autoFlights = new Map<string, Promise<TListed>>();
 const forceFlights = new Map<string, Promise<TListed>>();
 
+type TModelsOutcome =
+  | { readonly status: "ok" }
+  | { readonly status: "unavailable"; readonly reason: TDaemonModelsReason };
+
+/** Latest list/discover outcome per slug — drives `models_status` on status. */
+const lastModelsOutcome = new Map<string, TModelsOutcome>();
+
+const outcomeEqual = (
+  a: TModelsOutcome | undefined,
+  b: TModelsOutcome,
+): boolean => {
+  if (a === undefined) return false;
+  if (a.status === "ok" && b.status === "ok") return true;
+  if (a.status === "unavailable" && b.status === "unavailable") {
+    return a.reason === b.reason;
+  }
+  return false;
+};
+
+const noteModelsOutcome = (listed: TListed): boolean => {
+  if (listed.outcome.kind === "skipped") return false;
+  let next: TModelsOutcome;
+  if (
+    listed.outcome.kind === "success" &&
+    listed.outcome.models.length > 0 &&
+    listed.postError === undefined
+  ) {
+    next = { status: "ok" };
+  } else if (listed.outcome.kind === "failed") {
+    next = {
+      status: "unavailable",
+      reason: toWireModelsReason(listed.outcome.reason),
+    };
+  } else if (
+    listed.outcome.kind === "success" &&
+    listed.outcome.models.length > 0 &&
+    listed.postError !== undefined
+  ) {
+    // Provider listed models locally, but the cloud POST failed — tell the UI
+    // to refresh rather than pretending the catalog was empty.
+    next = { status: "unavailable", reason: "error" };
+  } else {
+    // success with empty models (callers usually coerce to failed first)
+    next = {
+      status: "unavailable",
+      reason: "empty_after_filter",
+    };
+  }
+  const prev = lastModelsOutcome.get(listed.slug);
+  if (outcomeEqual(prev, next)) return false;
+  lastModelsOutcome.set(listed.slug, next);
+  return true;
+};
+
+/** Models-status fields for one provider; empty when never attempted. */
+export const modelsStatusFieldsFor = (
+  slug: string,
+): {
+  readonly models_status?: TDaemonModelsStatus;
+  readonly models_reason?: TDaemonModelsReason;
+} => {
+  const outcome = lastModelsOutcome.get(slug);
+  if (outcome === undefined) return {};
+  if (outcome.status === "ok") return { models_status: "ok" };
+  return {
+    models_status: "unavailable",
+    models_reason: outcome.reason,
+  };
+};
+
+/** Overlay latest model-list outcomes onto a status connections array. */
+export const attachModelsStatusToConnections = (
+  connections: ReadonlyArray<TDaemonProviderConnection>,
+): TDaemonProviderConnection[] =>
+  connections.map((conn) => {
+    const fields = modelsStatusFieldsFor(conn.provider);
+    if (fields.models_status === undefined) return conn;
+    return { ...conn, ...fields };
+  });
+
 /** Reset the throttle — all slugs, or one (post-connect / tests). */
 export const resetModelReportThrottle = (slug?: string): void => {
   if (slug === undefined) {
     lastAttempt.clear();
     autoFlights.clear();
     forceFlights.clear();
+    lastModelsOutcome.clear();
     return;
   }
   lastAttempt.delete(slug);
   autoFlights.delete(slug);
   forceFlights.delete(slug);
+  lastModelsOutcome.delete(slug);
 };
 
 const isDue = (
@@ -179,13 +324,19 @@ const runForceList = (due: TDueModelReport): Promise<TListed> => {
   if (existing !== undefined) return existing;
   const flight = (async (): Promise<TListed> => {
     try {
-      const models = await (due.delegate.listModels?.() ??
-        Promise.resolve(null));
+      let nullReason: TListModelsNullReason | undefined;
+      const models = await (due.delegate.listModels?.({
+        onNullReason: (reason) => {
+          nullReason = reason;
+        },
+      }) ?? Promise.resolve(null));
       if (models === null) {
+        const reason = nullReason ?? "error";
+        noteConnectedListModelsNull(due.slug, reason);
         return {
           slug: due.slug,
           cliVersion: due.cliVersion,
-          outcome: { kind: "failed" },
+          outcome: { kind: "failed", reason },
         };
       }
       return {
@@ -194,10 +345,11 @@ const runForceList = (due: TDueModelReport): Promise<TListed> => {
         outcome: { kind: "success", models },
       };
     } catch {
+      noteConnectedListModelsNull(due.slug, "error");
       return {
         slug: due.slug,
         cliVersion: due.cliVersion,
-        outcome: { kind: "failed" },
+        outcome: { kind: "failed", reason: "error" },
       };
     }
   })();
@@ -215,6 +367,10 @@ const stampAttempt = (listed: TListed, now: number): void => {
     ok: listed.outcome.kind === "success" && listed.postError === undefined,
     ...(listed.cliVersion ? { cliVersion: listed.cliVersion } : {}),
   });
+  if (noteModelsOutcome(listed)) {
+    // Deduped dirty bit — watcher publishes once; no per-provider storm.
+    markStatusDirty("models");
+  }
 };
 
 const runAutoDiscoverAndReport = (
@@ -337,10 +493,38 @@ export const maybeReportModels = (
           )
         : dueForSucceededLogin(now, slug);
 
-    const results = await Promise.all(due.map((item) => runForceList(item)));
-    for (const listed of results) stampAttempt(listed, now);
-    return aggregateListed(results, { alreadyPosted: false });
+    const listed = await Promise.all(due.map((item) => runForceList(item)));
+    // Post before stamping so a cloud failure is reflected in models_status
+    // (auto already posts inside its flight; force must not stamp "ok" early).
+    const results = await applyForceCloudPost(listed);
+    for (const item of results) stampAttempt(item, now);
+    return aggregateListed(results, { alreadyPosted: true });
   });
+
+/** POST force listings once; attach `postError` when the cloud write fails. */
+const applyForceCloudPost = async (
+  results: ReadonlyArray<TListed>,
+): Promise<ReadonlyArray<TListed>> => {
+  const entries: TDaemonModelReportEntry[] = [];
+  for (const item of results) {
+    if (item.outcome.kind !== "success") continue;
+    if (item.outcome.models.length === 0) continue;
+    entries.push({
+      provider: item.slug,
+      models: item.outcome.models,
+      ...(item.cliVersion ? { cli_version: item.cliVersion } : {}),
+    });
+  }
+  if (entries.length === 0) return results;
+  const posted = await reportModels({ entries });
+  if (posted.ok) return results;
+  return results.map((item) => {
+    if (item.outcome.kind !== "success" || item.outcome.models.length === 0) {
+      return item;
+    }
+    return { ...item, postError: posted.error };
+  });
+};
 
 const aggregateListed = async (
   results: ReadonlyArray<TListed>,
@@ -348,8 +532,15 @@ const aggregateListed = async (
 ): Promise<TMaybeModelReportResult> => {
   const entries: TDaemonModelReportEntry[] = [];
   const failedProviders: string[] = [];
+  const postErrors: string[] = [];
   for (const listed of results) {
-    if (listed.outcome.kind === "failed" || listed.postError !== undefined) {
+    if (listed.postError !== undefined) {
+      // Cloud write failed after a successful list — keep the POST diagnostic
+      // separate from vendor listing failures.
+      postErrors.push(listed.postError);
+      continue;
+    }
+    if (listed.outcome.kind === "failed") {
       failedProviders.push(listed.slug);
       continue;
     }
@@ -368,11 +559,19 @@ const aggregateListed = async (
       : undefined;
   if (opts.alreadyPosted) {
     const posted = entries.length;
+    const postError =
+      postErrors.length === 0 ? undefined : [...new Set(postErrors)].join("; ");
+    const error =
+      postError === undefined
+        ? listingError
+        : listingError === undefined
+          ? postError
+          : `${listingError}; ${postError}`;
     return {
-      attempted: posted > 0,
+      attempted: posted > 0 || postErrors.length > 0,
       reported: posted,
-      failed: failedProviders.length > 0,
-      ...(listingError === undefined ? {} : { error: listingError }),
+      failed: failedProviders.length > 0 || postErrors.length > 0,
+      ...(error === undefined ? {} : { error }),
     };
   }
   if (entries.length === 0) {
@@ -424,3 +623,65 @@ export const observeLoginModelReports = (): void => {
   loginObserverInstalled = true;
   addAuthObserver(onAuthEvent);
 };
+
+type TConnectedBaseline = {
+  readonly connected: boolean;
+};
+
+/**
+ * Observe status snapshots and demand-report models on any oauth transition
+ * into `connected` — including credentials that appear out-of-band (native
+ * CLI login). Uses `mode: "auto"` (discoverModels only — observe-only store
+ * reads, never `listModels` / native refresh) so a passive status edge cannot
+ * open a keychain-prompting path. Explicit `auth.login.succeeded` and
+ * `refresh_models` still force-list. Deduped by the per-slug throttle /
+ * single-flight; does NOT reset the throttle (login.succeeded still does).
+ */
+export type TConnectedModelReportTracker = (
+  connections: ReadonlyArray<TDaemonProviderConnection>,
+) => void;
+
+export const createConnectedModelReportTracker =
+  (): TConnectedModelReportTracker => {
+    const last = new Map<string, TConnectedBaseline>();
+    let seeded = false;
+    return (connections) => {
+      // First status snapshot after daemon start: seed the baseline WITHOUT
+      // firing. Every already-connected provider would otherwise look like a
+      // rising edge and discoverModels would keychain-read on every boot.
+      if (!seeded) {
+        for (const conn of connections) {
+          if (!isOAuthSlug(conn.provider)) continue;
+          last.set(conn.provider, {
+            connected:
+              normalizeProviderConnection(conn).observation === "connected",
+          });
+        }
+        seeded = true;
+        return;
+      }
+      const now = Date.now();
+      for (const conn of connections) {
+        if (!isOAuthSlug(conn.provider)) continue;
+        const connected =
+          normalizeProviderConnection(conn).observation === "connected";
+        const was = last.get(conn.provider)?.connected === true;
+        last.set(conn.provider, { connected });
+        // Falling edge: drop a stale models outcome so an out-of-band re-login
+        // whose auto discover returns skipped cannot reattach unavailable/
+        // token_unavailable from the previous session.
+        if (!connected && was && lastModelsOutcome.delete(conn.provider)) {
+          markStatusDirty("models");
+        }
+        if (!connected || was) continue;
+        // Skip providers with a fresh last attempt — throttle already gates
+        // inside maybeReportModels, but avoid even scheduling a no-op flight.
+        if (!isDue(conn.provider, now, conn.cli_version)) continue;
+        void maybeReportModels(now, conn.provider, "auto").catch(() => {});
+      }
+    };
+  };
+
+/** Process-wide tracker — one baseline Map for the daemon lifetime. */
+export const noteConnectionsForModelReport: TConnectedModelReportTracker =
+  createConnectedModelReportTracker();

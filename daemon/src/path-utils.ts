@@ -4,6 +4,7 @@
 import { closeSync, existsSync, openSync, readSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, delimiter, isAbsolute, join } from "node:path";
+import { allManagerResolutionBinDirs } from "./launcher-roots";
 
 /**
  * Standard user bin dirs the daemon prepends to a spawned integration's PATH.
@@ -15,15 +16,84 @@ import { basename, delimiter, isAbsolute, join } from "node:path";
  * `/usr`, ~/.local/bin, ~/.bun — see `sandbox/working-set/`), so a spawn never
  * hits a Landlock denial; absent dirs are simply ignored by the shell.
  *
- * Computed per call (not module-load) so a test that overrides `HOME` sees the
- * overridden dirs — production HOME is stable for the process lifetime.
+ * Manager/packager shim dirs (mise/asdf/volta/proto/…) are NOT on this list —
+ * a native install must not pick `node`/`python` from a shim dir on every
+ * spawn. Demand launcher resolution remembers the proven interpreter/shim dir
+ * per provider (`launcher-profile-state` → `cliEnv` PATH prepend) instead.
+ *
+ * Prefer `$HOME` when set so tests (and atypical service units) can redirect
+ * the scan; fall back to `os.homedir()` (passwd entry) otherwise. Bun's
+ * `homedir()` does not always honour `$HOME`. Computed per call so a test that
+ * overrides `HOME` sees the overridden dirs — production HOME is stable for
+ * the process lifetime.
  */
-export const defaultBinDirs = (): readonly string[] => [
-  "/opt/homebrew/bin",
-  "/usr/local/bin",
-  `${homedir()}/.local/bin`,
-  `${homedir()}/.bun/bin`,
-];
+/** Cheap `mtimeMs:size` fingerprint; `null` when the path can't be statted. */
+export const fileFingerprint = (path: string): string | null => {
+  try {
+    const st = statSync(path);
+    return `${st.mtimeMs}:${st.size}`;
+  } catch {
+    return null;
+  }
+};
+
+export const defaultBinDirs = (): readonly string[] => {
+  const home = process.env.HOME?.trim() || homedir();
+  return [
+    "/opt/homebrew/bin",
+    "/usr/local/bin",
+    join(home, ".local", "bin"),
+    join(home, ".bun", "bin"),
+  ];
+};
+
+/**
+ * Manager/packager shim + bin dirs searched during launcher RESOLUTION only
+ * (classify / interpreter lookup) — never prepended to every spawn PATH.
+ * Derived from {@link allManagerResolutionBinDirs}; existence-filtered with a
+ * short-lived cache so demand resolve does not `existsSync` the same
+ * candidates repeatedly within a tick.
+ */
+const managerPackagerBinDirCache = new Map<
+  string,
+  { readonly at: number; readonly dirs: readonly string[] }
+>();
+const MANAGER_PACKAGER_BIN_DIR_CACHE_MS = 2_000;
+
+export const managerPackagerBinDirs = (
+  env: NodeJS.ProcessEnv = process.env,
+  now: () => number = Date.now,
+): readonly string[] => {
+  const home = env.HOME?.trim() || homedir();
+  const cacheKey = [
+    home,
+    env.MISE_DATA_DIR ?? "",
+    env.ASDF_DATA_DIR ?? "",
+    env.VOLTA_HOME ?? "",
+    env.PROTO_HOME ?? "",
+    env.FNM_DIR ?? "",
+    env.npm_config_prefix ?? "",
+    env.NPM_CONFIG_PREFIX ?? "",
+    env.XDG_DATA_HOME ?? "",
+  ].join("\0");
+  const cached = managerPackagerBinDirCache.get(cacheKey);
+  const t = now();
+  if (
+    cached !== undefined &&
+    t - cached.at <= MANAGER_PACKAGER_BIN_DIR_CACHE_MS
+  ) {
+    return cached.dirs;
+  }
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const dir of allManagerResolutionBinDirs(home, env)) {
+    if (dir.length === 0 || seen.has(dir)) continue;
+    seen.add(dir);
+    if (existsSync(dir)) out.push(dir);
+  }
+  managerPackagerBinDirCache.set(cacheKey, { at: t, dirs: out });
+  return out;
+};
 
 /** @deprecated Prefer {@link defaultBinDirs}; kept as a snapshot alias. */
 export const DEFAULT_BIN_DIRS: readonly string[] = defaultBinDirs();
@@ -87,6 +157,59 @@ export type THostCliRuntime = {
 
 const SHEBANG_READ_BYTES = 512;
 
+type TExecutableHeaderCache = {
+  readonly path: string;
+  readonly mtimeMs: number;
+  readonly size: number;
+  readonly header: Buffer | null;
+};
+
+let executableHeaderCache: TExecutableHeaderCache | null = null;
+
+/**
+ * Read the first {@link SHEBANG_READ_BYTES} of an executable. Shared by
+ * shebang inspection and launcher classification so a demand path that
+ * calls `isHostCliRunnable` then `classifyLauncherContent` does not open
+ * the same file twice for the same mtime/size.
+ */
+export const readExecutableHeader = (binPath: string): Buffer | null => {
+  let st: ReturnType<typeof statSync>;
+  try {
+    st = statSync(binPath);
+    if (!st.isFile()) return null;
+  } catch {
+    return null;
+  }
+  const cached = executableHeaderCache;
+  if (
+    cached !== null &&
+    cached.path === binPath &&
+    cached.mtimeMs === st.mtimeMs &&
+    cached.size === st.size
+  ) {
+    return cached.header;
+  }
+  let fd: number | null = null;
+  let header: Buffer | null = null;
+  try {
+    fd = openSync(binPath, "r");
+    const buf = Buffer.alloc(SHEBANG_READ_BYTES);
+    const read = readSync(fd, buf, 0, SHEBANG_READ_BYTES, 0);
+    header = Buffer.from(buf.subarray(0, read));
+  } catch {
+    header = null;
+  } finally {
+    if (fd !== null) closeSync(fd);
+  }
+  executableHeaderCache = {
+    path: binPath,
+    mtimeMs: st.mtimeMs,
+    size: st.size,
+    header,
+  };
+  return header;
+};
+
 /**
  * Parse `#!…` into the interpreter the kernel/`env` would try to exec.
  * Supports `#!/usr/bin/env node`, `#!/usr/bin/env -S node --flag`, and absolute
@@ -148,32 +271,19 @@ const parseShebang = (shebangLine: string): TShebang | null => {
 };
 
 const readShebangLine = (binPath: string): string | null => {
-  let fd: number | null = null;
-  try {
-    // Directories / FIFOs / devices are never a host CLI — and opening a FIFO
-    // would block discovery.
-    if (!statSync(binPath).isFile()) return null;
-    // Read only the header: a native CLI can be hundreds of MB.
-    fd = openSync(binPath, "r");
-    const buf = Buffer.alloc(SHEBANG_READ_BYTES);
-    const read = readSync(fd, buf, 0, SHEBANG_READ_BYTES, 0);
-    const slice = buf.subarray(0, read);
-    if (slice.length < 2 || slice[0] !== 0x23 || slice[1] !== 0x21) {
-      return null;
-    }
-    let end = slice.length;
-    for (let i = 2; i < slice.length; i += 1) {
-      if (slice[i] === 0x0a) {
-        end = i;
-        break;
-      }
-    }
-    return Buffer.from(slice.subarray(0, end)).toString("utf8");
-  } catch {
+  const slice = readExecutableHeader(binPath);
+  if (slice === null) return null;
+  if (slice.length < 2 || slice[0] !== 0x23 || slice[1] !== 0x21) {
     return null;
-  } finally {
-    if (fd !== null) closeSync(fd);
   }
+  let end = slice.length;
+  for (let i = 2; i < slice.length; i += 1) {
+    if (slice[i] === 0x0a) {
+      end = i;
+      break;
+    }
+  }
+  return Buffer.from(slice.subarray(0, end)).toString("utf8");
 };
 
 const interpreterResolves = (

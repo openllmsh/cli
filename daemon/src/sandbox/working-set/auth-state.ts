@@ -17,31 +17,29 @@ import { existsSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { cliConfigDir } from "../../cli-paths";
 import type { TWorkingSet } from "./base";
-import { miseDirs, vendorExecDirs } from "./base";
+import { vendorExecDirs } from "./base";
+import { delegatedCliRuntimeSet } from "./delegated-cli-runtime";
 
 /**
  * The `auth-state` layer's unique working set (pre-normalization — `index.ts`
  * runs `existing()`).
  */
 export const authStateLayer = (home: string): TWorkingSet => {
-  // Pre-create claude's XDG STATE + CACHE dirs the isolated claude WRITES at run
-  // time. REQUIRED on Linux: Landlock can only grant an EXISTING path
-  // (`existing()` drops a missing leaf rather than widening onto bare $HOME), so
-  // a fresh box would leave these ungranted. macOS is a harmless no-op.
   // Muse's isolated auth store is `$XDG_CONFIG_HOME/muse` →
   // `<cliHome("muse")>/.config/muse` (auth.json). Pre-create that leaf so a
   // future decomposed `<state>/cli` grant can address it; today the whole
   // state dir already covers it.
-  for (const d of [
-    join(home, ".local", "state", "claude"),
-    join(home, ".cache", "claude"),
-    cliConfigDir("muse"),
-  ]) {
-    try {
-      mkdirSync(d, { recursive: true });
-    } catch {
-      // best-effort — an ungranted leaf just fails that vendor's run visibly.
-    }
+  //
+  // Claude's XDG STATE + CACHE are under the ISOLATED home
+  // (`cliEnv` pins XDG_STATE_HOME/XDG_CACHE_HOME → `<cliHome>/.local/state` /
+  // `.cache`). Do NOT mkdir or RW-grant the real-home
+  // `~/.local/state/claude` / `~/.cache/claude` — that contradicted L3
+  // ("never RW real ~/.local/state") once L2 isolation landed. Isolated
+  // leaves are covered by `delegatedCliRuntimeSet` → `cliHome` RW.
+  try {
+    mkdirSync(cliConfigDir("muse"), { recursive: true });
+  } catch {
+    // best-effort — an ungranted leaf just fails that vendor's run visibly.
   }
   // bun's global install cache — the RW half of the split ~/.bun grant. Only
   // pre-create it when bun IS installed: absent bun means the plugin install
@@ -55,18 +53,12 @@ export const authStateLayer = (home: string): TWorkingSet => {
       // best-effort — see the claude-dir loop above.
     }
   }
-  // mise's global roots: login/usage delegation resolves and execs
-  // mise-managed vendor CLIs (see `miseDirs`).
-  const mise = miseDirs(home);
+  // L3 shared delegated-CLI runtime owns isolated homes + state tmp +
+  // launcher data roots (incl. mise via launcher-roots). One owner — do not
+  // also union `miseDirs` here (was a duplicate RO grant source).
+  const runtime = delegatedCliRuntimeSet(home);
   const readWrite = new Set<string>([
-    ...mise.readWrite,
-    //   claude's XDG STATE + CACHE dirs — the isolated claude WRITES these at
-    //   RUN time (logs/state + cache) on Linux; absent on macOS. Scoped to the
-    //   claude subdirs (not the whole `~/.local/state` / `~/.cache`) — no
-    //   secrets there. (`~/.local/share/claude`, the BINARY dir, is read+exec
-    //   in the readOnly set — the daemon execs but never writes it.)
-    join(home, ".local", "state", "claude"),
-    join(home, ".cache", "claude"),
+    ...runtime.readWrite,
     //   bun's global install cache ONLY (the SPLIT ~/.bun grant — audit §5-B):
     //   a plugin install running `bun install` populates
     //   ~/.bun/install/cache. The `bun` BINARY dir (~/.bun/bin) is read+exec in
@@ -81,7 +73,7 @@ export const authStateLayer = (home: string): TWorkingSet => {
     // symlink-chain resolution). The daemon RUNS the vendor CLIs (login/usage
     // delegation) but never WRITES them: installs are user-run + unsandboxed.
     ...vendorExecDirs(home),
-    ...mise.readOnly,
+    ...runtime.readOnly,
     // bun's BINARY dir — read+exec only (the split ~/.bun grant, audit §5-B):
     // the plugin install must EXEC `bun`, but a write grant here would let a
     // compromised daemon replace the user's `bun` launcher. The cache half
@@ -90,6 +82,8 @@ export const authStateLayer = (home: string): TWorkingSet => {
     // skipped at apply time — correct (nothing to exec anyway).
     join(home, ".bun", "bin"),
   ]);
+  // A read-write grant subsumes a read-only one.
+  for (const rw of readWrite) readOnly.delete(rw);
   return {
     readWrite: [...readWrite],
     readOnly: [...readOnly],

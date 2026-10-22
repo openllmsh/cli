@@ -258,6 +258,7 @@ export const COMMAND_ARGS: Readonly<
     "opt-out",
     "opt-in",
     "reporting-status",
+    "launchers",
     "--dry-run",
     "--yes",
     "--fix",

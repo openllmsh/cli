@@ -56,6 +56,8 @@ import {
   cachedCliSemver,
   credentialHasFetchLifetime,
   fetchModelList,
+  fetchModelListDetailed,
+  listWithReason,
   modelDiscoveryFromList,
   parseClaudeModelList,
   skippedModelDiscovery,
@@ -99,6 +101,7 @@ import type { TRunCaptureResult } from "./spawn";
 import { runCaptureResult } from "./spawn";
 import type {
   TImageCredential,
+  TListModelsOptions,
   TModelDiscoveryOptions,
   TModelDiscoveryResult,
   TProviderDelegate,
@@ -1114,27 +1117,42 @@ export const claudeCodeDelegate: TProviderDelegate = {
       }
     }),
 
-  listModels: () =>
-    withRefreshCaller("models", async () => {
-      // Anthropic's `GET /v1/models` accepts the subscription OAuth bearer
-      // (same auth shape as the usage read above). Host derived from the
-      // CAPTURED inference URL via `resolveProviderUrl` — no hardcoded
-      // origin; only the stable leaf path is a constant. Metadata only;
-      // bounded + null on any failure via `fetchModelList`.
-      const token = await readToken();
-      if (token === null) return null;
-      return fetchModelList(
-        await resolveProviderUrl(PROVIDER, "/v1/models?limit=1000"),
-        {
-          authorization: `Bearer ${token.accessToken}`,
-          "user-agent": await userAgent(),
-          "anthropic-version": "2023-06-01",
-          "anthropic-beta": OAUTH_BETA,
-          accept: "application/json",
-        },
-        parseClaudeModelList,
-      );
-    }),
+  listModels: (opts?: TListModelsOptions) =>
+    withRefreshCaller("models", () =>
+      listWithReason(opts, async () => {
+        // Anthropic's `GET /v1/models` accepts the subscription OAuth bearer
+        // (same auth shape as the usage read above). Host derived from the
+        // CAPTURED inference URL via `resolveProviderUrl` — no hardcoded
+        // origin; only the stable leaf path is a constant. Metadata only;
+        // bounded + null on any failure via `fetchModelListDetailed`.
+        const token = await readToken();
+        if (token === null) {
+          return { kind: "null", reason: "token_unavailable" };
+        }
+        // Resolve URL + UA BEFORE fetchModelListDetailed: argument-position
+        // awaits run outside its try/catch and would escape the null-reason
+        // contract.
+        let url: string;
+        let ua: string;
+        try {
+          url = await resolveProviderUrl(PROVIDER, "/v1/models?limit=1000");
+          ua = await userAgent();
+        } catch {
+          return { kind: "null", reason: "error" };
+        }
+        return fetchModelListDetailed(
+          url,
+          {
+            authorization: `Bearer ${token.accessToken}`,
+            "user-agent": ua,
+            "anthropic-version": "2023-06-01",
+            "anthropic-beta": OAUTH_BETA,
+            accept: "application/json",
+          },
+          parseClaudeModelList,
+        );
+      }),
+    ),
 
   discoverModels: async (
     options: TModelDiscoveryOptions,

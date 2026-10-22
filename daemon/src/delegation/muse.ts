@@ -34,6 +34,7 @@ import {
 import { unwrapKeychainSpawn } from "../sandbox/policy";
 import { resolveUpstreamUrl } from "./auth-config";
 import { cliLaunch, loginWiring } from "./delegate-shared";
+import { detailedFromCliList, listWithReason } from "./fetch-model-list";
 import { makeStreamConnect } from "./login-direct";
 import { makeCancelConnect } from "./login-flow";
 import {
@@ -47,6 +48,7 @@ import {
   waitFileStoreHint,
 } from "./observation-cache";
 import type {
+  TListModelsOptions,
   TModelDiscoveryOptions,
   TModelDiscoveryResult,
   TProviderDelegate,
@@ -555,24 +557,32 @@ export const museDelegate: TProviderDelegate = {
     return { kind: "success", models: cached };
   },
 
-  listModels: async (): Promise<ReadonlyArray<TProviderModelEntry> | null> => {
-    // Explicit manual refresh: demand-driven MSP model/list via runtime helper.
-    try {
-      const { listMuseModelsDemand } = await import(
-        "../native-runtime/muse-runtime"
-      );
-      const listed = await listMuseModelsDemand({
-        bin: cliBin(PROVIDER),
-        env: baseEnv(),
-      });
-      if (listed === null) return null;
-      return listed.length > 0 ? listed : null;
-    } catch {
-      const fingerprint = museNativeModelFingerprint();
-      if (fingerprint === null) return null;
-      return readMuseNativeModels({ fingerprint, accountHint: null });
-    }
-  },
+  listModels: (opts?: TListModelsOptions) =>
+    listWithReason(opts, async () => {
+      // Explicit manual refresh: demand-driven MSP model/list via runtime helper.
+      // Auth-absent short-circuits before any CLI/MSP spawn.
+      if ((await readFileBackedAuthPresence()) === null) {
+        return { kind: "null", reason: "token_unavailable" };
+      }
+      try {
+        const { listMuseModelsDemand } = await import(
+          "../native-runtime/muse-runtime"
+        );
+        const listed = await listMuseModelsDemand({
+          bin: cliBin(PROVIDER),
+          env: baseEnv(),
+        });
+        return detailedFromCliList(listed);
+      } catch {
+        const fingerprint = museNativeModelFingerprint();
+        if (fingerprint === null) {
+          return { kind: "null", reason: "error" };
+        }
+        return detailedFromCliList(
+          readMuseNativeModels({ fingerprint, accountHint: null }),
+        );
+      }
+    }),
 
   credentialForUpstream: async () => {
     if ((await readFileBackedAuthPresence()) === null) {

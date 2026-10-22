@@ -30,24 +30,22 @@ import { dirname, join } from "node:path";
 import { logDebug, logWarn } from "../logger";
 import type { TSandboxState } from "./landlock";
 import { daemonWorkingSet } from "./working-set";
+import { MAC_SEATBELT_RUNTIME_WRITE_EXTRAS } from "./working-set/delegated-cli-runtime";
 
 /** Escape a path for embedding in an SBPL `(subpath "...")` / `(literal "...")`. */
 const esc = (p: string): string =>
   p.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
 
-/** macOS runtime paths the process tree must WRITE (beyond the daemon working
- *  set): device nodes, the per-user temp/cache (LaunchServices + Bun mmap),
- *  and the user-Library bits the vendor-CLI / browser-open flows write —
- *  `Caches` (npm/node + CLI caches) and `Preferences` (CLI prefs / Launch
- *  Services). The read side is open (see {@link buildProfile}); these are the
- *  WRITE allow-list additions. */
+/**
+ * macOS runtime paths the process tree must WRITE beyond the shared working
+ * set. `/dev` is already in the base working set; the rest are the named
+ * Seatbelt-only extras ({@link MAC_SEATBELT_RUNTIME_WRITE_EXTRAS}) — kept out
+ * of the shared L3 set so Landlock does not grant `/tmp`, `/private/var/folders`,
+ * or real-home `Library/*`.
+ */
 const macRuntimeWrite = (home: string): string[] => [
   "/dev",
-  "/private/tmp",
-  "/tmp",
-  "/private/var/folders",
-  join(home, "Library", "Caches"),
-  join(home, "Library", "Preferences"),
+  ...MAC_SEATBELT_RUNTIME_WRITE_EXTRAS(home),
 ];
 
 /**

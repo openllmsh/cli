@@ -20,17 +20,11 @@
  * reads of HOME are a residual host-policy risk.
  */
 
-import {
-  chmodSync,
-  lstatSync,
-  mkdirSync,
-  symlinkSync,
-  writeFileSync,
-} from "node:fs";
+import { chmodSync, lstatSync, symlinkSync, writeFileSync } from "node:fs";
 import { mkdir, mkdtemp, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, relative, resolve, sep } from "node:path";
 import { MUSE_CREDENTIAL_BACKEND } from "../cli-paths";
+import { daemonTempDir } from "../sandbox/working-set";
 import type { TMuseMcpServer } from "./muse-mcp-server";
 
 /**
@@ -92,6 +86,49 @@ export type TMuseOverlay = {
 const isNodeError = (error: unknown): error is NodeJS.ErrnoException =>
   error instanceof Error && "code" in error;
 
+const PRIVATE_DIR_MODE = 0o700;
+
+/**
+ * Create each missing directory component from `base` down to `path` as
+ * mode 0700, then `chmod` each newly created dir to 0700.
+ *
+ * Node/`fs.mkdir({ recursive: true, mode })` only applies `mode` to the LAST
+ * component; intermediates get `0777 & ~umask`. Under a systemd user unit with
+ * `UMask=0002` that yields group-writable `0775` ancestors, which muse-bin
+ * rejects (`UnsafePath` on the session deletion registry). Creating one
+ * component at a time with an explicit post-create chmod keeps every overlay
+ * ancestor private regardless of umask. Does not change process umask.
+ */
+export const mkdirPrivate = async (
+  path: string,
+  base: string,
+): Promise<void> => {
+  const resolvedBase = resolve(base);
+  const resolvedPath = resolve(path);
+  if (
+    resolvedPath !== resolvedBase &&
+    !resolvedPath.startsWith(`${resolvedBase}${sep}`)
+  ) {
+    throw new Error(
+      `mkdirPrivate: ${resolvedPath} is not under base ${resolvedBase}`,
+    );
+  }
+  const rel = relative(resolvedBase, resolvedPath);
+  if (rel.length === 0) return;
+  let current = resolvedBase;
+  for (const part of rel.split(sep)) {
+    if (part.length === 0 || part === ".") continue;
+    current = join(current, part);
+    try {
+      await mkdir(current, { mode: PRIVATE_DIR_MODE });
+      chmodSync(current, PRIVATE_DIR_MODE);
+    } catch (error) {
+      if (isNodeError(error) && error.code === "EEXIST") continue;
+      throw error;
+    }
+  }
+};
+
 /**
  * Resolve the durable provider auth.json from the pre-overlay env.
  *
@@ -151,7 +188,7 @@ export const createMuseExecutionOverlay = async (params: {
   const durableAuth = museAuthJsonPath(params.baseEnv);
 
   const root = await mkdtemp(
-    join(params.parentDir ?? tmpdir(), "muse-overlay-"),
+    join(params.parentDir ?? daemonTempDir(), "muse-overlay-"),
   );
   chmodSync(root, 0o700);
 
@@ -167,14 +204,20 @@ export const createMuseExecutionOverlay = async (params: {
     const dataHome = join(home, ".local", "share");
     const stateHome = join(home, ".local", "state");
     const codexHome = join(home, ".codex");
-    await mkdir(home, { recursive: true, mode: 0o700 });
-    await mkdir(configHome, { recursive: true, mode: 0o700 });
-    await mkdir(dataHome, { recursive: true, mode: 0o700 });
-    await mkdir(stateHome, { recursive: true, mode: 0o700 });
-    await mkdir(codexHome, { recursive: true, mode: 0o700 });
-
     const museDir = join(configHome, "muse");
-    mkdirSync(museDir, { mode: 0o700 });
+    // One component at a time + chmod: recursive mkdir only modes the leaf,
+    // so umask 002 would otherwise leave `.local` (etc.) group-writable.
+    await mkdirPrivate(home, root);
+    await mkdirPrivate(configHome, root);
+    await mkdirPrivate(museDir, root);
+    await mkdirPrivate(dataHome, root);
+    // muse-bin creates its data dir (`museHome` = `$XDG_DATA_HOME/muse`) with
+    // mode 0777, so the daemon's umask 002 makes it 0775 — and muse then
+    // refuses its own session store with `UnsafePath` (#781). Pre-create it
+    // private; muse reuses an existing dir.
+    await mkdirPrivate(join(dataHome, "muse"), root);
+    await mkdirPrivate(stateHome, root);
+    await mkdirPrivate(codexHome, root);
 
     linkAuthIfPresent(durableAuth, join(museDir, "auth.json"));
 

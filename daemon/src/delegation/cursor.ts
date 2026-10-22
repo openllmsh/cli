@@ -11,7 +11,6 @@ import { platform } from "node:os";
 import { join } from "node:path";
 import type {
   TDaemonProviderConnection,
-  TProviderModelEntry,
   TProviderUsageSnapshot,
   TProviderUsageWindow,
 } from "@openllmsh/protocol";
@@ -38,6 +37,7 @@ import { unwrapKeychainSpawn } from "../sandbox/policy";
 import { accountHashField, nonEmpty } from "./account-id";
 import { resolveProviderUrl, resolveUpstreamUrl } from "./auth-config";
 import { cliLaunch, loginWiring, nativeRefresher } from "./delegate-shared";
+import { detailedFromCliList, listWithReason } from "./fetch-model-list";
 import { jwtExpiryMs, jwtSubject } from "./jwt";
 import { makeStreamConnect } from "./login-direct";
 import { makeCancelConnect } from "./login-flow";
@@ -59,6 +59,8 @@ import {
   withRefreshCaller,
 } from "./refresh";
 import type {
+  TFetchModelListDetailed,
+  TListModelsOptions,
   TModelDiscoveryOptions,
   TModelDiscoveryResult,
   TProviderDelegate,
@@ -98,8 +100,7 @@ const REFRESH_LEEWAY_MS = 5 * 60_000;
 const { bin, env } = cliLaunch(PROVIDER, { NO_OPEN_BROWSER: "1" });
 
 // ─── Live model rows: one native observation cache (inference + manual) ─────
-let cursorModelsInflight: Promise<ReadonlyArray<TProviderModelEntry> | null> | null =
-  null;
+let cursorModelsInflight: Promise<TFetchModelListDetailed> | null = null;
 
 const cursorModelProvenance = (
   accountHint: string | null,
@@ -785,10 +786,9 @@ export const cursorDelegate: TProviderDelegate = {
 
   // Manual list still may spawn a short-lived ACP session. The same native
   // observation cache stores the result (and inference-captured rows).
-  listModels: (): Promise<ReadonlyArray<TProviderModelEntry> | null> =>
-    withRefreshCaller(
-      "models",
-      async (): Promise<ReadonlyArray<TProviderModelEntry> | null> => {
+  listModels: (opts?: TListModelsOptions) =>
+    withRefreshCaller("models", () =>
+      listWithReason(opts, async (): Promise<TFetchModelListDetailed> => {
         const token = await readToken();
         const expiryMs = token === null ? null : jwtExpiryMs(token.accessToken);
         const accountHint =
@@ -796,18 +796,20 @@ export const cursorDelegate: TProviderDelegate = {
         const provenance = cursorModelProvenance(accountHint);
         if (provenance !== null) {
           const cached = readCursorNativeModels(provenance);
-          if (cached !== null) return cached;
+          if (cached !== null) return { kind: "ok", models: cached };
         }
-        if (expiryMs === null || expiryMs <= Date.now()) return null;
+        if (token === null || expiryMs === null || expiryMs <= Date.now()) {
+          return { kind: "null", reason: "token_unavailable" };
+        }
         if (cursorModelsInflight === null) {
           const observedGeneration = cursorNativeModelGeneration();
           cursorModelsInflight =
-            (async (): Promise<ReadonlyArray<TProviderModelEntry> | null> => {
+            (async (): Promise<TFetchModelListDetailed> => {
               const rows = await listCursorModelsViaAcp({
                 bin: bin(),
                 env: env(),
               });
-              if (rows === null) return null;
+              if (rows === null) return detailedFromCliList(null);
               const live = cursorModelProvenance(accountHint);
               if (live !== null) {
                 rememberCursorNativeModels(
@@ -817,15 +819,15 @@ export const cursorDelegate: TProviderDelegate = {
                   observedGeneration,
                 );
                 const cached = readCursorNativeModels(live);
-                if (cached !== null) return cached;
+                if (cached !== null) return { kind: "ok", models: cached };
               }
-              return entriesFromCursorModelRows(rows);
+              return detailedFromCliList(entriesFromCursorModelRows(rows));
             })().finally(() => {
               cursorModelsInflight = null;
             });
         }
         return cursorModelsInflight;
-      },
+      }),
     ),
 
   credentialForUpstream: () =>

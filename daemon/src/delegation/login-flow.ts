@@ -23,11 +23,16 @@ import type {
   TAuthLoginMode,
   TDaemonProviderReasonCode,
   TDoctorAuthPhase,
+  TDoctorLauncherAdapter,
+  TDoctorLauncherKind,
 } from "@openllmsh/protocol";
 import {
   classifyFailureOutput,
+  DoctorLauncherAdapter,
   projectDoctorOutcomeLedger,
+  wireCompatibleFailureSignature,
 } from "@openllmsh/protocol";
+import { Schema as S } from "effect";
 import {
   admitVerifiedLogin,
   emitAuth,
@@ -35,6 +40,7 @@ import {
 } from "../auth-events";
 import { noteAuthStoreIdentityChange } from "../auth-user-action";
 import { opaqueDoctorCorrelation } from "../doctor-report/correlation";
+import { launcherProfileFor } from "../launcher-profile-state";
 import { logInfo, logWarn, safeDiagnosticMessage } from "../logger";
 import type { TLoginCommandContext } from "../op-context";
 import {
@@ -398,6 +404,28 @@ const loginFailureMessage = (
   return safeDiagnosticMessage`Login ended in an unexpected failure.`;
 };
 
+/** Map a remembered launcher profile onto closed doctor ledger fields. */
+const doctorLauncherFields = (
+  slug: string,
+): {
+  readonly launcher_kind?: TDoctorLauncherKind;
+  readonly launcher_adapter?: TDoctorLauncherAdapter;
+  readonly timings?: { readonly launcher_under_manager_root: boolean };
+} => {
+  const profile = launcherProfileFor(slug);
+  if (profile === undefined) return {};
+  const adapter =
+    profile.adapter_id !== null &&
+    S.is(DoctorLauncherAdapter)(profile.adapter_id)
+      ? profile.adapter_id
+      : undefined;
+  return {
+    launcher_kind: profile.kind,
+    ...(adapter !== undefined ? { launcher_adapter: adapter } : {}),
+    timings: { launcher_under_manager_root: profile.under_manager_root },
+  };
+};
+
 export const emitLoginFailed = (
   flow: TLoginFlowCtx,
   fail: {
@@ -414,6 +442,7 @@ export const emitLoginFailed = (
   if (fail.code !== "user_cancelled") {
     try {
       const correlation_id = opaqueDoctorCorrelation(flow.flowId);
+      const launcher = doctorLauncherFields(flow.slug);
       logWarn(
         "login-flow",
         loginFailureMessage(fail.code, fail.reason_code),
@@ -425,11 +454,22 @@ export const emitLoginFailed = (
             operation_kind: "login",
             outcome: "failed",
             login_failure_code: fail.code,
-            failure_signature: classifyFailureOutput(fail.message),
+            failure_signature: wireCompatibleFailureSignature(
+              classifyFailureOutput(fail.message),
+            ),
             ...(fail.reason_code !== undefined
               ? { reason_code: fail.reason_code }
               : {}),
+            ...(launcher.launcher_kind !== undefined
+              ? { launcher_kind: launcher.launcher_kind }
+              : {}),
+            ...(launcher.launcher_adapter !== undefined
+              ? { launcher_adapter: launcher.launcher_adapter }
+              : {}),
           }),
+          ...(launcher.timings !== undefined
+            ? { timings: launcher.timings }
+            : {}),
         },
       );
     } catch {
@@ -506,7 +546,9 @@ export const finalizeLoginTerminal = (opts: {
         operation_kind: "login",
         outcome: "failed",
         login_failure_code: opts.event.code,
-        failure_signature: classifyFailureOutput(opts.event.message),
+        failure_signature: wireCompatibleFailureSignature(
+          classifyFailureOutput(opts.event.message),
+        ),
         ...(opts.event.reason_code !== undefined
           ? { reason_code: opts.event.reason_code }
           : {}),
@@ -545,7 +587,9 @@ export const finalizeLoginTerminal = (opts: {
       opts.event.kind === "failed"
         ? {
             login_failure_code: opts.event.code,
-            failure_signature: classifyFailureOutput(opts.event.message),
+            failure_signature: wireCompatibleFailureSignature(
+              classifyFailureOutput(opts.event.message),
+            ),
             ...(opts.event.reason_code !== undefined
               ? {
                   reason_code: opts.event.reason_code,
@@ -865,7 +909,8 @@ export const finishInBackground = async (opts: {
   /** Finite verification watchdog. Default {@link LOGIN_VERIFY_WATCHDOG_MS}. */
   readonly verifyWatchdogMs?: number;
   /** Runs after a credential lands. Returning `false` marks the login FAILED
-   *  (e.g. the keychain partition-list grant was refused) — see below. */
+   *  (observed `set-key-partition-list` refusal only — genp grant misses are
+   *  non-fatal inside `grantKeychainToolAccess`) — see below. */
   readonly onConnected?: () =>
     | boolean
     | void
@@ -945,11 +990,12 @@ export const finishInBackground = async (opts: {
       return;
     }
   }
-  // An `onConnected` that returns `false` is an OBSERVED refusal (the keychain
-  // partition-list grant), not a best-effort miss: the credential landed but the
-  // daemon can't read it prompt-free, so the login is failed + retryable rather
-  // than reported as succeeded. A THROW stays best-effort (swallowed) so cleanup
-  // still runs and `clearPendingAuth` is never skipped.
+  // An `onConnected` that returns `false` is an OBSERVED refusal of the
+  // `set-key-partition-list` grant (dev semantics), not a best-effort genp
+  // miss: `grantKeychainToolAccess` already treats genp failures as non-fatal
+  // (degraded telemetry) so Claude/Cursor logins whose credential landed are
+  // not false-failed. A THROW stays best-effort (swallowed) so cleanup still
+  // runs and `clearPendingAuth` is never skipped.
   let grantDenied = false;
   if (sampled.state === "connected" && opts.onConnected !== undefined) {
     try {
@@ -1262,6 +1308,7 @@ export const spawnStreamLogin = async <T>(
       typeof target === "string" ? inspectHostCliRuntime(target) : null;
     if (runtime !== null) {
       const correlation_id = opaqueDoctorCorrelation(flow.flowId);
+      const launcher = doctorLauncherFields(flow.slug);
       logInfo(
         "login-flow",
         safeDiagnosticMessage`Login spawn prepared.`,
@@ -1272,10 +1319,17 @@ export const spawnStreamLogin = async <T>(
             provider: flow.slug,
             operation_kind: "login",
             phase: "start",
+            ...(launcher.launcher_kind !== undefined
+              ? { launcher_kind: launcher.launcher_kind }
+              : {}),
+            ...(launcher.launcher_adapter !== undefined
+              ? { launcher_adapter: launcher.launcher_adapter }
+              : {}),
           }),
           timings: {
             cli_is_script: runtime.kind === "script",
             interpreter_resolved: runtime.interpreterResolved,
+            ...(launcher.timings !== undefined ? launcher.timings : {}),
           },
         },
       );

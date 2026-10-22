@@ -16,7 +16,10 @@
  */
 
 import type { TSubscriptionProviderSlug } from "@openllmsh/protocol";
-import { classifyFailureOutput } from "@openllmsh/protocol";
+import {
+  classifyFailureOutput,
+  wireCompatibleFailureSignature,
+} from "@openllmsh/protocol";
 import type { TReapOutcome } from "../child-supervisor";
 import { opaqueDoctorCorrelation } from "../doctor-report/correlation";
 import { clearPendingAuth } from "../pending-auth";
@@ -568,7 +571,9 @@ export const makeStreamConnect = (
           lifecycle.record("child", childMark, {
             outcome: failOutcome,
             login_failure_code: fail.code,
-            failure_signature: classifyFailureOutput(res.captured),
+            failure_signature: wireCompatibleFailureSignature(
+              classifyFailureOutput(res.captured),
+            ),
             ...(typeof res.exitCode === "number"
               ? { root_exit_code: res.exitCode }
               : {}),

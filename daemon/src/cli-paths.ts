@@ -16,12 +16,14 @@
 import {
   accessSync,
   constants,
+  existsSync,
+  mkdirSync,
   readFileSync,
   realpathSync,
   statSync,
 } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join } from "node:path";
+import { delimiter, dirname, join } from "node:path";
 import type { TSubscriptionProviderSlug } from "@openllmsh/protocol";
 import {
   ANTIGRAVITY_HARNESS,
@@ -29,7 +31,9 @@ import {
   antigravityManagedExecutable,
 } from "./antigravity-layout";
 import { stateDir } from "./env";
-import { resolveOnPath } from "./path-utils";
+import { interpreterDirFor } from "./launcher-profile-state";
+import { buildLauncherDataRootEnv } from "./launcher-roots";
+import { augmentSpawnPath, resolveOnPath } from "./path-utils";
 import { daemonTempDir } from "./sandbox/working-set";
 
 /** The providers with an isolated CLI — exactly the closed
@@ -55,7 +59,11 @@ type TCliSpec = {
   readonly hostCandidates: (home: string) => string[];
   /** Isolated config/credential dir as the CLI itself sees it. Lazy. */
   readonly configDir: (isolatedHome: string) => string;
-  /** Isolated spawn env (HOME + TMPDIR + provider knobs). Lazy. */
+  /**
+   * Provider-specific spawn env knobs only (`CODEX_HOME`, `CLAUDE_CONFIG_DIR`,
+   * …). The shared isolated runtime base (`HOME` / `XDG_*` / `TMPDIR`) is
+   * applied by {@link cliEnv} for every provider — do not re-pin those here.
+   */
   readonly env: (ctx: TCliEnvCtx) => Record<string, string>;
   /**
    * Version read from install metadata beside the RESOLVED binary, instead of
@@ -166,9 +174,7 @@ const SPECS: Readonly<Record<TCliProvider, TCliSpec>> = {
     // ~/.local/share/claude/versions/<v> (the self-contained binary).
     hostCandidates: (home) => [join(home, ".local", "bin", "claude")],
     configDir: (home) => join(home, ".claude"),
-    env: ({ home, config, tmp }) => ({
-      HOME: home,
-      TMPDIR: tmp,
+    env: ({ config }) => ({
       // Claude reads its config/credentials from CLAUDE_CONFIG_DIR
       // (defaults to $HOME/.claude); pin it to the isolated home so
       // login/status/usage all use it, never the user's.
@@ -184,9 +190,7 @@ const SPECS: Readonly<Record<TCliProvider, TCliSpec>> = {
       join(home, ".codex", "bin", "codex"),
     ],
     configDir: (home) => join(home, ".codex"),
-    env: ({ home, root, config, tmp }) => ({
-      HOME: home,
-      TMPDIR: tmp,
+    env: ({ root, config }) => ({
       CODEX_HOME: config,
       CODEX_INSTALL_DIR: join(root, "bin"),
       // Skip interactive prompts during the scripted install.
@@ -202,9 +206,7 @@ const SPECS: Readonly<Record<TCliProvider, TCliSpec>> = {
       join(home, ".local", "bin", "kimi"),
     ],
     configDir: (home) => join(home, ".kimi-code"),
-    env: ({ home, root, config, tmp }) => ({
-      HOME: home,
-      TMPDIR: tmp,
+    env: ({ root, config }) => ({
       KIMI_CODE_HOME: config,
       KIMI_INSTALL_DIR: root,
       // Don't edit the user's shell rc files.
@@ -230,15 +232,9 @@ const SPECS: Readonly<Record<TCliProvider, TCliSpec>> = {
     ],
     // grok caches its OAuth token at <home>/.grok/auth.json.
     configDir: (home) => join(home, ".grok"),
-    // grok is HOME-rooted (like claude): it reads/writes its config +
-    // `auth.json` under <home>/.grok, so pinning HOME isolates it from the
-    // user's real ~/.grok. The host binary lives at its DEFAULT location
-    // (~/.grok/bin, installed out of band by the user-run installer) and the
-    // isolated path is a symlink to it — the daemon only runs it, never installs.
-    env: ({ home, tmp }) => ({
-      HOME: home,
-      TMPDIR: tmp,
-    }),
+    // grok is HOME-rooted (like claude): the shared isolated `HOME` from
+    // {@link cliEnv} keeps auth.json under the isolated home. No extra knobs.
+    env: () => ({}),
   },
   // ⚠️ RESEARCH-UNVERIFIED: Cursor's official installer is reported to place
   // this launcher at ~/.local/bin/cursor-agent.
@@ -250,25 +246,14 @@ const SPECS: Readonly<Record<TCliProvider, TCliSpec>> = {
     hostCandidates: (home) => [join(home, ".local", "bin", "cursor-agent")],
     // Live-verified (Linux, cursor-agent 2026.07.23): the credential store is
     // the XDG path `$XDG_CONFIG_HOME/cursor/auth.json`, i.e. `<home>/.config/
-    // cursor/auth.json` once HOME is isolated (the CLI's own app data —
-    // cli-config, acp-sessions, skills — is HOME-rooted under `<home>/.cursor`
-    // and is NOT the credential dir). `cliEnv` pins `XDG_CONFIG_HOME` at
-    // `<home>/.config` so this is where the token lands regardless of any
-    // ambient `XDG_CONFIG_HOME`, keeping write + read on the same isolated path
-    // (Codex parity via `CODEX_HOME`).
+    // cursor/auth.json` once HOME + XDG_CONFIG_HOME are isolated (the CLI's own
+    // app data — cli-config, acp-sessions, skills — is HOME-rooted under
+    // `<home>/.cursor` and is NOT the credential dir). Shared {@link cliEnv}
+    // pins `XDG_CONFIG_HOME` at `<home>/.config` for every provider.
     configDir: (home) => join(home, ".config", "cursor"),
-    // cursor-agent resolves its credential store as
-    // `($XDG_CONFIG_HOME || $HOME/.config)/cursor/auth.json`. Pin
-    // `XDG_CONFIG_HOME` at the isolated `<home>/.config` so the token can never
-    // land in the user's real `~/.config/cursor` even when the host exports an
-    // ambient `XDG_CONFIG_HOME` (Codex parity via `CODEX_HOME`). `config` here
-    // is `<home>/.config/cursor` (see `configDir`), so its parent is the
-    // XDG config root. macOS Keychain credentials remain host-managed.
-    env: ({ home, tmp }) => ({
-      HOME: home,
-      TMPDIR: tmp,
-      XDG_CONFIG_HOME: join(home, ".config"),
-    }),
+    // Credential path is covered by the shared XDG pin; no extra knobs.
+    // macOS Keychain credentials remain host-managed.
+    env: () => ({}),
   },
   // Meta Muse Code — official `muse` CLI. Durable auth is the XDG path
   // `$XDG_CONFIG_HOME/muse/auth.json` (muse-code-acp + native binary config
@@ -283,7 +268,8 @@ const SPECS: Readonly<Record<TCliProvider, TCliSpec>> = {
   // `MUSE_AUTH_PATH` is the official **launcher** override for reading that
   // store during download auth (launcher never writes credentials; native
   // `muse-bin` strings do not reference `MUSE_AUTH_PATH`). The native binary
-  // keys off `XDG_CONFIG_HOME` + `TBH_CREDENTIAL_BACKEND=file`.
+  // keys off `XDG_CONFIG_HOME` + `TBH_CREDENTIAL_BACKEND=file`. Shared
+  // {@link cliEnv} already pins `XDG_CONFIG_HOME` to `<home>/.config`.
   //
   // macOS KeychainStore is NOT HOME-isolated (SecItem / fixed service); the
   // daemon never assumes an isolated login.keychain. File backend + inline
@@ -293,10 +279,7 @@ const SPECS: Readonly<Record<TCliProvider, TCliSpec>> = {
     cmd: "muse",
     hostCandidates: museHostCandidates,
     configDir: (home) => join(home, ".config", "muse"),
-    env: ({ home, tmp }) => ({
-      HOME: home,
-      TMPDIR: tmp,
-      XDG_CONFIG_HOME: join(home, ".config"),
+    env: ({ home }) => ({
       TBH_CREDENTIAL_BACKEND: MUSE_CREDENTIAL_BACKEND,
       MUSE_AUTH_PATH: join(home, ".config", "muse", "auth.json"),
       MUSE_NO_AUTO_UPDATE: "1",
@@ -314,16 +297,13 @@ const SPECS: Readonly<Record<TCliProvider, TCliSpec>> = {
   // forced, so the agent's Google sign-in token
   // (`<GEMINI_HOME>/antigravity-acp/acp_token.json`; read only by the usage
   // probe, `delegation/antigravity-usage.ts`) can never touch the user's own `~/.gemini` or the OS keychain.
+  // PyInstaller unpacks under the shared isolated TMPDIR from {@link cliEnv}.
   antigravity: {
     binRel: "bin/agy_acp_server",
     cmd: "agy_acp_server",
     hostCandidates: (home) => [antigravityManagedExecutable(home)],
     configDir: (home) => join(home, ".gemini"),
-    env: ({ home, config, tmp }) => ({
-      HOME: home,
-      // PyInstaller unpacks the bundle under TMPDIR on every launch; keep it
-      // inside the daemon-owned, sandbox-granted temp dir.
-      TMPDIR: tmp,
+    env: ({ config }) => ({
       GEMINI_HOME: config,
       AGY_ACP_FORCE_FILE_STORAGE: "1",
       ANTIGRAVITY_HARNESS_PATH: antigravityHarnessPath(),
@@ -478,28 +458,92 @@ export const sessionEnv = (): Record<string, string> => {
  * so the read location and the `cliEnv` run location never drift.
  *   claude → <home>/.claude   codex → <home>/.codex   kimi → <home>/.kimi-code
  */
-export const cliConfigDir = (provider: TCliProvider): string =>
-  SPECS[provider].configDir(cliHome(provider));
+export const cliConfigDir = (provider: TCliProvider, home?: string): string =>
+  SPECS[provider].configDir(cliHome(provider, home));
 
 /**
- * Environment overrides that (1) isolate the CLI's runtime home and
- * (2) — at INSTALL time — redirect where the vendor script drops the
- * binary. Merge onto `process.env` for every spawn of an isolated CLI.
+ * Shared isolated runtime env applied to EVERY delegated CLI (audit L2).
+ * Pins `HOME` + the XDG base dirs under the isolated home and `TMPDIR` at the
+ * daemon-owned, sandbox-granted state temp — so ambient session `XDG_*` (common
+ * on Omarchy/Arch) cannot steer a launcher's config/state/cache writes at the
+ * real `~/.config` / `~/.local/state` (read-only in the working set).
  *
- * All three get `HOME` pointed at the isolated home (isolates Claude's
- * binary + state, and is the floor for the others). Codex/Kimi also get
- * their explicit install-dir + home knobs and PATH-edit suppression so
- * the installer doesn't touch the user's shell profiles.
+ * Kept for every provider (claude_code, chatgpt, kimi_code, grok, cursor, muse,
+ * antigravity). None of them need a real-home XDG credential/config READ
+ * passthrough into the isolated child: each pins its own config knob
+ * (`CLAUDE_CONFIG_DIR` / `CODEX_HOME` / `KIMI_CODE_HOME` / HOME-rooted `.grok` /
+ * isolated `XDG_CONFIG_HOME` for cursor+muse / `GEMINI_HOME`). Real-home paths
+ * that remain are EXEC-only (`vendorExecDirs`) and launcher data-root FIND
+ * pointers (`launcherDataRootEnv`) — never RW on real `~/.local/state`.
+ */
+export const isolatedRuntimeEnv = (
+  home: string,
+  tmp: string,
+): Record<string, string> => ({
+  HOME: home,
+  TMPDIR: tmp,
+  XDG_CONFIG_HOME: join(home, ".config"),
+  XDG_DATA_HOME: join(home, ".local", "share"),
+  XDG_STATE_HOME: join(home, ".local", "state"),
+  XDG_CACHE_HOME: join(home, ".cache"),
+});
+
+/** Best-effort mkdir of the isolated XDG leaves (already RW via `<state>/cli`). */
+const ensureIsolatedRuntimeDirs = (home: string): void => {
+  for (const d of [
+    join(home, ".config"),
+    join(home, ".local", "share"),
+    join(home, ".local", "state"),
+    join(home, ".local", "state", "mise"),
+    join(home, ".cache"),
+    join(home, ".cache", "mise"),
+  ]) {
+    try {
+      mkdirSync(d, { recursive: true });
+    } catch {
+      // Spawn still proceeds; a missing leaf fails that vendor's write visibly.
+    }
+  }
+};
+
+/**
+ * Read-only *data-root* env vars passed into the isolated child so version-
+ * manager shims can still FIND installs after `XDG_DATA_HOME` is redirected.
+ * Derived from {@link buildLauncherDataRootEnv} (single roots module) — includes
+ * `PROTO_HOME` alongside mise/asdf/volta/fnm. Manager resolution continues to
+ * use the REAL ambient `process.env`; the child only inherits these pointers.
  *
- * ALL three additionally get `TMPDIR` pointed at the daemon-owned temp dir
- * (`<state>/tmp`). The OS sandbox (`./sandbox/working-set/`) does NOT grant
- * the system `/tmp` — only `<state>/tmp`. The codex + kimi vendor installers
- * stage their download/extract in `mktemp -d`, which falls back to `/tmp`
- * when `TMPDIR` is unset; under the sandbox that first `mktemp -d` EACCESes
- * and the `set -e` script exits with no binary. (Claude was unaffected: its
- * installer stages under `$HOME`, already granted.) Pinning `TMPDIR` at the
- * granted daemon temp dir keeps every isolated spawn's temp inside the
- * working set, so the install lands the binary on a remote/sandboxed box too.
+ * `MISE_CONFIG_DIR` / explicit `MISE_GLOBAL_CONFIG_FILE` pin the real global
+ * config so shims still resolve versions after `XDG_CONFIG_HOME` redirects;
+ * the sandbox grants those paths RO only (never RW).
+ *
+ * When `isolatedHome` is set, `MISE_CACHE_DIR` / `MISE_STATE_DIR` are pinned
+ * under that home (overriding ambient) so mise writes never hit the RO-granted
+ * real cache/state dirs.
+ */
+export const launcherDataRootEnv = (
+  ambient: NodeJS.ProcessEnv = process.env,
+  realHome: string = homedir(),
+  isolatedHome?: string,
+): Record<string, string> =>
+  buildLauncherDataRootEnv(ambient, realHome, existsSync, isolatedHome);
+
+/**
+ * Environment overrides that (1) isolate the CLI's runtime home + XDG base
+ * dirs and (2) — at INSTALL time — redirect where the vendor script drops the
+ * binary. Merge onto `process.env` for every spawn of an isolated CLI
+ * (`spawnEnv` / `cliLaunch`).
+ *
+ * Every provider gets the shared {@link isolatedRuntimeEnv} base (`HOME`,
+ * `XDG_CONFIG_HOME` / `DATA` / `STATE` / `CACHE`, `TMPDIR` at `<state>/tmp`)
+ * plus {@link launcherDataRootEnv} (real mise/asdf/volta/proto/fnm data roots,
+ * read-only; mise cache/state relocated under the isolated home). Providers
+ * then add only their own knobs (`CODEX_HOME`, …).
+ *
+ * The OS sandbox (`./sandbox/working-set/`) does NOT grant the system `/tmp`
+ * — only `<state>/tmp`. Pinning `TMPDIR` keeps every isolated spawn's temp
+ * inside the working set. Isolated homes live under `<state>/cli/<provider>/`
+ * and are already read-write via the state-dir grant.
  */
 export const cliEnv = (provider: TCliProvider): Record<string, string> => {
   const home = cliHome(provider);
@@ -507,5 +551,23 @@ export const cliEnv = (provider: TCliProvider): Record<string, string> => {
   const config = cliConfigDir(provider);
   // The daemon-owned, sandbox-granted staging dir for `mktemp -d` (see above).
   const tmp = verifiedDaemonTempDir();
-  return SPECS[provider].env({ home, root, config, tmp });
+  ensureIsolatedRuntimeDirs(home);
+  const base = {
+    ...isolatedRuntimeEnv(home, tmp),
+    ...launcherDataRootEnv(process.env, homedir(), home),
+    ...SPECS[provider].env({ home, root, config, tmp }),
+  };
+  // Phase 3 / L1: when demand resolution recorded a shebang interpreter,
+  // prepend its directory so `#!/usr/bin/env node` (etc.) still resolves
+  // under the isolated child's PATH.
+  const interpDir = interpreterDirFor(provider);
+  if (interpDir !== undefined && interpDir.length > 0) {
+    const inherited = process.env.PATH;
+    const composed = [interpDir, augmentSpawnPath(inherited)]
+      .filter((d) => d.length > 0)
+      .join(delimiter);
+    // Prefer an explicit PATH from the provider env if it set one, else ours.
+    return { ...base, PATH: base.PATH ?? composed };
+  }
+  return base;
 };

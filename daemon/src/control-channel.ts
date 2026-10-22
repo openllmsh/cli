@@ -57,6 +57,10 @@ import {
   safeDiagnosticMessage,
 } from "./logger";
 import {
+  attachModelsStatusToConnections,
+  noteConnectionsForModelReport,
+} from "./model-report";
+import {
   acceptChannel,
   closeChannelFromRelay,
   configureMuxHost,
@@ -152,6 +156,8 @@ export const statusChangeKey = (status: TDaemonStatus): string => {
         c.usage === undefined || c.usage === null
           ? ""
           : JSON.stringify(c.usage),
+        c.models_status ?? "",
+        c.models_reason ?? "",
       ]),
     )
     .join("|");
@@ -387,11 +393,16 @@ const statusPublishCoalescer = createStatusPublishCoalescer({
     const skipProviderProbes =
       trigger === "watcher" && watcherSkipProviderProbes;
     watcherSkipProviderProbes = false;
-    const status = await computeStatusFresh({
+    const fresh = await computeStatusFresh({
       trigger,
       ...(trigger === "late-probe" ? { reuseSettledSlugProbes: true } : {}),
       ...(skipProviderProbes ? { skipProviderProbes: true } : {}),
     });
+    // Overlay latest listModels/discoverModels outcomes (omit when unknown).
+    const status = {
+      ...fresh,
+      connections: attachModelsStatusToConnections(fresh.connections),
+    };
     return { status, fingerprint: statusChangeKey(status) };
   },
   canSend: (jobEpoch) =>
@@ -671,12 +682,14 @@ const enqueueStatusPublish = (opts: {
 
 /**
  * Shared observer choreography for a computed status snapshot: local
- * `auth.session.lost` emit, cloud POST on `→ disconnected`, then quota.
+ * `auth.session.lost` emit, demand model report on `→ connected`, cloud
+ * POST on `→ disconnected`, then quota.
  */
 const observeNotificationTransitions = (
   connections: ReadonlyArray<TDaemonProviderConnection>,
 ): void => {
   noteConnectionsForSessionLost(connections);
+  noteConnectionsForModelReport(connections);
   authStatusEdgeObserver.observe(connections);
   for (const transition of noteConnectionsForQuota(connections)) {
     void notifyQuotaStatus(transition);

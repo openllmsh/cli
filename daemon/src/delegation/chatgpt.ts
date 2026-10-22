@@ -44,6 +44,8 @@ import {
   cachedCliSemver,
   credentialHasFetchLifetime,
   fetchModelList,
+  fetchModelListDetailed,
+  listWithReason,
   modelDiscoveryFromList,
   parseChatgptModelList,
   skippedModelDiscovery,
@@ -63,7 +65,9 @@ import {
   withRefreshCaller,
 } from "./refresh";
 import type {
+  TFetchModelListDetailed,
   TImageCredential,
+  TListModelsOptions,
   TModelDiscoveryOptions,
   TModelDiscoveryResult,
   TProviderDelegate,
@@ -420,6 +424,66 @@ const deviceLogin = makeStreamDeviceConnect({
   },
 });
 
+const listChatgptModelsDetailed =
+  async (): Promise<TFetchModelListDetailed> => {
+    // Codex's own models endpoint (`GET <base>/models?client_version=…` —
+    // `ref/codex/codex-rs/codex-api/src/endpoint/models.rs`), returning
+    // `{ models: [{ slug, display_name, visibility, context_window }] }`.
+    // Host derived from the CAPTURED inference URL via
+    // `resolveProviderUrl`; only the stable leaf path is a constant. The
+    // `client_version` query mirrors the CLI's own call (the installed
+    // codex version). Picker-visible models only (`visibility: "list"`)
+    // — same filter the CLI's model picker applies. Metadata only; null
+    // on any failure (never an empty list), with a closed reason for
+    // doctor telemetry when a connected provider lists nothing.
+    const token = await readToken();
+    if (token === null) {
+      return { kind: "null", reason: "token_unavailable" };
+    }
+    // The backend wants a BARE semver (the CLI's own cache stores `"0.142.0"`).
+    // Read it from `cliInstallState` — the SAME source `status()` reports and
+    // `model-report` tags the list with — so the `client_version` we query with
+    // and the `cli_version` stamped on the resulting report can never disagree
+    // (which would let the cloud's older-semver guard drop a freshly-fetched
+    // list). `cliInstallState` already extracts the bare x.y.z; `0.0.0` fallback
+    // keeps the query well-formed when the version can't be read.
+    const resolvedVersion = (await cliInstallState(PROVIDER, { demand: true }))
+      .version;
+    const versionUnresolved =
+      resolvedVersion === null || resolvedVersion === "0.0.0";
+    const ver = resolvedVersion ?? "0.0.0";
+    // Resolve URL BEFORE fetchModelListDetailed: an argument-position await
+    // runs outside its try/catch and would escape the null-reason contract.
+    let url: string;
+    try {
+      url = await resolveProviderUrl(
+        PROVIDER,
+        `/backend-api/codex/models?client_version=${encodeURIComponent(ver)}`,
+      );
+    } catch {
+      return { kind: "null", reason: "error" };
+    }
+    const detailed = await fetchModelListDetailed(
+      url,
+      {
+        authorization: `Bearer ${token.accessToken}`,
+        ...(token.accountId !== null
+          ? { "chatgpt-account-id": token.accountId }
+          : {}),
+        accept: "application/json",
+      },
+      parseChatgptModelList,
+    );
+    if (
+      detailed.kind === "null" &&
+      detailed.reason === "empty_after_filter" &&
+      versionUnresolved
+    ) {
+      return { kind: "null", reason: "version_unresolved" };
+    }
+    return detailed;
+  };
+
 export const chatgptDelegate: TProviderDelegate = {
   slug: PROVIDER,
   statusCancellable: false,
@@ -577,43 +641,10 @@ export const chatgptDelegate: TProviderDelegate = {
       }
     }),
 
-  listModels: () =>
-    withRefreshCaller("models", async () => {
-      // Codex's own models endpoint (`GET <base>/models?client_version=…` —
-      // `ref/codex/codex-rs/codex-api/src/endpoint/models.rs`), returning
-      // `{ models: [{ slug, display_name, visibility, context_window }] }`.
-      // Host derived from the CAPTURED inference URL via
-      // `resolveProviderUrl`; only the stable leaf path is a constant. The
-      // `client_version` query mirrors the CLI's own call (the installed
-      // codex version). Picker-visible models only (`visibility: "list"`)
-      // — same filter the CLI's model picker applies. Metadata only; null
-      // on any failure (never an empty list).
-      const token = await readToken();
-      if (token === null) return null;
-      // The backend wants a BARE semver (the CLI's own cache stores `"0.142.0"`).
-      // Read it from `cliInstallState` — the SAME source `status()` reports and
-      // `model-report` tags the list with — so the `client_version` we query with
-      // and the `cli_version` stamped on the resulting report can never disagree
-      // (which would let the cloud's older-semver guard drop a freshly-fetched
-      // list). `cliInstallState` already extracts the bare x.y.z; `0.0.0` fallback
-      // keeps the query well-formed when the version can't be read.
-      const ver =
-        (await cliInstallState(PROVIDER, { demand: true })).version ?? "0.0.0";
-      return fetchModelList(
-        await resolveProviderUrl(
-          PROVIDER,
-          `/backend-api/codex/models?client_version=${encodeURIComponent(ver)}`,
-        ),
-        {
-          authorization: `Bearer ${token.accessToken}`,
-          ...(token.accountId !== null
-            ? { "chatgpt-account-id": token.accountId }
-            : {}),
-          accept: "application/json",
-        },
-        parseChatgptModelList,
-      );
-    }),
+  listModels: (opts?: TListModelsOptions) =>
+    withRefreshCaller("models", () =>
+      listWithReason(opts, listChatgptModelsDetailed),
+    ),
 
   discoverModels: async (
     options: TModelDiscoveryOptions,

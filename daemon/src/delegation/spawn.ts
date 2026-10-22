@@ -35,6 +35,10 @@ import {
 } from "../logger";
 import { currentTickId } from "../op-context";
 import { augmentSpawnPath } from "../path-utils";
+import {
+  maybeInvalidateLauncherOnExecFailure,
+  maybeInvalidateLauncherOnExitCode,
+} from "../launcher-exec-invalidate";
 import { sandboxSpawnArgs } from "../sandbox/exec";
 import { daemonTempDir } from "../sandbox/working-set";
 import { redactSensitiveArgv } from "./redact-sensitive-argv";
@@ -607,6 +611,9 @@ export const runCaptureResult = async (
         confined: opts?.probe !== true,
       });
       if (outcome.code !== 0) {
+        // sandbox-exec maps inner ENOENT → exit 127; drop a stale resolution
+        // so the next demand re-resolves (Phase 4 / L1).
+        maybeInvalidateLauncherOnExitCode(command, outcome.code);
         if (stderrText !== null && opts?.onFailureStderr !== undefined) {
           try {
             opts.onFailureStderr(await stderrText);
@@ -627,7 +634,11 @@ export const runCaptureResult = async (
       if (timer !== null) clearTimeout(timer);
       budget.release();
     }
-  } catch {
+  } catch (err) {
+    maybeInvalidateLauncherOnExecFailure(
+      spawnCommand(process.platform, argv[0] ?? "", argv.slice(1)),
+      err,
+    );
     return { kind: "failed" };
   }
 };

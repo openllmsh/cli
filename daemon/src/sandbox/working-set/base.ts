@@ -111,8 +111,14 @@ export const SENSITIVE_ROOTS = (home: string): readonly string[] => [
   join(home, ".claude"),
 ];
 
-export const existing = (paths: readonly string[]): string[] => {
-  const home = homedir();
+export const existing = (
+  paths: readonly string[],
+  // The home the working set was BUILT for — not `homedir()`. Under
+  // `--sandbox-exec --home <real>` this process's `HOME` is the child's
+  // isolated one, so `homedir()` would miss the real home and let a missing
+  // leaf climb onto the whole real home tree.
+  home: string = homedir(),
+): string[] => {
   const sensitiveRoots = SENSITIVE_ROOTS(home);
   const underSensitiveRoot = (p: string): boolean =>
     sensitiveRoots.some((root) => p.startsWith(`${root}/`));
@@ -271,10 +277,12 @@ export const resolveCliExecDirs = (seed: string, home: string): string[] => {
  *
  *   read+exec  — the config dir (global `config.toml`; `~/.config` stays
  *                ungranted, only its `mise` leaf), the data dir (mise's own
- *                launcher, `installs/`, `shims/`) and the state dir (tracked
- *                configs + trust records — read only, so a compromised daemon
- *                cannot mark a project config trusted);
- *   read-write — the cache dir only (holds no secrets or executables).
+ *                launcher, `installs/`, `shims/`), the state dir (tracked
+ *                configs + trust records), and the cache dir. All four are
+ *                read-only (L3): cache/config/state writes land in the
+ *                isolated XDG dirs from L2; the real mise tree is only needed
+ *                to FIND installs. A compromised daemon therefore cannot mark
+ *                a project config trusted or poison the cache.
  *
  * Only EXISTING dirs are emitted (a mise-less host contributes nothing, and a
  * missing leaf must never climb onto `~/.local/share` or `$HOME`), and a
@@ -291,9 +299,11 @@ export const miseDirs = (
   }
   const keep = (dirs: readonly string[]): string[] =>
     dirs.filter((d) => isAbsolute(d) && !forbidden.has(d) && existsSync(d));
+  // L3: every mise root is read-only. Cache/config/state writes land in the
+  // isolated XDG dirs (L2); the real mise tree is only needed to FIND installs.
   return {
-    readOnly: keep([p.configDir, p.dataDir, p.stateDir]),
-    readWrite: keep([p.cacheDir]),
+    readOnly: keep([p.configDir, p.dataDir, p.stateDir, p.cacheDir]),
+    readWrite: [],
   };
 };
 

@@ -15,6 +15,8 @@
  * host-binary candidate paths live in `cli-paths.ts` (`hostCliCandidates`).
  */
 import {
+  accessSync,
+  constants,
   existsSync,
   readdirSync,
   readlinkSync,
@@ -23,7 +25,8 @@ import {
   symlinkSync,
 } from "node:fs";
 import { mkdir, rm } from "node:fs/promises";
-import { basename, dirname, join } from "node:path";
+import { platform } from "node:os";
+import { basename, dirname, isAbsolute, join } from "node:path";
 import { projectDoctorOutcomeLedger } from "@openllmsh/protocol";
 import type { TCliProvider } from "./cli-paths";
 import {
@@ -35,12 +38,25 @@ import {
   cliRoot,
   hostCliCandidates,
 } from "./cli-paths";
+import { grantKeychainToolAccess } from "./delegation/keychain";
 import { cliVersion } from "./delegation/util";
 import type { TSafeDiagnosticMessage } from "./doctor-report/message";
+import { envMs } from "./env-ms";
+import {
+  rememberInterpreterDir,
+  rememberLauncherProfile,
+} from "./launcher-profile-state";
+import type { TLauncherResolver } from "./launcher-resolution";
+import { defaultLauncherResolver } from "./launcher-resolution";
+import type { TLauncherResolution } from "./launcher-resolution-types";
 import { logWarn, safeDiagnosticMessage } from "./logger";
 import type { TManagerRegistry } from "./manager-resolution";
-import { defaultManagerRegistry } from "./manager-resolution";
+import {
+  defaultManagerRegistry,
+  findRecognizingManagerHop,
+} from "./manager-resolution";
 import { isHostCliRunnable } from "./path-utils";
+import { isMacKeychainProvider } from "./sandbox/policy";
 
 export type TCliInstallState = {
   readonly installed: boolean;
@@ -107,16 +123,60 @@ const ensureIsolatedDirs = async (provider: TCliProvider): Promise<void> => {
  * always-granted state dir (`<stateDir>/cli/<provider>/`); it merely READS the
  * host binary, so it needs no grant on the host CLI's own dir.
  */
+/**
+ * Per-provider "re-grant pending" — set whenever a relink changes the target
+ * (passive OR demand). Keychain work stays demand-only: a passive call that
+ * relinks must not spawn `security`, but the next demand call must still
+ * re-grant even when that later call does not itself relink.
+ */
+const regrantPending = new Set<TCliProvider>();
+
 export const linkIsolatedCli = async (
   provider: TCliProvider,
   hostBin: string,
-): Promise<void> => {
+): Promise<{ readonly targetChanged: boolean }> => {
   await ensureIsolatedDirs(provider);
   const dst = cliBin(provider);
+  let previousReal: string | null = null;
+  try {
+    previousReal = realpathSync(dst);
+  } catch {
+    try {
+      // Dangling link: existsSync is false, but the prior target still
+      // identifies a change (version switch / self-update removed the old bin).
+      const previousLink = readlinkSync(dst);
+      previousReal = isAbsolute(previousLink)
+        ? previousLink
+        : join(dirname(dst), previousLink);
+    } catch {
+      previousReal = null;
+    }
+  }
   await mkdir(dirname(dst), { recursive: true });
   await rm(dst, { force: true });
   symlinkSync(hostBin, dst);
   linkSidecars(dst);
+  let nextReal: string | null = null;
+  try {
+    nextReal = realpathSync(dst);
+  } catch {
+    nextReal = hostBin;
+  }
+  // Target change (incl. replacing a prior binary) leaves keychain items ACL'd
+  // to the previous executable path. Record pending here; demand callers flush
+  // via regrantKeychainAfterRelink — passive status must not spawn `security`.
+  const targetChanged =
+    previousReal !== null && nextReal !== null && previousReal !== nextReal;
+  if (targetChanged) regrantPending.add(provider);
+  return { targetChanged };
+};
+
+/** Re-grant isolated-keychain ACLs after a demand-time launcher relink. */
+const regrantKeychainAfterRelink = async (
+  provider: TCliProvider,
+): Promise<boolean> => {
+  if (platform() !== "darwin" || !isMacKeychainProvider(provider)) return true;
+  return grantKeychainToolAccess(cliHome(provider)).catch(() => false);
 };
 
 /**
@@ -191,9 +251,11 @@ const linkSidecars = (isolatedBin: string): void => {
  * Resolve the preferred host candidate through the manager-resolution
  * coordinator. With zero adapters registered (default), this returns the
  * first existing candidate unchanged — identical to the pre-coordinator
- * behavior. A candidate recognized as a manager shim that cannot be
- * resolved is treated as absent (never linked, never version-probed),
- * rather than silently falling through to a lower-priority candidate.
+ * behavior. A candidate whose last DEMAND resolution is `unresolved` is
+ * treated as absent (never linked, never version-probed), rather than
+ * silently falling through to a lower-priority candidate. A recognized
+ * manager shim with NO demand cache yet is ordinary passthrough on the
+ * passive path: link the HOST candidate, never spawn.
  *
  * `demand` gates whether this may actually SPAWN the manager adapter:
  *   - `demand: true` (an explicit user/system action — connect, logout,
@@ -205,26 +267,182 @@ const linkSidecars = (isolatedBin: string): void => {
  *     (non-manager) candidate is unaffected either way, since
  *     `peekManagerResolution` answers it without ever needing a cache entry.
  */
+const noteLauncherResolution = (
+  provider: TCliProvider,
+  resolution: Awaited<ReturnType<TLauncherResolver["resolveLauncher"]>>,
+): void => {
+  rememberLauncherProfile(provider, resolution);
+  // Prefer the shebang interpreter dir; otherwise, when demand proved a
+  // manager shim / under-manager install, remember that path so cliEnv can
+  // prepend its dirname onto THIS provider's PATH only.
+  const pathForDir =
+    resolution?.interpreter ??
+    (resolution !== null &&
+    resolution !== undefined &&
+    (resolution.kind.startsWith("shim:") || resolution.underManagerRoot)
+      ? resolution.path
+      : undefined);
+  rememberInterpreterDir(provider, pathForDir);
+};
+
+const isExecutableAbsolutePath = (path: string): boolean => {
+  if (!isAbsolute(path)) return false;
+  try {
+    accessSync(path, constants.X_OK);
+    return true;
+  } catch {
+    return false;
+  }
+};
+
+/**
+ * Runnability for a launcher resolution. Any proven executable interpreter
+ * (script or shim→script) is accepted — a remembered interpreter *directory*
+ * alone is not enough. Native / shim / wrapper without an interpreter keep
+ * the spawnPathDirs check.
+ */
+export const isResolvedLauncherRunnable = (
+  resolution: TLauncherResolution,
+): boolean => {
+  if (resolution.interpreter !== undefined) {
+    return isExecutableAbsolutePath(resolution.interpreter);
+  }
+  if (resolution.kind === "script") {
+    return false;
+  }
+  return isHostCliRunnable(resolution.path);
+};
+
+export type TRunnableHostPick = {
+  readonly candidate: string;
+  readonly resolution: TLauncherResolution;
+};
+
+/**
+ * Path the isolated run-view symlink should point at for a launcher pick.
+ * Manager shims must link the resolved target (never the shim). Ordinary
+ * binary/script/wrapper picks must link the HOST CANDIDATE — vendors like
+ * Claude/Codex expose a stable `~/.local/bin/<cmd>` symlink that self-update
+ * repoints at `versions/<v>`; linking the realpath'd version pin dangling-
+ * breaks the isolated link the moment the old version is removed. Matches
+ * the pre-launcher `ordinary` manager passthrough (target === candidate).
+ */
+export const isolatedLinkTargetForLauncherPick = (
+  candidate: string,
+  resolution: TLauncherResolution,
+): string =>
+  resolution.kind.startsWith("shim:") ? resolution.path : candidate;
+
+/**
+ * Walk host candidates the demand path uses: skip missing paths, null
+ * `resolveLauncher` results, and non-runnable resolutions; return the first
+ * runnable pick. Shared by {@link resolveHostBinary} and `doctor launchers`.
+ */
+export const pickFirstRunnableHostCandidate = async (
+  candidates: readonly string[],
+  resolveLauncher: (candidate: string) => Promise<TLauncherResolution | null>,
+): Promise<TRunnableHostPick | null> => {
+  for (const candidate of candidates) {
+    if (!existsSync(candidate)) continue;
+    const resolution = await resolveLauncher(candidate);
+    if (resolution === null) continue;
+    if (!isResolvedLauncherRunnable(resolution)) continue;
+    return { candidate, resolution };
+  }
+  return null;
+};
+
+const cachedLauncherForTarget = (
+  launchers: TLauncherResolver,
+  provider: TCliProvider,
+  linkedTarget: string,
+): TLauncherResolution | undefined => {
+  const direct = launchers.peekLauncherResolution(linkedTarget);
+  if (direct !== undefined) return direct;
+  for (const candidate of hostCliCandidates(provider)) {
+    const peeked = launchers.peekLauncherResolution(candidate);
+    if (peeked === undefined) continue;
+    if (peeked.path === linkedTarget) return peeked;
+    try {
+      if (realpathSync(peeked.path) === linkedTarget) return peeked;
+    } catch {
+      // keep scanning
+    }
+  }
+  return undefined;
+};
+
 const resolveHostBinary = async (
   provider: TCliProvider,
   opts?: TCliInstallStateOpts,
 ): Promise<string | undefined> => {
   const managers = opts?.managers ?? defaultManagerRegistry;
-  // Walk every candidate: a PATH-hit shebang whose interpreter is missing
-  // (npm `@openai/codex` → `#!/usr/bin/env node` under nvm) must not win over
-  // a later native install, and must not count as "installed" when it is the
-  // only hit — that falls through to the isolated vendor-install flow.
+  // Production uses the process-wide default launcher resolver (stable
+  // fingerprint cache). Hermetic tests that inject `managers` without a
+  // matching `launchers` skip the generic layer so demand/passive gating
+  // assertions against the injected registry stay accurate — a fresh
+  // per-call resolver would drop the cache between calls.
+  const launchers =
+    opts?.launchers ??
+    (opts?.managers !== undefined ? undefined : defaultLauncherResolver);
+  // Demand + launchers: walk every candidate via the shared helper (doctor
+  // uses the same decision). A PATH-hit shebang whose interpreter is missing
+  // must not win over a later native install, and must not count as
+  // "installed" when it is the only hit. resolveLauncher already ran
+  // resolveManagerCandidate — do NOT re-enter the legacy manager path
+  // (CodeRabbit 4341596146).
+  if (launchers !== undefined && opts?.demand === true) {
+    const pick = await pickFirstRunnableHostCandidate(
+      hostCliCandidates(provider),
+      (candidate) =>
+        launchers.resolveLauncher(candidate, {
+          demand: true,
+          ...(opts.signal !== undefined ? { signal: opts.signal } : {}),
+        }),
+    );
+    if (pick !== null) {
+      noteLauncherResolution(provider, pick.resolution);
+      return isolatedLinkTargetForLauncherPick(pick.candidate, pick.resolution);
+    }
+    return undefined;
+  }
+
+  // Passive / no-launchers: walk candidates with cache peek + spawnPathDirs.
   for (const candidate of hostCliCandidates(provider)) {
     if (!existsSync(candidate)) continue;
+
+    if (launchers !== undefined) {
+      // Passive: reuse a prior demand resolution when the fingerprint still
+      // matches; never spawn. A cached script keeps its interpreter-aware
+      // check (not spawnPathDirs alone). Miss → fall through.
+      const peeked = launchers.peekLauncherResolution(candidate);
+      if (peeked !== undefined) {
+        if (!isResolvedLauncherRunnable(peeked)) continue;
+        noteLauncherResolution(provider, peeked);
+        return isolatedLinkTargetForLauncherPick(candidate, peeked);
+      }
+    }
+
+    // Passive miss / no launchers: keep the existing spawnPathDirs gate —
+    // never spawn to prove a sibling/manager interpreter.
     if (!isHostCliRunnable(candidate)) continue;
+
+    // Demand + launchers already handled above (continue on null). This
+    // demand branch only runs when tests inject managers without launchers.
     const resolved =
       opts?.demand === true
         ? await managers.resolveManagerCandidate(candidate, {
             signal: opts.signal,
           })
         : managers.peekManagerResolution(candidate);
-    if (resolved === undefined || resolved.kind === "unresolved") {
+    if (resolved !== undefined && resolved.kind === "unresolved") {
       continue;
+    }
+    if (resolved === undefined) {
+      // Passive + recognized manager shim + no demand cache yet: keep the
+      // pre-hop-recognition ordinary passthrough — link the HOST candidate
+      // (never spawn, never realpath into the manager binary).
+      return candidate;
     }
     const target = resolved.target ?? undefined;
     if (target === undefined) continue;
@@ -255,15 +473,6 @@ const resolveHostBinary = async (
  * The short TTL only throttles how often periodic status observations re-stat /
  * re-reconcile the isolated link; it never pins or expires a version.
  */
-
-/** Numeric env override — returns `fallback` unless the var parses to a
- *  non-negative integer. */
-const envMs = (name: string, fallback: number): number => {
-  const raw = process.env[name];
-  if (raw === undefined) return fallback;
-  const n = Number.parseInt(raw, 10);
-  return Number.isFinite(n) && n >= 0 ? n : fallback;
-};
 
 /** Cache TTL — 30 s throttles the re-stat / re-reconcile on the hot status
  *  path. Version identity is NOT gated here. */
@@ -319,6 +528,9 @@ export type TCliInstallStateOpts = {
   /** Manager-shim registry to resolve candidates through. Defaults to the
    *  production {@link defaultManagerRegistry}. */
   readonly managers?: TManagerRegistry;
+  /** Generic launcher resolver (audit L1). Defaults to
+   *  {@link defaultLauncherResolver}. */
+  readonly launchers?: TLauncherResolver;
 };
 
 const probeCliInstallState = async (
@@ -328,15 +540,33 @@ const probeCliInstallState = async (
   const now = Date.now();
   const bin = cliBin(provider);
   const demand = opts?.demand === true;
+  try {
+    return await probeCliInstallStateBody(provider, opts, now, bin, demand);
+  } finally {
+    // Flush a pending re-grant only on demand, and only clear after success so
+    // a failed grant stays queued for the next demand call.
+    if (demand && regrantPending.has(provider)) {
+      const ok = await regrantKeychainAfterRelink(provider);
+      if (ok) regrantPending.delete(provider);
+    }
+  }
+};
+
+const probeCliInstallStateBody = async (
+  provider: TCliProvider,
+  opts: TCliInstallStateOpts | undefined,
+  now: number,
+  bin: string,
+  demand: boolean,
+): Promise<TCliInstallState> => {
   if (!existsSync(bin)) {
     // No isolated link exists yet. A PASSIVE call here must NOT spawn a
     // manager subprocess, even once — cold bootstrap is not exempt from the
     // demand-only rule. `resolveHostBinary` already enforces this: for an
-    // ORDINARY (non-manager) candidate it resolves for free (no adapter
-    // recognizes it, so filesystem linking still self-heals passively, per
-    // the file header's contract); for a candidate recognized as a manager
-    // shim it fails closed on a passive call (peek-only, no cache yet) and
-    // only actually resolves when `opts.demand` is true — an explicit
+    // ORDINARY (non-manager) candidate it resolves for free; for a candidate
+    // recognized as a manager shim with no demand cache yet it returns the
+    // HOST candidate as ordinary passthrough (installed, no spawn); only
+    // `opts.demand` is true runs the adapter — an explicit
     // connect/logout/inference-prep call.
     const host = await resolveHostBinary(provider, opts);
     if (host === undefined) {
@@ -354,11 +584,11 @@ const probeCliInstallState = async (
     // observation of a pre-existing link (no throttle entry yet — e.g. a
     // daemon restart finding a link created by a prior process/version, or
     // one hand-crafted before this resolution step existed). Check that
-    // unconditionally, before any TTL gating, so a link that points directly
-    // at an unresolvable shim can never be version-probed/delegated through
-    // unconfined. On a PASSIVE call this is a cache-only peek — never a
-    // subprocess; on a DEMAND call it actually resolves and populates the
-    // cache for later passive callers.
+    // unconditionally, before any TTL gating. On a PASSIVE call this is a
+    // cache-only peek — never a subprocess; on a DEMAND call it actually
+    // resolves and populates the cache for later passive callers. A cold
+    // recognized shim (peek undefined) keeps the host link and reports
+    // installed below without probing --version through the raw shim.
     let immediateTarget: string | undefined;
     try {
       immediateTarget = readlinkSync(bin);
@@ -372,15 +602,7 @@ const probeCliInstallState = async (
             signal: opts?.signal,
           })
         : managers.peekManagerResolution(immediateTarget);
-      if (resolved === undefined) {
-        // Recognized as a manager shim but no demand resolution has ever
-        // populated the cache for it (passive call, cold cache): fail
-        // closed rather than trust an unconfirmed shim — the cache isn't
-        // permanently unusable, an explicit demand call (connect/logout/
-        // inference prep) will resolve and populate it.
-        return { installed: false, version: null };
-      }
-      if (resolved.kind === "unresolved") {
+      if (resolved !== undefined && resolved.kind === "unresolved") {
         // Recognized as a manager shim but it no longer resolves: fail
         // closed rather than falling through to probe the shim unconfined.
         cliInstallReconcileUntil.set(
@@ -390,6 +612,7 @@ const probeCliInstallState = async (
         return { installed: false, version: null };
       }
       if (
+        resolved !== undefined &&
         resolved.kind === "resolved" &&
         resolved.target !== null &&
         resolved.target !== immediateTarget
@@ -408,8 +631,34 @@ const probeCliInstallState = async (
     // spawns on this cadence unless `opts.demand` is set — the TTL only
     // throttles how often this cheap re-derive/re-stat runs, it is never
     // itself a license to query a manager adapter.
+    //
+    // Demand exception: when a host candidate is a manager shim and the
+    // launcher peek is cold (selection fingerprint drifted — `mise use -g`
+    // leaves the shim file untouched), force a re-resolve even inside the
+    // TTL so the isolated link and version probe track the new selection.
     const until = cliInstallReconcileUntil.get(installKey(provider));
-    if (until === undefined || until <= now) {
+    const launchersForReconcile =
+      opts?.launchers ??
+      (opts?.managers !== undefined ? undefined : defaultLauncherResolver);
+    const managersForReconcile = opts?.managers ?? defaultManagerRegistry;
+    const shimSelectionStale =
+      demand &&
+      launchersForReconcile !== undefined &&
+      hostCliCandidates(provider).some((candidate) => {
+        if (!existsSync(candidate)) return false;
+        if (
+          findRecognizingManagerHop(
+            candidate,
+            managersForReconcile.listManagerAdapters(),
+          ) === null
+        ) {
+          return false;
+        }
+        return (
+          launchersForReconcile.peekLauncherResolution(candidate) === undefined
+        );
+      });
+    if (until === undefined || until <= now || shimSelectionStale) {
       cliInstallReconcileUntil.set(
         installKey(provider),
         now + CLI_INSTALL_STATE_TTL_MS,
@@ -433,13 +682,27 @@ const probeCliInstallState = async (
   // A leftover isolated link at an unrunnable shebang (npm shim without node
   // on the daemon PATH) must not keep reporting installed / burn version
   // probes — drop it so the next demand can take the vendor-install path.
+  // Demand-proven scripts reuse the interpreter-aware check: spawnPathDirs
+  // alone would false-negative after resolveLauncher found a manager/sibling
+  // interpreter.
   let linkedTarget = bin;
   try {
     linkedTarget = realpathSync(bin);
   } catch {
     linkedTarget = bin;
   }
-  if (!isHostCliRunnable(linkedTarget)) {
+  const linkLaunchers =
+    opts?.launchers ??
+    (opts?.managers !== undefined ? undefined : defaultLauncherResolver);
+  const cached =
+    linkLaunchers !== undefined
+      ? cachedLauncherForTarget(linkLaunchers, provider, linkedTarget)
+      : undefined;
+  const linkedRunnable =
+    cached !== undefined
+      ? isResolvedLauncherRunnable(cached)
+      : isHostCliRunnable(linkedTarget);
+  if (!linkedRunnable) {
     try {
       rmSync(bin, { force: true });
     } catch {
@@ -462,9 +725,45 @@ const probeCliInstallState = async (
     return { installed: true, version: installed };
   }
 
+  // Cold recognized manager shim (no demand resolution in manager OR
+  // launcher cache): report installed without spawning --version through
+  // the raw shim / the manager binary it realpath's to. A later demand
+  // call resolves + persists; last-known version then surfaces via the
+  // stamp cache / metadata above.
+  let linkImmediate: string | undefined;
+  try {
+    linkImmediate = readlinkSync(bin);
+  } catch {
+    linkImmediate = undefined;
+  }
+  if (linkImmediate !== undefined && cached === undefined) {
+    const coldManagers = opts?.managers ?? defaultManagerRegistry;
+    if (
+      findRecognizingManagerHop(
+        linkImmediate,
+        coldManagers.listManagerAdapters(),
+      ) !== null &&
+      coldManagers.peekManagerResolution(linkImmediate) === undefined &&
+      (linkLaunchers === undefined ||
+        linkLaunchers.peekLauncherResolution(linkImmediate) === undefined)
+    ) {
+      return { installed: true, version: null };
+    }
+  }
+
+  // For manager-shim resolutions, fold the launcher cache fingerprint
+  // (already includes the adapter selection fingerprint) into the version
+  // identity so `mise use -g` invalidates a cached --version even when the
+  // resolved binary's path/mtime/size are unchanged.
+  const versionIdentityExtra = cached?.kind.startsWith("shim:")
+    ? cached.fingerprint
+    : undefined;
   const out = await cliVersion(bin, cliEnv(provider), {
     timeoutMs: cliVersionProbeTimeoutMs(),
     ...(opts?.signal !== undefined ? { signal: opts.signal } : {}),
+    ...(versionIdentityExtra !== undefined
+      ? { identityExtra: versionIdentityExtra }
+      : {}),
   });
   const state = { installed: true, version: parseVendorVersion(out) };
   noteCliInstallProbeResult({

@@ -23,17 +23,11 @@
  * persisted nulls are discarded so a poisoned identity can recover without
  * replacing the CLI.
  */
-import {
-  mkdirSync,
-  readFileSync,
-  renameSync,
-  rmSync,
-  statSync,
-  writeFileSync,
-} from "node:fs";
 import { join } from "node:path";
 import { resolveVersionBinary, versionBinaryStamp } from "./cli-version-stamp";
 import { stateDir } from "./env";
+import { envMsOptional } from "./env-ms";
+import { readJsonStateFile, writeJsonStateAtomic } from "./json-state-cache";
 import { withoutCommandReplayContext } from "./op-context";
 
 export type TCliVersionOpts = {
@@ -45,6 +39,14 @@ export type TCliVersionOpts = {
    * and reuse a successful stamp hit. Distinct from updater `force`.
    */
   readonly reprobe?: boolean;
+  /**
+   * Extra identity folded into the cache key after the binary stamp. For
+   * manager-shim resolutions this is the launcher cache fingerprint
+   * (`own|sel:…`, which already includes the adapter's selection
+   * fingerprint) so a plain `mise use -g` invalidates the version even
+   * when the resolved binary's path/mtime/size are unchanged.
+   */
+  readonly identityExtra?: string;
 };
 
 const SCHEMA_V1 = 1;
@@ -53,20 +55,13 @@ export const CLI_VERSION_CACHE_MAX_RECORDS = 64;
 /** Version stdout is a short banner; anything larger is treated as failure. */
 export const CLI_VERSION_OUTPUT_MAX_BYTES = 4_096;
 const MAX_PATH_CHARS = 4_096;
-const MAX_STAMP_CHARS = 256;
+/** Binary stamp alone is short; shim resolutions append `|x:` + launcher
+ *  fingerprint (`own|sel:…`), so allow room for a config path + mtimes. */
+const MAX_STAMP_CHARS = 1_024;
 const MAX_FILE_BYTES =
   64 * 1024 +
   CLI_VERSION_CACHE_MAX_RECORDS *
     (MAX_PATH_CHARS + CLI_VERSION_OUTPUT_MAX_BYTES);
-
-let persistTmpSeq = 0;
-
-const envMs = (name: string, fallback: number): number | undefined => {
-  const raw = process.env[name];
-  if (raw === undefined) return undefined;
-  const n = Number.parseInt(raw, 10);
-  return Number.isFinite(n) && n >= 0 ? n : fallback;
-};
 
 /**
  * Timeout for a NEW probe. `undefined` means runCapture's 5s default.
@@ -76,7 +71,7 @@ export const versionProbeTimeoutMs = (
   override: number | undefined,
 ): number | undefined => {
   if (override !== undefined) return override;
-  return envMs("OPENLLM_CLI_VERSION_PROBE_TIMEOUT_MS", 5_000);
+  return envMsOptional("OPENLLM_CLI_VERSION_PROBE_TIMEOUT_MS", 5_000);
 };
 
 type TPersistRecord = {
@@ -106,6 +101,15 @@ type TCacheState = {
 
 const identityKey = (path: string, stamp: string): string =>
   `${path}\n${stamp}`;
+
+/** Fold optional launcher/selection identity into the binary stamp. */
+const stampWithIdentityExtra = (
+  stamp: string,
+  identityExtra: string | undefined,
+): string =>
+  identityExtra !== undefined && identityExtra.length > 0
+    ? `${stamp}|x:${identityExtra}`
+    : stamp;
 
 export const cliVersionCacheFilePath = (): string =>
   join(stateDir(), "cli-version-cache.json");
@@ -150,26 +154,8 @@ const coerceFile = (v: unknown): TPersistRecord[] => {
 const loadPersist = (st: TCacheState): void => {
   if (st.persistLoaded) return;
   st.persistLoaded = true;
-  const path = st.file;
-  try {
-    const st = statSync(path);
-    if (st.size > MAX_FILE_BYTES) return;
-  } catch {
-    return;
-  }
-  let raw: string;
-  try {
-    raw = readFileSync(path, "utf-8");
-  } catch {
-    return;
-  }
-  if (raw.length > MAX_FILE_BYTES) return;
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(raw);
-  } catch {
-    return;
-  }
+  const parsed = readJsonStateFile(st.file, MAX_FILE_BYTES);
+  if (parsed === null) return;
   for (const rec of coerceFile(parsed)) {
     st.memory.set(identityKey(rec.path, rec.stamp), rec);
   }
@@ -179,29 +165,6 @@ const durableRecordsFromMemory = (st: TCacheState): TPersistRecord[] =>
   [...st.memory.values()]
     .filter((rec) => rec.output !== null)
     .slice(-CLI_VERSION_CACHE_MAX_RECORDS);
-
-const writePersistAtomic = (
-  st: TCacheState,
-  records: readonly TPersistRecord[],
-): void => {
-  persistTmpSeq += 1;
-  const tmp = join(
-    st.dir,
-    `.cli-version-cache.json.${process.pid}.${persistTmpSeq}.tmp`,
-  );
-  const body: TPersistFile = { v: SCHEMA_V, records };
-  try {
-    mkdirSync(st.dir, { recursive: true });
-    writeFileSync(tmp, JSON.stringify(body), { mode: 0o600 });
-    renameSync(tmp, st.file);
-  } catch {
-    try {
-      rmSync(tmp, { force: true });
-    } catch {
-      // best-effort temp cleanup
-    }
-  }
-};
 
 /** Snapshot the in-memory map (no disk RMW). Serialized; unique tmp names. */
 const flushPersist = (st: TCacheState): void => {
@@ -213,7 +176,11 @@ const flushPersist = (st: TCacheState): void => {
   try {
     do {
       st.persistQueued = false;
-      writePersistAtomic(st, durableRecordsFromMemory(st));
+      const body: TPersistFile = {
+        v: SCHEMA_V,
+        records: durableRecordsFromMemory(st),
+      };
+      writeJsonStateAtomic(st.dir, st.file, body);
     } while (st.persistQueued);
   } finally {
     st.persistLocked = false;
@@ -298,6 +265,7 @@ const runProbe = async (
   stamp: string,
   env: Record<string, string> | undefined,
   timeoutMs: number | undefined,
+  identityExtra: string | undefined,
 ): Promise<string | null> => {
   let output: string | null;
   try {
@@ -307,7 +275,11 @@ const runProbe = async (
     // Observer abort never reaches here (joinObserver only).
     output = null;
   }
-  const stampAfter = versionBinaryStamp(bin);
+  const baseStampAfter = versionBinaryStamp(bin);
+  const stampAfter =
+    baseStampAfter === null
+      ? null
+      : stampWithIdentityExtra(baseStampAfter, identityExtra);
   const resolvedAfter = resolveVersionBinary(bin);
   if (stampAfter !== stamp || resolvedAfter !== resolved) {
     return output;
@@ -337,10 +309,12 @@ const cachedCliVersionIn = (
 ): Promise<string | null> => {
   loadPersist(st);
   const resolved = resolveVersionBinary(bin);
-  const stamp = versionBinaryStamp(bin);
-  if (resolved === null || stamp === null) {
+  const baseStamp = versionBinaryStamp(bin);
+  if (resolved === null || baseStamp === null) {
     return Promise.resolve(null);
   }
+  const identityExtra = opts?.identityExtra;
+  const stamp = stampWithIdentityExtra(baseStamp, identityExtra);
   const key = identityKey(resolved, stamp);
   const hit = st.memory.get(key);
   if (hit !== undefined) {
@@ -363,6 +337,7 @@ const cachedCliVersionIn = (
       stamp,
       env,
       versionProbeTimeoutMs(opts?.timeoutMs),
+      identityExtra,
     ).finally(() => {
       st.inflight.delete(key);
     }),
@@ -380,11 +355,13 @@ const invalidateMatchingIn = (
   st: TCacheState,
   bin: string,
   output: string,
+  identityExtra?: string,
 ): boolean => {
   loadPersist(st);
   const resolved = resolveVersionBinary(bin);
-  const stamp = versionBinaryStamp(bin);
-  if (resolved === null || stamp === null) return false;
+  const baseStamp = versionBinaryStamp(bin);
+  if (resolved === null || baseStamp === null) return false;
+  const stamp = stampWithIdentityExtra(baseStamp, identityExtra);
   const key = identityKey(resolved, stamp);
   const hit = st.memory.get(key);
   if (hit === undefined || hit.output !== output) return false;
@@ -407,6 +384,7 @@ export type TCliVersionCache = {
   readonly invalidateMatchingCliVersionOutput: (
     bin: string,
     output: string,
+    identityExtra?: string,
   ) => boolean;
 };
 
@@ -436,8 +414,8 @@ export const createCliVersionCache = (): TCliVersionCache => {
   return {
     cachedCliVersion: (bin, env, opts) =>
       cachedCliVersionIn(current(), bin, env, opts),
-    invalidateMatchingCliVersionOutput: (bin, output) =>
-      invalidateMatchingIn(current(), bin, output),
+    invalidateMatchingCliVersionOutput: (bin, output, identityExtra) =>
+      invalidateMatchingIn(current(), bin, output, identityExtra),
   };
 };
 
