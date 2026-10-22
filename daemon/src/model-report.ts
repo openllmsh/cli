@@ -493,10 +493,38 @@ export const maybeReportModels = (
           )
         : dueForSucceededLogin(now, slug);
 
-    const results = await Promise.all(due.map((item) => runForceList(item)));
-    for (const listed of results) stampAttempt(listed, now);
-    return aggregateListed(results, { alreadyPosted: false });
+    const listed = await Promise.all(due.map((item) => runForceList(item)));
+    // Post before stamping so a cloud failure is reflected in models_status
+    // (auto already posts inside its flight; force must not stamp "ok" early).
+    const results = await applyForceCloudPost(listed);
+    for (const item of results) stampAttempt(item, now);
+    return aggregateListed(results, { alreadyPosted: true });
   });
+
+/** POST force listings once; attach `postError` when the cloud write fails. */
+const applyForceCloudPost = async (
+  results: ReadonlyArray<TListed>,
+): Promise<ReadonlyArray<TListed>> => {
+  const entries: TDaemonModelReportEntry[] = [];
+  for (const item of results) {
+    if (item.outcome.kind !== "success") continue;
+    if (item.outcome.models.length === 0) continue;
+    entries.push({
+      provider: item.slug,
+      models: item.outcome.models,
+      ...(item.cliVersion ? { cli_version: item.cliVersion } : {}),
+    });
+  }
+  if (entries.length === 0) return results;
+  const posted = await reportModels({ entries });
+  if (posted.ok) return results;
+  return results.map((item) => {
+    if (item.outcome.kind !== "success" || item.outcome.models.length === 0) {
+      return item;
+    }
+    return { ...item, postError: posted.error };
+  });
+};
 
 const aggregateListed = async (
   results: ReadonlyArray<TListed>,
@@ -504,8 +532,15 @@ const aggregateListed = async (
 ): Promise<TMaybeModelReportResult> => {
   const entries: TDaemonModelReportEntry[] = [];
   const failedProviders: string[] = [];
+  const postErrors: string[] = [];
   for (const listed of results) {
-    if (listed.outcome.kind === "failed" || listed.postError !== undefined) {
+    if (listed.postError !== undefined) {
+      // Cloud write failed after a successful list — keep the POST diagnostic
+      // separate from vendor listing failures.
+      postErrors.push(listed.postError);
+      continue;
+    }
+    if (listed.outcome.kind === "failed") {
       failedProviders.push(listed.slug);
       continue;
     }
@@ -524,11 +559,19 @@ const aggregateListed = async (
       : undefined;
   if (opts.alreadyPosted) {
     const posted = entries.length;
+    const postError =
+      postErrors.length === 0 ? undefined : [...new Set(postErrors)].join("; ");
+    const error =
+      postError === undefined
+        ? listingError
+        : listingError === undefined
+          ? postError
+          : `${listingError}; ${postError}`;
     return {
-      attempted: posted > 0,
+      attempted: posted > 0 || postErrors.length > 0,
       reported: posted,
-      failed: failedProviders.length > 0,
-      ...(listingError === undefined ? {} : { error: listingError }),
+      failed: failedProviders.length > 0 || postErrors.length > 0,
+      ...(error === undefined ? {} : { error }),
     };
   }
   if (entries.length === 0) {
