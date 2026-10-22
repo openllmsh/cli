@@ -1129,11 +1129,22 @@ export const claudeCodeDelegate: TProviderDelegate = {
         if (token === null) {
           return { kind: "null", reason: "token_unavailable" };
         }
+        // Resolve URL + UA BEFORE fetchModelListDetailed: argument-position
+        // awaits run outside its try/catch and would escape the null-reason
+        // contract.
+        let url: string;
+        let ua: string;
+        try {
+          url = await resolveProviderUrl(PROVIDER, "/v1/models?limit=1000");
+          ua = await userAgent();
+        } catch {
+          return { kind: "null", reason: "error" };
+        }
         return fetchModelListDetailed(
-          await resolveProviderUrl(PROVIDER, "/v1/models?limit=1000"),
+          url,
           {
             authorization: `Bearer ${token.accessToken}`,
-            "user-agent": await userAgent(),
+            "user-agent": ua,
             "anthropic-version": "2023-06-01",
             "anthropic-beta": OAUTH_BETA,
             accept: "application/json",

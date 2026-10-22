@@ -713,13 +713,23 @@ const fetchModelRowsDetailed = async (): Promise<TGrokModelRowsDetailed> => {
   // Route through the shared fetch/timeout/reason helper; keep the raw-row
   // cache for supportsReasoningEffort (which needs vendor fields listModels
   // strips). Capture rows inside `parse` before they are projected.
+  // Resolve URL + version BEFORE fetchModelListDetailed: argument-position
+  // awaits run outside its try/catch and would escape the null-reason contract.
+  let url: string;
+  let version: string;
+  try {
+    url = await resolveProviderUrl(PROVIDER, "/v1/models");
+    version = await clientVersion();
+  } catch {
+    return { kind: "null", reason: "error" };
+  }
   let capturedRows: ReadonlyArray<TGrokModelRow> = [];
   const detailed = await fetchModelListDetailed(
-    await resolveProviderUrl(PROVIDER, "/v1/models"),
+    url,
     {
       authorization: `Bearer ${token.accessToken}`,
       "user-agent": OPENLLM_USER_AGENT,
-      "x-grok-client-version": await clientVersion(),
+      "x-grok-client-version": version,
       accept: "application/json",
     },
     (body) => {

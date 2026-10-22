@@ -916,12 +916,22 @@ export const kimiCodeDelegate: TProviderDelegate = {
         if (token === null) {
           return { kind: "null", reason: "token_unavailable" };
         }
-        const base = await resolveProviderUrl(PROVIDER, "/coding/v1");
+        // Resolve URL + identity headers BEFORE fetchModelListDetailed:
+        // awaits outside its try/catch would escape the null-reason contract.
+        let url: string;
+        let headers: Record<string, string>;
+        try {
+          const base = await resolveProviderUrl(PROVIDER, "/coding/v1");
+          url = `${base}/models`;
+          headers = await identityHeaders();
+        } catch {
+          return { kind: "null", reason: "error" };
+        }
         return fetchModelListDetailed(
-          `${base}/models`,
+          url,
           {
             authorization: `Bearer ${token.accessToken}`,
-            ...(await identityHeaders()),
+            ...headers,
             accept: "application/json",
           },
           parseKimiModelList,

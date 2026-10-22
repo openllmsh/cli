@@ -452,11 +452,19 @@ const listChatgptModelsDetailed =
     const versionUnresolved =
       resolvedVersion === null || resolvedVersion === "0.0.0";
     const ver = resolvedVersion ?? "0.0.0";
-    const detailed = await fetchModelListDetailed(
-      await resolveProviderUrl(
+    // Resolve URL BEFORE fetchModelListDetailed: an argument-position await
+    // runs outside its try/catch and would escape the null-reason contract.
+    let url: string;
+    try {
+      url = await resolveProviderUrl(
         PROVIDER,
         `/backend-api/codex/models?client_version=${encodeURIComponent(ver)}`,
-      ),
+      );
+    } catch {
+      return { kind: "null", reason: "error" };
+    }
+    const detailed = await fetchModelListDetailed(
+      url,
       {
         authorization: `Bearer ${token.accessToken}`,
         ...(token.accountId !== null
