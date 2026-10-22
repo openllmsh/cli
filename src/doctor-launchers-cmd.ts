@@ -30,6 +30,13 @@ export type TLauncherDoctorRow = {
   readonly interpreter: string | null;
   readonly underManagerRoot: boolean;
   readonly isolatedEnvApplies: boolean;
+  /**
+   * How the row was found when it is NOT a daemon-usable install. Login-shell
+   * probe hits set `login-shell`; the daemon never enables that probe, so
+   * those rows stay `installed: false` with `daemonWillNotUse: true`.
+   */
+  readonly foundVia: "login-shell" | null;
+  readonly daemonWillNotUse: boolean;
 };
 
 export const DOCTOR_LAUNCHERS_USAGE = `openllm doctor launchers
@@ -61,7 +68,17 @@ export const formatLauncherDoctorReport = (
   const lines: string[] = ["Launcher resolution", ""];
   for (const row of rows) {
     if (!row.installed) {
-      if (row.candidate !== null) {
+      if (row.foundVia === "login-shell") {
+        // Visible to a login shell, but the daemon never enables that probe —
+        // keep installed=false so the report matches the dashboard.
+        lines.push(
+          `${row.provider}: not installed`,
+          `  candidate=${row.candidate ?? "?"}`,
+          `  resolved=${row.resolvedPath ?? "?"}`,
+          `  found_via=login-shell`,
+          `  daemon_will_not_use=yes`,
+        );
+      } else if (row.candidate !== null) {
         // Candidate exists on disk but demand resolution returned null
         // (e.g. recognized manager shim whose query failed).
         lines.push(
@@ -130,6 +147,8 @@ export const collectLauncherDoctorRows = async (): Promise<
           underManagerRoot: resolution.underManagerRoot,
           // L2 isolatedRuntimeEnv applies to every installed provider on spawn.
           isolatedEnvApplies: true,
+          foundVia: null,
+          daemonWillNotUse: false,
         };
       }
 
@@ -147,10 +166,13 @@ export const collectLauncherDoctorRows = async (): Promise<
           interpreter: null,
           underManagerRoot: false,
           isolatedEnvApplies: false,
+          foundVia: null,
+          daemonWillNotUse: false,
         };
       }
 
-      // Try a login-shell probe on the bare command name.
+      // Try a login-shell probe on the bare command name. The daemon never
+      // enables this probe — surface the hit as shell-only / not installed.
       const probed = await resolver.resolveLauncher(cliCommand(provider), {
         demand: true,
         enableShellProbe: true,
@@ -166,19 +188,22 @@ export const collectLauncherDoctorRows = async (): Promise<
           interpreter: null,
           underManagerRoot: false,
           isolatedEnvApplies: false,
+          foundVia: null,
+          daemonWillNotUse: false,
         };
       }
       return {
         provider,
-        installed: true,
+        installed: false,
         candidate: cliCommand(provider),
         resolvedPath: probed.path,
         kind: probed.kind,
         adapterId: probed.adapterId ?? null,
         interpreter: probed.interpreter ?? null,
         underManagerRoot: probed.underManagerRoot,
-        // L2 isolatedRuntimeEnv applies to every provider on the next spawn.
-        isolatedEnvApplies: true,
+        isolatedEnvApplies: false,
+        foundVia: "login-shell",
+        daemonWillNotUse: true,
       };
     }),
   );
