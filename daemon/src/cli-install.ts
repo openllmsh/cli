@@ -314,6 +314,21 @@ export type TRunnableHostPick = {
 };
 
 /**
+ * Path the isolated run-view symlink should point at for a launcher pick.
+ * Manager shims must link the resolved target (never the shim). Ordinary
+ * binary/script/wrapper picks must link the HOST CANDIDATE — vendors like
+ * Claude/Codex expose a stable `~/.local/bin/<cmd>` symlink that self-update
+ * repoints at `versions/<v>`; linking the realpath'd version pin dangling-
+ * breaks the isolated link the moment the old version is removed. Matches
+ * the pre-launcher `ordinary` manager passthrough (target === candidate).
+ */
+export const isolatedLinkTargetForLauncherPick = (
+  candidate: string,
+  resolution: TLauncherResolution,
+): string =>
+  resolution.kind.startsWith("shim:") ? resolution.path : candidate;
+
+/**
  * Walk host candidates the demand path uses: skip missing paths, null
  * `resolveLauncher` results, and non-runnable resolutions; return the first
  * runnable pick. Shared by {@link resolveHostBinary} and `doctor launchers`.
@@ -382,7 +397,7 @@ const resolveHostBinary = async (
     );
     if (pick !== null) {
       noteLauncherResolution(provider, pick.resolution);
-      return pick.resolution.path;
+      return isolatedLinkTargetForLauncherPick(pick.candidate, pick.resolution);
     }
     return undefined;
   }
@@ -399,7 +414,7 @@ const resolveHostBinary = async (
       if (peeked !== undefined) {
         if (!isResolvedLauncherRunnable(peeked)) continue;
         noteLauncherResolution(provider, peeked);
-        return peeked.path;
+        return isolatedLinkTargetForLauncherPick(candidate, peeked);
       }
     }
 
