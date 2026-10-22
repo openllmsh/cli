@@ -624,6 +624,12 @@ export const createConnectedModelReportTracker =
           normalizeProviderConnection(conn).observation === "connected";
         const was = last.get(conn.provider)?.connected === true;
         last.set(conn.provider, { connected });
+        // Falling edge: drop a stale models outcome so an out-of-band re-login
+        // whose auto discover returns skipped cannot reattach unavailable/
+        // token_unavailable from the previous session.
+        if (!connected && was && lastModelsOutcome.delete(conn.provider)) {
+          markStatusDirty("models");
+        }
         if (!connected || was) continue;
         // Skip providers with a fresh last attempt — throttle already gates
         // inside maybeReportModels, but avoid even scheduling a no-op flight.
