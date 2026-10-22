@@ -28,9 +28,9 @@ import {
   writeFileSync,
 } from "node:fs";
 import { mkdir, mkdtemp, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { MUSE_CREDENTIAL_BACKEND } from "../cli-paths";
+import { daemonTempDir } from "../sandbox/working-set";
 import type { TMuseMcpServer } from "./muse-mcp-server";
 
 /**
@@ -151,7 +151,7 @@ export const createMuseExecutionOverlay = async (params: {
   const durableAuth = museAuthJsonPath(params.baseEnv);
 
   const root = await mkdtemp(
-    join(params.parentDir ?? tmpdir(), "muse-overlay-"),
+    join(params.parentDir ?? daemonTempDir(), "muse-overlay-"),
   );
   chmodSync(root, 0o700);
 

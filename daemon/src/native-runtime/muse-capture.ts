@@ -46,7 +46,6 @@
  */
 
 import { existsSync } from "node:fs";
-import { tmpdir } from "node:os";
 import type { TChatCompletionChunk } from "@openllmsh/protocol";
 import { decodeProviderEventStream } from "@openllmsh/wire/lib/streaming/provider-decode";
 import type { TChatGptStreamEvent } from "@openllmsh/wire/providers/chatgpt/streaming";
@@ -56,6 +55,7 @@ import {
   newChatGptStreamState,
 } from "@openllmsh/wire/providers/chatgpt/streaming";
 import { Schema } from "effect";
+import { daemonTempDir } from "../sandbox/working-set";
 import {
   createCaptureLoopbackProxyGuard,
   museCaptureProxyNoProxyHosts,
@@ -1247,7 +1247,7 @@ export const runMuseNativeCapture = async (
       ...(params.hostFactory !== undefined
         ? { hostFactory: params.hostFactory }
         : {}),
-      cwd: params.cwd ?? tmpdir(),
+      cwd: params.cwd ?? daemonTempDir(),
       dirPrefix: "muse-capture-",
       endpointTransport: handle.endpointTransport,
       // Capture-only: server-executed search folds into the captured turn

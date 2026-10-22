@@ -44,9 +44,8 @@
  * on mismatch, then re-`read` fail-closed.
  */
 
-import { existsSync } from "node:fs";
+import { chmodSync, existsSync } from "node:fs";
 import { mkdir, mkdtemp, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { TurnOutcome as TOfficialMuseTurnOutcome } from "@muse-code/sdk";
 import {
@@ -71,6 +70,7 @@ import {
 import { spawnCwd } from "../delegation/util";
 import { logError, logInfo, logWarn, safeDiagnosticMessage } from "../logger";
 import { sandboxSpawnArgs } from "../sandbox/exec";
+import { daemonTempDir } from "../sandbox/working-set";
 import { DAEMON_VERSION } from "../version";
 import type {
   TMuseFoldedItem,
@@ -1192,6 +1192,7 @@ export const allocateMuseTurnDirs = async (
   const doMkdir = options.mkdir ?? mkdir;
   const turnRoot = await mkdtemp(join(parent, prefix));
   try {
+    chmodSync(turnRoot, 0o700);
     const workspaceRoot = join(turnRoot, "workspace");
     const runtimeParent = join(turnRoot, "runtime");
     await doMkdir(workspaceRoot, { recursive: true, mode: 0o700 });
@@ -1225,7 +1226,7 @@ export const listMuseModelsDemand = async (
   let host: TMuseHost | null = null;
   try {
     const dirs = await allocateMuseTurnDirs(
-      params.cwd ?? (spawnCwd(baseEnv) || tmpdir()),
+      params.cwd ?? (spawnCwd(baseEnv) || daemonTempDir()),
       "muse-models-",
     );
     turnRoot = dirs.turnRoot;
@@ -1487,10 +1488,12 @@ export const openMuseTurnSession = async (
     if (options.signal.aborted) throw abortedError();
     // Caller resolves its own cwd fallback (the bridge and capture paths
     // disagree: the bridge falls back through `spawnCwd(env)` before
-    // `tmpdir()`, capture goes straight to `tmpdir()`) — this helper only
-    // ever allocates under whatever `options.cwd` it is handed.
+    // `daemonTempDir()`, capture goes straight to `daemonTempDir()`) — this
+    // helper only ever allocates under whatever `options.cwd` it is handed.
+    // Never bare `os.tmpdir()`: under systemd that is sticky world-writable
+    // `/tmp`, which muse-bin rejects as an UnsafePath parent.
     const dirs = await allocateMuseTurnDirs(
-      options.cwd ?? tmpdir(),
+      options.cwd ?? daemonTempDir(),
       options.dirPrefix,
     );
     turnRoot = dirs.turnRoot;
@@ -1712,7 +1715,7 @@ export const runMuseNative = async (
       ...(params.hostFactory !== undefined
         ? { hostFactory: params.hostFactory }
         : {}),
-      cwd: params.cwd ?? (spawnCwd(params.env) || tmpdir()),
+      cwd: params.cwd ?? (spawnCwd(params.env) || daemonTempDir()),
       dirPrefix: "muse-turn-",
       hooks: {
         onToolCall: (name, args) => {

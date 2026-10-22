@@ -55,13 +55,14 @@
  */
 
 import { randomBytes } from "node:crypto";
+import { chmodSync } from "node:fs";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import * as http2 from "node:http2";
 import { createServer } from "node:net";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { TChatCompletionChunk } from "@openllmsh/protocol";
 import { providerDeclaresBridgeCapture } from "../execution-registry";
+import { daemonTempDir } from "../sandbox/working-set";
 import type {
   TCursorAgentServiceMethod,
   TCursorDecodeBlock,
@@ -461,7 +462,11 @@ export const openCursorCaptureBridge = async (args: {
   });
 
   const root =
-    args.tempRoot ?? (await mkdtemp(join(tmpdir(), "openllm-cursor-capture-")));
+    args.tempRoot ??
+    (await mkdtemp(join(daemonTempDir(), "openllm-cursor-capture-")));
+  if (args.tempRoot === undefined) {
+    chmodSync(root, 0o700);
+  }
   const preloadPath = await materializeCursorCapturePreload(root);
   const socketPath = join(root, "ipc.sock");
   const token = randomBytes(32).toString("hex");
