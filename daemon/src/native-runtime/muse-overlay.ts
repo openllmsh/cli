@@ -211,6 +211,11 @@ export const createMuseExecutionOverlay = async (params: {
     await mkdirPrivate(configHome, root);
     await mkdirPrivate(museDir, root);
     await mkdirPrivate(dataHome, root);
+    // muse-bin creates its data dir (`museHome` = `$XDG_DATA_HOME/muse`) with
+    // mode 0777, so the daemon's umask 002 makes it 0775 — and muse then
+    // refuses its own session store with `UnsafePath` (#781). Pre-create it
+    // private; muse reuses an existing dir.
+    await mkdirPrivate(join(dataHome, "muse"), root);
     await mkdirPrivate(stateHome, root);
     await mkdirPrivate(codexHome, root);
 
