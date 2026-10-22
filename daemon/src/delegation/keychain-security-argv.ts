@@ -106,16 +106,19 @@ export const looksLikeKeychainPath = (arg: string): boolean => {
 };
 
 /**
- * Last positional argv element after skipping flags and their values.
- * Production builders always place the keychain path last; a flag value that
- * merely looks like a keychain path is not a positional operand.
+ * Positional argv elements after skipping flags and their values.
+ * A flag value that merely looks like a keychain path is not a positional
+ * operand. Every positional on a keychain-path subcommand must be an absolute
+ * keychain path — `security` accepts several operands, and a bare earlier
+ * name (e.g. `login.keychain-db`) would resolve against the default search
+ * list even when a later absolute path is present.
  */
-const finalKeychainOperand = (
+const positionalOperands = (
   argv: ReadonlyArray<string>,
   sub: TAllowedSecuritySubcommand,
-): string | undefined => {
+): ReadonlyArray<string> => {
   const valueFlags = VALUE_TAKING_FLAGS[sub];
-  let lastPositional: string | undefined;
+  const positionals: string[] = [];
   for (let i = 1; i < argv.length; ) {
     const arg = argv[i];
     if (arg === undefined) break;
@@ -133,18 +136,20 @@ const finalKeychainOperand = (
       i += 1;
       continue;
     }
-    lastPositional = arg;
+    positionals.push(arg);
     i += 1;
   }
-  return lastPositional;
+  return positionals;
 };
 
 const hasExplicitKeychainPath = (
   argv: ReadonlyArray<string>,
   sub: TAllowedSecuritySubcommand,
 ): boolean => {
-  const last = finalKeychainOperand(argv, sub);
-  return last !== undefined && looksLikeKeychainPath(last);
+  const operands = positionalOperands(argv, sub);
+  return (
+    operands.length > 0 && operands.every((op) => looksLikeKeychainPath(op))
+  );
 };
 
 const hasFlag = (
