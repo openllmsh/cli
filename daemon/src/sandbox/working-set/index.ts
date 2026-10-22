@@ -32,7 +32,6 @@ import type { TWorkingSet } from "./base";
 import { baseWorkingSet, existing } from "./base";
 import { browserChatLayer } from "./browser-chat";
 import {
-  DARWIN_USER_RUNTIME_WRITE_DIRS,
   delegatedCliRuntimeSet,
   launcherDataRoots,
   MAC_SEATBELT_RUNTIME_WRITE_EXTRAS,
@@ -43,7 +42,6 @@ import { vendorCliTunnelLayer } from "./vendor-cli-tunnel";
 export type { TWorkingSet } from "./base";
 export { daemonTempDir, resolveCliExecDirs } from "./base";
 export {
-  DARWIN_USER_RUNTIME_WRITE_DIRS,
   delegatedCliRuntimeSet,
   launcherDataRoots,
   MAC_SEATBELT_RUNTIME_WRITE_EXTRAS,
@@ -131,7 +129,7 @@ export const workingSetForLayer = (
 
 /**
  * Effective Landlock write allow-list (shared working set only — no macOS
- * real-home / Darwin per-user temp extras).
+ * Seatbelt-only extras: `/tmp`, `/private/var/folders`, real-home Library).
  */
 export const compileLandlockWriteAllow = (
   homeOverride?: string,

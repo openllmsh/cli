@@ -18,90 +18,36 @@
  * Dependency-light: imports `./base` + `cli-paths` / `mise-paths` only — never
  * `./index`, so the working-set composition can pull this in without a cycle.
  */
-import { execFileSync } from "node:child_process";
-import { existsSync, realpathSync } from "node:fs";
+import { existsSync } from "node:fs";
 import { dirname, isAbsolute, join } from "node:path";
 import { CLI_PROVIDERS, cliConfigDir, cliHome } from "../../cli-paths";
 import { allManagerDataRoots } from "../../launcher-roots";
 import type { TWorkingSet } from "./base";
 import { daemonTempDir, SENSITIVE_ROOTS } from "./base";
 
-const stripTrailingSlash = (p: string): string =>
-  p.length > 1 && p.endsWith("/") ? p.replace(/\/+$/, "") : p;
-
-/**
- * Resolve one `getconf DARWIN_USER_*` dir to its canonical `/private/var/…`
- * path. Returns null off-macOS or when getconf/realpath fails.
- */
-const resolveDarwinUserDir = (
-  name: "DARWIN_USER_TEMP_DIR" | "DARWIN_USER_CACHE_DIR",
-): string | null => {
-  if (process.platform !== "darwin") return null;
-  try {
-    const raw = execFileSync("getconf", [name], { encoding: "utf8" }).trim();
-    if (raw.length === 0) return null;
-    return stripTrailingSlash(realpathSync(stripTrailingSlash(raw)));
-  } catch {
-    return null;
-  }
-};
-
-let cachedDarwinUserRuntimeWriteDirs: readonly string[] | undefined;
-
-/**
- * Per-user Darwin temp + cache dirs (`getconf DARWIN_USER_TEMP_DIR` /
- * `DARWIN_USER_CACHE_DIR`, realpath'd). Security.framework, CFNetwork, Bun
- * mmap, and LaunchServices use these regardless of the process `TMPDIR`, so
- * Seatbelt must keep them writable or keychain / auth IPC can wedge or prompt.
- *
- * Narrowed from the prior blanket `/private/var/folders` grant (audit L3).
- * Falls back to that broad prefix only when getconf/realpath is unavailable —
- * never omit the surface and risk a keychain prompt.
- */
-export const DARWIN_USER_RUNTIME_WRITE_DIRS = (): readonly string[] => {
-  if (cachedDarwinUserRuntimeWriteDirs !== undefined) {
-    return cachedDarwinUserRuntimeWriteDirs;
-  }
-  const resolved = [
-    resolveDarwinUserDir("DARWIN_USER_TEMP_DIR"),
-    resolveDarwinUserDir("DARWIN_USER_CACHE_DIR"),
-  ].filter((p): p is string => p !== null);
-  // Dedupe while preserving order (temp then cache).
-  const seen = new Set<string>();
-  const dirs: string[] = [];
-  for (const p of resolved) {
-    if (seen.has(p)) continue;
-    seen.add(p);
-    dirs.push(p);
-  }
-  cachedDarwinUserRuntimeWriteDirs =
-    dirs.length > 0 ? dirs : ["/private/var/folders"];
-  return cachedDarwinUserRuntimeWriteDirs;
-};
-
 /**
  * macOS Seatbelt-only write extras beyond the shared working set. Kept as ONE
  * named constant so the Landlock↔Seatbelt divergence is explicit in tests and
  * review. Do NOT fold these into {@link delegatedCliRuntimeSet} — Landlock must
- * not grant real-home `Library/*` or Darwin per-user temp/cache.
+ * not grant real-home `Library/*`, `/tmp`, or `/private/var/folders`.
  *
- * Justified members (audit L3):
- * - {@link DARWIN_USER_RUNTIME_WRITE_DIRS} — frameworks/keychain ignore TMPDIR.
+ * Justified members (parity with `dev`'s Seatbelt `macRuntimeWrite`, minus
+ * `/dev` which the shared base already grants):
+ * - `/private/tmp` + `/tmp` — ambient temp for wrappers that ignore TMPDIR.
+ * - `/private/var/folders` — Darwin per-user temp/cache/runtime (incl.
+ *   `DARWIN_USER_DIR` …/0 that LaunchServices uses for `open` during OAuth).
+ *   A getconf-narrowed grant that only kept TEMP/CACHE dirs omitted that
+ *   runtime dir and broke browser-open.
  * - `~/Library/Caches` + `~/Library/Preferences` — LaunchServices (`open` for
  *   OAuth browser) + CFPreferences; the LS database lives on the real home and
- *   cannot be relocated into the isolated HOME. Kept (not removed) because
- *   dropping them risks auth/browser-open breakage; a real-Mac smoke must
- *   confirm before any further shrink.
- *
- * Removed vs the prior set: `/tmp` and `/private/tmp`. Spawned CLIs (and the
- * daemon's own children) already get `TMPDIR=<state>/tmp` via `cliEnv` /
- * `isolatedRuntimeEnv`, and that dir is in the shared RW set — global `/tmp`
- * was only lenient ambient surface for wrappers that ignore TMPDIR.
+ *   cannot be relocated into the isolated HOME.
  */
 export const MAC_SEATBELT_RUNTIME_WRITE_EXTRAS = (
   home: string,
 ): readonly string[] => [
-  ...DARWIN_USER_RUNTIME_WRITE_DIRS(),
+  "/private/tmp",
+  "/tmp",
+  "/private/var/folders",
   join(home, "Library", "Caches"),
   join(home, "Library", "Preferences"),
 ];

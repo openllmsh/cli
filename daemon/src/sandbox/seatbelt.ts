@@ -40,7 +40,7 @@ const esc = (p: string): string =>
  * macOS runtime paths the process tree must WRITE beyond the shared working
  * set. `/dev` is already in the base working set; the rest are the named
  * Seatbelt-only extras ({@link MAC_SEATBELT_RUNTIME_WRITE_EXTRAS}) — kept out
- * of the shared L3 set so Landlock does not grant Darwin per-user temp/cache
+ * of the shared L3 set so Landlock does not grant `/tmp`, `/private/var/folders`,
  * or real-home `Library/*`.
  */
 const macRuntimeWrite = (home: string): string[] => [
