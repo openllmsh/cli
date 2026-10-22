@@ -1017,8 +1017,14 @@ Two orthogonal hardenings from
   (inheritance across `execve` does the rest). Wrapped: delegation capture /
   login / keychain spawns, the `open`/`xdg-open` browser launch, and the
   long-lived native runtimes. NOT wrapped: the session-host PTY spawn (the
-  exemption), read-only diagnostics (`ps`, `journalctl`/`tail`), and CLI-verb
-  paths. `sandbox/working-set.ts` derives ONE allow-list from
+  exemption), read-only diagnostics (`ps`, `journalctl`/`tail`), CLI-verb
+  paths, macOS keychain-dependent vendor spawns
+  (`sandbox/policy.ts` `unwrapKeychainSpawn` — Claude/Cursor), and the Muse
+  `serve` host on Linux only (`unwrapMuseServeSpawn`, #781: muse-bin's
+  root-anchored ConfinedDir walk cannot open `/` under Landlock; overlay
+  isolation + `--disable-write`/`--disable-shell` stay). Muse login/logout
+  and macOS Muse serve remain confined. `sandbox/working-set.ts` derives ONE
+  allow-list from
   `env.ts`/`cli-paths.ts`
   (the state dir — which contains the binary, CLI homes, and logs — plus the
   claude-code integration footprint `~/.claude`/`~/.claude.json` read-write;

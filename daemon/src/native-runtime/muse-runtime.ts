@@ -6,8 +6,12 @@
  * Confinement is therefore the SAME argv wrap Cursor uses: `sandboxSpawnArgs`
  * turns `[museBin, "serve", --disable-write, --disable-shell]` into the
  * daemon's `--sandbox-exec` shim so the SDK-owned child is the confined shim,
- * which then execs `muse serve`. An SDK that spawned outside this path would
- * be a blocker; this file does not invent a parallel MSP.
+ * which then execs `muse serve` — EXCEPT on Linux, where {@link
+ * unwrapMuseServeSpawn} skips the wrap (#781: muse-bin's root-anchored
+ * session-store walk cannot open `/` under Landlock). Isolation (overlay
+ * HOME/XDG, file credential backend, safety flags) stays either way. An SDK
+ * that spawned outside this path would be a blocker; this file does not invent
+ * a parallel MSP.
  *
  * Caller tools ride an ephemeral loopback MCP server injected via an isolated
  * XDG overlay (auth.json symlinked from the provider home; no ambient
@@ -24,6 +28,7 @@
  *   - auth overlay HOME is a SIBLING of `workspaceRoot`, not inside it, so
  *     workspace-scoped reads cannot reach the auth symlink by relative path
  *   - daemon `--sandbox-exec` wrap of the SDK-owned `muse serve` child
+ *     (skipped on Linux only — `unwrapMuseServeSpawn` / #781)
  *   - exact model+policy confirmation before any turn; setup RPC + pre-commit
  *     first-output budgets only (no absolute post-submit turn cutoff —
  *     Claude/Codex native contract; Cursor keeps its own turn/idle budgets)
@@ -70,6 +75,7 @@ import {
 import { spawnCwd } from "../delegation/util";
 import { logError, logInfo, logWarn, safeDiagnosticMessage } from "../logger";
 import { sandboxSpawnArgs } from "../sandbox/exec";
+import { unwrapMuseServeSpawn } from "../sandbox/policy";
 import { daemonTempDir } from "../sandbox/working-set";
 import { DAEMON_VERSION } from "../version";
 import type {
@@ -167,13 +173,28 @@ export type TMuseSpawnTarget = {
   readonly args: ReadonlyArray<string>;
 };
 
-/** Wrap official `muse serve` argv with the daemon sandbox shim. Pure. */
-export const wrapMuseServeSpawn = (museBin: string): TMuseSpawnTarget => {
-  const wrapped = sandboxSpawnArgs([
-    museBin,
-    "serve",
-    ...MUSE_SERVE_SAFETY_ARGS,
-  ]);
+export type TWrapMuseServeSpawnOpts = {
+  /**
+   * Override platform for the {@link unwrapMuseServeSpawn} probe (tests).
+   * Production omits this and uses `process.platform`.
+   */
+  readonly platform?: NodeJS.Platform;
+};
+
+/**
+ * Wrap official `muse serve` argv with the daemon sandbox shim — unless
+ * {@link unwrapMuseServeSpawn} says this platform runs the serve host
+ * unconfined (Linux / #781). Pure argv transform; isolation env is the
+ * caller's job and is unchanged by this wrap.
+ */
+export const wrapMuseServeSpawn = (
+  museBin: string,
+  opts?: TWrapMuseServeSpawnOpts,
+): TMuseSpawnTarget => {
+  const wrapped = sandboxSpawnArgs(
+    [museBin, "serve", ...MUSE_SERVE_SAFETY_ARGS],
+    { probe: unwrapMuseServeSpawn(opts?.platform ?? process.platform) },
+  );
   const command = wrapped[0];
   if (command === undefined) {
     throw new Error("sandboxSpawnArgs returned an empty argv");
