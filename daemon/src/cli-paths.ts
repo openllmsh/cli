@@ -511,8 +511,9 @@ const ensureIsolatedRuntimeDirs = (home: string): void => {
  * `PROTO_HOME` alongside mise/asdf/volta/fnm. Manager resolution continues to
  * use the REAL ambient `process.env`; the child only inherits these pointers.
  *
- * Never grants write on real `~/.config/mise` — config/state/cache fall to the
- * redirected XDG dirs automatically.
+ * `MISE_CONFIG_DIR` / explicit `MISE_GLOBAL_CONFIG_FILE` pin the real global
+ * config so shims still resolve versions after `XDG_CONFIG_HOME` redirects;
+ * the sandbox grants those paths RO only (never RW).
  */
 export const launcherDataRootEnv = (
   ambient: NodeJS.ProcessEnv = process.env,

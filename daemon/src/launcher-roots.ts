@@ -8,7 +8,7 @@
  * Built on {@link misePaths} for mise's XDG-aware layout; other managers keep
  * their documented default roots here.
  */
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { DOCTOR_LAUNCHER_ADAPTERS } from "@openllmsh/protocol";
 import { misePaths } from "./mise-paths";
 
@@ -275,6 +275,9 @@ export const allManagerDataRoots = (
   };
   const mise = misePaths(home, env);
   push(mise.configDir);
+  // Explicit `MISE_GLOBAL_CONFIG_FILE` may live outside configDir — grant its
+  // parent RO so the sandbox can open the file (existence-filtered later).
+  push(dirname(mise.globalConfigFile));
   push(mise.dataDir);
   push(mise.stateDir);
   push(mise.cacheDir);
@@ -311,6 +314,12 @@ export const allManagerDataRoots = (
  * sandbox RO set (via {@link fnmDataRootCandidates}) grants. Earlier we
  * treated fnm as PATH-only (alias bin on PATH); that no longer holds once
  * XDG is redirected.
+ *
+ * Mise also needs its REAL config: with `XDG_CONFIG_HOME` isolated, an unset
+ * `MISE_CONFIG_DIR` makes shims miss global tool versions ("no version set").
+ * Pass `MISE_CONFIG_DIR` (ambient or {@link misePaths}) and any explicit
+ * `MISE_GLOBAL_CONFIG_FILE`. Project/session selector vars (`MISE_ENV`, …)
+ * stay stripped — this allowlist never forwards them.
  */
 export const buildLauncherDataRootEnv = (
   ambient: NodeJS.ProcessEnv,
@@ -337,7 +346,10 @@ export const buildLauncherDataRootEnv = (
     const fnmRoot = fnmDataRootCandidates(realHome, ambient).find(exists);
     if (fnmRoot !== undefined) out.FNM_DIR = fnmRoot;
   }
-  passOrDefault("MISE_DATA_DIR", misePaths(realHome, ambient).dataDir);
+  const mise = misePaths(realHome, ambient);
+  passOrDefault("MISE_DATA_DIR", mise.dataDir);
+  passOrDefault("MISE_CONFIG_DIR", mise.configDir);
+  pass("MISE_GLOBAL_CONFIG_FILE");
   return out;
 };
 
