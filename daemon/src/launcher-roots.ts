@@ -287,7 +287,13 @@ export const allManagerDataRoots = (
       continue;
     }
     push(m.dataRoot(home, env));
-    if (m.id === "nix") push("/nix/var/nix/profiles/default");
+    if (m.id === "nix") {
+      push("/nix/var/nix/profiles/default");
+      // Profile bin entries symlink into the store; Landlock O_PATH on the
+      // profile grants only the resolved user-env dir, so grant the store RO
+      // (existence-filtered by launcherDataRoots — never RW).
+      push("/nix/store");
+    }
     if (m.id === "linuxbrew") push("/home/linuxbrew/.linuxbrew");
   }
   return out;
