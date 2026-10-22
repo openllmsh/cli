@@ -304,9 +304,13 @@ export const allManagerDataRoots = (
  * installs after `XDG_*` redirection. Manager resolution still uses ambient
  * `process.env`; the child only inherits these pointers.
  *
- * `FNM_DIR` is passthrough-only (no default) — the default alias bin is
- * PATH-added directly when present. Everyone else defaults to the real-home
- * root when that directory exists (caller existence-filters).
+ * Everyone defaults to the real-home root when that directory exists (caller
+ * existence-filters). `FNM_DIR` is pinned the same way: the child's
+ * `XDG_DATA_HOME` is isolated, so an unset `FNM_DIR` would otherwise make the
+ * shim resolve under the isolated home — missing the real install that the
+ * sandbox RO set (via {@link fnmDataRootCandidates}) grants. Earlier we
+ * treated fnm as PATH-only (alias bin on PATH); that no longer holds once
+ * XDG is redirected.
  */
 export const buildLauncherDataRootEnv = (
   ambient: NodeJS.ProcessEnv,
@@ -327,7 +331,12 @@ export const buildLauncherDataRootEnv = (
   passOrDefault("ASDF_DATA_DIR", asdfDataRoot(realHome, ambient));
   passOrDefault("VOLTA_HOME", voltaDataRoot(realHome, ambient));
   passOrDefault("PROTO_HOME", protoDataRoot(realHome, ambient));
-  pass("FNM_DIR");
+  // Same candidate list the sandbox RO roots use — first existing wins.
+  if (nonEmpty(ambient.FNM_DIR) !== undefined) pass("FNM_DIR");
+  else {
+    const fnmRoot = fnmDataRootCandidates(realHome, ambient).find(exists);
+    if (fnmRoot !== undefined) out.FNM_DIR = fnmRoot;
+  }
   passOrDefault("MISE_DATA_DIR", misePaths(realHome, ambient).dataDir);
   return out;
 };
