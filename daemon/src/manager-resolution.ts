@@ -299,10 +299,11 @@ export const createManagerRegistry = (
    *     fingerprint has not changed since that demand call ran;
    *   - `undefined` when the candidate is recognized as a manager shim but
    *     no fresh demand resolution exists yet (never resolved, or the
-   *     candidate changed since). Callers MUST treat this as "not yet
-   *     known, do not link or version-probe the raw shim" — never as
-   *     "ordinary", and never as license to resolve it themselves from a
-   *     passive path.
+   *     candidate changed since). Callers must NEVER treat this as license
+   *     to spawn a manager from a passive path. Status/install probes may
+   *     ordinary-passthrough the HOST candidate (link it, report installed,
+   *     skip --version through the raw shim); they must not probe or
+   *     delegate through the unresolved manager binary.
    */
   const peekManagerResolution = (
     candidate: string,

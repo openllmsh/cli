@@ -251,9 +251,11 @@ const linkSidecars = (isolatedBin: string): void => {
  * Resolve the preferred host candidate through the manager-resolution
  * coordinator. With zero adapters registered (default), this returns the
  * first existing candidate unchanged — identical to the pre-coordinator
- * behavior. A candidate recognized as a manager shim that cannot be
- * resolved is treated as absent (never linked, never version-probed),
- * rather than silently falling through to a lower-priority candidate.
+ * behavior. A candidate whose last DEMAND resolution is `unresolved` is
+ * treated as absent (never linked, never version-probed), rather than
+ * silently falling through to a lower-priority candidate. A recognized
+ * manager shim with NO demand cache yet is ordinary passthrough on the
+ * passive path: link the HOST candidate, never spawn.
  *
  * `demand` gates whether this may actually SPAWN the manager adapter:
  *   - `demand: true` (an explicit user/system action — connect, logout,
@@ -433,8 +435,14 @@ const resolveHostBinary = async (
             signal: opts.signal,
           })
         : managers.peekManagerResolution(candidate);
-    if (resolved === undefined || resolved.kind === "unresolved") {
+    if (resolved !== undefined && resolved.kind === "unresolved") {
       continue;
+    }
+    if (resolved === undefined) {
+      // Passive + recognized manager shim + no demand cache yet: keep the
+      // pre-hop-recognition ordinary passthrough — link the HOST candidate
+      // (never spawn, never realpath into the manager binary).
+      return candidate;
     }
     const target = resolved.target ?? undefined;
     if (target === undefined) continue;
@@ -555,11 +563,10 @@ const probeCliInstallStateBody = async (
     // No isolated link exists yet. A PASSIVE call here must NOT spawn a
     // manager subprocess, even once — cold bootstrap is not exempt from the
     // demand-only rule. `resolveHostBinary` already enforces this: for an
-    // ORDINARY (non-manager) candidate it resolves for free (no adapter
-    // recognizes it, so filesystem linking still self-heals passively, per
-    // the file header's contract); for a candidate recognized as a manager
-    // shim it fails closed on a passive call (peek-only, no cache yet) and
-    // only actually resolves when `opts.demand` is true — an explicit
+    // ORDINARY (non-manager) candidate it resolves for free; for a candidate
+    // recognized as a manager shim with no demand cache yet it returns the
+    // HOST candidate as ordinary passthrough (installed, no spawn); only
+    // `opts.demand` is true runs the adapter — an explicit
     // connect/logout/inference-prep call.
     const host = await resolveHostBinary(provider, opts);
     if (host === undefined) {
@@ -577,11 +584,11 @@ const probeCliInstallStateBody = async (
     // observation of a pre-existing link (no throttle entry yet — e.g. a
     // daemon restart finding a link created by a prior process/version, or
     // one hand-crafted before this resolution step existed). Check that
-    // unconditionally, before any TTL gating, so a link that points directly
-    // at an unresolvable shim can never be version-probed/delegated through
-    // unconfined. On a PASSIVE call this is a cache-only peek — never a
-    // subprocess; on a DEMAND call it actually resolves and populates the
-    // cache for later passive callers.
+    // unconditionally, before any TTL gating. On a PASSIVE call this is a
+    // cache-only peek — never a subprocess; on a DEMAND call it actually
+    // resolves and populates the cache for later passive callers. A cold
+    // recognized shim (peek undefined) keeps the host link and reports
+    // installed below without probing --version through the raw shim.
     let immediateTarget: string | undefined;
     try {
       immediateTarget = readlinkSync(bin);
@@ -595,15 +602,7 @@ const probeCliInstallStateBody = async (
             signal: opts?.signal,
           })
         : managers.peekManagerResolution(immediateTarget);
-      if (resolved === undefined) {
-        // Recognized as a manager shim but no demand resolution has ever
-        // populated the cache for it (passive call, cold cache): fail
-        // closed rather than trust an unconfirmed shim — the cache isn't
-        // permanently unusable, an explicit demand call (connect/logout/
-        // inference prep) will resolve and populate it.
-        return { installed: false, version: null };
-      }
-      if (resolved.kind === "unresolved") {
+      if (resolved !== undefined && resolved.kind === "unresolved") {
         // Recognized as a manager shim but it no longer resolves: fail
         // closed rather than falling through to probe the shim unconfined.
         cliInstallReconcileUntil.set(
@@ -613,6 +612,7 @@ const probeCliInstallStateBody = async (
         return { installed: false, version: null };
       }
       if (
+        resolved !== undefined &&
         resolved.kind === "resolved" &&
         resolved.target !== null &&
         resolved.target !== immediateTarget
@@ -723,6 +723,32 @@ const probeCliInstallStateBody = async (
   const installed = cliInstalledVersion(provider, linkedTarget);
   if (installed !== undefined) {
     return { installed: true, version: installed };
+  }
+
+  // Cold recognized manager shim (no demand resolution in manager OR
+  // launcher cache): report installed without spawning --version through
+  // the raw shim / the manager binary it realpath's to. A later demand
+  // call resolves + persists; last-known version then surfaces via the
+  // stamp cache / metadata above.
+  let linkImmediate: string | undefined;
+  try {
+    linkImmediate = readlinkSync(bin);
+  } catch {
+    linkImmediate = undefined;
+  }
+  if (linkImmediate !== undefined && cached === undefined) {
+    const coldManagers = opts?.managers ?? defaultManagerRegistry;
+    if (
+      findRecognizingManagerHop(
+        linkImmediate,
+        coldManagers.listManagerAdapters(),
+      ) !== null &&
+      coldManagers.peekManagerResolution(linkImmediate) === undefined &&
+      (linkLaunchers === undefined ||
+        linkLaunchers.peekLauncherResolution(linkImmediate) === undefined)
+    ) {
+      return { installed: true, version: null };
+    }
   }
 
   // For manager-shim resolutions, fold the launcher cache fingerprint
