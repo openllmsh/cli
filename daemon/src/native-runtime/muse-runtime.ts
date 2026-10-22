@@ -193,7 +193,7 @@ export const wrapMuseServeSpawn = (
 ): TMuseSpawnTarget => {
   const wrapped = sandboxSpawnArgs(
     [museBin, "serve", ...MUSE_SERVE_SAFETY_ARGS],
-    { probe: unwrapMuseServeSpawn(opts?.platform ?? process.platform) },
+    { probe: unwrapMuseServeSpawn(opts?.platform) },
   );
   const command = wrapped[0];
   if (command === undefined) {
