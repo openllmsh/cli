@@ -322,9 +322,49 @@ export const CLI_PROVIDERS = Object.keys(SPECS) as readonly TCliProvider[];
 export const cliRoot = (provider: TCliProvider, home?: string): string =>
   join(stateDir(home), "cli", provider);
 
+/**
+ * Device-local account slot of a subscription provider. Index 0 is the
+ * original single account and keeps today's `<root>/home` path (no
+ * migration); index n >= 1 lives at `<root>/accounts/<n>/home`. Binaries and
+ * install state stay provider-wide (`cliRoot` / `cliBin`).
+ */
+export type TAccountIndex = number;
+
+export type TAccountRef = {
+  readonly provider: TCliProvider;
+  readonly index: TAccountIndex;
+};
+
+/** The default (and legacy) account slot. */
+export const DEFAULT_ACCOUNT_INDEX: TAccountIndex = 0;
+
+export const isAccountIndex = (value: unknown): value is TAccountIndex =>
+  typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
+
+/** The single in-memory key for per-account state: `provider` for index 0
+ *  (so existing per-provider keys are unchanged), `provider#n` otherwise. */
+export const accountKey = (ref: TAccountRef): string =>
+  ref.index === DEFAULT_ACCOUNT_INDEX
+    ? ref.provider
+    : `${ref.provider}#${ref.index}`;
+
+/** Directory holding the extra (n >= 1) account homes of a provider. */
+export const cliAccountsDir = (provider: TCliProvider, home?: string): string =>
+  join(cliRoot(provider, home), "accounts");
+
 /** The CLI's isolated home/config dir (passed as the CLI's home env). */
-export const cliHome = (provider: TCliProvider, home?: string): string =>
-  join(cliRoot(provider, home), "home");
+export const cliHome = (
+  provider: TCliProvider,
+  home?: string,
+  index: TAccountIndex = DEFAULT_ACCOUNT_INDEX,
+): string => {
+  if (!isAccountIndex(index)) {
+    throw new Error(`invalid account index: ${String(index)}`);
+  }
+  return index === DEFAULT_ACCOUNT_INDEX
+    ? join(cliRoot(provider, home), "home")
+    : join(cliAccountsDir(provider, home), String(index), "home");
+};
 
 /** Absolute path to the installed isolated binary. */
 export const cliBin = (provider: TCliProvider, home?: string): string =>
@@ -458,8 +498,11 @@ export const sessionEnv = (): Record<string, string> => {
  * so the read location and the `cliEnv` run location never drift.
  *   claude → <home>/.claude   codex → <home>/.codex   kimi → <home>/.kimi-code
  */
-export const cliConfigDir = (provider: TCliProvider, home?: string): string =>
-  SPECS[provider].configDir(cliHome(provider, home));
+export const cliConfigDir = (
+  provider: TCliProvider,
+  home?: string,
+  index: TAccountIndex = DEFAULT_ACCOUNT_INDEX,
+): string => SPECS[provider].configDir(cliHome(provider, home, index));
 
 /**
  * Shared isolated runtime env applied to EVERY delegated CLI (audit L2).
@@ -545,10 +588,14 @@ export const launcherDataRootEnv = (
  * inside the working set. Isolated homes live under `<state>/cli/<provider>/`
  * and are already read-write via the state-dir grant.
  */
-export const cliEnv = (provider: TCliProvider): Record<string, string> => {
-  const home = cliHome(provider);
+export const cliEnv = (
+  provider: TCliProvider,
+  index: TAccountIndex = DEFAULT_ACCOUNT_INDEX,
+): Record<string, string> => {
+  const home = cliHome(provider, undefined, index);
+  // Provider-wide: install dirs (`CODEX_INSTALL_DIR`, …) stay shared.
   const root = cliRoot(provider);
-  const config = cliConfigDir(provider);
+  const config = cliConfigDir(provider, undefined, index);
   // The daemon-owned, sandbox-granted staging dir for `mktemp -d` (see above).
   const tmp = verifiedDaemonTempDir();
   ensureIsolatedRuntimeDirs(home);
