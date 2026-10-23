@@ -354,7 +354,10 @@ const runCommandInAccount = async (
         if (slug === undefined) {
           const usage = await daemonCommandScheduler.schedulePerProviderUsage(
             async (one) => {
-              const result = await refreshUsage(one, { manual });
+              const result = await refreshUsage(one, {
+                manual,
+                allAccounts: true,
+              });
               if (result.deferred.length > 0) return { deferred: true };
               return undefined;
             },
@@ -378,7 +381,10 @@ const runCommandInAccount = async (
               : {}),
           };
         }
-        const one = await refreshUsage(slug, { manual });
+        const one = await refreshUsage(slug, {
+          manual,
+          allAccounts: cmd.payload?.account_index === undefined,
+        });
         if (one.deferred.length > 0) {
           return {
             id: cmd.id,

@@ -933,8 +933,22 @@ export const computeStatus = async (): Promise<TDaemonStatus> => {
  */
 export const refreshUsage = async (
   slug?: string,
-  options?: { readonly manual?: boolean },
+  options?: { readonly manual?: boolean; readonly allAccounts?: boolean },
 ): Promise<{ readonly deferred: readonly string[] }> => {
+  // A provider-scoped refresh with no explicit account reads EVERY account
+  // slot, so extra accounts get usage too.
+  if (slug !== undefined && options?.allAccounts === true) {
+    const deferred: string[] = [];
+    await Promise.allSettled(
+      readRoster(slug as TCliProvider).accounts.map((account) =>
+        runWithAccount(account.index, async () => {
+          const one = await refreshUsage(slug, { manual: options.manual });
+          deferred.push(...one.deferred);
+        }),
+      ),
+    );
+    return { deferred: [...new Set(deferred)] };
+  }
   // Join the canonical snapshot — never a raw `d.status()` bypass that would
   // start a second producer beside `computeStatus`. `allSettled`, NOT `all`:
   // ONE provider throwing (e.g. a failing usage read) must not reject the whole
