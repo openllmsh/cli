@@ -221,15 +221,15 @@ const handleParsed = async (input: TLocalAuthRequest): Promise<Response> => {
       const selected = Object.values(DELEGATES).filter(
         (one) => provider === undefined || one.slug === provider,
       );
+      // Usage is keyed by roster hash (`slug#hash`). The bare/unscoped key is
+      // account 0's legacy fallback only — never serve it for account n>=1.
       const slotUsage = (slug: string, index: number): unknown => {
         const hash = readRoster(slug as TCliProvider).accounts.find(
           (a) => a.index === index,
         )?.account_hash;
-        return (
-          (index === 0 && hash == null
-            ? peekUsage(slug)
-            : peekUsage(slug, hash ?? undefined)) ?? null
-        );
+        if (hash != null) return peekUsage(slug, hash) ?? null;
+        if (index === 0) return peekUsage(slug) ?? null;
+        return null;
       };
       if (account !== undefined)
         return reply(200, {
@@ -258,7 +258,7 @@ const handleParsed = async (input: TLocalAuthRequest): Promise<Response> => {
       );
       return reply(200, {
         usage: Object.fromEntries(
-          selected.map((one) => [one.slug, peekUsage(one.slug) ?? null]),
+          selected.map((one) => [one.slug, slotUsage(one.slug, 0)]),
         ),
         ...(Object.keys(accounts).length > 0 ? { accounts } : {}),
       });
