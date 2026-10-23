@@ -47,17 +47,6 @@ export const setForgetProviderAccount = (fn: (slug: string) => void): void => {
   forgetProviderAccount = fn;
 };
 
-/**
- * Test seam: awaited after logout/cache clear and before `rmSync`, so a
- * concurrent add can race the reserved index without hitting real vendor CLIs.
- */
-let removeAccountPause: (() => Promise<void>) | null = null;
-export const setRemoveAccountPauseForTest = (
-  pause: (() => Promise<void>) | null,
-): void => {
-  removeAccountPause = pause;
-};
-
 export type TAccountCommandResult = {
   readonly ok: boolean;
   readonly error?: string;
@@ -160,7 +149,6 @@ export const removeAccountSlot = async (
       invalidateUsage(slug, prepared.hash);
     }
     await disposeAccountRuntimes(slug, index);
-    if (removeAccountPause !== null) await removeAccountPause();
     // The whole slot dir: its home AND its per-account config.json.
     rmSync(join(cliAccountsDir(slug), String(index)), {
       recursive: true,
