@@ -9,10 +9,9 @@
  */
 
 import { readdirSync, readFileSync, statSync } from "node:fs";
-import { homedir } from "node:os";
 import { basename, extname, join } from "node:path";
 import { CLI_VERSION } from "../cli-version";
-import { cliConfig } from "../env";
+import { cliConfig, userHome } from "../env";
 import { MemoryClient } from "../mcp/memory/client";
 import { memoryProject } from "./transcript";
 
@@ -195,7 +194,7 @@ export const runMemoryImport = async (
   return createMemoryImport({
     cwd: () => process.cwd(),
     env: (name) => process.env[name],
-    home: homedir,
+    home: userHome,
     isDirectory: (path) => statSync(path).isDirectory(),
     listDir: (path) => readdirSync(path),
     readFile: (path) => readFileSync(path, "utf8"),
