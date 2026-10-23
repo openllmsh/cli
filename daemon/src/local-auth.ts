@@ -14,8 +14,10 @@ import {
   parseLocalAuthRequest,
 } from "@openllmsh/protocol";
 import { Schema } from "effect";
+import { readRoster } from "./account-roster";
 import { AccountKeyedMap } from "./account-scope";
 import { requestStatusPush } from "./auth-events";
+import type { TCliProvider } from "./cli-paths";
 import { runCommandInner } from "./control-relay";
 import { DELEGATES, getDelegate } from "./delegation";
 import { loginSlot } from "./delegation/login-flow";
@@ -25,6 +27,7 @@ import {
   localJson,
   readBoundedLocalJson,
 } from "./local-http";
+import { runWithAccount } from "./op-context";
 import { getPendingAuth, pendingAuthWire } from "./pending-auth";
 import { scheduleDaemonCommand } from "./scheduled-command";
 import { computeStatus, loginAdmittedForCommand } from "./status";
@@ -94,6 +97,9 @@ const commandOutcome = (ack: TDaemonCommandAck): Record<string, unknown> => {
               "overflow",
               "apply_busy",
               "continuation_idle",
+              "duplicate_account",
+              "unknown account",
+              "unknown provider",
             ].includes(result.error)
               ? result.error
               : "command_failed",
@@ -178,6 +184,18 @@ export const handleLocalAuth = async (req: Request): Promise<Response> => {
   } catch {
     return localJson(400, { error: "invalid" });
   }
+  // Flows, pending prompts and login slots are per account slot.
+  return runWithAccount(input.account ?? 0, () => handleParsed(input));
+};
+
+/** The roster slot `account` of `provider` exists (account 0 always does). */
+const knownAccount = (provider: string, account: number): boolean =>
+  account === 0 ||
+  readRoster(provider as TCliProvider).accounts.some(
+    (a) => a.index === account,
+  );
+
+const handleParsed = async (input: TLocalAuthRequest): Promise<Response> => {
   const provider = input.provider;
   const delegate = provider !== undefined ? getDelegate(provider) : null;
   if (provider !== undefined && delegate === null)
@@ -187,17 +205,64 @@ export const handleLocalAuth = async (req: Request): Promise<Response> => {
     });
   const reply = (status: number, result: Record<string, unknown>): Response =>
     localJson(status, { version: AUTH_LOCAL_VERSION, ...result });
+  const account = input.account;
+  if (
+    provider !== undefined &&
+    account !== undefined &&
+    input.operation !== "pin-account" &&
+    !knownAccount(provider, account)
+  )
+    return reply(400, { error: "unknown_account" });
+  const accountField = account !== undefined ? { account_index: account } : {};
   try {
     if (input.operation === "providers")
       return reply(200, { providers: localAuthProviders() });
-    if (input.operation === "usage")
+    if (input.operation === "usage") {
+      const selected = Object.values(DELEGATES).filter(
+        (one) => provider === undefined || one.slug === provider,
+      );
+      const slotUsage = (slug: string, index: number): unknown => {
+        const hash = readRoster(slug as TCliProvider).accounts.find(
+          (a) => a.index === index,
+        )?.account_hash;
+        return (
+          (index === 0 && hash == null
+            ? peekUsage(slug)
+            : peekUsage(slug, hash ?? undefined)) ?? null
+        );
+      };
+      if (account !== undefined)
+        return reply(200, {
+          usage: Object.fromEntries(
+            selected.map((one) => [one.slug, slotUsage(one.slug, account)]),
+          ),
+        });
+      // Account 0 keeps the legacy shape; extra slots ride `accounts`.
+      const accounts = Object.fromEntries(
+        selected
+          .map(
+            (one) =>
+              [
+                one.slug,
+                readRoster(one.slug as TCliProvider).accounts,
+              ] as const,
+          )
+          .filter(([, slots]) => slots.length > 1)
+          .map(([slug, slots]) => [
+            slug,
+            slots.map((a) => ({
+              account_index: a.index,
+              usage: slotUsage(slug, a.index),
+            })),
+          ]),
+      );
       return reply(200, {
         usage: Object.fromEntries(
-          Object.values(DELEGATES)
-            .filter((one) => provider === undefined || one.slug === provider)
-            .map((one) => [one.slug, peekUsage(one.slug) ?? null]),
+          selected.map((one) => [one.slug, peekUsage(one.slug) ?? null]),
         ),
+        ...(Object.keys(accounts).length > 0 ? { accounts } : {}),
       });
+    }
     if (input.operation === "status") {
       const flow =
         provider !== undefined && input.flow_id !== undefined
@@ -208,6 +273,10 @@ export const handleLocalAuth = async (req: Request): Promise<Response> => {
       const status = await computeStatus();
       const providers = status.connections
         .filter((one) => provider === undefined || one.provider === provider)
+        .filter(
+          (one) =>
+            account === undefined || (one.account_index ?? 0) === account,
+        )
         .map((one) => {
           // Browser-originated prompts never escape through OS-local discovery.
           if (one.pending_auth === undefined || one.pending_auth === null)
@@ -262,7 +331,7 @@ export const handleLocalAuth = async (req: Request): Promise<Response> => {
         const command = Schema.decodeUnknownSync(DaemonCommand)({
           id,
           kind: method === primary ? "connect" : "connect_device_code",
-          payload: { slug: provider },
+          payload: { slug: provider, ...accountField },
         });
         // Admission reserves synchronously. Never claim ownership of a duplicate/resurfaced relay flow.
         if (
@@ -311,13 +380,50 @@ export const handleLocalAuth = async (req: Request): Promise<Response> => {
           id,
           kind: "refresh",
           payload: {
-            ...(provider !== undefined ? { slug: provider } : {}),
+            ...(provider !== undefined
+              ? { slug: provider, ...accountField }
+              : {}),
             manual: true,
           },
         };
         break;
       case "logout":
-        raw = { id, kind: "logout", payload: { slug: provider } };
+        raw = {
+          id,
+          kind: "logout",
+          payload: { slug: provider, ...accountField },
+        };
+        break;
+      case "add-account":
+        raw = {
+          id,
+          kind: "add_account",
+          payload: {
+            slug: provider,
+            ...(input.label !== undefined ? { label: input.label } : {}),
+          },
+        };
+        break;
+      case "remove-account":
+        raw = {
+          id,
+          kind: "remove_account",
+          payload: { slug: provider, account_index: account },
+        };
+        break;
+      case "pin-account":
+        raw = {
+          id,
+          kind: "pin_account",
+          payload: { slug: provider, account_index: account },
+        };
+        break;
+      case "unpin-account":
+        raw = {
+          id,
+          kind: "pin_account",
+          payload: { slug: provider, account_index: null },
+        };
         break;
       case "cancel":
         raw = {
@@ -325,6 +431,7 @@ export const handleLocalAuth = async (req: Request): Promise<Response> => {
           kind: "cancel_connect",
           payload: {
             slug: provider,
+            ...accountField,
             ...(owned !== null ? { flow_id: owned.id } : {}),
           },
         };
@@ -344,6 +451,7 @@ export const handleLocalAuth = async (req: Request): Promise<Response> => {
           kind: "submit_login_code",
           payload: {
             slug: provider,
+            ...accountField,
             sealed: sealTo(daemonPublicKey(), input.code),
           },
         };
@@ -354,7 +462,14 @@ export const handleLocalAuth = async (req: Request): Promise<Response> => {
       Schema.decodeUnknownSync(DaemonCommand)(raw),
       owned?.id,
     );
-    return reply(ack.status === "error" ? 409 : 200, commandOutcome(ack));
+    const accountResult = ack.result as Record<string, unknown> | undefined;
+    return reply(ack.status === "error" ? 409 : 200, {
+      ...commandOutcome(ack),
+      ...(typeof accountResult?.account_index === "number" &&
+      input.operation.endsWith("-account")
+        ? { account_index: accountResult.account_index }
+        : {}),
+    });
   } catch {
     return reply(500, { error: "local_auth_failed" });
   }

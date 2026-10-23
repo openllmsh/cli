@@ -18,6 +18,10 @@ export const authCommandArgs = (
   ...(request.provider !== undefined ? [request.provider] : []),
   ...(request.method !== undefined ? ["--method", request.method] : []),
   ...(request.flow_id !== undefined ? ["--flow-id", request.flow_id] : []),
+  ...(request.account !== undefined
+    ? ["--account", String(request.account)]
+    : []),
+  ...(request.label !== undefined ? ["--label", request.label] : []),
   "--json",
 ];
 
