@@ -2,9 +2,7 @@
 
 ### Cross-session memory
 - `mcp__openllm__memory` (action: "save" | "forget") and `mcp__openllm__recall`
-  are the SINGLE source of truth for remembering things across conversations.
-  Do NOT use file-based auto-memory paths — that backend is superseded by these
-  tools.
+  are for remembering things across conversations.
 - Projects are auto-scoped from the working directory; pass an explicit
   `project` only when discussing a different repo than the cwd.
 - PROACTIVELY save when the user has CONCLUDED something: a stated preference or
