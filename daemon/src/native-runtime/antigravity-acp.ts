@@ -574,6 +574,14 @@ type TWarmAgent = {
   readonly route: TWarmRoute;
   /** Pool epoch the process was spawned in; a bump makes it un-parkable. */
   readonly epoch: number;
+  /** Isolated GEMINI_HOME this process was spawned under (account slot). */
+  readonly geminiHome: string | undefined;
+  /**
+   * `geminiHomeGenerations` value observed at spawn. A dispose for that home
+   * bumps the counter so leased agents refuse to re-park, while a later reuse
+   * of the same path can park again under the new generation.
+   */
+  readonly homeGeneration: number;
   turns: number;
   /** Sign-in identity recorded when the process authenticated; never
    *  overwritten, so a token swap mid-life retires the process. */
@@ -584,6 +592,15 @@ type TWarmAgent = {
 const idlePool: TWarmAgent[] = [];
 let warmEpoch = 0;
 let exitHookInstalled = false;
+/** Per-GEMINI_HOME generation; dispose bumps it so stale agents retire. */
+const geminiHomeGenerations = new Map<string, number>();
+
+const homeGenerationOf = (geminiHome: string | undefined): number =>
+  geminiHome === undefined ? 0 : (geminiHomeGenerations.get(geminiHome) ?? 0);
+
+const homeGenerationStale = (agent: TWarmAgent): boolean =>
+  agent.geminiHome !== undefined &&
+  agent.homeGeneration !== homeGenerationOf(agent.geminiHome);
 
 /** Stable, non-reversible identity of a spawn (binary + final env). */
 export const antigravityWarmKey = (
@@ -633,7 +650,8 @@ const acquireWarmAgent = (
       !agent.client.isAlive() ||
       agent.epoch !== warmEpoch ||
       identity === null ||
-      agent.identity !== identity
+      agent.identity !== identity ||
+      homeGenerationStale(agent)
     ) {
       retireWarmAgent(agent, null);
       continue;
@@ -660,7 +678,8 @@ const releaseWarmAgent = (
     agent.turns >= ANTIGRAVITY_WARM_MAX_TURNS ||
     identity === null ||
     agent.identity === null ||
-    agent.identity !== identity
+    agent.identity !== identity ||
+    homeGenerationStale(agent)
   ) {
     retireWarmAgent(agent, null);
     return;
@@ -688,6 +707,23 @@ const releaseWarmAgent = (
 export const disposeAntigravityWarmPool = (): void => {
   warmEpoch += 1;
   for (const agent of idlePool.splice(0)) retireWarmAgent(agent, null);
+};
+
+/**
+ * Retire parked (and block re-parking of leased) warm agents bound to one
+ * account's `GEMINI_HOME`. Used when that account slot is removed.
+ */
+export const disposeAntigravityWarmPoolForGeminiHome = (
+  geminiHome: string,
+): void => {
+  if (geminiHome.length === 0) return;
+  geminiHomeGenerations.set(geminiHome, homeGenerationOf(geminiHome) + 1);
+  for (let i = idlePool.length - 1; i >= 0; i--) {
+    const agent = idlePool[i];
+    if (agent === undefined || agent.geminiHome !== geminiHome) continue;
+    idlePool.splice(i, 1);
+    retireWarmAgent(agent, null);
+  }
 };
 
 /** Number of parked processes (diagnostics + tests). */
@@ -916,6 +952,8 @@ export const runAntigravityNative = async (
       procCwd,
       route,
       epoch: warmEpoch,
+      geminiHome,
+      homeGeneration: homeGenerationOf(geminiHome),
       turns: 0,
       identity: null,
       idleTimer: undefined,

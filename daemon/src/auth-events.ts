@@ -57,8 +57,25 @@ export const addAuthObserver = (
   return () => observers.delete(observer);
 };
 
+/** Flow ids the USER cancelled (bounded): their connect command acks as a
+ *  quiet `done`, not an error with Try again. */
+const userCancelledFlows = new Set<string>();
+export const wasUserCancelledFlow = (flowId: string): boolean =>
+  userCancelledFlows.has(flowId);
+
 /** Best-effort: no-op when the control channel is not running (tests, headless). */
 export const emitAuth = (event: TAuthEvent): void => {
+  if (
+    event.event === "auth.login.failed" &&
+    "code" in event &&
+    event.code === "user_cancelled"
+  ) {
+    userCancelledFlows.add(event.flow_id);
+    if (userCancelledFlows.size > 64) {
+      const oldest = userCancelledFlows.values().next().value;
+      if (oldest !== undefined) userCancelledFlows.delete(oldest);
+    }
+  }
   try {
     withoutCommandReplayContext(() => sink?.emit(event));
   } catch {

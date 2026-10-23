@@ -1,6 +1,11 @@
 /** LOCAL stdio registration only. Never import this from cloud/browser tool lists. */
 import { runAuthCommand } from "../auth-command";
-import { AUTH_CODE_MAX_BYTES, AUTH_COMMANDS } from "../generated/local-auth";
+import {
+  AUTH_ACCOUNT_MAX,
+  AUTH_CODE_MAX_BYTES,
+  AUTH_COMMANDS,
+  AUTH_LABEL_MAX_LENGTH,
+} from "../generated/local-auth";
 import type { TToolResult } from "./types";
 
 export const localAuthToolDefs = AUTH_COMMANDS.map((descriptor) => {
@@ -21,21 +26,42 @@ export const localAuthToolDefs = AUTH_COMMANDS.map((descriptor) => {
             description:
               "Must be advertised by local_auth_providers; omit for native primary method",
           }
-        : field === "code"
+        : field === "account"
           ? {
-              type: "string",
-              minLength: 1,
-              maxLength: AUTH_CODE_MAX_BYTES,
+              type: "integer",
+              minimum: descriptor.name === "remove-account" ? 1 : 0,
+              maximum: AUTH_ACCOUNT_MAX,
               description:
-                "User-supplied paste-back code, forwarded over stdin only; never log or echo it",
+                descriptor.name === "remove-account" ||
+                descriptor.name === "pin-account"
+                  ? "Account slot index on this machine (from local_auth_status)"
+                  : "Account slot index on this machine (from local_auth_status); omit for account 0",
             }
-          : {
-              type: "string",
-              description:
-                "Originating login flow_id returned by local_auth_login",
-            };
+          : field === "label"
+            ? {
+                type: "string",
+                minLength: 1,
+                maxLength: AUTH_LABEL_MAX_LENGTH,
+                description:
+                  "Optional user-facing name for the new account slot",
+              }
+            : field === "code"
+              ? {
+                  type: "string",
+                  minLength: 1,
+                  maxLength: AUTH_CODE_MAX_BYTES,
+                  description:
+                    "User-supplied paste-back code, forwarded over stdin only; never log or echo it",
+                }
+              : {
+                  type: "string",
+                  description:
+                    "Originating login flow_id returned by local_auth_login",
+                };
   }
   if (descriptor.name === "submit-code") required.push("flow_id", "code");
+  if (descriptor.name === "remove-account" || descriptor.name === "pin-account")
+    required.push("account");
   return {
     name: `local_auth_${descriptor.name.replaceAll("-", "_")}`,
     description: `${descriptor.description}. This machine only; never controls another device or falls back to cloud. ${descriptor.mutating ? "MUTATING — call only when the user explicitly requested this action. Vendor consent may still require the user. Command acceptance is not authenticated success; explicitly check status with the returned flow_id. No autonomous polling or login." : "Read-only; does not start authentication or refresh usage. Status returns a login prompt only for a matching locally initiated flow_id; recheck explicitly and boundedly."}`,
@@ -47,7 +73,8 @@ export const localAuthToolDefs = AUTH_COMMANDS.map((descriptor) => {
     },
     annotations: {
       readOnlyHint: !descriptor.mutating,
-      destructiveHint: descriptor.name === "logout",
+      destructiveHint:
+        descriptor.name === "logout" || descriptor.name === "remove-account",
       openWorldHint: descriptor.mutating,
     },
     operation: descriptor.name,

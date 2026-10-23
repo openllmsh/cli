@@ -652,9 +652,12 @@ class CodexAppServerClient {
   }
 }
 
-// ONE client per daemon process; keyed by binary path so tests can run a
-// fixture server side-by-side with a real install.
+// ONE client per (binary, CODEX_HOME): keyed by binary path so tests can run a
+// fixture server side-by-side with a real install, and by home so each
+// provider account gets its own app-server bound to its own credential.
 const clients = new Map<string, CodexAppServerClient>();
+const clientKey = (bin: string, env: Record<string, string>): string =>
+  `${bin}\0${env.CODEX_HOME ?? ""}`;
 
 export type { TThreadSink };
 export { CodexAppServerClient };
@@ -662,10 +665,11 @@ export const clientFor = (
   bin: string,
   env: Record<string, string>,
 ): CodexAppServerClient => {
-  const existing = clients.get(bin);
+  const key = clientKey(bin, env);
+  const existing = clients.get(key);
   if (existing !== undefined) return existing;
   const created = new CodexAppServerClient(bin, env);
-  clients.set(bin, created);
+  clients.set(key, created);
   return created;
 };
 
@@ -693,11 +697,36 @@ export const clientFor = (
 export const disposeSharedCodexAppServerClientAndWaitForExit = async (
   bin: string,
 ): Promise<boolean> => {
-  const existing = clients.get(bin);
-  if (existing === undefined) return false;
-  clients.delete(bin);
-  await existing.disposeAndWaitForExit();
-  return true;
+  let disposed = false;
+  for (const [key, existing] of [...clients]) {
+    if (!key.startsWith(`${bin}\0`)) continue;
+    clients.delete(key);
+    await existing.disposeAndWaitForExit();
+    disposed = true;
+  }
+  return disposed;
+};
+
+/**
+ * Dispose every shared warm client bound to `codexHome` (any binary). GET-ONLY:
+ * a miss is a no-op. Used when an account slot is removed so the next allocate
+ * of that index cannot inherit a live app-server still pointing at the deleted
+ * home. Deletes the map entry before awaiting exit so a racing `clientFor`
+ * creates a fresh replacement instead of receiving the torn-down instance.
+ */
+export const disposeCodexAppServerClientForHome = async (
+  codexHome: string,
+): Promise<boolean> => {
+  if (codexHome.length === 0) return false;
+  const suffix = `\0${codexHome}`;
+  let disposed = false;
+  for (const [key, existing] of [...clients]) {
+    if (!key.endsWith(suffix)) continue;
+    clients.delete(key);
+    await existing.disposeAndWaitForExit();
+    disposed = true;
+  }
+  return disposed;
 };
 
 /**

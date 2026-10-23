@@ -387,3 +387,21 @@ export const readAntigravityUsage = (
   params: Parameters<TAntigravityUsageReader["readAntigravityUsage"]>[0],
 ): Promise<TProviderUsageSnapshot> =>
   defaultReader.readAntigravityUsage(params);
+
+/**
+ * Stable raw account id for `account_hash`, read from the agent's token file
+ * (local read, no spawn, no network). Prefers the Code Assist `project_id`,
+ * which Google provisions per user and keeps across re-logins; falls back to
+ * the refresh token, which identifies the account but rotates on re-login
+ * (a weaker key: a re-login may read as a new account until the project id
+ * is present). Never logged; only its hash leaves this module.
+ */
+export const readAntigravityAccountId = async (
+  geminiHome: string,
+): Promise<string | null> => {
+  const token = await readTokenFile(geminiHome);
+  if (token === null) return null;
+  return token.project_id !== undefined
+    ? `project:${token.project_id}`
+    : `refresh:${token.refresh_token}`;
+};

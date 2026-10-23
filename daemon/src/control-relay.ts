@@ -14,8 +14,17 @@ import type {
   TDaemonCommandAck,
   TLocalCliSession,
 } from "@openllmsh/protocol";
+import type { TAccountCommandResult } from "./account-commands";
+import {
+  addAccount,
+  pinAccountSlot,
+  reconcileAccountIdentity,
+  removeAccountSlot,
+} from "./account-commands";
+import { wasUserCancelledFlow } from "./auth-events";
 import { autoUpdateEnabled, setAutoUpdate } from "./auto-update-pref";
 import {
+  commandAccountIndexOf,
   daemonCommandScheduler,
   schedulerProviderSlugs,
 } from "./command-scheduler";
@@ -36,7 +45,7 @@ import {
 import { clampLimit, readLocalSessions } from "./local-sessions";
 import { logError } from "./logger";
 import { maybeReportModels, resetModelReportThrottle } from "./model-report";
-import { withoutCommandReplayContext } from "./op-context";
+import { runWithAccount, withoutCommandReplayContext } from "./op-context";
 import { clearPendingAuth } from "./pending-auth";
 import { clearPlanCache } from "./plan-cache";
 import { deviceSessionsForList } from "./session-host";
@@ -75,12 +84,78 @@ export type TRunCommandOptions = {
  * each `case` narrows to its exact typed payload (no hand-cast). The delegate
  * null-checks stay as belt-and-braces for any non-wire caller.
  */
-export const runCommandInner = async (
+/**
+ * Terminal ack of a connect. A login the USER cancelled is not a failure:
+ * ack `done` + `cancelled` so the dashboard closes quietly instead of
+ * surfacing "sign-in cancelled" with a Try again.
+ */
+/**
+ * After a credential lands, probe the account and run the duplicate gate.
+ * Returns a failed result only for `duplicate_account`; probe errors are
+ * ignored so a flaky status read cannot undo a successful connect.
+ */
+const reconcileConnectedAccount = async (
+  slug: string,
+  index: number,
+): Promise<TAccountCommandResult | null> => {
+  const delegate = getDelegate(slug);
+  if (delegate === null) return null;
+  try {
+    const conn = await delegate.status();
+    return await reconcileAccountIdentity(conn, index);
+  } catch {
+    return null;
+  }
+};
+
+const connectAck = (
+  id: string,
+  connected: boolean,
+  pending: boolean,
+  result: object,
+): TDaemonCommandAck => {
+  const cancelled = !connected && !pending && wasUserCancelledFlow(id);
+  return {
+    id,
+    status: connected || pending || cancelled ? "done" : "error",
+    result: cancelled ? { ...result, cancelled: true } : result,
+  };
+};
+
+export const runCommandInner = (
+  cmd: TDaemonCommand,
+  opts?: TRunCommandOptions,
+): Promise<TDaemonCommandAck> =>
+  // Bind the addressed provider account once: delegates, login slots,
+  // pending auth and status memory all read it (absent ⇒ account 0).
+  runWithAccount(commandAccountIndexOf(cmd), () =>
+    runCommandInAccount(cmd, opts),
+  );
+
+const runCommandInAccount = async (
   cmd: TDaemonCommand,
   opts?: TRunCommandOptions,
 ): Promise<TDaemonCommandAck> => {
   try {
     switch (cmd.kind) {
+      case "add_account": {
+        const r = await addAccount(cmd.payload.slug, cmd.payload.label);
+        return { id: cmd.id, status: r.ok ? "done" : "error", result: r };
+      }
+      case "remove_account": {
+        const r = await removeAccountSlot(
+          cmd.payload.slug,
+          cmd.payload.account_index,
+        );
+        return { id: cmd.id, status: r.ok ? "done" : "error", result: r };
+      }
+      case "pin_account": {
+        const r = await pinAccountSlot(
+          cmd.payload.slug,
+          cmd.payload.account_index,
+        );
+        return { id: cmd.id, status: r.ok ? "done" : "error", result: r };
+      }
       case "connect": {
         const delegate = getDelegate(cmd.payload.slug);
         if (delegate === null) {
@@ -108,6 +183,17 @@ export const runCommandInner = async (
           loginAdmittedForCommand(cmd.payload.slug, cmd.id);
         if (connected) {
           invalidateUsage(cmd.payload.slug);
+          const recon = await reconcileConnectedAccount(
+            cmd.payload.slug,
+            commandAccountIndexOf(cmd),
+          );
+          if (
+            recon !== null &&
+            recon.ok === false &&
+            recon.error === "duplicate_account"
+          ) {
+            return { id: cmd.id, status: "error", result: recon };
+          }
         }
         const result = connected ? r : { ...r, connected: false };
         // Model catalog: `auth.login.succeeded` (observeLoginModelReports),
@@ -119,11 +205,7 @@ export const runCommandInner = async (
         // the relay routes a real `command_lifecycle` error to the originating
         // watcher and the dashboard surfaces the delegate's `detail` instead of
         // a silent "done" with no dialog (issue #2).
-        return {
-          id: cmd.id,
-          status: connected || r.pending === true ? "done" : "error",
-          result,
-        };
+        return connectAck(cmd.id, connected, r.pending === true, result);
       }
       case "connect_device_code": {
         // Start a device-code login (codex remote; kimi falls back to its
@@ -152,13 +234,20 @@ export const runCommandInner = async (
           loginAdmittedForCommand(cmd.payload.slug, cmd.id);
         if (connected) {
           invalidateUsage(cmd.payload.slug);
+          const recon = await reconcileConnectedAccount(
+            cmd.payload.slug,
+            commandAccountIndexOf(cmd),
+          );
+          if (
+            recon !== null &&
+            recon.ok === false &&
+            recon.error === "duplicate_account"
+          ) {
+            return { id: cmd.id, status: "error", result: recon };
+          }
         }
         const result = connected ? r : { ...r, connected: false };
-        return {
-          id: cmd.id,
-          status: connected || r.pending === true ? "done" : "error",
-          result,
-        };
+        return connectAck(cmd.id, connected, r.pending === true, result);
       }
       case "cancel_connect": {
         const slot = loginSlot(cmd.payload.slug);
@@ -309,6 +398,17 @@ export const runCommandInner = async (
         if (r.ok) {
           clearProviderSignedOut(cmd.payload.slug);
           invalidateUsage(cmd.payload.slug);
+          const recon = await reconcileConnectedAccount(
+            cmd.payload.slug,
+            commandAccountIndexOf(cmd),
+          );
+          if (
+            recon !== null &&
+            recon.ok === false &&
+            recon.error === "duplicate_account"
+          ) {
+            return { id: cmd.id, status: "error", result: recon };
+          }
         }
         return { id: cmd.id, status: r.ok ? "done" : "error", result: r };
       }
@@ -323,7 +423,10 @@ export const runCommandInner = async (
         if (slug === undefined) {
           const usage = await daemonCommandScheduler.schedulePerProviderUsage(
             async (one) => {
-              const result = await refreshUsage(one, { manual });
+              const result = await refreshUsage(one, {
+                manual,
+                allAccounts: true,
+              });
               if (result.deferred.length > 0) return { deferred: true };
               return undefined;
             },
@@ -347,7 +450,10 @@ export const runCommandInner = async (
               : {}),
           };
         }
-        const one = await refreshUsage(slug, { manual });
+        const one = await refreshUsage(slug, {
+          manual,
+          allAccounts: cmd.payload?.account_index === undefined,
+        });
         if (one.deferred.length > 0) {
           return {
             id: cmd.id,

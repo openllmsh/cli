@@ -16,6 +16,7 @@
  * in-memory-only session flag. Quota/plan are never claimed without an
  * official source.
  */
+
 import { join } from "node:path";
 import type {
   TDaemonProviderConnection,
@@ -32,6 +33,7 @@ import {
   pendingAuthDetail,
 } from "../pending-auth";
 import { unwrapKeychainSpawn } from "../sandbox/policy";
+import { accountHashField } from "./account-id";
 import { resolveUpstreamUrl } from "./auth-config";
 import { cliLaunch, loginWiring } from "./delegate-shared";
 import { detailedFromCliList, listWithReason } from "./fetch-model-list";
@@ -166,7 +168,13 @@ export type TMuseAuthFile = {
 type TMuseStoreObservation =
   | { readonly kind: "absent" }
   | { readonly kind: "keychain_pointer" }
-  | { readonly kind: "file_backed" };
+  | {
+      readonly kind: "file_backed";
+      /** Stable account id for `account_hash` (the signed-in Meta email,
+       *  normalised). Muse stores no account uuid; the email is per account,
+       *  not per device, so it merges devices and splits accounts correctly. */
+      readonly accountId: string | null;
+    };
 
 const isJsonRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null && !Array.isArray(value);
@@ -214,7 +222,14 @@ export const observeMuseAuthStore = async (): Promise<
     return { kind: "present", value: { kind: "keychain_pointer" } };
   }
   if (typeof meta.access_token === "string" && meta.access_token.length > 0) {
-    return { kind: "present", value: { kind: "file_backed" } };
+    const email =
+      typeof meta.user_email === "string" && meta.user_email.trim().length > 0
+        ? meta.user_email.trim().toLowerCase()
+        : null;
+    return {
+      kind: "present",
+      value: { kind: "file_backed", accountId: email },
+    };
   }
   return { kind: "present", value: { kind: "absent" } };
 };
@@ -470,6 +485,12 @@ export const museDelegate: TProviderDelegate = {
         provider: PROVIDER,
         status: "connected",
         ...connectedObservation(),
+        ...accountHashField(
+          PROVIDER,
+          storeRead.value.kind === "file_backed"
+            ? storeRead.value.accountId
+            : null,
+        ),
         cli_installed: true,
         ...(version !== null ? { cli_version: version } : {}),
         last_login_at_ms: null,

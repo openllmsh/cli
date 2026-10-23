@@ -25,6 +25,7 @@ import {
 import { homedir } from "node:os";
 import { delimiter, dirname, join } from "node:path";
 import type { TSubscriptionProviderSlug } from "@openllmsh/protocol";
+import { scopedSlug } from "./account-scope";
 import {
   ANTIGRAVITY_HARNESS,
   ANTIGRAVITY_INSTALL_MARKER,
@@ -33,6 +34,7 @@ import {
 import { stateDir } from "./env";
 import { interpreterDirFor } from "./launcher-profile-state";
 import { buildLauncherDataRootEnv } from "./launcher-roots";
+import { currentAccountIndex } from "./op-context";
 import { augmentSpawnPath, resolveOnPath } from "./path-utils";
 import { daemonTempDir } from "./sandbox/working-set";
 
@@ -322,9 +324,48 @@ export const CLI_PROVIDERS = Object.keys(SPECS) as readonly TCliProvider[];
 export const cliRoot = (provider: TCliProvider, home?: string): string =>
   join(stateDir(home), "cli", provider);
 
-/** The CLI's isolated home/config dir (passed as the CLI's home env). */
-export const cliHome = (provider: TCliProvider, home?: string): string =>
-  join(cliRoot(provider, home), "home");
+/**
+ * Device-local account slot of a subscription provider. Index 0 is the
+ * original single account and keeps today's `<root>/home` path (no
+ * migration); index n >= 1 lives at `<root>/accounts/<n>/home`. Binaries and
+ * install state stay provider-wide (`cliRoot` / `cliBin`).
+ */
+export type TAccountIndex = number;
+
+export type TAccountRef = {
+  readonly provider: TCliProvider;
+  readonly index: TAccountIndex;
+};
+
+/** The default (and legacy) account slot. */
+export const DEFAULT_ACCOUNT_INDEX: TAccountIndex = 0;
+
+export const isAccountIndex = (value: unknown): value is TAccountIndex =>
+  typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
+
+/** The single in-memory key for per-account state — delegates to
+ *  {@link scopedSlug} so account 0 stays the bare provider slug. */
+export const accountKey = (ref: TAccountRef): string =>
+  scopedSlug(ref.provider, ref.index);
+
+/** Directory holding the extra (n >= 1) account homes of a provider. */
+export const cliAccountsDir = (provider: TCliProvider, home?: string): string =>
+  join(cliRoot(provider, home), "accounts");
+
+/** The CLI's isolated home/config dir (passed as the CLI's home env). The
+ *  index defaults to the ambient account (`runWithAccount`), else 0. */
+export const cliHome = (
+  provider: TCliProvider,
+  home?: string,
+  index: TAccountIndex = currentAccountIndex(),
+): string => {
+  if (!isAccountIndex(index)) {
+    throw new Error(`invalid account index: ${String(index)}`);
+  }
+  return index === DEFAULT_ACCOUNT_INDEX
+    ? join(cliRoot(provider, home), "home")
+    : join(cliAccountsDir(provider, home), String(index), "home");
+};
 
 /** Absolute path to the installed isolated binary. */
 export const cliBin = (provider: TCliProvider, home?: string): string =>
@@ -458,8 +499,11 @@ export const sessionEnv = (): Record<string, string> => {
  * so the read location and the `cliEnv` run location never drift.
  *   claude → <home>/.claude   codex → <home>/.codex   kimi → <home>/.kimi-code
  */
-export const cliConfigDir = (provider: TCliProvider, home?: string): string =>
-  SPECS[provider].configDir(cliHome(provider, home));
+export const cliConfigDir = (
+  provider: TCliProvider,
+  home?: string,
+  index: TAccountIndex = currentAccountIndex(),
+): string => SPECS[provider].configDir(cliHome(provider, home, index));
 
 /**
  * Shared isolated runtime env applied to EVERY delegated CLI (audit L2).
@@ -545,13 +589,24 @@ export const launcherDataRootEnv = (
  * inside the working set. Isolated homes live under `<state>/cli/<provider>/`
  * and are already read-write via the state-dir grant.
  */
-export const cliEnv = (provider: TCliProvider): Record<string, string> => {
-  const home = cliHome(provider);
+export const cliEnv = (
+  provider: TCliProvider,
+  index: TAccountIndex = currentAccountIndex(),
+): Record<string, string> => {
+  const home = cliHome(provider, undefined, index);
+  // Provider-wide: install dirs (`CODEX_INSTALL_DIR`, …) stay shared.
   const root = cliRoot(provider);
-  const config = cliConfigDir(provider);
+  const config = cliConfigDir(provider, undefined, index);
   // The daemon-owned, sandbox-granted staging dir for `mktemp -d` (see above).
   const tmp = verifiedDaemonTempDir();
   ensureIsolatedRuntimeDirs(home);
+  // The provider's config root must exist: Codex refuses to start when
+  // CODEX_HOME names a missing dir (a fresh account slot has none yet).
+  try {
+    mkdirSync(config, { recursive: true, mode: 0o700 });
+  } catch {
+    // The vendor's own error surfaces if this truly can't be created.
+  }
   const base = {
     ...isolatedRuntimeEnv(home, tmp),
     ...launcherDataRootEnv(process.env, homedir(), home),

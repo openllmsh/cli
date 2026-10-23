@@ -31,12 +31,20 @@
  *   - Usage: GET <region api origin>/coding/v1/usages (global `api.kimi.ai`
  *     by default; `kimi-region.ts`).
  */
-import { mkdirSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
+
+import {
+  existsSync,
+  mkdirSync,
+  renameSync,
+  unlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { rm } from "node:fs/promises";
 import { arch, hostname, release, type } from "node:os";
 import { dirname, join } from "node:path";
 import type { TProviderUsageSnapshot } from "@openllmsh/protocol";
 import { QUOTA_REJECT_PERCENT, QUOTA_WARN_PERCENT } from "@openllmsh/protocol";
+import { accountCell } from "../account-scope";
 import { noteAuthStoreIdentityChange } from "../auth-user-action";
 import { cliInstallState } from "../cli-install";
 import { cliConfigDir } from "../cli-paths";
@@ -134,9 +142,9 @@ const MANAGED_ALIAS_PREFIX = "kimi-code"; // managedModelKey = `${this}/<id>`
 const configTomlPath = (): string => join(kimiHome(), "config.toml");
 
 // Provisioned once per process; single-flight; back off after a failed fetch.
-let configEnsured = false;
-let provisionInFlight: Promise<void> | null = null;
-let provisionBackoffUntil = 0;
+const configEnsured = accountCell<boolean>(() => false);
+const provisionInFlight = accountCell<Promise<void> | null>(() => null);
+const provisionBackoffUntil = accountCell<number>(() => 0);
 
 /**
  * Fetch the vendor's managed model list (`GET /coding/v1/models` — exactly the
@@ -209,8 +217,14 @@ const provisionModelConfig = async (
  * needs a live token), so the config is ready before the near-expiry refresh.
  */
 const ensureModelConfig = async (accessToken: string): Promise<void> => {
-  if (configEnsured) return;
-  if (provisionInFlight !== null) return provisionInFlight;
+  // accountCell survives slot removal; a reused index must not skip writing
+  // config.toml just because a prior occupant set the cell.
+  if (configEnsured.get()) {
+    if (existsSync(configTomlPath())) return;
+    configEnsured.set(false);
+  }
+  const inFlight = provisionInFlight.get();
+  if (inFlight !== null) return inFlight;
   const base = await resolveProviderUrl(PROVIDER, "/coding/v1");
   const existing = await Bun.file(configTomlPath())
     .text()
@@ -223,19 +237,20 @@ const ensureModelConfig = async (accessToken: string): Promise<void> => {
     existing.includes(`base_url = "${base}"`) &&
     existing.includes(`key = "${kimiEndpoints().oauthKey}"`)
   ) {
-    configEnsured = true;
+    configEnsured.set(true);
     return;
   }
-  if (Date.now() < provisionBackoffUntil) return;
-  provisionInFlight = provisionModelConfig(accessToken, base)
+  if (Date.now() < provisionBackoffUntil.get()) return;
+  const run = provisionModelConfig(accessToken, base)
     .then((ok) => {
-      if (ok) configEnsured = true;
-      else provisionBackoffUntil = Date.now() + 60_000;
+      if (ok) configEnsured.set(true);
+      else provisionBackoffUntil.set(Date.now() + 60_000);
     })
     .finally(() => {
-      provisionInFlight = null;
+      provisionInFlight.set(null);
     });
-  return provisionInFlight;
+  provisionInFlight.set(run);
+  return run;
 };
 
 /**

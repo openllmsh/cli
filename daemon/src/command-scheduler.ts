@@ -7,6 +7,8 @@
  * maps {@link TScheduleResult} to an ack.
  */
 import type { TDaemonCommand } from "@openllmsh/protocol";
+import { parseAccountKey, scopedSlug } from "./account-scope";
+import { isAccountIndex } from "./cli-paths";
 import { DELEGATES } from "./delegation";
 import {
   endDaemonApply,
@@ -14,6 +16,7 @@ import {
   providerAuthOperationActive,
   tryBeginDaemonApply,
 } from "./delegation/login-flow";
+import { runWithAccount } from "./op-context";
 
 export type TCommandLane =
   | "control"
@@ -55,8 +58,23 @@ const reject = (reason: TAdmissionReason, slug?: string): TScheduleResult => ({
   admitted: false,
   retryable: true,
   reason,
-  ...(slug !== undefined ? { slug } : {}),
+  ...(slug !== undefined ? { slug: parseAccountKey(slug).slug } : {}),
 });
+
+/** The device-local account a command addresses (absent ⇒ 0). */
+export const commandAccountIndexOf = (cmd: TDaemonCommand): number => {
+  const payload = "payload" in cmd ? cmd.payload : undefined;
+  if (
+    payload !== null &&
+    payload !== undefined &&
+    typeof payload === "object" &&
+    "account_index" in payload &&
+    isAccountIndex(payload.account_index)
+  ) {
+    return payload.account_index;
+  }
+  return 0;
+};
 
 const CONTROL_QUEUE_MAX = 1;
 const CONTINUATION_QUEUE_MAX = 1;
@@ -76,6 +94,9 @@ export const commandLaneOf = (cmd: TDaemonCommand): TCommandLane => {
     case "connect":
     case "connect_device_code":
     case "logout":
+    case "add_account":
+    case "remove_account":
+    case "pin_account":
       return "mutation";
     case "refresh":
       return "usage";
@@ -127,13 +148,22 @@ const cancelFlowIdOf = (cmd: TDaemonCommand): string | undefined => {
   return undefined;
 };
 
-const loginOwned = (slug: string, reserved: ReadonlySet<string>): boolean => {
-  const slot = loginSlot(slug);
-  return reserved.has(slug) || slot.inFlight() || slot.cleanupUnknown();
+/** Read per-account login state for a scheduler key (`slug` or `slug#n`). */
+const inAccountOf = <T>(key: string, read: (slug: string) => T): T => {
+  const { slug, index } = parseAccountKey(key);
+  return runWithAccount(index, () => read(slug));
 };
 
+const loginOwned = (slug: string, reserved: ReadonlySet<string>): boolean =>
+  reserved.has(slug) ||
+  inAccountOf(slug, (s) => {
+    const slot = loginSlot(s);
+    return slot.inFlight() || slot.cleanupUnknown();
+  });
+
 const authBusy = (slug: string, reserved: ReadonlySet<string>): boolean =>
-  loginOwned(slug, reserved) || providerAuthOperationActive(slug);
+  loginOwned(slug, reserved) ||
+  inAccountOf(slug, (s) => providerAuthOperationActive(s));
 
 const runAdmitted = async (
   job: () => Promise<void>,
@@ -270,7 +300,13 @@ export const createCommandScheduler = (): TCommandScheduler => {
     schedulePerProviderUsage,
     schedule: (cmd, job): Promise<TScheduleResult> => {
       const lane = commandLaneOf(cmd);
-      const slug = commandProviderOf(cmd);
+      // Lanes, login reservations and conflicts are per provider ACCOUNT:
+      // two accounts of one provider may sign in concurrently.
+      const provider = commandProviderOf(cmd);
+      const slug =
+        provider === undefined
+          ? undefined
+          : scopedSlug(provider, commandAccountIndexOf(cmd));
 
       if (lane === "observe") {
         return runAdmitted(job);
@@ -279,7 +315,7 @@ export const createCommandScheduler = (): TCommandScheduler => {
       if (lane === "control") {
         if (slug === undefined) return runAdmitted(job);
         const wantFlow = cancelFlowIdOf(cmd);
-        const live = loginSlot(slug).flow();
+        const live = inAccountOf(slug, (s) => loginSlot(s).flow());
         if (
           wantFlow !== undefined &&
           live !== null &&
@@ -298,7 +334,7 @@ export const createCommandScheduler = (): TCommandScheduler => {
 
       if (lane === "continuation") {
         if (slug === undefined) return runAdmitted(job);
-        if (!loginSlot(slug).inFlight()) {
+        if (!inAccountOf(slug, (s) => loginSlot(s).inFlight())) {
           return Promise.resolve(reject("continuation_idle", slug));
         }
         return enqueueCounted(
@@ -339,8 +375,18 @@ export const createCommandScheduler = (): TCommandScheduler => {
 
       if (lane === "mutation") {
         if (slug === undefined) return runAdmitted(job);
-        if (loginOwned(slug, loginReserved)) {
-          const reason = cmd.kind === "logout" ? "login_conflict" : "resurface";
+        // Roster-only mutations (allocate / pin) must not wait on a login that
+        // owns account 0 or the pin target — they don't touch that slot's
+        // credentials. remove_account / logout / connect still conflict.
+        const skipLoginOwnership =
+          cmd.kind === "add_account" || cmd.kind === "pin_account";
+        if (!skipLoginOwnership && loginOwned(slug, loginReserved)) {
+          // Only a duplicate sign-in "resurfaces" the live one; logout and
+          // remove_account are retryable conflicts.
+          const reason =
+            cmd.kind === "connect" || cmd.kind === "connect_device_code"
+              ? "resurface"
+              : "login_conflict";
           return Promise.resolve(reject(reason, slug));
         }
         if ((mutationQueued.get(slug) ?? 0) >= MUTATION_QUEUE_MAX) {

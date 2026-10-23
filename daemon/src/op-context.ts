@@ -144,3 +144,17 @@ export const currentLoginCommandContext = ():
 /** Opaque doctor correlation for the bound login command; omit when unbound. */
 export const currentLoginCommandCorrelation = (): string | undefined =>
   opaqueDoctorCorrelation(loginCommandContext.getStore()?.flowId);
+
+/**
+ * Ambient device-local account slot (multi-account subscription providers,
+ * `docs/plan/multi-account-subscriptions.md`). Unbound ⇒ account 0, so every
+ * existing call path keeps today's single-account behaviour. Entry points that
+ * address another slot (auth commands, the status loop, the walker's account
+ * loop) bind it once; path helpers and per-account state read it.
+ */
+const accountContext = new AsyncLocalStorage<number | undefined>();
+
+export const currentAccountIndex = (): number => accountContext.getStore() ?? 0;
+
+export const runWithAccount = <T>(index: number, run: () => T): T =>
+  accountContext.run(index, run);
