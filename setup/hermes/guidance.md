@@ -2,7 +2,9 @@
 
 ### Cross-session memory
 - `mcp__openllm__memory` (action: "save" | "forget") and `mcp__openllm__recall`
-  are for remembering things across conversations.
+  are for remembering things across conversations. If the user asks to bring
+  existing memory files into OpenLLM, run `openllm exec memory import [path]`
+  (reads only; `--dry-run` previews).
 - Projects are auto-scoped from the working directory; pass an explicit
   `project` only when discussing a different repo than the cwd.
 - PROACTIVELY save when the user has CONCLUDED something: a stated preference or

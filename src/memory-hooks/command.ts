@@ -11,6 +11,7 @@ export const MEMORY_HOOK_USAGE = `usage: openllm exec memory <${EXEC_VERBS.memor
 
 Read a client hook event from stdin. Recall emits hook context; extract starts
 an independent worker and returns immediately. extract-worker is internal.
+import copies existing memory files into OpenLLM memory (see import --help).
 No external Python, Node or Bun installation is required by the compiled CLI.
 `;
 
@@ -29,6 +30,11 @@ export const runMemoryHookCommand = async (
     return 0;
   }
   const verb = args[0];
+  // Not a hook: a user command with its own flags, never gated by AUTO_*.
+  if (verb === "import") {
+    const { runMemoryImport } = await import("./import");
+    return runMemoryImport(args.slice(1));
+  }
   if (args.length !== 1 || !EXEC_VERBS.memory.includes(verb)) {
     process.stderr.write(MEMORY_HOOK_USAGE);
     return 2;
