@@ -840,8 +840,19 @@ const computeStatusFreshInner = async (
   const force = forceProbeTrigger(options?.trigger);
   const skipProviderProbes = options?.skipProviderProbes === true;
   // One row per (provider, account slot) in the roster; account 0 always.
+  // Skip orphan prune on skipProviderProbes ticks (cheap status) and never let
+  // an rmSync EBUSY/EPERM sink the whole snapshot.
   const slots = Object.values(DELEGATES).flatMap((d) => {
-    pruneOrphanAccountDirs(d.slug as TCliProvider);
+    if (!skipProviderProbes) {
+      try {
+        pruneOrphanAccountDirs(d.slug as TCliProvider);
+      } catch (err) {
+        logWarn("status", "Orphan account-dir prune failed.", {
+          slug: d.slug,
+          err: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
     const roster = readRoster(d.slug as TCliProvider);
     return roster.accounts.map((account) => ({
       d,

@@ -375,9 +375,14 @@ export const createCommandScheduler = (): TCommandScheduler => {
 
       if (lane === "mutation") {
         if (slug === undefined) return runAdmitted(job);
-        if (loginOwned(slug, loginReserved)) {
+        // Roster-only mutations (allocate / pin) must not wait on a login that
+        // owns account 0 or the pin target — they don't touch that slot's
+        // credentials. remove_account / logout / connect still conflict.
+        const skipLoginOwnership =
+          cmd.kind === "add_account" || cmd.kind === "pin_account";
+        if (!skipLoginOwnership && loginOwned(slug, loginReserved)) {
           // Only a duplicate sign-in "resurfaces" the live one; logout and
-          // roster changes are retryable conflicts.
+          // remove_account are retryable conflicts.
           const reason =
             cmd.kind === "connect" || cmd.kind === "connect_device_code"
               ? "resurface"

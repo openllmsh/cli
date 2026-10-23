@@ -17,7 +17,12 @@
  */
 
 import type { TSubscriptionProviderSlug } from "@openllmsh/protocol";
-import { AccountKeyedMap, accountScoped } from "../account-scope";
+import {
+  AccountKeyedMap,
+  accountScoped,
+  parseAccountKey,
+  scopedSlug,
+} from "../account-scope";
 import type { TDeadlineTimebase } from "../deadline-budget";
 import type { TSafeDiagnosticMessage } from "../doctor-report/message";
 import { logDebug, logInfo, logWarn, safeDiagnosticMessage } from "../logger";
@@ -325,6 +330,8 @@ type TRefreshCounters = {
   lost: number;
 };
 
+// Plain Maps keyed with scopedSlug so snapshot aggregation can read raw
+// entries without AccountKeyedMap re-scoping under a different ambient account.
 const refreshCounters = new Map<string, TRefreshCounters>();
 
 export type TRefreshLast = {
@@ -350,10 +357,11 @@ const emptyLast = (): TRefreshLast => ({
 const refreshLast = new Map<string, TRefreshLast>();
 
 const lastFor = (provider: string): TRefreshLast => {
-  const current = refreshLast.get(provider);
+  const key = scopedSlug(provider);
+  const current = refreshLast.get(key);
   if (current !== undefined) return current;
   const next = emptyLast();
-  refreshLast.set(provider, next);
+  refreshLast.set(key, next);
   return next;
 };
 
@@ -361,13 +369,15 @@ const patchLast = (
   provider: string,
   patch: Partial<TRefreshLast>,
 ): TRefreshLast => {
+  const key = scopedSlug(provider);
   const next: TRefreshLast = { ...lastFor(provider), ...patch };
-  refreshLast.set(provider, next);
+  refreshLast.set(key, next);
   return next;
 };
 
 const counterFor = (provider: string): TRefreshCounters => {
-  const current = refreshCounters.get(provider);
+  const key = scopedSlug(provider);
+  const current = refreshCounters.get(key);
   if (current !== undefined) return current;
   const next: TRefreshCounters = {
     attempts: 0,
@@ -379,7 +389,7 @@ const counterFor = (provider: string): TRefreshCounters => {
     fallbacks: 0,
     lost: 0,
   };
-  refreshCounters.set(provider, next);
+  refreshCounters.set(key, next);
   lastFor(provider);
   return next;
 };
@@ -388,16 +398,43 @@ export type TRefreshTelemetryEntry = TRefreshCounters & {
   readonly last: TRefreshLast;
 };
 
-/** Metadata-only refresh telemetry for `openllmd status` consumers. */
+const mergeRefreshLast = (a: TRefreshLast, b: TRefreshLast): TRefreshLast => {
+  const preferred = a.in_flight ? a : b.in_flight ? b : b;
+  return {
+    ...preferred,
+    in_flight: a.in_flight || b.in_flight,
+  };
+};
+
+/** Metadata-only refresh telemetry for `openllmd status` consumers.
+ *  Aggregated back to the bare provider slug so the diagnostics shape stays
+ *  provider-keyed; `in_flight` is true when ANY account is refreshing. */
 export const refreshTelemetrySnapshot = (): Readonly<
   Record<string, Readonly<TRefreshTelemetryEntry>>
-> =>
-  Object.fromEntries(
-    [...refreshCounters.entries()].map(([provider, counters]) => [
-      provider,
-      { ...counters, last: lastFor(provider) },
-    ]),
-  );
+> => {
+  const byProvider = new Map<string, TRefreshTelemetryEntry>();
+  for (const [key, counters] of refreshCounters.entries()) {
+    const { slug } = parseAccountKey(key);
+    const last = refreshLast.get(key) ?? emptyLast();
+    const existing = byProvider.get(slug);
+    if (existing === undefined) {
+      byProvider.set(slug, { ...counters, last });
+      continue;
+    }
+    byProvider.set(slug, {
+      attempts: existing.attempts + counters.attempts,
+      ok: existing.ok + counters.ok,
+      fail: existing.fail + counters.fail,
+      abandoned: existing.abandoned + counters.abandoned,
+      cooldown_skips: existing.cooldown_skips + counters.cooldown_skips,
+      backoff_skips: existing.backoff_skips + counters.backoff_skips,
+      fallbacks: existing.fallbacks + counters.fallbacks,
+      lost: existing.lost + counters.lost,
+      last: mergeRefreshLast(existing.last, last),
+    });
+  }
+  return Object.fromEntries(byProvider);
+};
 
 export const noteRefreshTokenLost = (provider: string): void => {
   counterFor(provider).lost++;

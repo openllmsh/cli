@@ -21,6 +21,7 @@ import {
   releasePendingDelete,
   removeAccount,
   reservePendingDelete,
+  rosterCorruptionReason,
   setAccountHash,
   withRosterLock,
 } from "./account-roster";
@@ -71,6 +72,15 @@ const disposeAccountRuntimes = async (
   });
 };
 
+const corruptRosterResult = (slug: TCliProvider): TAccountCommandResult => {
+  const reason = rosterCorruptionReason(slug);
+  if (reason === null) return { ok: true };
+  return {
+    ok: false,
+    error: `account roster corrupt (${reason}) — repair or delete accounts.json`,
+  };
+};
+
 export const addAccount = async (
   slug: string,
   label?: string,
@@ -78,6 +88,8 @@ export const addAccount = async (
 ): Promise<TAccountCommandResult> => {
   if (!isProvider(slug)) return { ok: false, error: "unknown provider" };
   return withRosterLock(slug, () => {
+    const corrupt = corruptRosterResult(slug);
+    if (!corrupt.ok) return corrupt;
     let index = DEFAULT_ACCOUNT_INDEX;
     mutateRosterSync(slug, (roster) => {
       const next = allocateAccount(
@@ -110,6 +122,8 @@ export const removeAccountSlot = async (
   }
 
   const prepared = await withRosterLock(slug, () => {
+    const corrupt = corruptRosterResult(slug);
+    if (!corrupt.ok) return { ok: false as const, error: corrupt.error };
     const roster = readRoster(slug);
     const account = roster.accounts.find((a) => a.index === index);
     if (account === undefined) {
@@ -168,6 +182,8 @@ export const pinAccountSlot = async (
 ): Promise<TAccountCommandResult> => {
   if (!isProvider(slug)) return { ok: false, error: "unknown provider" };
   return withRosterLock(slug, () => {
+    const corrupt = corruptRosterResult(slug);
+    if (!corrupt.ok) return corrupt;
     if (
       index !== null &&
       !readRoster(slug).accounts.some((a) => a.index === index)
@@ -212,7 +228,14 @@ export const reconcileAccountIdentity = async (
   const roster = readRoster(slug);
   const duplicate = findDuplicateAccount(roster, index, hash);
   if (duplicate !== undefined && index !== DEFAULT_ACCOUNT_INDEX) {
-    await removeAccountSlot(slug, index);
+    const removed = await removeAccountSlot(slug, index);
+    if (!removed.ok) {
+      return {
+        ok: false,
+        error: removed.error ?? "failed to remove duplicate account",
+        duplicate_of: duplicate.index,
+      };
+    }
     return {
       ok: false,
       error: "duplicate_account",
@@ -233,6 +256,9 @@ export const reconcileAccountIdentity = async (
  * index reserved by an in-flight removal.
  */
 export const pruneOrphanAccountDirs = (slug: TCliProvider): number => {
+  // A corrupt roster reads as "account 0 only" — never prune against that
+  // view or every accounts/<n>/ credential home would be deleted.
+  if (rosterCorruptionReason(slug) !== null) return 0;
   let names: string[];
   try {
     names = readdirSync(cliAccountsDir(slug));

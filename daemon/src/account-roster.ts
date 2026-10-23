@@ -12,6 +12,7 @@
  * carries over to the account that reuses it.
  * See `docs/plan/multi-account-subscriptions.md` §1.
  */
+import { existsSync, statSync } from "node:fs";
 import { join } from "node:path";
 import type { TAccountIndex, TCliProvider } from "./cli-paths";
 import { cliRoot, DEFAULT_ACCOUNT_INDEX, isAccountIndex } from "./cli-paths";
@@ -114,6 +115,52 @@ export const readRoster = (
     readJsonStateFile(accountRosterPath(provider, home), MAX_ROSTER_BYTES),
   );
 
+/**
+ * On-disk roster state. A missing file is the cold start (account 0 only). An
+ * existing but unreadable / oversize / wrong-version file must NOT be treated
+ * as empty — prune would delete every `accounts/<n>/` and a write would
+ * clobber the corrupt file with account 0 only.
+ */
+export type TRosterFileStatus =
+  | { readonly status: "missing" }
+  | { readonly status: "valid"; readonly roster: TAccountRoster }
+  | { readonly status: "invalid"; readonly reason: string };
+
+export const inspectRosterFile = (
+  provider: TCliProvider,
+  home?: string,
+): TRosterFileStatus => {
+  const path = accountRosterPath(provider, home);
+  if (!existsSync(path)) return { status: "missing" };
+  try {
+    if (statSync(path).size > MAX_ROSTER_BYTES) {
+      return { status: "invalid", reason: "oversize" };
+    }
+  } catch {
+    return { status: "invalid", reason: "unreadable" };
+  }
+  const raw = readJsonStateFile(path, MAX_ROSTER_BYTES);
+  if (raw === null) {
+    return { status: "invalid", reason: "unreadable_or_parse" };
+  }
+  if (typeof raw !== "object" || raw === null) {
+    return { status: "invalid", reason: "not_object" };
+  }
+  if ((raw as { version?: unknown }).version !== ACCOUNT_ROSTER_VERSION) {
+    return { status: "invalid", reason: "unknown_version" };
+  }
+  return { status: "valid", roster: parseRoster(raw) };
+};
+
+/** Non-null when `accounts.json` exists but cannot be trusted. */
+export const rosterCorruptionReason = (
+  provider: TCliProvider,
+  home?: string,
+): string | null => {
+  const inspected = inspectRosterFile(provider, home);
+  return inspected.status === "invalid" ? inspected.reason : null;
+};
+
 export const writeRoster = (
   provider: TCliProvider,
   roster: TAccountRoster,
@@ -193,7 +240,13 @@ export const mutateRosterSync = (
   fn: (roster: TAccountRoster) => TAccountRoster,
   home?: string,
 ): TAccountRoster => {
-  const next = parseRoster(fn(readRoster(provider, home)));
+  const inspected = inspectRosterFile(provider, home);
+  if (inspected.status === "invalid") {
+    throw new Error(`account roster corrupt (${inspected.reason})`);
+  }
+  const current =
+    inspected.status === "missing" ? emptyRoster() : inspected.roster;
+  const next = parseRoster(fn(current));
   writeRoster(provider, next, home);
   return next;
 };

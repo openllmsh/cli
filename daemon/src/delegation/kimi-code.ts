@@ -32,7 +32,13 @@
  *     by default; `kimi-region.ts`).
  */
 
-import { mkdirSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  renameSync,
+  unlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { rm } from "node:fs/promises";
 import { arch, hostname, release, type } from "node:os";
 import { dirname, join } from "node:path";
@@ -211,7 +217,12 @@ const provisionModelConfig = async (
  * needs a live token), so the config is ready before the near-expiry refresh.
  */
 const ensureModelConfig = async (accessToken: string): Promise<void> => {
-  if (configEnsured.get()) return;
+  // accountCell survives slot removal; a reused index must not skip writing
+  // config.toml just because a prior occupant set the cell.
+  if (configEnsured.get()) {
+    if (existsSync(configTomlPath())) return;
+    configEnsured.set(false);
+  }
   const inFlight = provisionInFlight.get();
   if (inFlight !== null) return inFlight;
   const base = await resolveProviderUrl(PROVIDER, "/coding/v1");
