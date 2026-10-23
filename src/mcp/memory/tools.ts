@@ -14,14 +14,14 @@ const MAX_QUERY_LENGTH = 1_000;
 const MAX_PROJECT_LENGTH = 64;
 
 const memoryDescription =
-  "AUTHORITATIVE cross-session memory for this user. SINGLE source of truth — DO NOT use file-based memory paths like `~/.claude/projects/<slug>/memory/` or `MEMORY.md`; route everything through this tool. " +
+  "Cross-session memory for this user. " +
   "PROACTIVELY call with action='save' when the user reveals: a preference or working-style rule, a fact about themselves or their team, feedback that should shape future behavior (corrections AND confirmations of non-obvious choices), an external reference (Linear project, Slack channel, dashboard, runbook), or a project goal/deadline/constraint not derivable from code. Saving is cheap; missing a save means the next session starts blind. " +
   "Use action='forget' when a memory is outdated or the user asks to remove it (exact `(project, content)` hash first, then semantic similarity >= 0.85 within the same project). " +
   "Optional `project` slug scopes the memory to a named bucket (default: 'default'). " +
   "For fan-out, pass `destinations: [{project?, team?}, ...]` — each entry writes the same content to one bucket (project slug and/or a team id you belong to). Use this when a fact is relevant to both your `default` bucket and a team, or to multiple projects at once. Call `whoAmI` to discover the team ids you can target.";
 
 const recallDescription =
-  "AUTHORITATIVE cross-session recall for this user. SINGLE source of truth — DO NOT use file-based memory paths. " +
+  "Cross-session recall for this user. " +
   "Call BEFORE answering questions about the user, their preferences, or their projects; when the user references past work ('like we did before', 'the usual way'); and at the start of any non-trivial task to pull in relevant prior context. " +
   "Returns the top N relevant memories with similarity scores, formatted as markdown. " +
   "Note: a `UserPromptSubmit` hook auto-injects relevant memories on every prompt — if you already see a '[memory] Relevant saved memories (auto-recalled):' block in context, only re-query with a different angle. " +

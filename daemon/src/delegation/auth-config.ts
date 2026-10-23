@@ -38,8 +38,9 @@
  */
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { AccountKeyedMap } from "../account-scope";
 import type { TCliProvider } from "../cli-paths";
-import { cliBin, cliEnv, cliRoot } from "../cli-paths";
+import { cliAccountsDir, cliBin, cliEnv, cliRoot } from "../cli-paths";
 import { logDebug, logInfo, logWarn } from "../logger";
 import {
   codexCapturePreambleForwardPath,
@@ -50,6 +51,7 @@ import {
   reframeFetchedControlResponse,
   remapCodexObservedUrlToExternal,
 } from "../native-runtime/codex-capture";
+import { currentAccountIndex } from "../op-context";
 import { sandboxSpawnArgs } from "../sandbox/exec";
 import { unwrapKeychainSpawn } from "../sandbox/policy";
 import { isOtherKimiRegionOrigin, kimiEndpoints } from "./kimi-region";
@@ -87,8 +89,15 @@ const CAPTURE_TIMEOUT_MS = 20_000;
 
 // ─── Persisted config.json sidecar (read/write/patch) ────────────────────────
 
-const configPath = (provider: TCliProvider): string =>
-  join(cliRoot(provider), "config.json");
+/** Per provider ACCOUNT: the captured upstream depends on the signed-in
+ *  account (Codex workspace routing, Kimi region). Account 0 keeps
+ *  `<root>/config.json`; account n uses `<root>/accounts/<n>/config.json`. */
+const configPath = (provider: TCliProvider): string => {
+  const index = currentAccountIndex();
+  return index === 0
+    ? join(cliRoot(provider), "config.json")
+    : join(cliAccountsDir(provider), String(index), "config.json");
+};
 
 const readConfig = (provider: TCliProvider): Promise<TAuthConfig | null> =>
   readJsonFile<TAuthConfig>(configPath(provider));
@@ -103,7 +112,7 @@ const writeConfig = async (
 // Serialize read-modify-write per provider — the URL capture and the OAuth
 // extraction both patch the ONE file; a per-provider queue stops them clobbering
 // each other's sub-part.
-const writeLocks = new Map<TCliProvider, Promise<void>>();
+const writeLocks = new AccountKeyedMap<Promise<void>>();
 const patchConfig = async (
   provider: TCliProvider,
   patch: TAuthConfig,
@@ -597,8 +606,7 @@ const captureInferenceRequest = async (
 // ONE capture in flight per provider — URL and identity callers share the same
 // recorder run rather than racing it; the run patches every field the
 // provider's spec captures under the ONE freshness key.
-const captureInFlight = new Map<
-  TCliProvider,
+const captureInFlight = new AccountKeyedMap<
   Promise<{
     readonly url: string;
     readonly identityHeaders: Readonly<Record<string, string>>;
@@ -608,10 +616,10 @@ const captureInFlight = new Map<
 // In-memory stand-in for the persisted capture stamps when config.json can't
 // be written: without it an unwritable config would let every stale hop spawn
 // the capture again. Keyed by CLI version, honoured for the same TTL.
-const captureAttemptMemo = new Map<
-  TCliProvider,
-  { readonly version: string; readonly atMs: number }
->();
+const captureAttemptMemo = new AccountKeyedMap<{
+  readonly version: string;
+  readonly atMs: number;
+}>();
 
 const persistCapture = async (
   provider: TCliProvider,

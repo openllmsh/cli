@@ -26,6 +26,7 @@
  *     2023-06-01`, `User-Agent: claude-cli/<version>`.
  *   - Usage: GET https://api.anthropic.com/api/oauth/usage.
  */
+
 import { platform } from "node:os";
 import { join } from "node:path";
 import type {
@@ -33,6 +34,7 @@ import type {
   TProviderUsageSnapshot,
 } from "@openllmsh/protocol";
 import { MODEL_LIST_FETCH_TIMEOUT_MS } from "@openllmsh/protocol";
+import { accountCell } from "../account-scope";
 import { noteAuthStoreIdentityChange } from "../auth-user-action";
 import { cliInstallState } from "../cli-install";
 import { cliConfigDir, cliHome } from "../cli-paths";
@@ -410,7 +412,7 @@ type TAuthStatusFlight = {
   lateAdmitted: boolean;
 };
 
-let authStatusInFlight: TAuthStatusFlight | null = null;
+const authStatusInFlight = accountCell<TAuthStatusFlight | null>(() => null);
 
 const maybeAdmitInnerAuthLate = (flight: TAuthStatusFlight): void => {
   if (flight.lateAdmitted) return;
@@ -610,7 +612,7 @@ const authStatusLoggedIn = async (
 ): Promise<TAuthStatusWait> => {
   const generation = claudeStatusCache.generation();
   const startFingerprint = claudePassiveReuseAllowed().fingerprint;
-  let flight = authStatusInFlight;
+  let flight = authStatusInFlight.get();
   if (flight === null || flight.generation !== generation) {
     if (signal?.aborted === true) return { kind: "aborted" };
     const work = (async (): Promise<TAuthStatusProbe> => {
@@ -647,10 +649,10 @@ const authStatusLoggedIn = async (
       settled: undefined,
       lateAdmitted: false,
     };
-    authStatusInFlight = flight;
+    authStatusInFlight.set(flight);
     const captured = flight;
     const clearFlight = (): void => {
-      if (authStatusInFlight?.work === work) authStatusInFlight = null;
+      if (authStatusInFlight.get()?.work === work) authStatusInFlight.set(null);
     };
     void work.then(
       (probe) => {

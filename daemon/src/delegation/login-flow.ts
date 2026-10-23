@@ -33,6 +33,7 @@ import {
   wireCompatibleFailureSignature,
 } from "@openllmsh/protocol";
 import { Schema as S } from "effect";
+import { AccountKeyedSet, scopedSlug } from "../account-scope";
 import {
   admitVerifiedLogin,
   emitAuth,
@@ -141,10 +142,31 @@ export type TLoginSlot = {
   readonly cancelAll: () => number;
 };
 
+/** Keyed by account-scoped slug (`slug` / `slug#n`). */
 const slots = new Map<string, TLoginSlot>();
 
-/** The memoized single-flight slot for `provider` (created on first use). */
+/**
+ * The single-flight slot for `provider`, resolved against the AMBIENT account
+ * on every call. Delegates capture `loginSlot(PROVIDER)` once at module load,
+ * so the returned view must not pin the account that was ambient then.
+ */
 export const loginSlot = (provider: string): TLoginSlot => {
+  const at = (): TLoginSlot => accountLoginSlot(scopedSlug(provider));
+  return {
+    inFlight: () => at().inFlight(),
+    flow: () => at().flow(),
+    startedAtMs: () => at().startedAtMs(),
+    wasCancelled: () => at().wasCancelled(),
+    cleanupUnknown: () => at().cleanupUnknown(),
+    markCleanupUnknown: () => at().markCleanupUnknown(),
+    start: (canceler, nextFlow) => at().start(canceler, nextFlow),
+    end: (flowId) => at().end(flowId),
+    cancelAll: () => at().cancelAll(),
+  };
+};
+
+/** The memoized single-flight slot for one account key (created on first use). */
+const accountLoginSlot = (provider: string): TLoginSlot => {
   const existing = slots.get(provider);
   if (existing !== undefined) return existing;
   let inFlight = false;
@@ -269,7 +291,7 @@ export const loginOwnershipPending = (
 };
 
 /** Providers whose logout is in flight (login uses {@link loginSlot}). */
-const logoutOps = new Set<string>();
+const logoutOps = new AccountKeyedSet();
 
 /** Mark logout as the owner of this provider's auth until verification ends. */
 export const beginProviderAuthOperation = (slug: string): void => {

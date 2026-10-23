@@ -116,6 +116,18 @@ export const API_OPERATIONS: readonly TApiOperation[] = [
     "hasBody": true
   },
   {
+    "id": "cookieConsent.region",
+    "method": "get",
+    "path": "/cookie-consent/region",
+    "summary": "",
+    "tags": [
+      "cookieConsent"
+    ],
+    "pathParams": [],
+    "queryParams": [],
+    "hasBody": false
+  },
+  {
     "id": "credentials.list",
     "method": "get",
     "path": "/credentials",

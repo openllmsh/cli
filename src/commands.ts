@@ -26,7 +26,7 @@ export type TExecGroup = (typeof EXEC_GROUPS)[number];
 
 /** Per-group verbs (drives dispatch, help, and completion). */
 export const EXEC_VERBS: Record<TExecGroup, readonly string[]> = {
-  memory: ["recall", "extract", "extract-worker"],
+  memory: ["recall", "extract", "extract-worker", "import"],
 };
 
 export type TFlag = { readonly name: string; readonly description: string };

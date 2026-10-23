@@ -31,6 +31,7 @@ import type {
   TDaemonProviderConnection,
   TProviderUsageSnapshot,
 } from "@openllmsh/protocol";
+import { accountCell } from "../account-scope";
 import { noteAuthStoreIdentityChange } from "../auth-user-action";
 import { cliInstallState } from "../cli-install";
 import { cliBin, cliConfigDir, cliEnv } from "../cli-paths";
@@ -62,7 +63,11 @@ import {
   pendingAuthDetail,
 } from "../pending-auth";
 import { daemonTempDir } from "../sandbox/working-set";
-import { readAntigravityUsage } from "./antigravity-usage";
+import { accountHashField } from "./account-id";
+import {
+  readAntigravityAccountId,
+  readAntigravityUsage,
+} from "./antigravity-usage";
 import { loginWiring } from "./delegate-shared";
 import { detailedFromCliList, listWithReason } from "./fetch-model-list";
 import type { TConnectResult } from "./login-flow";
@@ -119,8 +124,10 @@ const wiring = loginWiring({
 });
 
 /** The live login's callback target, for the remote paste-back path. */
-let pendingCallback: Pick<TAntigravityAuthUrl, "redirectUri" | "state"> | null =
-  null;
+const pendingCallback = accountCell<Pick<
+  TAntigravityAuthUrl,
+  "redirectUri" | "state"
+> | null>(() => null);
 
 /** Replay one validated callback to the agent's loopback listener. */
 const forwardCallback = (callback: URL): Promise<boolean> =>
@@ -217,7 +224,7 @@ const connect = (): Promise<TConnectResult> =>
       }
       const dispose = (): void => {
         client.dispose();
-        pendingCallback = null;
+        pendingCallback.set(null);
         void rm(scratch, { recursive: true, force: true });
       };
       if (!wiring.slot.start(dispose, flow)) {
@@ -381,7 +388,10 @@ const connect = (): Promise<TConnectResult> =>
       if (!openAuthUrlUnlessCancelled(wiring.slot, first.url)) {
         return { connected: false, detail: "sign-in cancelled" };
       }
-      pendingCallback = { redirectUri: first.redirectUri, state: first.state };
+      pendingCallback.set({
+        redirectUri: first.redirectUri,
+        state: first.state,
+      });
       publishPendingAuth(flow, PROVIDER, {
         url: first.url,
         code: "",
@@ -398,7 +408,7 @@ const connect = (): Promise<TConnectResult> =>
 const submitLoginCode = async (
   pasted: string,
 ): Promise<{ readonly ok: boolean; readonly detail?: string }> => {
-  const target = pendingCallback;
+  const target = pendingCallback.get();
   if (target === null || !wiring.slot.inFlight()) {
     return { ok: false, detail: "no Google sign-in is awaiting a response." };
   }
@@ -431,12 +441,18 @@ export const antigravityDelegate: TProviderDelegate = {
     const { installed, version } = await cliInstallState(PROVIDER);
     const connected = installed && tokenPresent();
     if (connected) clearPendingAuth(PROVIDER);
+    const accountId = connected
+      ? await readAntigravityAccountId(geminiHome())
+      : null;
     const pending = connected ? null : getPendingAuth(PROVIDER);
     return {
       provider: PROVIDER,
       status: connected ? "connected" : "disconnected",
       ...(connected
-        ? connectedObservation()
+        ? {
+            ...connectedObservation(),
+            ...accountHashField(PROVIDER, accountId),
+          }
         : pending !== null
           ? {}
           : installed

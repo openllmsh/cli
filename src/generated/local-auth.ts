@@ -16,61 +16,97 @@ export const AUTH_COMMANDS = [
   },
   {
     name: "status",
-    args: "[provider] [--flow-id <id>]",
+    args: "[provider] [--account <n>] [--flow-id <id>]",
     description:
       "Read local provider state and explicitly check an originating login flow",
     mutating: false,
     provider: "optional",
-    fields: ["flow_id"],
+    fields: ["account", "flow_id"],
   },
   {
     name: "usage",
-    args: "[provider]",
+    args: "[provider] [--account <n>]",
     description: "Read cached usage without refreshing credentials or quota",
     mutating: false,
     provider: "optional",
-    fields: [],
+    fields: ["account"],
   },
   {
     name: "refresh",
-    args: "[provider]",
+    args: "[provider] [--account <n>]",
     description:
       "Explicitly refresh usage using the existing manual refresh policy",
     mutating: true,
     provider: "optional",
-    fields: [],
+    fields: ["account"],
   },
   {
     name: "login",
-    args: "<provider> [--method browser|device]",
+    args: "<provider> [--account <n>] [--method browser|device]",
     description:
       "Start local provider login using its native CLI and vendor consent",
     mutating: true,
     provider: "required",
-    fields: ["method"],
+    fields: ["account", "method"],
   },
   {
     name: "submit-code",
-    args: "<provider> --flow-id <id>",
+    args: "<provider> [--account <n>] --flow-id <id>",
     description:
       "Submit a paste-back authorization code to the originating login via stdin",
     mutating: true,
     provider: "required",
-    fields: ["flow_id", "code"],
+    fields: ["account", "flow_id", "code"],
   },
   {
     name: "cancel",
-    args: "<provider> [--flow-id <id>]",
+    args: "<provider> [--account <n>] [--flow-id <id>]",
     description: "Cancel a pending local provider login",
     mutating: true,
     provider: "required",
-    fields: ["flow_id"],
+    fields: ["account", "flow_id"],
   },
   {
     name: "logout",
-    args: "<provider>",
+    args: "<provider> [--account <n>]",
     description:
       "Sign out of a provider on this machine not the OpenLLM account",
+    mutating: true,
+    provider: "required",
+    fields: ["account"],
+  },
+  {
+    name: "add-account",
+    args: "<provider> [--label <label>]",
+    description:
+      "Add another account slot for a provider on this machine, then log in with --account",
+    mutating: true,
+    provider: "required",
+    fields: ["label"],
+  },
+  {
+    name: "remove-account",
+    args: "<provider> --account <n>",
+    description:
+      "Sign out and delete an extra account slot (account 0 is only logged out)",
+    mutating: true,
+    provider: "required",
+    fields: ["account"],
+  },
+  {
+    name: "pin-account",
+    args: "<provider> --account <n>",
+    description:
+      "Try this account first when routing; others still serve as fallback",
+    mutating: true,
+    provider: "required",
+    fields: ["account"],
+  },
+  {
+    name: "unpin-account",
+    args: "<provider>",
+    description:
+      "Clear the pinned account; routing returns to least-remaining-quota order",
     mutating: true,
     provider: "required",
     fields: [],
@@ -84,7 +120,13 @@ export type TLocalAuthRequest = {
   readonly method?: TLocalAuthMethod;
   readonly flow_id?: string;
   readonly code?: string;
+  /** Device-local account slot (multi-account); absent ⇒ account 0. */
+  readonly account?: number;
+  readonly label?: string;
 };
+
+export const AUTH_ACCOUNT_MAX = 1023;
+export const AUTH_LABEL_MAX_LENGTH = 64;
 
 /** Strict on every surface; provider existence is checked against live daemon delegates. */
 export const parseLocalAuthRequest = (input: unknown): TLocalAuthRequest => {
@@ -127,6 +169,32 @@ export const parseLocalAuthRequest = (input: unknown): TLocalAuthRequest => {
     return invalid();
   if (record.flow_id !== undefined && record.provider === undefined)
     return invalid();
+  if (
+    record.account !== undefined &&
+    (typeof record.account !== "number" ||
+      !Number.isSafeInteger(record.account) ||
+      record.account < 0 ||
+      record.account > AUTH_ACCOUNT_MAX)
+  )
+    return invalid();
+  if (
+    descriptor.name === "remove-account" &&
+    (typeof record.account !== "number" || record.account < 1)
+  )
+    return invalid();
+  if (descriptor.name === "pin-account" && record.account === undefined)
+    return invalid();
+  if (
+    record.label !== undefined &&
+    (typeof record.label !== "string" ||
+      record.label.length === 0 ||
+      record.label.length > AUTH_LABEL_MAX_LENGTH ||
+      Array.from(record.label).some(
+        (character) =>
+          character.charCodeAt(0) < 32 || character.charCodeAt(0) === 127,
+      ))
+  )
+    return invalid();
   if (descriptor.name === "submit-code") {
     if (
       record.flow_id === undefined ||
@@ -154,11 +222,26 @@ export const parseAuthArgs = (
   for (let index = 1; index < args.length; index += 1) {
     const arg = args[index];
     if (arg === "--json") continue;
-    if (arg === "--method" || arg === "--flow-id") {
-      const key = arg === "--method" ? "method" : "flow_id";
-      if (request[key] !== undefined || args[index + 1] === undefined)
+    if (
+      arg === "--method" ||
+      arg === "--flow-id" ||
+      arg === "--account" ||
+      arg === "--label"
+    ) {
+      const key =
+        arg === "--method"
+          ? "method"
+          : arg === "--flow-id"
+            ? "flow_id"
+            : arg === "--account"
+              ? "account"
+              : "label";
+      const value = args[index + 1];
+      if (request[key] !== undefined || value === undefined)
         throw new Error("Missing or repeated auth option");
-      request[key] = args[++index];
+      index += 1;
+      request[key] =
+        key === "account" && /^[0-9]{1,4}$/.test(value) ? Number(value) : value;
     } else if (
       arg !== undefined &&
       !arg.startsWith("-") &&

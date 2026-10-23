@@ -10781,7 +10781,9 @@
                           "type": "string",
                           "enum": [
                             "accepted",
-                            "declined"
+                            "declined",
+                            "analytics_only",
+                            "advertising_only"
                           ]
                         },
                         {
@@ -13877,7 +13879,9 @@
                     "type": "string",
                     "enum": [
                       "accepted",
-                      "declined"
+                      "declined",
+                      "analytics_only",
+                      "advertising_only"
                     ]
                   }
                 },
@@ -13886,6 +13890,85 @@
             }
           },
           "required": true
+        }
+      }
+    },
+    "/cookie-consent/region": {
+      "get": {
+        "tags": [
+          "cookieConsent"
+        ],
+        "operationId": "cookieConsent.region",
+        "parameters": [],
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "region"
+                  ],
+                  "properties": {
+                    "region": {
+                      "type": "string",
+                      "enum": [
+                        "strict",
+                        "default_on"
+                      ]
+                    }
+                  },
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request did not match the expected schema",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HttpApiDecodeError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "error"
+                  ],
+                  "properties": {
+                    "error": {
+                      "type": "object",
+                      "required": [
+                        "message"
+                      ],
+                      "properties": {
+                        "message": {
+                          "type": "string"
+                        },
+                        "type": {
+                          "type": "string"
+                        },
+                        "code": {
+                          "type": "string"
+                        }
+                      },
+                      "additionalProperties": false
+                    }
+                  },
+                  "additionalProperties": false
+                }
+              }
+            }
+          }
         }
       }
     },

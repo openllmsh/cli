@@ -64,6 +64,11 @@ import {
   TUNNELED_REQUEST_VALUE,
 } from "@openllmsh/protocol";
 import { declaresAnthropicServerSearchTool } from "@openllmsh/wire/adapters/messages/request";
+import type { TRankableAccount } from "@openllmsh/wire/features/account-rank";
+import {
+  pickFinalFallback,
+  rankProviderAccounts,
+} from "@openllmsh/wire/features/account-rank";
 import type { TCompactionSurface } from "@openllmsh/wire/features/compaction/compact-request";
 import { compactRequestToFit } from "@openllmsh/wire/features/compaction/compact-request";
 import {
@@ -171,6 +176,9 @@ import {
   UnsupportedContentError,
 } from "@openllmsh/wire/providers/upstream-request";
 import { Schema } from "effect";
+import { accountIndexes } from "./account-models";
+import { readRoster } from "./account-roster";
+import { AccountKeyedMap } from "./account-scope";
 import { requestStatusPush } from "./auth-events";
 import type { TCacheProbe } from "./cache-probe";
 import {
@@ -179,6 +187,8 @@ import {
   cacheProbePrefixHash,
   cacheProbeWrap,
 } from "./cache-probe";
+import type { TCliProvider } from "./cli-paths";
+import { DEFAULT_ACCOUNT_INDEX } from "./cli-paths";
 import {
   deliverChunkStream,
   deliverJsonResponse,
@@ -205,6 +215,7 @@ import type { TProviderDelegate } from "./delegation/types";
 import { stateDir } from "./env";
 import { forwardToCloud } from "./forward";
 import {
+  allAccountsCoolingDown,
   clearHopCooldown,
   isHopCoolingDown,
   markHopCooldown,
@@ -220,6 +231,7 @@ import {
 } from "./native-runtime/serve";
 import type { TNativeTokens } from "./native-runtime/types";
 import { tokensFromResponse, ZERO_TOKENS } from "./native-runtime/types";
+import { runWithAccount } from "./op-context";
 import { clearPlanCache } from "./plan-cache";
 import { isClaudeCodeOriginator, resolveHopExecution } from "./sub-method";
 import type { TTunnelToPeer } from "./tunnel-client";
@@ -770,6 +782,12 @@ export const report = (
   const recordedRow: TDaemonRecordRequest = {
     ...row,
     idempotency_key: row.idempotency_key ?? randomUUID(),
+    // A dialled account's hash is often known only as the 3rd argument (native
+    // success, hop failure). Merge it when the row omitted it so every recorded
+    // attempt — success and failure — carries `account_hash`.
+    ...(row.account_hash === undefined && accountHash !== undefined
+      ? { account_hash: accountHash }
+      : {}),
   };
   void recordRequest(recordedRow, origin);
   if (
@@ -784,7 +802,7 @@ export const report = (
     sampleUsageAfterRequest(
       recordedRow.provider,
       () => delegate.usage(),
-      recordedRow.account_hash ?? accountHash,
+      recordedRow.account_hash,
     );
   }
   // Fire-and-forget automatic catalog refresh for the hop that actually
@@ -2557,6 +2575,8 @@ const withoutContextOverflowHopTag = (response: Response): Response => {
 type THopServed = {
   readonly response: Response;
   readonly servedLocally: boolean;
+  /** Local account slot that served it (multi-account); absent ⇒ 0. */
+  readonly accountIndex?: number;
 };
 
 const walkPlan = async (
@@ -2569,10 +2589,15 @@ const walkPlan = async (
   const hopRetryDelayMs = args.hopRetryDelayMs ?? DEFAULT_HOP_RETRY_DELAY_MS;
   const hopRetryAfterCapMs =
     args.hopRetryAfterCapMs ?? DEFAULT_HOP_RETRY_AFTER_CAP_MS;
-  const accountHashByProvider = new Map<string, string | null>();
+  // Keyed per provider ACCOUNT (ambient `runWithAccount`; account 0 = slug).
+  const accountHashByProvider = new AccountKeyedMap<string | null>();
   // Shared per-request cache of `delegate.status()` — the local auth gate and
   // the quota-account lookup both read through it so a hop pays status once.
-  const connectedByProvider = new Map<string, TLocalSubscriptionAuth>();
+  const connectedByProvider = new AccountKeyedMap<TLocalSubscriptionAuth>();
+  // Other local accounts of the hop's provider still to try after the one
+  // being dialled. While > 0, a failure cools only that account locally and
+  // is not reported as a model cooldown to the cloud.
+  let siblingAccountsRemaining = 0;
   // Canonical view of the inbound for native-runtime eligibility and encoding.
   const canonical = canonicalFromInbound(args.surface, args.rawBody);
   const baseEstimate = estimateBodyTokens(args.rawBody);
@@ -2637,12 +2662,18 @@ const walkPlan = async (
         latency_ms: Date.now() - args.startedAt,
         endpoint: args.endpoint,
         error: reason,
-        ...(cooldownReason !== undefined
+        ...(cooldownReason !== undefined && siblingAccountsRemaining === 0
           ? { cooldown_reason: cooldownReason }
           : {}),
       },
       args.originParam,
+      // Ambient account map — multi-account dials run inside `runWithAccount`,
+      // so this is the dialled slot's hash (null/absent for single-account).
+      accountHashByProvider.get(hop.provider) ?? undefined,
     );
+    // Another local account of this provider can still serve the model: the
+    // failure cooled only this account, so the plan stays valid.
+    if (siblingAccountsRemaining > 0) return;
     // A hop that failed is about to cool on the cloud (daemon-record →
     // publishCooldownMark). Drop the signed-plan cache so the next request
     // re-resolves a plan that skips the cooled model instead of replaying
@@ -2745,9 +2776,113 @@ const walkPlan = async (
   // (it benefits all local consumers); only the trigger narrows to local serves.
   const commitSubscriptionServe = (hop: THop, served: THopServed): Response => {
     if (served.servedLocally && served.response.status < 400) {
-      clearHopCooldown(hop.provider, hop.modelId);
+      runWithAccount(served.accountIndex ?? DEFAULT_ACCOUNT_INDEX, () =>
+        clearHopCooldown(hop.provider, hop.modelId),
+      );
     }
     return withHopTrailHeaders(served.response, hop);
+  };
+  // ── Multi-account expansion (docs/plan/multi-account-subscriptions.md §6) ─
+  // A subscription hop names a provider, not an account: on this device it
+  // expands into the provider's roster. Signed-in, non-cooling accounts are
+  // ranked (pinned → least remaining quota → unknown by index) and dialled in
+  // order; an account switch happens only between attempts, never mid-stream
+  // (in-place retries stay inside `serveSubscriptionHop`'s ambient account).
+  // A single-account provider takes the original path unchanged.
+  const subscriptionAccounts = (provider: string): readonly number[] =>
+    isOAuthSlug(provider) ? accountIndexes(provider) : [DEFAULT_ACCOUNT_INDEX];
+  const serveSubscriptionAccounts = async (
+    hop: THop,
+    finalHop: boolean,
+    opts: { readonly forceContextAttempt: boolean },
+  ): Promise<THopServed | THopContinue> => {
+    const roster = readRoster(hop.provider as TCliProvider);
+    if (roster.accounts.length <= 1) {
+      return serveSubscriptionHop(hop, finalHop, { ...opts, retryAttempt: 0 });
+    }
+    const now = Date.now();
+    const meter = lookupCatalogEntry(hop.modelId)?.subscription_meter;
+    const signedIn: TRankableAccount[] = [];
+    for (const { index } of roster.accounts) {
+      const rankable = await runWithAccount(index, async () => {
+        const auth = await ensureLocalSubscription(
+          hop.provider,
+          connectedByProvider,
+          accountHashByProvider,
+        );
+        if (!auth.connected) return null;
+        return {
+          index,
+          snapshot: await usageForActiveAccount(
+            hop.provider,
+            accountHashByProvider,
+            connectedByProvider,
+          ),
+          cooling: isHopCoolingDown(hop.provider, hop.modelId, now),
+        };
+      });
+      if (rankable !== null) signedIn.push(rankable);
+    }
+    let order = rankProviderAccounts({
+      accounts: signedIn,
+      meter,
+      pinnedIndex: roster.pinned_index,
+      staleCapMs: GATE_STALE_CAP_MS,
+      now,
+    }).map((a) => a.index);
+    // Never-drop-all: on the FINAL hop, when every signed-in account is
+    // cooled or exhausted, still dial the least-bad one for a real error
+    // (pinned → most remaining trusted quota → lowest index).
+    const fallbackIndex = pickFinalFallback({
+      accounts: signedIn,
+      meter,
+      pinnedIndex: roster.pinned_index,
+      staleCapMs: GATE_STALE_CAP_MS,
+      now,
+    });
+    if (order.length === 0 && finalHop && fallbackIndex !== undefined) {
+      order = [fallbackIndex];
+    }
+    for (let i = 0; i < order.length; i += 1) {
+      const index = order[i] ?? DEFAULT_ACCOUNT_INDEX;
+      siblingAccountsRemaining = order.length - 1 - i;
+      try {
+        const served = await runWithAccount(index, () =>
+          serveSubscriptionHop(
+            hop,
+            finalHop && siblingAccountsRemaining === 0,
+            {
+              ...opts,
+              retryAttempt: 0,
+              fleetFallback: false,
+            },
+          ),
+        );
+        if (served !== HOP_CONTINUE) return { ...served, accountIndex: index };
+      } finally {
+        siblingAccountsRemaining = 0;
+      }
+      if (args.req.signal.aborted) return HOP_CONTINUE;
+      // Context overflow is model-level; a sibling account cannot fix it.
+      if (contextDemotionTarget !== null) return HOP_CONTINUE;
+    }
+    if (order.length === 0 && signedIn.length > 0) {
+      lastError = `${hop.provider}: no signed-in account with quota on this device`;
+      hopTrail.push({
+        modelId: hop.modelId,
+        provider: hop.provider,
+        reason: lastError,
+      });
+    }
+    // Same contract as the single-account auth gate: only a box with NO
+    // signed-in account hands the hop to a fleet peer. A signed-in account
+    // that failed (or is cooling/exhausted) advances the plan instead.
+    if (signedIn.length > 0) return HOP_CONTINUE;
+    lastError = `${hop.provider} not signed in on this device`;
+    const tunneled = await tryFleetTunnel(hop, args);
+    if (tunneled !== null) return { response: tunneled, servedLocally: false };
+    addHopFailure(hop, lastError);
+    return HOP_CONTINUE;
   };
   // Context skips preserve priority without permanently excluding a model:
   // once ordinary candidates are exhausted, retry the skipped candidates once
@@ -2796,6 +2931,8 @@ const walkPlan = async (
     opts: {
       readonly forceContextAttempt: boolean;
       readonly retryAttempt: number;
+      /** False while the account loop owns the fleet fallback. */
+      readonly fleetFallback?: boolean;
     },
   ): Promise<THopServed | THopContinue> => {
     const { forceContextAttempt, retryAttempt } = opts;
@@ -2813,6 +2950,7 @@ const walkPlan = async (
     if (!localAuth.connected) {
       lastError =
         localAuth.detail ?? `${hop.provider} not signed in on this device`;
+      if (opts.fleetFallback === false) return HOP_CONTINUE;
       const tunneled = await tryFleetTunnel(hop, args);
       if (tunneled !== null) {
         return { response: tunneled, servedLocally: false };
@@ -3264,7 +3402,14 @@ const walkPlan = async (
     // limited, auth) is not dialled again from this box until its policy TTL
     // expires. Never applied to the FINAL hop (never-drop-all: the caller gets
     // the real upstream error, not a synthetic one).
-    if (!finalHop && isHopCoolingDown(hop.provider, hop.modelId)) {
+    if (
+      !finalHop &&
+      allAccountsCoolingDown(
+        hop.provider,
+        hop.modelId,
+        subscriptionAccounts(hop.provider),
+      )
+    ) {
       lastError = `hop ${hop.modelId} skipped: cooling down after a recent failure`;
       hopTrail.push({
         modelId: hop.modelId,
@@ -3339,9 +3484,8 @@ const walkPlan = async (
       // Record the DIALLED identity before serving so the recovery pass can
       // never re-dial it, independent of the (sibling-overwritable) setter key.
       dialedHops.add(`${hop.provider}|${hop.modelId}`);
-      const served = await serveSubscriptionHop(hop, finalHop, {
+      const served = await serveSubscriptionAccounts(hop, finalHop, {
         forceContextAttempt,
-        retryAttempt: 0,
       });
       if (served === HOP_CONTINUE) continue;
       return commitSubscriptionServe(hop, served);
@@ -3471,54 +3615,70 @@ const walkPlan = async (
     // this walk. Covers a chain that lists the same model at two positions.
     if (dialedHops.has(`${hop.provider}|${hop.modelId}`)) continue;
     if (recoveryDialed.has(`${hop.provider}|${hop.modelId}`)) continue; // at-most-once per hop
-    const cd = peekHopCooldown(hop.provider, hop.modelId);
-    if (cd === undefined) continue; // expired — leave to the next request
-    if (!TRANSIENT_COOLDOWN_REASONS.has(cd.reason)) continue; // hard reason
-    if (cd.setterSessionKey === walkSessionKey) continue; // I set it — already tried
-    // Past the vendor's authoritative recover floor (or none given).
-    if (cd.recoverAtMs !== undefined && Date.now() < cd.recoverAtMs) continue;
-    // Provably doomed by size: pass 1's cooldown gate runs BEFORE its context
-    // gate, so a cooldown-skipped hop was never size-checked. Mirror pass 1's
-    // `shouldSkipHopForContext` (finalHop:false — the recovery dial is never
-    // final) so a context-ineligible hop is not re-dialled into a guaranteed
-    // context_overflow (which doesn't even cool — pure waste). Checked BEFORE
-    // the usage read so an ineligible hop never pays for a vendor usage probe.
-    if (
-      shouldSkipHopForSize(contextOverflowStrategy) &&
-      shouldSkipHopForContext({
-        estimatedTokens: baseEstimate,
-        inputTokenLimit:
-          lookupCatalogEntry(hop.modelId)?.input_token_limit ?? null,
-        finalHop: false,
-      })
-    ) {
-      continue;
+    // Each account of the provider is its own candidate (its own cooldown
+    // provenance and usage floor); single-account providers loop once.
+    for (const index of subscriptionAccounts(hop.provider)) {
+      if (recoveryDialed.has(`${hop.provider}|${hop.modelId}|${index}`))
+        continue;
+      const recovered = await runWithAccount(
+        index,
+        async (): Promise<THopServed | null> => {
+          const cd = peekHopCooldown(hop.provider, hop.modelId);
+          if (cd === undefined) return null; // expired — leave to the next request
+          if (!TRANSIENT_COOLDOWN_REASONS.has(cd.reason)) return null; // hard reason
+          if (cd.setterSessionKey === walkSessionKey) return null; // I set it — already tried
+          // Past the vendor's authoritative recover floor (or none given).
+          if (cd.recoverAtMs !== undefined && Date.now() < cd.recoverAtMs)
+            return null;
+          // Provably doomed by size: pass 1's cooldown gate runs BEFORE its context
+          // gate, so a cooldown-skipped hop was never size-checked. Mirror pass 1's
+          // `shouldSkipHopForContext` (finalHop:false — the recovery dial is never
+          // final) so a context-ineligible hop is not re-dialled into a guaranteed
+          // context_overflow (which doesn't even cool — pure waste). Checked BEFORE
+          // the usage read so an ineligible hop never pays for a vendor usage probe.
+          if (
+            shouldSkipHopForSize(contextOverflowStrategy) &&
+            shouldSkipHopForContext({
+              estimatedTokens: baseEstimate,
+              inputTokenLimit:
+                lookupCatalogEntry(hop.modelId)?.input_token_limit ?? null,
+              finalHop: false,
+            })
+          ) {
+            return null;
+          }
+          // HARD usage floor — the STRICTER predicate: a confirmed quota snapshot that
+          // the gate says still has room. Absent / null / rejected → never bypass.
+          const snap = await usageForActiveAccount(
+            hop.provider,
+            accountHashByProvider,
+            connectedByProvider,
+          );
+          if (snap === null || snap.kind !== "quota") return null;
+          const gate = quotaGateDecision({
+            snapshot: snap,
+            meter: lookupCatalogEntry(hop.modelId)?.subscription_meter,
+            finalHop: false,
+            staleCapMs: GATE_STALE_CAP_MS,
+            now: Date.now(),
+          });
+          if (gate.kind !== "allow") return null;
+          recoveryDialed.add(`${hop.provider}|${hop.modelId}`);
+          recoveryDialed.add(`${hop.provider}|${hop.modelId}|${index}`);
+          const served = await serveSubscriptionHop(hop, false, {
+            forceContextAttempt: false,
+            retryAttempt: 0,
+          });
+          // A bypass failure re-marks the hop with THIS walk's session key (setter ==
+          // mine), so it can never be reconsidered here — at-most-once, no loop. A
+          // success clears the stale cooldown sign (`commitSubscriptionServe`).
+          return served === HOP_CONTINUE
+            ? null
+            : { ...served, accountIndex: index };
+        },
+      );
+      if (recovered !== null) return commitSubscriptionServe(hop, recovered);
     }
-    // HARD usage floor — the STRICTER predicate: a confirmed quota snapshot that
-    // the gate says still has room. Absent / null / rejected → never bypass.
-    const snap = await usageForActiveAccount(
-      hop.provider,
-      accountHashByProvider,
-      connectedByProvider,
-    );
-    if (snap === null || snap.kind !== "quota") continue;
-    const gate = quotaGateDecision({
-      snapshot: snap,
-      meter: lookupCatalogEntry(hop.modelId)?.subscription_meter,
-      finalHop: false,
-      staleCapMs: GATE_STALE_CAP_MS,
-      now: Date.now(),
-    });
-    if (gate.kind !== "allow") continue;
-    recoveryDialed.add(`${hop.provider}|${hop.modelId}`);
-    const served = await serveSubscriptionHop(hop, false, {
-      forceContextAttempt: false,
-      retryAttempt: 0,
-    });
-    // A bypass failure re-marks the hop with THIS walk's session key (setter ==
-    // mine), so it can never be reconsidered here — at-most-once, no loop. A
-    // success clears the stale cooldown sign (`commitSubscriptionServe`).
-    if (served !== HOP_CONTINUE) return commitSubscriptionServe(hop, served);
   }
   // Every hop in the plan failed pre-stream. Surface the trail so the client
   // (and Overview once rows land in Neon) can see WHY earlier hops walked.
