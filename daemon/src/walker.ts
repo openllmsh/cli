@@ -65,7 +65,10 @@ import {
 } from "@openllmsh/protocol";
 import { declaresAnthropicServerSearchTool } from "@openllmsh/wire/adapters/messages/request";
 import type { TRankableAccount } from "@openllmsh/wire/features/account-rank";
-import { rankProviderAccounts } from "@openllmsh/wire/features/account-rank";
+import {
+  pickFinalFallback,
+  rankProviderAccounts,
+} from "@openllmsh/wire/features/account-rank";
 import type { TCompactionSurface } from "@openllmsh/wire/features/compaction/compact-request";
 import { compactRequestToFit } from "@openllmsh/wire/features/compaction/compact-request";
 import {
@@ -173,6 +176,7 @@ import {
   UnsupportedContentError,
 } from "@openllmsh/wire/providers/upstream-request";
 import { Schema } from "effect";
+import { accountIndexes } from "./account-models";
 import { readRoster } from "./account-roster";
 import { AccountKeyedMap } from "./account-scope";
 import { requestStatusPush } from "./auth-events";
@@ -778,6 +782,12 @@ export const report = (
   const recordedRow: TDaemonRecordRequest = {
     ...row,
     idempotency_key: row.idempotency_key ?? randomUUID(),
+    // A dialled account's hash is often known only as the 3rd argument (native
+    // success, hop failure). Merge it when the row omitted it so every recorded
+    // attempt — success and failure — carries `account_hash`.
+    ...(row.account_hash === undefined && accountHash !== undefined
+      ? { account_hash: accountHash }
+      : {}),
   };
   void recordRequest(recordedRow, origin);
   if (
@@ -792,7 +802,7 @@ export const report = (
     sampleUsageAfterRequest(
       recordedRow.provider,
       () => delegate.usage(),
-      recordedRow.account_hash ?? accountHash,
+      recordedRow.account_hash,
     );
   }
   // Fire-and-forget automatic catalog refresh for the hop that actually
@@ -2657,6 +2667,9 @@ const walkPlan = async (
           : {}),
       },
       args.originParam,
+      // Ambient account map — multi-account dials run inside `runWithAccount`,
+      // so this is the dialled slot's hash (null/absent for single-account).
+      accountHashByProvider.get(hop.provider) ?? undefined,
     );
     // Another local account of this provider can still serve the model: the
     // failure cooled only this account, so the plan stays valid.
@@ -2777,9 +2790,7 @@ const walkPlan = async (
   // (in-place retries stay inside `serveSubscriptionHop`'s ambient account).
   // A single-account provider takes the original path unchanged.
   const subscriptionAccounts = (provider: string): readonly number[] =>
-    isOAuthSlug(provider)
-      ? readRoster(provider as TCliProvider).accounts.map((a) => a.index)
-      : [DEFAULT_ACCOUNT_INDEX];
+    isOAuthSlug(provider) ? accountIndexes(provider) : [DEFAULT_ACCOUNT_INDEX];
   const serveSubscriptionAccounts = async (
     hop: THop,
     finalHop: boolean,
@@ -2820,8 +2831,15 @@ const walkPlan = async (
       now,
     }).map((a) => a.index);
     // Never-drop-all: on the FINAL hop, when every signed-in account is
-    // cooled or exhausted, still dial the least-bad one for a real error.
-    const fallbackIndex = signedIn[signedIn.length - 1]?.index;
+    // cooled or exhausted, still dial the least-bad one for a real error
+    // (pinned → most remaining trusted quota → lowest index).
+    const fallbackIndex = pickFinalFallback({
+      accounts: signedIn,
+      meter,
+      pinnedIndex: roster.pinned_index,
+      staleCapMs: GATE_STALE_CAP_MS,
+      now,
+    });
     if (order.length === 0 && finalHop && fallbackIndex !== undefined) {
       order = [fallbackIndex];
     }

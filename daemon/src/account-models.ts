@@ -16,7 +16,8 @@ import type {
 } from "./delegation/types";
 import { runWithAccount } from "./op-context";
 
-const accountIndexes = (slug: string): readonly number[] =>
+/** Roster indexes for a provider slug (index 0 alone when the file is absent). */
+export const accountIndexes = (slug: string): readonly number[] =>
   readRoster(slug as TCliProvider).accounts.map((a) => a.index);
 
 /** First entry wins per `provider_model_id`, in account-index order. */
