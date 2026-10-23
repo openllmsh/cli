@@ -918,6 +918,42 @@ export const API_OPERATIONS: readonly TApiOperation[] = [
     "hasBody": false
   },
   {
+    "id": "user.sessions",
+    "method": "get",
+    "path": "/user/sessions",
+    "summary": "",
+    "tags": [
+      "user"
+    ],
+    "pathParams": [],
+    "queryParams": [],
+    "hasBody": false
+  },
+  {
+    "id": "user.revokeSession",
+    "method": "post",
+    "path": "/user/sessions/revoke",
+    "summary": "",
+    "tags": [
+      "user"
+    ],
+    "pathParams": [],
+    "queryParams": [],
+    "hasBody": true
+  },
+  {
+    "id": "user.revokeOtherSessions",
+    "method": "post",
+    "path": "/user/sessions/revoke-others",
+    "summary": "",
+    "tags": [
+      "user"
+    ],
+    "pathParams": [],
+    "queryParams": [],
+    "hasBody": false
+  },
+  {
     "id": "v1Audio.speech",
     "method": "post",
     "path": "/v1/audio/speech",

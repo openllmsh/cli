@@ -194,6 +194,10 @@ const AGENT_FORBIDDEN_PATHS: ReadonlySet<string> = new Set([
   "/gravity/app-open",
   "/gravity/chat-ad",
   "/marketplace/launch",
+  // Signing browsers out is the account owner's act, from Settings →
+  // Sessions; the gateway refuses keys there anyway.
+  "/user/sessions/revoke",
+  "/user/sessions/revoke-others",
   "/vault/passkey",
   "/vault/passkey/{id}",
   "/vault/handoff",
@@ -216,12 +220,14 @@ const byToolName = new Map<string, TApiOperation>(
 /** Endpoints that require a browser SESSION, not an `sk-llm-…` key, and so
  *  always 401 from the CLI. `/user/auth-methods` reads the auth service's
  *  `list-accounts` with the caller's cookies (see `authMethodsHandler`) and
- *  refuses the key path outright. The vault device-handoff reads
+ *  refuses the key path outright; `/user/sessions` does the same with
+ *  `list-sessions` (`listAuthSessionsHandler`). The vault device-handoff reads
  *  (`vaultHandoffPendingHandler` / `vaultHandoffStatusHandler`) refuse any
  *  request presenting a key with a 403. Execution stays possible via
  *  `byToolName`; this only keeps them out of ListTools. */
 const SESSION_ONLY_PATHS: ReadonlySet<string> = new Set([
   "/user/auth-methods",
+  "/user/sessions",
   "/vault/handoff/pending",
   "/vault/handoff/{id}",
 ]);
