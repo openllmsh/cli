@@ -16,10 +16,18 @@ import type {
   TDaemonStatus,
   TProviderUsageSnapshot,
 } from "@openllmsh/protocol";
-import { normalizeProviderConnection } from "@openllmsh/protocol";
+import {
+  MULTI_ACCOUNT_CONTROL_CAP,
+  normalizeProviderConnection,
+} from "@openllmsh/protocol";
+import { reconcileAccountIdentity } from "./account-commands";
+import type { TRosterAccount } from "./account-roster";
+import { readRoster } from "./account-roster";
 import { AccountKeyedMap, AccountKeyedSet } from "./account-scope";
 import { setVerifiedLoginAdmitter } from "./auth-events";
 import { autoUpdateEnabled } from "./auto-update-pref";
+import type { TCliProvider } from "./cli-paths";
+import { DEFAULT_ACCOUNT_INDEX } from "./cli-paths";
 import { getCloudState } from "./config";
 import type { TDeadlineBudget } from "./deadline-budget";
 import {
@@ -50,6 +58,7 @@ import {
   currentTickId,
   nextStatusTickId,
   opTickContext,
+  runWithAccount,
   withoutCommandReplayContext,
   withUsageNativeRefresh,
 } from "./op-context";
@@ -695,94 +704,137 @@ const publishConnection = (
 ): Promise<TDaemonProviderConnection> =>
   attachHostSignIn(attachVendorCliInstall(conn));
 
+type TStatusDelegate = (typeof DELEGATES)[keyof typeof DELEGATES];
+
+/** Account-slot metadata on a published row. Account 0 of a single-account
+ *  provider stays byte-identical to the legacy row. */
+const stampAccount = (
+  conn: TDaemonProviderConnection,
+  account: TRosterAccount,
+  pinned: boolean,
+  multi: boolean,
+): TDaemonProviderConnection => {
+  void reconcileAccountIdentity(conn, account.index).catch(() => undefined);
+  if (!multi && account.index === DEFAULT_ACCOUNT_INDEX) return conn;
+  return {
+    ...conn,
+    account_index: account.index,
+    ...(account.label !== null ? { account_label: account.label } : {}),
+    ...(pinned ? { account_pinned: true } : {}),
+  };
+};
+
+/** One provider account's published row (runs inside `runWithAccount`). */
+const probeProviderAccount = async (
+  d: TStatusDelegate,
+  force: boolean,
+  skipProviderProbes: boolean,
+  options: TComputeStatusFreshOptions | undefined,
+): Promise<TDaemonProviderConnection> => {
+  try {
+    if (daemonStatusState().pendingVerifiedPublish.has(d.slug)) {
+      daemonStatusState().pendingVerifiedPublish.delete(d.slug);
+      const seeded = daemonStatusState().lastKnownConnections.get(d.slug);
+      if (seeded?.observation === "connected") {
+        return publishConnection(attachUpstreamAuthCooldown(d.slug, seeded));
+      }
+    }
+    if (skipProviderProbes) {
+      const last = daemonStatusState().lastKnownConnections.get(d.slug);
+      if (last !== undefined) {
+        let published = attachUpstreamAuthCooldown(d.slug, last);
+        if (
+          normalizeProviderConnection(published).observation === "connected"
+        ) {
+          const usage = peekUsage(d.slug, published.account_hash);
+          if (usage !== null) published = { ...published, usage };
+        }
+        return publishConnection(published);
+      }
+      // No last-known yet — honest unknown without spawning a probe.
+      return publishConnection(
+        attachUpstreamAuthCooldown(d.slug, statusFailure(d.slug)),
+      );
+    }
+    const raw = await boundedDelegateStatus(
+      d.slug,
+      (signal) => d.status(signal),
+      { force, reuseSettled: options?.reuseSettledSlugProbes === true },
+    );
+    const conn = applyAuthLiteral(d.slug, raw);
+    rememberConnection(d.slug, raw, conn);
+    if (!providerAuthOwned(d.slug) && !probeBackoffBlocks(d.slug, force)) {
+      // An absent CLI is a definite (cheap stat) answer, not a flaky
+      // probe: backing it off would delay detecting a finished vendor
+      // install by up to the backoff ceiling and publish a placeholder
+      // that drops `cli_installed` in the meantime.
+      noteProbeIndeterminate(
+        d.slug,
+        conn.reason_code !== "cli_unavailable" &&
+          (conn.observation === "unknown" ||
+            conn.detail === STATUS_CHECK_FAILED_DETAIL),
+      );
+    }
+    // Installer metadata is merged AFTER auth overlays / last-known spreads
+    // so a probe timeout cannot drop this-tick `cli_install`, and last-known
+    // never has to persist process-local progress.
+    let published = attachUpstreamAuthCooldown(d.slug, conn);
+    // Attach a metadata-only usage snapshot for connected providers so the
+    // dashboard can show remaining quota (read locally; never a token).
+    if (normalizeProviderConnection(published).observation !== "connected") {
+      return publishConnection(published);
+    }
+    // PEEK only — never hit the vendor here. `computeStatus` runs on every
+    // status push (hello/reconnect, the periodic observer, post-command),
+    // and the vendor usage endpoint rate-limits independently of inference;
+    // reading it on that cadence 429'd it ("Claude usage is rate-limited
+    // right now") on a daemon nobody was even looking at. Usage is read ONLY
+    // on demand — the `refresh` command → `refreshUsage` (the manual button
+    // or the providers page mounting). Here we just attach whatever that last
+    // on-demand read cached. See `usage-cache.ts`.
+    const usage = peekUsage(d.slug, published.account_hash);
+    if (usage !== null) published = { ...published, usage };
+    return publishConnection(published);
+  } catch (err) {
+    // One provider's status read must NOT sink the whole snapshot (every
+    // card would vanish + the push would fail). Surface a safe placeholder;
+    // the next push self-corrects once the provider recovers.
+    logWarn("status", "Provider status probe failed.", {
+      slug: d.slug,
+      err: err instanceof Error ? err.message : String(err),
+    });
+    return publishConnection(
+      attachUpstreamAuthCooldown(d.slug, statusFailure(d.slug)),
+    );
+  }
+};
+
 const computeStatusFreshInner = async (
   options?: TComputeStatusFreshOptions,
 ): Promise<TDaemonStatus> => {
   const force = forceProbeTrigger(options?.trigger);
   const skipProviderProbes = options?.skipProviderProbes === true;
+  // One row per (provider, account slot) in the roster; account 0 always.
+  const slots = Object.values(DELEGATES).flatMap((d) => {
+    const roster = readRoster(d.slug as TCliProvider);
+    return roster.accounts.map((account) => ({
+      d,
+      account,
+      pinned: roster.pinned_index === account.index,
+      multi: roster.accounts.length > 1,
+    }));
+  });
   const connections = await Promise.all(
-    Object.values(DELEGATES).map(async (d) => {
-      try {
-        if (daemonStatusState().pendingVerifiedPublish.has(d.slug)) {
-          daemonStatusState().pendingVerifiedPublish.delete(d.slug);
-          const seeded = daemonStatusState().lastKnownConnections.get(d.slug);
-          if (seeded?.observation === "connected") {
-            return publishConnection(
-              attachUpstreamAuthCooldown(d.slug, seeded),
-            );
-          }
-        }
-        if (skipProviderProbes) {
-          const last = daemonStatusState().lastKnownConnections.get(d.slug);
-          if (last !== undefined) {
-            let published = attachUpstreamAuthCooldown(d.slug, last);
-            if (
-              normalizeProviderConnection(published).observation === "connected"
-            ) {
-              const usage = peekUsage(d.slug, published.account_hash);
-              if (usage !== null) published = { ...published, usage };
-            }
-            return publishConnection(published);
-          }
-          // No last-known yet — honest unknown without spawning a probe.
-          return publishConnection(
-            attachUpstreamAuthCooldown(d.slug, statusFailure(d.slug)),
-          );
-        }
-        const raw = await boundedDelegateStatus(
-          d.slug,
-          (signal) => d.status(signal),
-          { force, reuseSettled: options?.reuseSettledSlugProbes === true },
-        );
-        const conn = applyAuthLiteral(d.slug, raw);
-        rememberConnection(d.slug, raw, conn);
-        if (!providerAuthOwned(d.slug) && !probeBackoffBlocks(d.slug, force)) {
-          // An absent CLI is a definite (cheap stat) answer, not a flaky
-          // probe: backing it off would delay detecting a finished vendor
-          // install by up to the backoff ceiling and publish a placeholder
-          // that drops `cli_installed` in the meantime.
-          noteProbeIndeterminate(
-            d.slug,
-            conn.reason_code !== "cli_unavailable" &&
-              (conn.observation === "unknown" ||
-                conn.detail === STATUS_CHECK_FAILED_DETAIL),
-          );
-        }
-        // Installer metadata is merged AFTER auth overlays / last-known spreads
-        // so a probe timeout cannot drop this-tick `cli_install`, and last-known
-        // never has to persist process-local progress.
-        let published = attachUpstreamAuthCooldown(d.slug, conn);
-        // Attach a metadata-only usage snapshot for connected providers so the
-        // dashboard can show remaining quota (read locally; never a token).
-        if (
-          normalizeProviderConnection(published).observation !== "connected"
-        ) {
-          return publishConnection(published);
-        }
-        // PEEK only — never hit the vendor here. `computeStatus` runs on every
-        // status push (hello/reconnect, the periodic observer, post-command),
-        // and the vendor usage endpoint rate-limits independently of inference;
-        // reading it on that cadence 429'd it ("Claude usage is rate-limited
-        // right now") on a daemon nobody was even looking at. Usage is read ONLY
-        // on demand — the `refresh` command → `refreshUsage` (the manual button
-        // or the providers page mounting). Here we just attach whatever that last
-        // on-demand read cached. See `usage-cache.ts`.
-        const usage = peekUsage(d.slug, published.account_hash);
-        if (usage !== null) published = { ...published, usage };
-        return publishConnection(published);
-      } catch (err) {
-        // One provider's status read must NOT sink the whole snapshot (every
-        // card would vanish + the push would fail). Surface a safe placeholder;
-        // the next push self-corrects once the provider recovers.
-        logWarn("status", "Provider status probe failed.", {
-          slug: d.slug,
-          err: err instanceof Error ? err.message : String(err),
-        });
-        return publishConnection(
-          attachUpstreamAuthCooldown(d.slug, statusFailure(d.slug)),
-        );
-      }
-    }),
+    slots.map(({ d, account, pinned, multi }) =>
+      runWithAccount(account.index, async () =>
+        stampAccount(
+          await probeProviderAccount(d, force, skipProviderProbes, options),
+          account,
+          pinned,
+          multi,
+        ),
+      ),
+    ),
   );
   // Device-session-only CLI (no subscription connect card). Append so the
   // device picker can list it; /providers filters to subscription slugs.
@@ -812,7 +864,7 @@ const computeStatusFreshInner = async (
     port: daemonPort(),
     sandbox: sandboxState(),
     caps: currentDaemonCaps(),
-    control_caps: ["refresh_models_due"],
+    control_caps: ["refresh_models_due", MULTI_ACCOUNT_CONTROL_CAP],
     connections,
     // TTL-cached CLI probe from `getCliState()`. It returns cached state when fresh
     // and schedules a background refresh when stale, so status can stay responsive
@@ -875,11 +927,16 @@ export const refreshUsage = async (
   const manual = options?.manual === true;
   if (slug === undefined) {
     const deferred: string[] = [];
+    // Every account slot of every provider, each in its own account context.
     await Promise.allSettled(
-      Object.values(DELEGATES).map(async (d) => {
-        const one = await refreshUsage(d.slug, options);
-        deferred.push(...one.deferred);
-      }),
+      Object.values(DELEGATES).flatMap((d) =>
+        readRoster(d.slug as TCliProvider).accounts.map((account) =>
+          runWithAccount(account.index, async () => {
+            const one = await refreshUsage(d.slug, options);
+            deferred.push(...one.deferred);
+          }),
+        ),
+      ),
     );
     return { deferred };
   }

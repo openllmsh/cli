@@ -94,6 +94,9 @@ export const commandLaneOf = (cmd: TDaemonCommand): TCommandLane => {
     case "connect":
     case "connect_device_code":
     case "logout":
+    case "add_account":
+    case "remove_account":
+    case "pin_account":
       return "mutation";
     case "refresh":
       return "usage";

@@ -14,8 +14,14 @@ import type {
   TDaemonCommandAck,
   TLocalCliSession,
 } from "@openllmsh/protocol";
+import {
+  addAccount,
+  pinAccountSlot,
+  removeAccountSlot,
+} from "./account-commands";
 import { autoUpdateEnabled, setAutoUpdate } from "./auto-update-pref";
 import {
+  commandAccountIndexOf,
   daemonCommandScheduler,
   schedulerProviderSlugs,
 } from "./command-scheduler";
@@ -36,7 +42,7 @@ import {
 import { clampLimit, readLocalSessions } from "./local-sessions";
 import { logError } from "./logger";
 import { maybeReportModels, resetModelReportThrottle } from "./model-report";
-import { withoutCommandReplayContext } from "./op-context";
+import { runWithAccount, withoutCommandReplayContext } from "./op-context";
 import { clearPendingAuth } from "./pending-auth";
 import { clearPlanCache } from "./plan-cache";
 import { deviceSessionsForList } from "./session-host";
@@ -75,12 +81,37 @@ export type TRunCommandOptions = {
  * each `case` narrows to its exact typed payload (no hand-cast). The delegate
  * null-checks stay as belt-and-braces for any non-wire caller.
  */
-export const runCommandInner = async (
+export const runCommandInner = (
+  cmd: TDaemonCommand,
+  opts?: TRunCommandOptions,
+): Promise<TDaemonCommandAck> =>
+  // Bind the addressed provider account once: delegates, login slots,
+  // pending auth and status memory all read it (absent ⇒ account 0).
+  runWithAccount(commandAccountIndexOf(cmd), () =>
+    runCommandInAccount(cmd, opts),
+  );
+
+const runCommandInAccount = async (
   cmd: TDaemonCommand,
   opts?: TRunCommandOptions,
 ): Promise<TDaemonCommandAck> => {
   try {
     switch (cmd.kind) {
+      case "add_account": {
+        const r = addAccount(cmd.payload.slug, cmd.payload.label);
+        return { id: cmd.id, status: r.ok ? "done" : "error", result: r };
+      }
+      case "remove_account": {
+        const r = await removeAccountSlot(
+          cmd.payload.slug,
+          cmd.payload.account_index,
+        );
+        return { id: cmd.id, status: r.ok ? "done" : "error", result: r };
+      }
+      case "pin_account": {
+        const r = pinAccountSlot(cmd.payload.slug, cmd.payload.account_index);
+        return { id: cmd.id, status: r.ok ? "done" : "error", result: r };
+      }
       case "connect": {
         const delegate = getDelegate(cmd.payload.slug);
         if (delegate === null) {
