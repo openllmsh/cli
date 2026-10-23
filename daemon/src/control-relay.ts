@@ -19,6 +19,7 @@ import {
   pinAccountSlot,
   removeAccountSlot,
 } from "./account-commands";
+import { wasUserCancelledFlow } from "./auth-events";
 import { autoUpdateEnabled, setAutoUpdate } from "./auto-update-pref";
 import {
   commandAccountIndexOf,
@@ -81,6 +82,25 @@ export type TRunCommandOptions = {
  * each `case` narrows to its exact typed payload (no hand-cast). The delegate
  * null-checks stay as belt-and-braces for any non-wire caller.
  */
+/**
+ * Terminal ack of a connect. A login the USER cancelled is not a failure:
+ * ack `done` + `cancelled` so the dashboard closes quietly instead of
+ * surfacing "sign-in cancelled" with a Try again.
+ */
+const connectAck = (
+  id: string,
+  connected: boolean,
+  pending: boolean,
+  result: object,
+): TDaemonCommandAck => {
+  const cancelled = !connected && !pending && wasUserCancelledFlow(id);
+  return {
+    id,
+    status: connected || pending || cancelled ? "done" : "error",
+    result: cancelled ? { ...result, cancelled: true } : result,
+  };
+};
+
 export const runCommandInner = (
   cmd: TDaemonCommand,
   opts?: TRunCommandOptions,
@@ -150,11 +170,7 @@ const runCommandInAccount = async (
         // the relay routes a real `command_lifecycle` error to the originating
         // watcher and the dashboard surfaces the delegate's `detail` instead of
         // a silent "done" with no dialog (issue #2).
-        return {
-          id: cmd.id,
-          status: connected || r.pending === true ? "done" : "error",
-          result,
-        };
+        return connectAck(cmd.id, connected, r.pending === true, result);
       }
       case "connect_device_code": {
         // Start a device-code login (codex remote; kimi falls back to its
@@ -185,11 +201,7 @@ const runCommandInAccount = async (
           invalidateUsage(cmd.payload.slug);
         }
         const result = connected ? r : { ...r, connected: false };
-        return {
-          id: cmd.id,
-          status: connected || r.pending === true ? "done" : "error",
-          result,
-        };
+        return connectAck(cmd.id, connected, r.pending === true, result);
       }
       case "cancel_connect": {
         const slot = loginSlot(cmd.payload.slug);
