@@ -7,6 +7,7 @@
  * provenance, lifecycle invalidation) and never starts a standalone ACP client.
  * Manual `listModels` may still probe ACP.
  */
+
 import { platform } from "node:os";
 import { join } from "node:path";
 import type {
@@ -15,6 +16,7 @@ import type {
   TProviderUsageWindow,
 } from "@openllmsh/protocol";
 import { MODEL_LIST_FETCH_TIMEOUT_MS } from "@openllmsh/protocol";
+import { accountCell } from "../account-scope";
 import { noteAuthStoreIdentityChange } from "../auth-user-action";
 import { cliInstallState } from "../cli-install";
 import { cliConfigDir, cliHome } from "../cli-paths";
@@ -328,10 +330,10 @@ type TStatusAccessObservation =
 const cursorStatusCache =
   createPassiveObservationCache<TStatusAccessObservation>();
 
-let statusAccessInFlight: {
+const statusAccessInFlight = accountCell<{
   readonly generation: number;
   readonly work: Promise<TStoreRead<string>>;
-} | null = null;
+} | null>(() => null);
 
 /** Drop cached Cursor status presence. Login/logout/native refresh/auth
  *  mutations call this so the next status tick re-reads the store. */
@@ -422,7 +424,7 @@ const readCachedStatusAccess = async (
     }
   }
 
-  let flight = statusAccessInFlight;
+  let flight = statusAccessInFlight.get();
   if (flight === null || flight.generation !== generation) {
     if (signal?.aborted === true) {
       return { kind: "indeterminate", cause: "keychain_read_aborted" };
@@ -431,9 +433,10 @@ const readCachedStatusAccess = async (
     // waiter must not cancel another tick's in-flight store read.
     const work = readStatusAccessToken();
     flight = { generation, work };
-    statusAccessInFlight = flight;
+    statusAccessInFlight.set(flight);
     const clearFlight = (): void => {
-      if (statusAccessInFlight?.work === work) statusAccessInFlight = null;
+      if (statusAccessInFlight.get()?.work === work)
+        statusAccessInFlight.set(null);
     };
     void work.then(clearFlight, clearFlight);
   }

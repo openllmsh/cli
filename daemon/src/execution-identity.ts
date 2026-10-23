@@ -40,6 +40,7 @@
  */
 
 import type { TBridgeVariant } from "@openllmsh/protocol";
+import { scopedSlug } from "./account-scope";
 import type { TNativeRuntimeProvider } from "./native-runtime/types";
 
 export type TExecutionIdentity = {
@@ -54,8 +55,10 @@ export type TExecutionIdentity = {
  * the parsed public wire grammar, see
  * `@openllmsh/protocol/execution-selection`'s `parseActiveExecutionToken`.
  */
+/** Scoped to the ambient provider account so a native session never resumes
+ *  under another account's credential. Account 0 keeps the bare provider. */
 export const executionIdentityKey = (identity: TExecutionIdentity): string =>
-  `${identity.provider}:${identity.variant}:${identity.capture ? "capture" : "native"}`;
+  `${scopedSlug(identity.provider)}:${identity.variant}:${identity.capture ? "capture" : "native"}`;
 
 export const sameExecutionOwner = (
   a: TExecutionIdentity,

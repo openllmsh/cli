@@ -3,6 +3,8 @@ import type {
   TCooldownReason,
 } from "@openllmsh/protocol";
 import { cooldownPolicyFor } from "@openllmsh/protocol";
+import { scopedSlug } from "./account-scope";
+import { runWithAccount } from "./op-context";
 import { stateScoped } from "./state-scoped";
 
 /**
@@ -51,8 +53,11 @@ export type THopCooldownEntry = {
 /** This daemon's marks (see {@link stateScoped}). */
 const daemonMarks = stateScoped(() => new Map<string, THopCooldownEntry>());
 
+/** Scoped to the ambient provider account: one account's 429 / auth failure
+ *  cools only that account's dial, never its siblings
+ *  (`docs/plan/multi-account-subscriptions.md` §6). */
 const key = (provider: string, modelId: string): string =>
-  `${provider}|${modelId}`;
+  `${scopedSlug(provider)}|${modelId}`;
 
 /**
  * Record a hop failure. A non-cooling reason (`network`, `context_overflow`,
@@ -235,7 +240,7 @@ export const authCooldownForProvider = (
   now: number = Date.now(),
 ): TAuthCooldownForProvider | null => {
   const marks = daemonMarks();
-  const prefix = `${provider}|`;
+  const prefix = `${scopedSlug(provider)}|`;
   let latest: TAuthCooldownForProvider | null = null;
   for (const [k, entry] of marks) {
     if (!k.startsWith(prefix)) continue;
@@ -261,3 +266,16 @@ export const authCooldownForProvider = (
   }
   return latest;
 };
+
+/** True only when EVERY listed account of `provider` is cooling for `modelId`
+ *  (an empty list counts as cooling — nothing could serve). The walker's outer
+ *  hop skip uses this so one exhausted account never hides its siblings. */
+export const allAccountsCoolingDown = (
+  provider: string,
+  modelId: string,
+  accountIndexes: readonly number[],
+  now: number = Date.now(),
+): boolean =>
+  accountIndexes.every((index) =>
+    runWithAccount(index, () => isHopCoolingDown(provider, modelId, now)),
+  );

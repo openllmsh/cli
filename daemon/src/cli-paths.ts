@@ -33,6 +33,7 @@ import {
 import { stateDir } from "./env";
 import { interpreterDirFor } from "./launcher-profile-state";
 import { buildLauncherDataRootEnv } from "./launcher-roots";
+import { currentAccountIndex } from "./op-context";
 import { augmentSpawnPath, resolveOnPath } from "./path-utils";
 import { daemonTempDir } from "./sandbox/working-set";
 
@@ -352,11 +353,12 @@ export const accountKey = (ref: TAccountRef): string =>
 export const cliAccountsDir = (provider: TCliProvider, home?: string): string =>
   join(cliRoot(provider, home), "accounts");
 
-/** The CLI's isolated home/config dir (passed as the CLI's home env). */
+/** The CLI's isolated home/config dir (passed as the CLI's home env). The
+ *  index defaults to the ambient account (`runWithAccount`), else 0. */
 export const cliHome = (
   provider: TCliProvider,
   home?: string,
-  index: TAccountIndex = DEFAULT_ACCOUNT_INDEX,
+  index: TAccountIndex = currentAccountIndex(),
 ): string => {
   if (!isAccountIndex(index)) {
     throw new Error(`invalid account index: ${String(index)}`);
@@ -501,7 +503,7 @@ export const sessionEnv = (): Record<string, string> => {
 export const cliConfigDir = (
   provider: TCliProvider,
   home?: string,
-  index: TAccountIndex = DEFAULT_ACCOUNT_INDEX,
+  index: TAccountIndex = currentAccountIndex(),
 ): string => SPECS[provider].configDir(cliHome(provider, home, index));
 
 /**
@@ -590,7 +592,7 @@ export const launcherDataRootEnv = (
  */
 export const cliEnv = (
   provider: TCliProvider,
-  index: TAccountIndex = DEFAULT_ACCOUNT_INDEX,
+  index: TAccountIndex = currentAccountIndex(),
 ): Record<string, string> => {
   const home = cliHome(provider, undefined, index);
   // Provider-wide: install dirs (`CODEX_INSTALL_DIR`, …) stay shared.

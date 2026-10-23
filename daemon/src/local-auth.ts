@@ -14,6 +14,7 @@ import {
   parseLocalAuthRequest,
 } from "@openllmsh/protocol";
 import { Schema } from "effect";
+import { AccountKeyedMap } from "./account-scope";
 import { requestStatusPush } from "./auth-events";
 import { runCommandInner } from "./control-relay";
 import { DELEGATES, getDelegate } from "./delegation";
@@ -63,8 +64,8 @@ type TLocalFlow = {
   readonly startedAt: number;
   ack?: TDaemonCommandAck;
 };
-// At most one retained originating login per provider, in memory for this boot.
-const localFlows = new Map<string, TLocalFlow>();
+// At most one retained originating login per provider account, in memory for this boot.
+const localFlows = new AccountKeyedMap<TLocalFlow>();
 const localFlowOf = (provider: string, id: string): TLocalFlow | null => {
   const flow = localFlows.get(provider);
   if (flow === undefined || flow.token !== id) return null;

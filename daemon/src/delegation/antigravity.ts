@@ -31,6 +31,7 @@ import type {
   TDaemonProviderConnection,
   TProviderUsageSnapshot,
 } from "@openllmsh/protocol";
+import { accountCell } from "../account-scope";
 import { noteAuthStoreIdentityChange } from "../auth-user-action";
 import { cliInstallState } from "../cli-install";
 import { cliBin, cliConfigDir, cliEnv } from "../cli-paths";
@@ -119,8 +120,10 @@ const wiring = loginWiring({
 });
 
 /** The live login's callback target, for the remote paste-back path. */
-let pendingCallback: Pick<TAntigravityAuthUrl, "redirectUri" | "state"> | null =
-  null;
+const pendingCallback = accountCell<Pick<
+  TAntigravityAuthUrl,
+  "redirectUri" | "state"
+> | null>(() => null);
 
 /** Replay one validated callback to the agent's loopback listener. */
 const forwardCallback = (callback: URL): Promise<boolean> =>
@@ -217,7 +220,7 @@ const connect = (): Promise<TConnectResult> =>
       }
       const dispose = (): void => {
         client.dispose();
-        pendingCallback = null;
+        pendingCallback.set(null);
         void rm(scratch, { recursive: true, force: true });
       };
       if (!wiring.slot.start(dispose, flow)) {
@@ -381,7 +384,10 @@ const connect = (): Promise<TConnectResult> =>
       if (!openAuthUrlUnlessCancelled(wiring.slot, first.url)) {
         return { connected: false, detail: "sign-in cancelled" };
       }
-      pendingCallback = { redirectUri: first.redirectUri, state: first.state };
+      pendingCallback.set({
+        redirectUri: first.redirectUri,
+        state: first.state,
+      });
       publishPendingAuth(flow, PROVIDER, {
         url: first.url,
         code: "",
@@ -398,7 +404,7 @@ const connect = (): Promise<TConnectResult> =>
 const submitLoginCode = async (
   pasted: string,
 ): Promise<{ readonly ok: boolean; readonly detail?: string }> => {
-  const target = pendingCallback;
+  const target = pendingCallback.get();
   if (target === null || !wiring.slot.inFlight()) {
     return { ok: false, detail: "no Google sign-in is awaiting a response." };
   }

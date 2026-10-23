@@ -11,6 +11,8 @@
 import type { FSWatcher } from "node:fs";
 import { statSync, watch } from "node:fs";
 import { basename, dirname } from "node:path";
+import { AccountKeyedMap } from "../account-scope";
+import { currentAccountIndex } from "../op-context";
 
 export type TFileStoreIdentity = {
   readonly path: string;
@@ -159,7 +161,7 @@ export type TPassiveObservationCache<T> = {
   readonly invalidate: () => void;
 };
 
-const storeIdentityEpochs = new Map<string, number>();
+const storeIdentityEpochs = new AccountKeyedMap<number>();
 
 export const storeIdentityEpoch = (slug: string): number =>
   storeIdentityEpochs.get(slug) ?? 0;
@@ -171,21 +173,38 @@ export const bumpStoreIdentityEpoch = (slug: string): void => {
 export const createPassiveObservationCache = <
   T,
 >(): TPassiveObservationCache<T> => {
-  let generation = 0;
-  let entry: { readonly fingerprint: string; readonly value: T } | null = null;
+  // One generation + entry per ambient account, so two account homes of the
+  // same provider never evict each other's observation.
+  type TSlot = {
+    generation: number;
+    entry: { readonly fingerprint: string; readonly value: T } | null;
+  };
+  const slots = new Map<number, TSlot>();
+  const slot = (): TSlot => {
+    const index = currentAccountIndex();
+    const existing = slots.get(index);
+    if (existing !== undefined) return existing;
+    const next: TSlot = { generation: 0, entry: null };
+    slots.set(index, next);
+    return next;
+  };
   return {
-    generation: () => generation,
-    get: (fingerprint) =>
-      entry !== null && entry.fingerprint === fingerprint
+    generation: () => slot().generation,
+    get: (fingerprint) => {
+      const { entry } = slot();
+      return entry !== null && entry.fingerprint === fingerprint
         ? entry.value
-        : undefined,
+        : undefined;
+    },
     set: (fingerprint, value, observedGeneration) => {
-      if (observedGeneration !== generation) return;
-      entry = { fingerprint, value };
+      const s = slot();
+      if (observedGeneration !== s.generation) return;
+      s.entry = { fingerprint, value };
     },
     invalidate: () => {
-      generation += 1;
-      entry = null;
+      const s = slot();
+      s.generation += 1;
+      s.entry = null;
     },
   };
 };

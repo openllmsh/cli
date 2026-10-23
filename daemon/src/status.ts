@@ -17,6 +17,7 @@ import type {
   TProviderUsageSnapshot,
 } from "@openllmsh/protocol";
 import { normalizeProviderConnection } from "@openllmsh/protocol";
+import { AccountKeyedMap, AccountKeyedSet } from "./account-scope";
 import { setVerifiedLoginAdmitter } from "./auth-events";
 import { autoUpdateEnabled } from "./auto-update-pref";
 import { getCloudState } from "./config";
@@ -114,12 +115,14 @@ type TDaemonStatusState = {
 
 const daemonStatusState = stateScoped(
   (): TDaemonStatusState => ({
-    lastKnownConnections: new Map(),
-    signedOutByUser: new Set(),
-    pendingVerifiedPublish: new Set(),
-    admittedLoginFlow: new Map(),
-    probeBackoff: new Map(),
-    inFlightSlugProbes: new Map(),
+    // Keyed per provider account (ambient `runWithAccount`); account 0 keeps
+    // the bare slug.
+    lastKnownConnections: new AccountKeyedMap(),
+    signedOutByUser: new AccountKeyedSet(),
+    pendingVerifiedPublish: new AccountKeyedSet(),
+    admittedLoginFlow: new AccountKeyedMap(),
+    probeBackoff: new AccountKeyedMap(),
+    inFlightSlugProbes: new AccountKeyedMap(),
     inFlightStatus: null,
   }),
 );

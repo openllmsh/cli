@@ -14,6 +14,7 @@
  * persistence and nothing sensitive is held.
  */
 import { PENDING_AUTH_TTL_MS } from "@openllmsh/protocol";
+import { AccountKeyedMap } from "./account-scope";
 
 export type TPendingAuth = {
   /** Local initiation: never include prompt material in shared status or relay events. */
@@ -41,7 +42,7 @@ export type TPendingAuth = {
 
 type TStoredAuth = TPendingAuth & { readonly startedAt: number };
 
-const pending = new Map<string, TStoredAuth>();
+const pending = new AccountKeyedMap<TStoredAuth>();
 
 let loginOwnerLive: (slug: string) => boolean = () => false;
 let anyLoginOwnerLive: () => boolean = () => false;
