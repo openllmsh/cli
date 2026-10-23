@@ -96,7 +96,7 @@ export const createMemoryImport = (deps: TMemoryImportDeps) => {
       if (arg === "--dry-run") dryRun = true;
       else if (arg === "--project") {
         project = args[++i];
-        if (!project) {
+        if (!project || project.startsWith("-")) {
           deps.err(MEMORY_IMPORT_USAGE);
           return 2;
         }
