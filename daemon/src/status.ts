@@ -22,8 +22,8 @@ import {
 } from "@openllmsh/protocol";
 import {
   pruneOrphanAccountDirs,
-  reconcileAccountIdentity,
   setForgetProviderAccount,
+  stampAccountHash,
 } from "./account-commands";
 import type { TRosterAccount } from "./account-roster";
 import { readRoster } from "./account-roster";
@@ -725,14 +725,21 @@ const publishConnection = (
 type TStatusDelegate = (typeof DELEGATES)[keyof typeof DELEGATES];
 
 /** Account-slot metadata on a published row. Account 0 of a single-account
- *  provider stays byte-identical to the legacy row. */
+ *  provider stays byte-identical to the legacy row. Status never removes a
+ *  slot — duplicate detection runs only after a successful connect. */
 const stampAccount = (
   conn: TDaemonProviderConnection,
   account: TRosterAccount,
   pinned: boolean,
   multi: boolean,
 ): TDaemonProviderConnection => {
-  void reconcileAccountIdentity(conn, account.index).catch(() => undefined);
+  const hash =
+    conn.status === "connected" && typeof conn.account_hash === "string"
+      ? conn.account_hash
+      : undefined;
+  if (hash !== undefined && account.account_hash !== hash) {
+    stampAccountHash(conn.provider, account.index, hash);
+  }
   if (!multi && account.index === DEFAULT_ACCOUNT_INDEX) return conn;
   return {
     ...conn,

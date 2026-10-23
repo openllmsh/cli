@@ -4,7 +4,10 @@
  * Lists the device-local account slots of one subscription provider. Index 0
  * (today's single account at `<root>/home`) always exists, even when the file
  * is missing. A new account takes the LOWEST free index (1, 2, … — no gaps
- * after a removal); removal clears that index's in-memory state first
+ * after a removal). Indexes ARE reused after a removal finishes; while a
+ * removal is in flight the index stays reserved via an in-memory tombstone
+ * so a concurrent allocate cannot claim it and then have its fresh home
+ * deleted. Removal clears that index's in-memory state first
  * (`account-commands.ts`), and usage is keyed by `account_hash`, so nothing
  * carries over to the account that reuses it.
  * See `docs/plan/multi-account-subscriptions.md` §1.
@@ -123,8 +126,69 @@ export const writeRoster = (
   );
 };
 
-/** Read, transform and atomically write back; returns the written roster. */
-export const mutateRoster = (
+// ─── per-provider mutation lock + pending-delete tombstones ─────────
+
+const rosterChains = new Map<string, Promise<unknown>>();
+const pendingDeletes = new Map<string, Set<TAccountIndex>>();
+
+const rosterLockKey = (provider: TCliProvider, home?: string): string =>
+  home === undefined ? provider : `${provider}\0${home}`;
+
+/**
+ * Serialize roster-touching work per provider. Nested calls from the same
+ * async chain still queue (not reentrant) — keep critical sections short and
+ * call sync helpers inside one lock acquisition.
+ */
+export const withRosterLock = async <T>(
+  provider: TCliProvider,
+  fn: () => T | Promise<T>,
+  home?: string,
+): Promise<T> => {
+  const key = rosterLockKey(provider, home);
+  const prev = rosterChains.get(key) ?? Promise.resolve();
+  const run = prev.then(fn, fn);
+  rosterChains.set(
+    key,
+    run.then(
+      () => undefined,
+      () => undefined,
+    ),
+  );
+  return run;
+};
+
+const pendingSetOf = (provider: TCliProvider): Set<TAccountIndex> => {
+  const existing = pendingDeletes.get(provider);
+  if (existing !== undefined) return existing;
+  const created = new Set<TAccountIndex>();
+  pendingDeletes.set(provider, created);
+  return created;
+};
+
+/** Indexes reserved while a removal is mid-flight (dir not gone yet). */
+export const pendingDeletesOf = (
+  provider: TCliProvider,
+): ReadonlySet<TAccountIndex> => pendingSetOf(provider);
+
+export const reservePendingDelete = (
+  provider: TCliProvider,
+  index: TAccountIndex,
+): void => {
+  pendingSetOf(provider).add(index);
+};
+
+export const releasePendingDelete = (
+  provider: TCliProvider,
+  index: TAccountIndex,
+): void => {
+  const set = pendingDeletes.get(provider);
+  if (set === undefined) return;
+  set.delete(index);
+  if (set.size === 0) pendingDeletes.delete(provider);
+};
+
+/** Sync read→transform→write. Call only under {@link withRosterLock}. */
+export const mutateRosterSync = (
   provider: TCliProvider,
   fn: (roster: TAccountRoster) => TAccountRoster,
   home?: string,
@@ -134,6 +198,14 @@ export const mutateRoster = (
   return next;
 };
 
+/** Read, transform and atomically write back; returns the written roster. */
+export const mutateRoster = (
+  provider: TCliProvider,
+  fn: (roster: TAccountRoster) => TAccountRoster,
+  home?: string,
+): Promise<TAccountRoster> =>
+  withRosterLock(provider, () => mutateRosterSync(provider, fn, home), home);
+
 // ─── pure transforms ────────────────────────────────────────────────
 
 export type TAllocateAccountReturnType = {
@@ -141,9 +213,13 @@ export type TAllocateAccountReturnType = {
   readonly index: TAccountIndex;
 };
 
-/** The lowest index >= 1 not held by a listed slot. */
-export const lowestFreeIndex = (roster: TAccountRoster): TAccountIndex => {
+/** The lowest index >= 1 not held by a listed slot or a pending delete. */
+export const lowestFreeIndex = (
+  roster: TAccountRoster,
+  reserved: ReadonlySet<TAccountIndex> = new Set(),
+): TAccountIndex => {
   const taken = new Set(roster.accounts.map((a) => a.index));
+  for (const index of reserved) taken.add(index);
   let index = DEFAULT_ACCOUNT_INDEX + 1;
   while (taken.has(index)) index += 1;
   return index;
@@ -154,8 +230,9 @@ export const allocateAccount = (
   roster: TAccountRoster,
   nowMs: number,
   label: string | null = null,
+  reserved: ReadonlySet<TAccountIndex> = new Set(),
 ): TAllocateAccountReturnType => {
-  const index = lowestFreeIndex(roster);
+  const index = lowestFreeIndex(roster, reserved);
   const account: TRosterAccount = {
     index,
     account_hash: null,
@@ -172,7 +249,8 @@ export const allocateAccount = (
 };
 
 /** Drop slot `index` (n >= 1 only — account 0 is logged out, never removed).
- *  Clears the pin when it pointed there; the index becomes free for reuse. */
+ *  Clears the pin when it pointed there; the index becomes free for reuse
+ *  once any matching pending-delete tombstone is also released. */
 export const removeAccount = (
   roster: TAccountRoster,
   index: TAccountIndex,

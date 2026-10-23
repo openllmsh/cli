@@ -708,6 +708,28 @@ export const disposeSharedCodexAppServerClientAndWaitForExit = async (
 };
 
 /**
+ * Dispose every shared warm client bound to `codexHome` (any binary). GET-ONLY:
+ * a miss is a no-op. Used when an account slot is removed so the next allocate
+ * of that index cannot inherit a live app-server still pointing at the deleted
+ * home. Deletes the map entry before awaiting exit so a racing `clientFor`
+ * creates a fresh replacement instead of receiving the torn-down instance.
+ */
+export const disposeCodexAppServerClientForHome = async (
+  codexHome: string,
+): Promise<boolean> => {
+  if (codexHome.length === 0) return false;
+  const suffix = `\0${codexHome}`;
+  let disposed = false;
+  for (const [key, existing] of [...clients]) {
+    if (!key.endsWith(suffix)) continue;
+    clients.delete(key);
+    await existing.disposeAndWaitForExit();
+    disposed = true;
+  }
+  return disposed;
+};
+
+/**
  * Fresh app-server child that is NOT shared with {@link clientFor}. Capture
  * builders must use this so `turn/interrupt` cannot disturb unrelated warm
  * threads, and so `-c chatgpt_base_url` / `-c openai_base_url` redirects apply

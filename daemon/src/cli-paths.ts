@@ -25,6 +25,7 @@ import {
 import { homedir } from "node:os";
 import { delimiter, dirname, join } from "node:path";
 import type { TSubscriptionProviderSlug } from "@openllmsh/protocol";
+import { scopedSlug } from "./account-scope";
 import {
   ANTIGRAVITY_HARNESS,
   ANTIGRAVITY_INSTALL_MARKER,
@@ -342,12 +343,10 @@ export const DEFAULT_ACCOUNT_INDEX: TAccountIndex = 0;
 export const isAccountIndex = (value: unknown): value is TAccountIndex =>
   typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
 
-/** The single in-memory key for per-account state: `provider` for index 0
- *  (so existing per-provider keys are unchanged), `provider#n` otherwise. */
+/** The single in-memory key for per-account state — delegates to
+ *  {@link scopedSlug} so account 0 stays the bare provider slug. */
 export const accountKey = (ref: TAccountRef): string =>
-  ref.index === DEFAULT_ACCOUNT_INDEX
-    ? ref.provider
-    : `${ref.provider}#${ref.index}`;
+  scopedSlug(ref.provider, ref.index);
 
 /** Directory holding the extra (n >= 1) account homes of a provider. */
 export const cliAccountsDir = (provider: TCliProvider, home?: string): string =>

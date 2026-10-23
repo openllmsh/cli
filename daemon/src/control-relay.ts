@@ -14,9 +14,11 @@ import type {
   TDaemonCommandAck,
   TLocalCliSession,
 } from "@openllmsh/protocol";
+import type { TAccountCommandResult } from "./account-commands";
 import {
   addAccount,
   pinAccountSlot,
+  reconcileAccountIdentity,
   removeAccountSlot,
 } from "./account-commands";
 import { wasUserCancelledFlow } from "./auth-events";
@@ -87,6 +89,25 @@ export type TRunCommandOptions = {
  * ack `done` + `cancelled` so the dashboard closes quietly instead of
  * surfacing "sign-in cancelled" with a Try again.
  */
+/**
+ * After a credential lands, probe the account and run the duplicate gate.
+ * Returns a failed result only for `duplicate_account`; probe errors are
+ * ignored so a flaky status read cannot undo a successful connect.
+ */
+const reconcileConnectedAccount = async (
+  slug: string,
+  index: number,
+): Promise<TAccountCommandResult | null> => {
+  const delegate = getDelegate(slug);
+  if (delegate === null) return null;
+  try {
+    const conn = await delegate.status();
+    return await reconcileAccountIdentity(conn, index);
+  } catch {
+    return null;
+  }
+};
+
 const connectAck = (
   id: string,
   connected: boolean,
@@ -118,7 +139,7 @@ const runCommandInAccount = async (
   try {
     switch (cmd.kind) {
       case "add_account": {
-        const r = addAccount(cmd.payload.slug, cmd.payload.label);
+        const r = await addAccount(cmd.payload.slug, cmd.payload.label);
         return { id: cmd.id, status: r.ok ? "done" : "error", result: r };
       }
       case "remove_account": {
@@ -129,7 +150,10 @@ const runCommandInAccount = async (
         return { id: cmd.id, status: r.ok ? "done" : "error", result: r };
       }
       case "pin_account": {
-        const r = pinAccountSlot(cmd.payload.slug, cmd.payload.account_index);
+        const r = await pinAccountSlot(
+          cmd.payload.slug,
+          cmd.payload.account_index,
+        );
         return { id: cmd.id, status: r.ok ? "done" : "error", result: r };
       }
       case "connect": {
@@ -159,6 +183,17 @@ const runCommandInAccount = async (
           loginAdmittedForCommand(cmd.payload.slug, cmd.id);
         if (connected) {
           invalidateUsage(cmd.payload.slug);
+          const recon = await reconcileConnectedAccount(
+            cmd.payload.slug,
+            commandAccountIndexOf(cmd),
+          );
+          if (
+            recon !== null &&
+            recon.ok === false &&
+            recon.error === "duplicate_account"
+          ) {
+            return { id: cmd.id, status: "error", result: recon };
+          }
         }
         const result = connected ? r : { ...r, connected: false };
         // Model catalog: `auth.login.succeeded` (observeLoginModelReports),
@@ -199,6 +234,17 @@ const runCommandInAccount = async (
           loginAdmittedForCommand(cmd.payload.slug, cmd.id);
         if (connected) {
           invalidateUsage(cmd.payload.slug);
+          const recon = await reconcileConnectedAccount(
+            cmd.payload.slug,
+            commandAccountIndexOf(cmd),
+          );
+          if (
+            recon !== null &&
+            recon.ok === false &&
+            recon.error === "duplicate_account"
+          ) {
+            return { id: cmd.id, status: "error", result: recon };
+          }
         }
         const result = connected ? r : { ...r, connected: false };
         return connectAck(cmd.id, connected, r.pending === true, result);
@@ -352,6 +398,17 @@ const runCommandInAccount = async (
         if (r.ok) {
           clearProviderSignedOut(cmd.payload.slug);
           invalidateUsage(cmd.payload.slug);
+          const recon = await reconcileConnectedAccount(
+            cmd.payload.slug,
+            commandAccountIndexOf(cmd),
+          );
+          if (
+            recon !== null &&
+            recon.ok === false &&
+            recon.error === "duplicate_account"
+          ) {
+            return { id: cmd.id, status: "error", result: recon };
+          }
         }
         return { id: cmd.id, status: r.ok ? "done" : "error", result: r };
       }

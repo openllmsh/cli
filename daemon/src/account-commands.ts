@@ -4,7 +4,8 @@
  * duplicate gate (`docs/plan/multi-account-subscriptions.md` §4).
  *
  * Account 0 always exists at today's `<root>/home` and is only logged out,
- * never removed. Indexes are never reused.
+ * never removed. Indexes are reused after a removal finishes; while removal
+ * is in flight the index stays reserved so a concurrent add cannot claim it.
  */
 import { mkdirSync, readdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
@@ -13,16 +14,28 @@ import {
   allocateAccount,
   findDuplicateAccount,
   mutateRoster,
+  mutateRosterSync,
+  pendingDeletesOf,
   pinAccount,
   readRoster,
+  releasePendingDelete,
   removeAccount,
+  reservePendingDelete,
   setAccountHash,
+  withRosterLock,
 } from "./account-roster";
 import type { TCliProvider } from "./cli-paths";
-import { cliAccountsDir, cliHome, DEFAULT_ACCOUNT_INDEX } from "./cli-paths";
+import {
+  cliAccountsDir,
+  cliEnv,
+  cliHome,
+  DEFAULT_ACCOUNT_INDEX,
+} from "./cli-paths";
 import { getDelegate } from "./delegation";
 import { loginSlot } from "./delegation/login-flow";
 import { clearAccountCooldowns } from "./hop-cooldown";
+import { disposeAntigravityWarmPoolForGeminiHome } from "./native-runtime/antigravity-acp";
+import { disposeCodexAppServerClientForHome } from "./native-runtime/codex-app-server";
 import { runWithAccount } from "./op-context";
 import { clearPendingAuth } from "./pending-auth";
 import { invalidateUsage } from "./usage-cache";
@@ -32,6 +45,17 @@ import { invalidateUsage } from "./usage-cache";
 let forgetProviderAccount: (slug: string) => void = () => undefined;
 export const setForgetProviderAccount = (fn: (slug: string) => void): void => {
   forgetProviderAccount = fn;
+};
+
+/**
+ * Test seam: awaited after logout/cache clear and before `rmSync`, so a
+ * concurrent add can race the reserved index without hitting real vendor CLIs.
+ */
+let removeAccountPause: (() => Promise<void>) | null = null;
+export const setRemoveAccountPauseForTest = (
+  pause: (() => Promise<void>) | null,
+): void => {
+  removeAccountPause = pause;
 };
 
 export type TAccountCommandResult = {
@@ -44,20 +68,44 @@ export type TAccountCommandResult = {
 const isProvider = (slug: string): slug is TCliProvider =>
   getDelegate(slug) !== null;
 
-export const addAccount = (
+const disposeAccountRuntimes = async (
+  slug: TCliProvider,
+  index: number,
+): Promise<void> => {
+  await runWithAccount(index, async () => {
+    const env = cliEnv(slug, index);
+    await disposeCodexAppServerClientForHome(env.CODEX_HOME ?? "");
+    const geminiHome = env.GEMINI_HOME;
+    if (geminiHome !== undefined && geminiHome.length > 0) {
+      disposeAntigravityWarmPoolForGeminiHome(geminiHome);
+    }
+  });
+};
+
+export const addAccount = async (
   slug: string,
   label?: string,
   nowMs: number = Date.now(),
-): TAccountCommandResult => {
+): Promise<TAccountCommandResult> => {
   if (!isProvider(slug)) return { ok: false, error: "unknown provider" };
-  let index = DEFAULT_ACCOUNT_INDEX;
-  mutateRoster(slug, (roster) => {
-    const next = allocateAccount(roster, nowMs, label ?? null);
-    index = next.index;
-    return next.roster;
+  return withRosterLock(slug, () => {
+    let index = DEFAULT_ACCOUNT_INDEX;
+    mutateRosterSync(slug, (roster) => {
+      const next = allocateAccount(
+        roster,
+        nowMs,
+        label ?? null,
+        pendingDeletesOf(slug),
+      );
+      index = next.index;
+      return next.roster;
+    });
+    mkdirSync(cliHome(slug, undefined, index), {
+      recursive: true,
+      mode: 0o700,
+    });
+    return { ok: true, account_index: index };
   });
-  mkdirSync(cliHome(slug, undefined, index), { recursive: true, mode: 0o700 });
-  return { ok: true, account_index: index };
 };
 
 export const removeAccountSlot = async (
@@ -71,51 +119,92 @@ export const removeAccountSlot = async (
       error: "account 0 cannot be removed; sign out instead",
     };
   }
-  if (!readRoster(slug).accounts.some((a) => a.index === index)) {
-    return { ok: false, error: "unknown account" };
-  }
+
+  const prepared = await withRosterLock(slug, () => {
+    const roster = readRoster(slug);
+    const account = roster.accounts.find((a) => a.index === index);
+    if (account === undefined) {
+      return { ok: false as const, error: "unknown account" };
+    }
+    const blocked = runWithAccount(index, () => loginSlot(slug).inFlight());
+    if (blocked) {
+      return {
+        ok: false as const,
+        error: "login in progress — cancel it first",
+      };
+    }
+    const hash = account.account_hash;
+    // Drop the roster row but keep the index reserved until the home is gone.
+    reservePendingDelete(slug, index);
+    mutateRosterSync(slug, (r) => removeAccount(r, index));
+    return { ok: true as const, hash };
+  });
+  if (!prepared.ok) return prepared;
+
   const delegate = getDelegate(slug);
-  const blocked = runWithAccount(index, () => loginSlot(slug).inFlight());
-  if (blocked) {
-    return { ok: false, error: "login in progress — cancel it first" };
+  try {
+    if (delegate !== null) {
+      // Best-effort vendor sign-out so the CLI revokes the session; the home
+      // is deleted either way.
+      await runWithAccount(index, () => delegate.logout()).catch(
+        () => undefined,
+      );
+    }
+    runWithAccount(index, () => {
+      clearPendingAuth(slug);
+      clearAccountCooldowns(slug);
+      forgetProviderAccount(slug);
+      delegate?.invalidateStatusObservation?.();
+    });
+    if (prepared.hash !== null && prepared.hash !== undefined) {
+      invalidateUsage(slug, prepared.hash);
+    }
+    await disposeAccountRuntimes(slug, index);
+    if (removeAccountPause !== null) await removeAccountPause();
+    // The whole slot dir: its home AND its per-account config.json.
+    rmSync(join(cliAccountsDir(slug), String(index)), {
+      recursive: true,
+      force: true,
+    });
+    return { ok: true, account_index: index };
+  } finally {
+    await withRosterLock(slug, () => {
+      releasePendingDelete(slug, index);
+    });
   }
-  if (delegate !== null) {
-    // Best-effort vendor sign-out so the CLI revokes the session; the home
-    // is deleted either way.
-    await runWithAccount(index, () => delegate.logout()).catch(() => undefined);
-  }
-  runWithAccount(index, () => {
-    clearPendingAuth(slug);
-    clearAccountCooldowns(slug);
-    forgetProviderAccount(slug);
-    delegate?.invalidateStatusObservation?.();
-  });
-  const hash = readRoster(slug).accounts.find(
-    (a) => a.index === index,
-  )?.account_hash;
-  if (hash !== null && hash !== undefined) invalidateUsage(slug, hash);
-  mutateRoster(slug, (roster) => removeAccount(roster, index));
-  // The whole slot dir: its home AND its per-account config.json.
-  rmSync(join(cliAccountsDir(slug), String(index)), {
-    recursive: true,
-    force: true,
-  });
-  return { ok: true, account_index: index };
 };
 
-export const pinAccountSlot = (
+export const pinAccountSlot = async (
   slug: string,
   index: number | null,
-): TAccountCommandResult => {
+): Promise<TAccountCommandResult> => {
   if (!isProvider(slug)) return { ok: false, error: "unknown provider" };
-  if (
-    index !== null &&
-    !readRoster(slug).accounts.some((a) => a.index === index)
-  ) {
-    return { ok: false, error: "unknown account" };
-  }
-  mutateRoster(slug, (roster) => pinAccount(roster, index));
-  return { ok: true, ...(index !== null ? { account_index: index } : {}) };
+  return withRosterLock(slug, () => {
+    if (
+      index !== null &&
+      !readRoster(slug).accounts.some((a) => a.index === index)
+    ) {
+      return { ok: false, error: "unknown account" };
+    }
+    mutateRosterSync(slug, (roster) => pinAccount(roster, index));
+    return { ok: true, ...(index !== null ? { account_index: index } : {}) };
+  });
+};
+
+/**
+ * Non-destructive hash stamp for status probes. Never removes a slot.
+ */
+export const stampAccountHash = (
+  slug: string,
+  index: number,
+  accountHash: string,
+): void => {
+  if (!isProvider(slug)) return;
+  void withRosterLock(slug, () => {
+    const current = readRoster(slug).accounts.find((a) => a.index === index);
+    if (current === undefined || current.account_hash === accountHash) return;
+    mutateRosterSync(slug, (r) => setAccountHash(r, index, accountHash));
+  }).catch(() => undefined);
 };
 
 /**
@@ -144,7 +233,7 @@ export const reconcileAccountIdentity = async (
   }
   const current = roster.accounts.find((a) => a.index === index);
   if (current !== undefined && current.account_hash !== hash) {
-    mutateRoster(slug, (r) => setAccountHash(r, index, hash));
+    await mutateRoster(slug, (r) => setAccountHash(r, index, hash));
   }
   return { ok: true, account_index: index };
 };
@@ -152,7 +241,8 @@ export const reconcileAccountIdentity = async (
 /**
  * Delete `accounts/<n>/` dirs whose slot is not in the roster (left by an
  * older build that removed only `home/`, or by a crash mid-removal). Never
- * touches account 0 (`<root>/home`), `bin/`, or a slot still listed.
+ * touches account 0 (`<root>/home`), `bin/`, a slot still listed, or an
+ * index reserved by an in-flight removal.
  */
 export const pruneOrphanAccountDirs = (slug: TCliProvider): number => {
   let names: string[];
@@ -162,6 +252,7 @@ export const pruneOrphanAccountDirs = (slug: TCliProvider): number => {
     return 0;
   }
   const live = new Set(readRoster(slug).accounts.map((a) => String(a.index)));
+  for (const index of pendingDeletesOf(slug)) live.add(String(index));
   let pruned = 0;
   for (const name of names) {
     if (!/^[1-9][0-9]*$/.test(name) || live.has(name)) continue;
