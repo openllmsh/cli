@@ -20,7 +20,10 @@ import {
   MULTI_ACCOUNT_CONTROL_CAP,
   normalizeProviderConnection,
 } from "@openllmsh/protocol";
-import { reconcileAccountIdentity } from "./account-commands";
+import {
+  pruneOrphanAccountDirs,
+  reconcileAccountIdentity,
+} from "./account-commands";
 import type { TRosterAccount } from "./account-roster";
 import { readRoster } from "./account-roster";
 import { AccountKeyedMap, AccountKeyedSet } from "./account-scope";
@@ -816,6 +819,7 @@ const computeStatusFreshInner = async (
   const skipProviderProbes = options?.skipProviderProbes === true;
   // One row per (provider, account slot) in the roster; account 0 always.
   const slots = Object.values(DELEGATES).flatMap((d) => {
+    pruneOrphanAccountDirs(d.slug as TCliProvider);
     const roster = readRoster(d.slug as TCliProvider);
     return roster.accounts.map((account) => ({
       d,

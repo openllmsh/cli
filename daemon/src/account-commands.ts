@@ -6,7 +6,8 @@
  * Account 0 always exists at today's `<root>/home` and is only logged out,
  * never removed. Indexes are never reused.
  */
-import { mkdirSync, rmSync } from "node:fs";
+import { mkdirSync, readdirSync, rmSync } from "node:fs";
+import { join } from "node:path";
 import type { TDaemonProviderConnection } from "@openllmsh/protocol";
 import {
   allocateAccount,
@@ -18,7 +19,7 @@ import {
   setAccountHash,
 } from "./account-roster";
 import type { TCliProvider } from "./cli-paths";
-import { cliHome, DEFAULT_ACCOUNT_INDEX } from "./cli-paths";
+import { cliAccountsDir, cliHome, DEFAULT_ACCOUNT_INDEX } from "./cli-paths";
 import { getDelegate } from "./delegation";
 import { loginSlot } from "./delegation/login-flow";
 import { runWithAccount } from "./op-context";
@@ -81,7 +82,11 @@ export const removeAccountSlot = async (
   )?.account_hash;
   if (hash !== null && hash !== undefined) invalidateUsage(slug, hash);
   mutateRoster(slug, (roster) => removeAccount(roster, index));
-  rmSync(cliHome(slug, undefined, index), { recursive: true, force: true });
+  // The whole slot dir: its home AND its per-account config.json.
+  rmSync(join(cliAccountsDir(slug), String(index)), {
+    recursive: true,
+    force: true,
+  });
   return { ok: true, account_index: index };
 };
 
@@ -129,4 +134,26 @@ export const reconcileAccountIdentity = async (
     mutateRoster(slug, (r) => setAccountHash(r, index, hash));
   }
   return { ok: true, account_index: index };
+};
+
+/**
+ * Delete `accounts/<n>/` dirs whose slot is not in the roster (left by an
+ * older build that removed only `home/`, or by a crash mid-removal). Never
+ * touches account 0 (`<root>/home`), `bin/`, or a slot still listed.
+ */
+export const pruneOrphanAccountDirs = (slug: TCliProvider): number => {
+  let names: string[];
+  try {
+    names = readdirSync(cliAccountsDir(slug));
+  } catch {
+    return 0;
+  }
+  const live = new Set(readRoster(slug).accounts.map((a) => String(a.index)));
+  let pruned = 0;
+  for (const name of names) {
+    if (!/^[1-9][0-9]*$/.test(name) || live.has(name)) continue;
+    rmSync(join(cliAccountsDir(slug), name), { recursive: true, force: true });
+    pruned += 1;
+  }
+  return pruned;
 };
