@@ -22,9 +22,17 @@ import type { TCliProvider } from "./cli-paths";
 import { cliAccountsDir, cliHome, DEFAULT_ACCOUNT_INDEX } from "./cli-paths";
 import { getDelegate } from "./delegation";
 import { loginSlot } from "./delegation/login-flow";
+import { clearAccountCooldowns } from "./hop-cooldown";
 import { runWithAccount } from "./op-context";
 import { clearPendingAuth } from "./pending-auth";
 import { invalidateUsage } from "./usage-cache";
+
+/** Bound by `status.ts` (avoids a module cycle): forget the ambient
+ *  account's status memory. */
+let forgetProviderAccount: (slug: string) => void = () => undefined;
+export const setForgetProviderAccount = (fn: (slug: string) => void): void => {
+  forgetProviderAccount = fn;
+};
 
 export type TAccountCommandResult = {
   readonly ok: boolean;
@@ -76,7 +84,12 @@ export const removeAccountSlot = async (
     // is deleted either way.
     await runWithAccount(index, () => delegate.logout()).catch(() => undefined);
   }
-  runWithAccount(index, () => clearPendingAuth(slug));
+  runWithAccount(index, () => {
+    clearPendingAuth(slug);
+    clearAccountCooldowns(slug);
+    forgetProviderAccount(slug);
+    delegate?.invalidateStatusObservation?.();
+  });
   const hash = readRoster(slug).accounts.find(
     (a) => a.index === index,
   )?.account_hash;

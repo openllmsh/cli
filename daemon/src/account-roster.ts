@@ -3,8 +3,10 @@
  *
  * Lists the device-local account slots of one subscription provider. Index 0
  * (today's single account at `<root>/home`) always exists, even when the file
- * is missing. Indexes are never reused — `next_index` only grows — so a removed
- * account's usage cache / cooldown entries can never bleed into a new one.
+ * is missing. A new account takes the LOWEST free index (1, 2, … — no gaps
+ * after a removal); removal clears that index's in-memory state first
+ * (`account-commands.ts`), and usage is keyed by `account_hash`, so nothing
+ * carries over to the account that reuses it.
  * See `docs/plan/multi-account-subscriptions.md` §1.
  */
 import { join } from "node:path";
@@ -146,13 +148,21 @@ export type TAllocateAccountReturnType = {
   readonly index: TAccountIndex;
 };
 
-/** Append a fresh slot at `next_index`. */
+/** The lowest index >= 1 not held by a listed slot. */
+export const lowestFreeIndex = (roster: TAccountRoster): TAccountIndex => {
+  const taken = new Set(roster.accounts.map((a) => a.index));
+  let index = DEFAULT_ACCOUNT_INDEX + 1;
+  while (taken.has(index)) index += 1;
+  return index;
+};
+
+/** Add a fresh slot at the lowest free index. */
 export const allocateAccount = (
   roster: TAccountRoster,
   nowMs: number,
   label: string | null = null,
 ): TAllocateAccountReturnType => {
-  const index = roster.next_index;
+  const index = lowestFreeIndex(roster);
   const account: TRosterAccount = {
     index,
     account_hash: null,
@@ -163,14 +173,14 @@ export const allocateAccount = (
     index,
     roster: {
       ...roster,
-      accounts: [...roster.accounts, account],
-      next_index: index + 1,
+      accounts: [...roster.accounts, account].sort((a, b) => a.index - b.index),
+      next_index: Math.max(roster.next_index, index + 1),
     },
   };
 };
 
 /** Drop slot `index` (n >= 1 only — account 0 is logged out, never removed).
- *  Clears the pin when it pointed there. `next_index` is left untouched. */
+ *  Clears the pin when it pointed there; the index becomes free for reuse. */
 export const removeAccount = (
   roster: TAccountRoster,
   index: TAccountIndex,

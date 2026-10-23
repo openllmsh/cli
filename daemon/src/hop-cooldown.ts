@@ -279,3 +279,11 @@ export const allAccountsCoolingDown = (
   accountIndexes.every((index) =>
     runWithAccount(index, () => isHopCoolingDown(provider, modelId, now)),
   );
+
+/** Drop every mark of the ambient provider account (account removal, before
+ *  its index can be reused). */
+export const clearAccountCooldowns = (provider: string): void => {
+  const marks = daemonMarks();
+  const prefix = `${scopedSlug(provider)}|`;
+  for (const k of [...marks.keys()]) if (k.startsWith(prefix)) marks.delete(k);
+};

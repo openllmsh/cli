@@ -23,6 +23,7 @@ import {
 import {
   pruneOrphanAccountDirs,
   reconcileAccountIdentity,
+  setForgetProviderAccount,
 } from "./account-commands";
 import type { TRosterAccount } from "./account-roster";
 import { readRoster } from "./account-roster";
@@ -138,6 +139,20 @@ const daemonStatusState = stateScoped(
     inFlightStatus: null,
   }),
 );
+
+/** Forget everything observed for the ambient account of `slug` (account
+ *  removal): a later account reusing the index starts clean. */
+export const forgetProviderAccount = (slug: string): void => {
+  const st = daemonStatusState();
+  st.lastKnownConnections.delete(slug);
+  st.signedOutByUser.delete(slug);
+  st.pendingVerifiedPublish.delete(slug);
+  st.admittedLoginFlow.delete(slug);
+  st.probeBackoff.delete(slug);
+  st.inFlightSlugProbes.delete(slug);
+};
+
+setForgetProviderAccount(forgetProviderAccount);
 
 /** Mark `slug` signed-out at logout command receipt, before `delegate.logout()`. */
 export const markProviderSignedOut = (slug: string): void => {
