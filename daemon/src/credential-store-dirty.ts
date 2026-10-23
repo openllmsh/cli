@@ -14,6 +14,8 @@
 import { readdirSync } from "node:fs";
 import { platform } from "node:os";
 import { join } from "node:path";
+import { readRoster } from "./account-roster";
+import type { TCliProvider } from "./cli-paths";
 import { CLI_PROVIDERS, cliConfigDir, cliHome } from "./cli-paths";
 import { keychainStoreIdentity } from "./delegation/keychain";
 import {
@@ -41,8 +43,22 @@ const kimiCredentialFingerprints = (configDir: string): string[] => {
 export const credentialStoreFingerprint = (): string => {
   const parts: string[] = [];
   for (const provider of CLI_PROVIDERS) {
-    const config = cliConfigDir(provider);
-    const home = cliHome(provider);
+    for (const { index } of readRoster(provider).accounts) {
+      parts.push(...accountStoreFingerprints(provider, index));
+    }
+  }
+  return parts.join("\n");
+};
+
+/** Stat-only identities of one provider account's credential store. */
+const accountStoreFingerprints = (
+  provider: TCliProvider,
+  index: number,
+): string[] => {
+  const parts: string[] = [];
+  {
+    const config = cliConfigDir(provider, undefined, index);
+    const home = cliHome(provider, undefined, index);
     switch (provider) {
       case "claude_code":
         if (MAC) {
@@ -92,7 +108,7 @@ export const credentialStoreFingerprint = (): string => {
       }
     }
   }
-  return parts.join("\n");
+  return parts;
 };
 
 let lastFingerprint: string | null = null;

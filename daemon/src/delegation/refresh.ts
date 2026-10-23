@@ -17,6 +17,7 @@
  */
 
 import type { TSubscriptionProviderSlug } from "@openllmsh/protocol";
+import { AccountKeyedMap, accountScoped } from "../account-scope";
 import type { TDeadlineTimebase } from "../deadline-budget";
 import type { TSafeDiagnosticMessage } from "../doctor-report/message";
 import { logDebug, logInfo, logWarn, safeDiagnosticMessage } from "../logger";
@@ -28,7 +29,6 @@ import {
   refreshSpawnBag,
   usageNativeRefreshAllowed,
 } from "../op-context";
-import { stateScoped } from "../state-scoped";
 import type { TNativeAuthProducer, TTimeoutScheduler } from "./spawn";
 import { DEADLINE_CHECK_CAP_MS, spawnLogin, spawnLoginPty } from "./spawn";
 import type { TLoginResult, TStoreRead } from "./util";
@@ -662,7 +662,8 @@ export const classifyRefreshError = (err: unknown): TRefreshErrorClass => {
   return "rejected";
 };
 
-const lastRefreshErrorClasses = new Map<string, TRefreshErrorClass | null>();
+const lastRefreshErrorClasses =
+  new AccountKeyedMap<TRefreshErrorClass | null>();
 
 /** In-memory result of the most recently settled refresh for one provider. */
 export const lastRefreshErrorClass = (
@@ -728,7 +729,9 @@ export const makeRefresher = (opts: {
 }): ((expiresAtMs: number | null) => Promise<TRefreshOutcome>) => {
   // The credential store lives under the state dir, so its refresh memory
   // (in-flight spawn, cooldown, failure backoff) is scoped to it.
-  const refresherState = stateScoped(
+  // One refresher state per provider ACCOUNT: each home refreshes its own
+  // credential with its own single-flight + cooldown.
+  const refresherState = accountScoped(
     (): TRefresherState => ({
       inFlight: null,
       lastErrorClass: null,
