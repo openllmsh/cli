@@ -29,10 +29,13 @@ export const localAuthToolDefs = AUTH_COMMANDS.map((descriptor) => {
         : field === "account"
           ? {
               type: "integer",
-              minimum: 0,
+              minimum: descriptor.name === "remove-account" ? 1 : 0,
               maximum: AUTH_ACCOUNT_MAX,
               description:
-                "Account slot index on this machine (from local_auth_status); omit for account 0",
+                descriptor.name === "remove-account" ||
+                descriptor.name === "pin-account"
+                  ? "Account slot index on this machine (from local_auth_status)"
+                  : "Account slot index on this machine (from local_auth_status); omit for account 0",
             }
           : field === "label"
             ? {

@@ -2863,6 +2863,8 @@ const walkPlan = async (
         siblingAccountsRemaining = 0;
       }
       if (args.req.signal.aborted) return HOP_CONTINUE;
+      // Context overflow is model-level; a sibling account cannot fix it.
+      if (contextDemotionTarget !== null) return HOP_CONTINUE;
     }
     if (order.length === 0 && signedIn.length > 0) {
       lastError = `${hop.provider}: no signed-in account with quota on this device`;
