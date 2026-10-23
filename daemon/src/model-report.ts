@@ -29,6 +29,10 @@ import {
   DaemonModelsReason,
   normalizeProviderConnection,
 } from "@openllmsh/protocol";
+import {
+  discoverModelsAcrossAccounts,
+  listModelsAcrossAccounts,
+} from "./account-models";
 import { addAuthObserver } from "./auth-events";
 import { reportModels } from "./cloud-client";
 import type { TProviderDelegate } from "./delegation";
@@ -325,11 +329,11 @@ const runForceList = (due: TDueModelReport): Promise<TListed> => {
   const flight = (async (): Promise<TListed> => {
     try {
       let nullReason: TListModelsNullReason | undefined;
-      const models = await (due.delegate.listModels?.({
+      const models = await listModelsAcrossAccounts(due.delegate, {
         onNullReason: (reason) => {
           nullReason = reason;
         },
-      }) ?? Promise.resolve(null));
+      });
       if (models === null) {
         const reason = nullReason ?? "error";
         noteConnectedListModelsNull(due.slug, reason);
@@ -390,7 +394,8 @@ const runAutoDiscoverAndReport = (
       };
     } else {
       try {
-        const result = await discover(
+        const result = await discoverModelsAcrossAccounts(
+          due.delegate,
           due.cliVersion === undefined ? {} : { cliVersion: due.cliVersion },
         );
         if (result.kind === "success" && result.models.length === 0) {
