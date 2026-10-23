@@ -601,6 +601,13 @@ export const cliEnv = (
   // The daemon-owned, sandbox-granted staging dir for `mktemp -d` (see above).
   const tmp = verifiedDaemonTempDir();
   ensureIsolatedRuntimeDirs(home);
+  // The provider's config root must exist: Codex refuses to start when
+  // CODEX_HOME names a missing dir (a fresh account slot has none yet).
+  try {
+    mkdirSync(config, { recursive: true, mode: 0o700 });
+  } catch {
+    // The vendor's own error surfaces if this truly can't be created.
+  }
   const base = {
     ...isolatedRuntimeEnv(home, tmp),
     ...launcherDataRootEnv(process.env, homedir(), home),
