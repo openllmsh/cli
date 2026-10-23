@@ -31,7 +31,6 @@ export type TRosterAccount = {
 export type TAccountRoster = {
   readonly version: number;
   readonly accounts: readonly TRosterAccount[];
-  readonly next_index: TAccountIndex;
   readonly pinned_index: TAccountIndex | null;
 };
 
@@ -45,7 +44,6 @@ const defaultAccount = (): TRosterAccount => ({
 export const emptyRoster = (): TAccountRoster => ({
   version: ACCOUNT_ROSTER_VERSION,
   accounts: [defaultAccount()],
-  next_index: DEFAULT_ACCOUNT_INDEX + 1,
   pinned_index: null,
 });
 
@@ -75,7 +73,7 @@ const parseAccount = (raw: unknown): TRosterAccount | null => {
 
 /**
  * Normalise an untrusted roster: dedupe indexes (first wins), sort ascending,
- * guarantee index 0, keep `next_index` above every index, and drop a pin that
+ * guarantee index 0, and drop a pin that
  * points at no account. Unknown versions fall back to the empty roster rather
  * than guessing at a newer layout.
  */
@@ -94,10 +92,6 @@ export const parseRoster = (raw: unknown): TAccountRoster => {
     byIndex.set(DEFAULT_ACCOUNT_INDEX, defaultAccount());
   }
   const accounts = [...byIndex.values()].sort((a, b) => a.index - b.index);
-  const highest = accounts[accounts.length - 1]?.index ?? DEFAULT_ACCOUNT_INDEX;
-  const next = isAccountIndex(r.next_index)
-    ? Math.max(r.next_index, highest + 1)
-    : highest + 1;
   const pinned =
     isAccountIndex(r.pinned_index) && byIndex.has(r.pinned_index)
       ? r.pinned_index
@@ -105,7 +99,6 @@ export const parseRoster = (raw: unknown): TAccountRoster => {
   return {
     version: ACCOUNT_ROSTER_VERSION,
     accounts,
-    next_index: next,
     pinned_index: pinned,
   };
 };
@@ -174,7 +167,6 @@ export const allocateAccount = (
     roster: {
       ...roster,
       accounts: [...roster.accounts, account].sort((a, b) => a.index - b.index),
-      next_index: Math.max(roster.next_index, index + 1),
     },
   };
 };
