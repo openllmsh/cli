@@ -63,7 +63,11 @@ import {
   pendingAuthDetail,
 } from "../pending-auth";
 import { daemonTempDir } from "../sandbox/working-set";
-import { readAntigravityUsage } from "./antigravity-usage";
+import { accountHashField } from "./account-id";
+import {
+  readAntigravityAccountId,
+  readAntigravityUsage,
+} from "./antigravity-usage";
 import { loginWiring } from "./delegate-shared";
 import { detailedFromCliList, listWithReason } from "./fetch-model-list";
 import type { TConnectResult } from "./login-flow";
@@ -437,12 +441,18 @@ export const antigravityDelegate: TProviderDelegate = {
     const { installed, version } = await cliInstallState(PROVIDER);
     const connected = installed && tokenPresent();
     if (connected) clearPendingAuth(PROVIDER);
+    const accountId = connected
+      ? await readAntigravityAccountId(geminiHome())
+      : null;
     const pending = connected ? null : getPendingAuth(PROVIDER);
     return {
       provider: PROVIDER,
       status: connected ? "connected" : "disconnected",
       ...(connected
-        ? connectedObservation()
+        ? {
+            ...connectedObservation(),
+            ...accountHashField(PROVIDER, accountId),
+          }
         : pending !== null
           ? {}
           : installed
