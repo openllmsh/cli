@@ -376,7 +376,12 @@ export const createCommandScheduler = (): TCommandScheduler => {
       if (lane === "mutation") {
         if (slug === undefined) return runAdmitted(job);
         if (loginOwned(slug, loginReserved)) {
-          const reason = cmd.kind === "logout" ? "login_conflict" : "resurface";
+          // Only a duplicate sign-in "resurfaces" the live one; logout and
+          // roster changes are retryable conflicts.
+          const reason =
+            cmd.kind === "connect" || cmd.kind === "connect_device_code"
+              ? "resurface"
+              : "login_conflict";
           return Promise.resolve(reject(reason, slug));
         }
         if ((mutationQueued.get(slug) ?? 0) >= MUTATION_QUEUE_MAX) {
