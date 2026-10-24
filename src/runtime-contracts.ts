@@ -34,13 +34,16 @@ export const isUsableOpenllmApiKey = (
 ): boolean =>
   value !== null && value !== undefined && isOpenllmApiKeySyntax(value.trim());
 
-/** Extract the public id half of a `sk-llm-{id}.{secret}` key. */
+/**
+ * Extract the public id half of a `sk-llm-{id}.{secret}` key. Shape-only
+ * parse (the secret is ignored); returns null on any mismatch.
+ */
 export const parseApiKeyId = (raw: string): string | null => {
-  if (!isOpenllmApiKeySyntax(raw.trim())) return null;
-  return raw.trim().slice(
-    OPENLLM_API_KEY_PREFIX.length,
-    OPENLLM_API_KEY_PREFIX.length + OPENLLM_API_KEY_ID_LENGTH,
-  );
+  if (!raw.startsWith(OPENLLM_API_KEY_PREFIX)) return null;
+  const rest = raw.slice(OPENLLM_API_KEY_PREFIX.length);
+  const dot = rest.indexOf(".");
+  if (dot <= 0 || dot === rest.length - 1) return null;
+  return rest.slice(0, dot);
 };
 
 /** Must match `packages/protocol/api-key-syntax.ts` (parity-tested). */
