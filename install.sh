@@ -16,7 +16,7 @@
 #
 # Options (after `bash -s --`):
 #   --lock-device-sessions the daemon refuses a REMOTE enable of device (agent)
-#                          sessions; only `openllm device enable` on this
+#                          sessions; only `openllm daemon device enable` on this
 #                          machine turns them on
 #
 # Env (all optional):

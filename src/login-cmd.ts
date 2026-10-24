@@ -47,6 +47,7 @@ is what gets saved.
   --lock-device-sessions
                        refuse a remote enable of device sessions; only
                        openllm daemon device enable on this machine can
+                       turn them on
   --start              also start the daemon when it isn't running
   --json               print {"saved":true,"daemon":"restarted"|"started"|
                        "not_running"} on stdout; everything else on stderr
