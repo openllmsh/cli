@@ -234,9 +234,12 @@ export type TDeviceAccessVerify = {
   readonly invalidatePin: () => void;
 };
 
-/** The persisted remote device-sessions switch (default disabled). */
+/**
+ * The persisted remote device-sessions switch. Absent = enabled — the anchor
+ * is the opt-in; only an explicit disable turns sessions off.
+ */
 export const persistedDeviceSessionsEnabled = (): boolean =>
-  readState().deviceSessions?.enabled === true;
+  readState().deviceSessions?.enabled !== false;
 
 /**
  * Verify an Ed25519 signature over `message` with a base64(SPKI) public key.

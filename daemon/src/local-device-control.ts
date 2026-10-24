@@ -8,8 +8,10 @@
  *   as a LOCAL confirmation (`via: "local"`, an anchored pin, never TOFU).
  * - `POST /local/device-anchor` — accept the install-time trust anchor for the
  *   key this daemon runs on (the desktop app's Device sessions toggle). Written
- *   by the same writer as `openllm daemon anchor` ({@link installDeviceAnchor});
- *   enables device sessions unless locked. The anchor is never logged.
+ *   by the same writer as `openllm daemon anchor` ({@link installDeviceAnchor}).
+ *   The anchor is the sessions opt-in; the endpoint also persists `enabled:
+ *   true` so a prior explicit disable is cleared by the toggle. The anchor is
+ *   never logged.
  *
  * Both use the `/local/agent` admission: loopback peer + loopback Host, an
  * allowed Origin (Tauri / OpenLLM deployment / none), and this boot's local
@@ -40,12 +42,7 @@ import {
   isEd25519SpkiB64,
   setDeviceAccessPubkey,
 } from "./device-access-verify";
-import {
-  deviceSessionsReport,
-  deviceSessionsState,
-  installDeviceAnchor,
-  setDeviceSessionsLocal,
-} from "./device-anchor";
+import { deviceSessionsReport, installDeviceAnchor } from "./device-anchor";
 import { daemonEnv, parseApiKeyId } from "./env";
 import { daemonPublicKey } from "./keypair";
 
@@ -175,13 +172,7 @@ const anchorResponse = async (req: Request): Promise<Response> => {
         : "malformed_anchor",
     );
   }
-  // Anchoring enables device sessions unless the machine locked them, the
-  // same default `openllm login` applies.
-  if (!deviceSessionsState().locked) {
-    if (setDeviceSessionsLocal({ enabled: true }) === null) {
-      return anchorRefusal(500, "persist_failed");
-    }
-  }
+  // `installDeviceAnchor` already clears a persisted disable.
   const body: TLocalDeviceAnchorResponse = {
     ok: true,
     device_sessions: deviceSessionsReport(),

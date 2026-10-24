@@ -202,7 +202,6 @@ export const statusChangeKey = (status: TDaemonStatus): string => {
       : joinChangeKeyParts([
           String(status.device_sessions.anchored),
           String(status.device_sessions.enabled),
-          String(status.device_sessions.locked),
           status.device_sessions.dpk_proof ?? "",
         ]),
     status.port === undefined ? "" : String(status.port),

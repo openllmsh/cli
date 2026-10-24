@@ -239,7 +239,7 @@ export const COMMAND_ARGS: Readonly<
   Partial<Record<TCommandName, readonly string[]>>
 > = {
   auth: AUTH_COMMANDS.map((item) => item.name),
-  login: ["--key", "--lock-device-sessions"],
+  login: ["--key"],
   completion: [...COMPLETION_SHELLS, "install"],
   "auto-update": [...AUTO_UPDATE_ACTIONS],
   mcp: ["--only", ...MCP_ONLY_GROUPS],

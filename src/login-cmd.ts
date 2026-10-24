@@ -22,26 +22,19 @@
  * writes `OPENLLM_API_KEY=<bare>` and `OPENLLM_DEVICE_ANCHOR=<anchor>` to the
  * runtime's env file (the daemon derives its pin from that line, never
  * trust-on-first-use). ONLY the bare `sk-llm-<key>` is exported or ever used
- * as a bearer; the anchor never enters process.env. Anchoring
- * also enables device sessions unless `--lock-device-sessions` is set.
- *
- * `--lock-device-sessions` makes the daemon refuse a REMOTE enable of device
- * sessions; only `openllm daemon device enable` on this machine turns them on.
+ * as a bearer; the anchor never enters process.env. The anchor is the
+ * sessions opt-in — an anchored device serves agent sessions by default
+ * until someone explicitly turns them off.
  */
 
 import { daemonPort, daemonReachable } from "./clients/gateway";
 import { daemonInvocation } from "./daemon-delegation";
-import {
-  cliConfig,
-  DEVICE_ANCHOR_ENV,
-  envFileHasDeviceAnchor,
-  sharedFileConfig,
-} from "./env";
+import { cliConfig, DEVICE_ANCHOR_ENV, envFileHasDeviceAnchor } from "./env";
 import { defaultTerminal, saveEnvVars } from "./onboarding";
 import type { TCredentialGateTerminal } from "./runtime-contracts";
 import { splitAnchoredApiKey } from "./runtime-contracts";
 
-export const LOGIN_USAGE = `usage: openllm login [sk-llm-...] [--key <sk-llm-...>] [--lock-device-sessions] [--start] [--json]
+export const LOGIN_USAGE = `usage: openllm login [sk-llm-...] [--key <sk-llm-...>] [--start] [--json]
 
 Save your OpenLLM API key to ~/.openllm/.env, replacing any existing key.
 With no key argument, the key is read from piped stdin, or prompted for
@@ -50,13 +43,10 @@ it up. Get a key under Keys after signing in.
 
 A key from Manage device with Enable device sessions ends in a device
 trust anchor (sk-llm-KEY.ANCHOR). It is kept on this machine only, as
-a separate line of the env file; the bare key is the bearer. Anchoring enables device sessions unless
---lock-device-sessions is set.
+a separate line of the env file; the bare key is the bearer. Anchoring
+is the sessions opt-in — agent sessions stay on until someone turns them
+off (Manage device, or openllm daemon device disable).
 
-  --lock-device-sessions
-                       refuse a remote enable of device sessions; only
-                       openllm daemon device enable on this machine can
-                       turn them on (also skips the default enable)
   --start              also start the daemon when it isn't running
   --json               print {"saved":true,"daemon":"restarted"|"started"|
                        "not_running"} on stdout; everything else on stderr
@@ -80,10 +70,6 @@ export type TLoginIo = {
   /** Run `openllm daemon anchor` with `anchoredKey` on stdin; its exit
    *  status. Defaults to a self-spawn of the daemon half. */
   readonly anchorDaemon?: (anchoredKey: string) => Promise<number>;
-  /** Run `openllm daemon device enable`; its exit status. */
-  readonly enableDeviceSessions?: (quiet: boolean) => Promise<number>;
-  /** Run `openllm daemon device lock`; its exit status. */
-  readonly lockDeviceSessions?: (quiet: boolean) => Promise<number>;
 };
 
 /** How long piped stdin may stay silent. A caller that inherits an open but
@@ -153,12 +139,6 @@ const anchorDaemon = async (anchoredKey: string): Promise<number> => {
   }
 };
 
-const enableDeviceSessions = (quiet: boolean): Promise<number> =>
-  runDaemonArgs(["device", "enable"], quiet);
-
-const lockDeviceSessions = (quiet: boolean): Promise<number> =>
-  runDaemonArgs(["device", "lock"], quiet);
-
 const defaultIo: TLoginIo = {
   terminal: defaultTerminal,
   readStdin: readPipedStdin,
@@ -166,20 +146,16 @@ const defaultIo: TLoginIo = {
   runDaemon,
   writeStdout: (text) => process.stdout.write(text),
   anchorDaemon,
-  enableDeviceSessions,
-  lockDeviceSessions,
 };
 
 type TLoginArgs = {
   readonly key: string | null;
-  readonly lock: boolean;
   readonly start: boolean;
   readonly json: boolean;
 };
 
 const parseLoginArgs = (args: readonly string[]): TLoginArgs | null => {
   let key: string | null = null;
-  let lock = false;
   let start = false;
   let json = false;
   for (let i = 0; i < args.length; i += 1) {
@@ -191,8 +167,6 @@ const parseLoginArgs = (args: readonly string[]): TLoginArgs | null => {
       i += 1;
     } else if (arg?.startsWith("--key=")) {
       key = arg.slice("--key=".length);
-    } else if (arg === "--lock-device-sessions") {
-      lock = true;
     } else if (key === null && arg !== undefined && arg.startsWith("sk-llm-")) {
       // `openllm login sk-llm-<key>.<anchor>` — the one-line setup command.
       key = arg;
@@ -204,7 +178,7 @@ const parseLoginArgs = (args: readonly string[]): TLoginArgs | null => {
       return null;
     }
   }
-  return { key, lock, start, json };
+  return { key, start, json };
 };
 
 export const runLogin = async (
@@ -248,8 +222,8 @@ export const runLogin = async (
   const trimmed = split.key;
 
   // Pin the device-control key from the anchor BEFORE saving the key and
-  // restarting: the restarted daemon boots anchored. An anchored login
-  // enables device sessions unless the caller opted into a locked install.
+  // restarting: the restarted daemon boots anchored. Sessions default on
+  // once anchored — no separate enable step.
   if (split.anchor !== null) {
     const anchor = io.anchorDaemon ?? anchorDaemon;
     if ((await anchor(`${split.key}.${split.anchor}`)) !== 0) {
@@ -258,36 +232,13 @@ export const runLogin = async (
       );
       return 1;
     }
-    if (parsed.lock) {
-      const lock = io.lockDeviceSessions ?? lockDeviceSessions;
-      if ((await lock(parsed.json)) !== 0) {
-        io.terminal.write("[openllm] Could not lock remote device sessions.\n");
-        return 1;
-      }
-    } else {
-      const enable = io.enableDeviceSessions ?? enableDeviceSessions;
-      if ((await enable(parsed.json)) !== 0) {
-        io.terminal.write("[openllm] Could not enable device sessions.\n");
-        return 1;
-      }
-    }
-  } else if (parsed.lock) {
-    const lock = io.lockDeviceSessions ?? lockDeviceSessions;
-    if ((await lock(parsed.json)) !== 0) {
-      io.terminal.write("[openllm] Could not lock remote device sessions.\n");
-      return 1;
-    }
   }
 
   const vars: Record<string, string> = { OPENLLM_API_KEY: trimmed };
   // `openllm daemon anchor` already wrote OPENLLM_DEVICE_ANCHOR beside the
-  // key. A bare login to a DIFFERENT key blanks the old anchor: its pair
-  // secret is bound to the old key id.
-  if (
-    split.anchor === null &&
-    envFileHasDeviceAnchor() &&
-    sharedFileConfig().OPENLLM_API_KEY?.trim() !== trimmed
-  ) {
+  // key. A bare login ALWAYS blanks an existing anchor — "sessions off" is
+  // simply omitting the suffix (same rule as install.sh).
+  if (split.anchor === null && envFileHasDeviceAnchor()) {
     vars[DEVICE_ANCHOR_ENV] = "";
   }
   if (!saveEnvVars(vars)) {

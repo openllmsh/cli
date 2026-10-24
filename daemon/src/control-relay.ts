@@ -678,8 +678,8 @@ const runCommandInAccount = async (
       }
       // Control-key-signed device-sessions switch. The cloud only relays the
       // statement; it is verified against this daemon's ANCHORED pin (a
-      // cloud-chosen pin never authorises it) and a locked device refuses a
-      // remote enable. The post-command status push carries the new state.
+      // cloud-chosen pin never authorises it). A signed enable or disable
+      // always applies. The post-command status push carries the new state.
       case "set_device_sessions": {
         const applied = applyDeviceSessionsCommand(cmd.payload.statement);
         if (!applied.ok) {

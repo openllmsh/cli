@@ -74,8 +74,7 @@ ${formatHelpRows(FLAGS.map((f) => ({ left: f.name, right: f.description })))}
 State lives under ~/.openllm (override with OPENLLM_DAEMON_STATE_DIR).
 `;
 
-const DEVICE_USAGE =
-  "usage: openllm daemon device <enable|disable|lock|unlock|status>\n";
+const DEVICE_USAGE = "usage: openllm daemon device <enable|disable|status>\n";
 
 /**
  * `openllm daemon anchor` — read `sk-llm-<id>.<secret>.<anchor>` from stdin
@@ -106,7 +105,7 @@ const runAnchor = async (args: readonly string[]): Promise<number> => {
   return 0;
 };
 
-/** `openllm daemon device <enable|disable|lock|unlock|status>`. */
+/** `openllm daemon device <enable|disable|status>`. */
 const runDevice = (args: readonly string[]): never => {
   const action = args[0];
   if (args.length !== 1 || action === undefined) {
@@ -115,24 +114,18 @@ const runDevice = (args: readonly string[]): never => {
   }
   const change =
     action === "enable"
-      ? { enabled: true }
+      ? { enabled: true as const }
       : action === "disable"
-        ? { enabled: false }
-        : action === "lock"
-          ? { locked: true }
-          : action === "unlock"
-            ? { locked: false }
-            : action === "status"
-              ? {}
-              : null;
-  if (change === null) {
+        ? { enabled: false as const }
+        : action === "status"
+          ? null
+          : undefined;
+  if (change === undefined) {
     process.stderr.write(DEVICE_USAGE);
     process.exit(2);
   }
   const state =
-    action === "status"
-      ? deviceSessionsState()
-      : setDeviceSessionsLocal(change);
+    change === null ? deviceSessionsState() : setDeviceSessionsLocal(change);
   if (state === null) {
     process.stderr.write("could not save the device-sessions setting\n");
     process.exit(1);
@@ -140,8 +133,10 @@ const runDevice = (args: readonly string[]): never => {
   const report = deviceSessionsReport();
   process.stdout.write(
     `device sessions ${state.enabled ? "enabled" : "disabled"}${
-      state.locked ? " (locked — remote enable refused)" : ""
-    }${report.anchored ? "" : "; this device is not anchored — turn on Enable device sessions in Manage device and re-run install/update"}\n`,
+      report.anchored
+        ? ""
+        : "; this device is not anchored — turn on Enable device sessions in Manage device and re-run install/update"
+    }\n`,
   );
   process.exit(0);
 };

@@ -74,14 +74,15 @@ const isPinVia = (v: unknown): v is TDeviceAccessPinVia =>
 /**
  * Remote device (agent) sessions — the only device-trust state kept here (the
  * install anchor itself lives in the runtime env file as
- * `OPENLLM_DEVICE_ANCHOR`, never in this file). Fresh installs start disabled; `locked`
- * (`--lock-device-sessions`) refuses a remote enable so only a local
- * `openllm device enable` can turn them on. `lastCommandTs` is the newest
- * accepted signed command — an older or equal one is a replay.
+ * `OPENLLM_DEVICE_ANCHOR`, never in this file). The anchor is the opt-in: an
+ * absent switch means enabled. Disabled only when someone explicitly turned
+ * sessions off (local `openllm daemon device disable` or a signed remote
+ * disable). `lastCommandTs` is the newest accepted signed command — an older
+ * or equal one is a replay. A legacy `locked` field in on-disk state is
+ * ignored.
  */
 export type TDeviceSessionsState = {
   readonly enabled: boolean;
-  readonly locked: boolean;
   readonly lastCommandTs?: number;
 };
 
@@ -89,15 +90,13 @@ const coerceDeviceSessions = (v: unknown): TDeviceSessionsState | undefined => {
   if (typeof v !== "object" || v === null) return undefined;
   const raw = v as {
     enabled?: unknown;
-    locked?: unknown;
     lastCommandTs?: unknown;
   };
-  if (typeof raw.enabled !== "boolean" || typeof raw.locked !== "boolean") {
+  if (typeof raw.enabled !== "boolean") {
     return undefined;
   }
   return {
     enabled: raw.enabled,
-    locked: raw.locked,
     ...(typeof raw.lastCommandTs === "number" &&
     Number.isInteger(raw.lastCommandTs) &&
     raw.lastCommandTs > 0
@@ -143,7 +142,7 @@ export type TDaemonState = {
    * agent sessions (`device_not_anchored` otherwise).
    */
   readonly deviceAccessPinAnchored?: true;
-  /** Remote device-sessions switch; absent = disabled, unlocked. */
+  /** Remote device-sessions switch; absent = enabled (anchor is the opt-in). */
   readonly deviceSessions?: TDeviceSessionsState;
   /** RTC native-crash breaker: this run's liveness sentinel (see {@link TRtcRun}). */
   readonly rtcRun?: TRtcRun | null;

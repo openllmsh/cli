@@ -833,10 +833,11 @@ silent signaling timeouts. Detail lives in
   "openllm-dpk-proof-v1" || key_id || pubkey)`) so a browser holding the
   control seed trusts this daemon's X25519 key without a first-use window,
   and applies the control-signed `set_device_sessions` command (anchored pin,
-  this key id, fresh + monotonic `ts`). Fresh installs are disabled;
-  `--lock-device-sessions` (install.sh / `openllm login`) refuses a remote
-  enable, and `openllm daemon device enable|disable|lock|unlock` is the local
-  switch that always wins. `openllm daemon identity` and
+  this key id, fresh + monotonic `ts`). The anchor is the sessions opt-in —
+  an anchored device with no persisted switch serves sessions; only an
+  explicit local or signed-remote disable turns them off. A signed enable or
+  disable always applies. `openllm daemon device enable|disable|status` is
+  the local switch. `openllm daemon identity` and
   `DaemonStatus.device_access_pin` show the pin's fingerprint and `via`
   (agent eligibility is reported once, as `device_sessions.anchored`);
   loopback `GET /local/identity` returns the same plus `device_sessions`

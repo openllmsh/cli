@@ -16,9 +16,9 @@
  *   browser holding the control seed can trust this daemon's X25519 key.
  * - {@link applyDeviceSessionsCommand} — the control-signed remote
  *   enable / disable (`set_device_sessions`), verified against the anchored
- *   pin; a locked device (`--lock-device-sessions`) refuses a remote enable.
- * - {@link setDeviceSessionsLocal} — `openllm device enable|disable|lock|
- *   unlock`, the local switch that always wins.
+ *   pin. A signed enable or disable always applies.
+ * - {@link setDeviceSessionsLocal} — `openllm daemon device enable|disable`,
+ *   the local switch that always wins.
  *
  * node:crypto only — the daemon never imports `@openllm/vault`.
  */
@@ -68,12 +68,17 @@ export type TInstallDeviceAnchorResult =
       readonly reason: "malformed" | "no_anchor" | "persist_failed";
     };
 
+/**
+ * No persisted switch yet = ON. The anchor is the opt-in (it only reaches a
+ * device through an install/update/login/desktop step the user took), so an
+ * anchored device serves sessions until someone explicitly turns them off.
+ * Unanchored devices never serve agent regardless (`isAgentEligiblePin`).
+ */
 const DEFAULT_SESSIONS: TDeviceSessionsState = {
-  enabled: false,
-  locked: false,
+  enabled: true,
 };
 
-/** The persisted remote device-sessions switch (absent = disabled, unlocked). */
+/** The persisted remote device-sessions switch (absent = enabled). */
 export const deviceSessionsState = (): TDeviceSessionsState =>
   readState().deviceSessions ?? DEFAULT_SESSIONS;
 
@@ -106,6 +111,11 @@ export const installDeviceAnchor = (
   invalidateDeviceAccessPin();
   const pin = getDeviceAccessPin();
   if (pin?.pubkey !== anchor.controlPubkey || pin.via !== "anchor") {
+    return { ok: false, reason: "persist_failed" };
+  }
+  // Anchor is the sessions opt-in: clear any persisted disable so a
+  // deliberate re-enable via install/login/desktop works.
+  if (setDeviceSessionsLocal({ enabled: true }) === null) {
     return { ok: false, reason: "persist_failed" };
   }
   return {
@@ -161,7 +171,6 @@ export const deviceSessionsReport = (): TDeviceSessionsReport => {
   return {
     anchored: isAgentEligiblePin(getDeviceAccessPin()),
     enabled: sessions.enabled,
-    locked: sessions.locked,
     ...(proof === null ? {} : { dpk_proof: proof }),
   };
 };
@@ -173,7 +182,6 @@ export type TDeviceSessionsCommandRefusal =
   | "stale_ts"
   | "replayed"
   | "bad_sig"
-  | "device_sessions_locked"
   | "persist_failed";
 
 export type TApplyDeviceSessionsCommandResult =
@@ -184,8 +192,8 @@ export type TApplyDeviceSessionsCommandResult =
  * Verify and apply one signed `{ v, key_id, enable, ts, nonce }` statement.
  * Requires an ANCHORED control pin (a cloud-chosen pin could be the cloud's
  * own key), this daemon's key id, a fresh `ts` greater than the last accepted
- * one (replay), and a signature by the pinned key. A locked device refuses a
- * remote enable; a remote DISABLE is always honoured.
+ * one (replay), and a signature by the pinned key. A signed enable or disable
+ * always applies.
  */
 export const applyDeviceSessionsCommand = (
   encoded: string,
@@ -220,12 +228,8 @@ export const applyDeviceSessionsCommand = (
   ) {
     return { ok: false, reason: "bad_sig" };
   }
-  if (command.enable && current.locked) {
-    return { ok: false, reason: "device_sessions_locked" };
-  }
   const next: TDeviceSessionsState = {
     enabled: command.enable,
-    locked: current.locked,
     lastCommandTs: command.ts,
   };
   mutateState((s) => ({ ...s, deviceSessions: next }));
@@ -241,25 +245,20 @@ export const applyDeviceSessionsCommand = (
 };
 
 /**
- * The local switch (`openllm device enable|disable|lock|unlock`). Local
- * always wins: it may enable a locked device. Returns the persisted state, or
- * null when the write did not stick.
+ * The local switch (`openllm daemon device enable|disable`). Returns the
+ * persisted state, or null when the write did not stick.
  */
 export const setDeviceSessionsLocal = (change: {
-  readonly enabled?: boolean;
-  readonly locked?: boolean;
+  readonly enabled: boolean;
 }): TDeviceSessionsState | null => {
   const current = deviceSessionsState();
   const next: TDeviceSessionsState = {
-    enabled: change.enabled ?? current.enabled,
-    locked: change.locked ?? current.locked,
+    enabled: change.enabled,
     ...(current.lastCommandTs === undefined
       ? {}
       : { lastCommandTs: current.lastCommandTs }),
   };
   mutateState((s) => ({ ...s, deviceSessions: next }));
   const back = deviceSessionsState();
-  return back.enabled === next.enabled && back.locked === next.locked
-    ? back
-    : null;
+  return back.enabled === next.enabled ? back : null;
 };

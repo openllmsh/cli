@@ -11,16 +11,6 @@
 #   # with a key, so the daemon is paired immediately:
 #   curl -fsSL https://www.openllm.sh/install | OPENLLM_API_KEY=sk-llm-... bash
 #
-#   # a strict machine: remote device sessions can only be enabled locally
-#   curl -fsSL https://www.openllm.sh/install | OPENLLM_API_KEY=sk-llm-... bash -s -- --lock-device-sessions
-#
-# Options (after `bash -s --`):
-#   --lock-device-sessions the daemon refuses a REMOTE enable of device (agent)
-#                          sessions; only `openllm daemon device enable` on this
-#                          machine turns them on. Without this flag, an anchored
-#                          key (sk-llm-<key>.<anchor> from Manage device) pins
-#                          the trust root AND enables device sessions.
-#
 # Env (all optional):
 #   OPENLLM_CLOUD_ORIGIN   gateway origin (env → existing ~/.openllm/.env →
 #                          default https://www.openllm.sh; a re-run keeps your origin)
@@ -32,8 +22,8 @@
 #                          to the BARE key. It is never exported, logged, or
 #                          sent — only the bare `sk-llm-<key>` is the bearer.
 #                          Re-running install with a new anchor rotates it.
-#                          An anchored key also enables device sessions unless
-#                          `--lock-device-sessions` is set.
+#                          The anchor is the sessions opt-in — an anchored
+#                          device serves agent sessions by default.
 #   OPENLLM_DAEMON_PORT    local daemon port (default 8787; if unset AND
 #                          nothing is already persisted, and 8787 is taken on
 #                          this machine, the installer walks forward to the
@@ -79,13 +69,9 @@ has_command() { command -v "$1" >/dev/null 2>&1; }
 
 die() { echo "Error: $*" >&2; exit 1; }
 
-# Installer options (`curl … | bash -s -- --lock-device-sessions`).
-LOCK_DEVICE_SESSIONS=0
+# Reject unknown installer options so a mistyped flag never silently no-ops.
 for arg in "$@"; do
-  case "$arg" in
-    --lock-device-sessions) LOCK_DEVICE_SESSIONS=1 ;;
-    *) die "unknown installer option: $arg" ;;
-  esac
+  die "unknown installer option: $arg"
 done
 
 # Can we prompt the human running this install? A piped `curl … | bash` leaves
@@ -593,12 +579,13 @@ write_env_file() {
     fi
   fi
   # The device trust anchor is its own line, OPENLLM_DEVICE_ANCHOR, beside the
-  # BARE key. A supplied anchor replaces it (re-running install is rotation);
-  # a different bare key drops the old one (its pair secret is bound to the old
-  # key id); otherwise it is kept.
+  # BARE key. A supplied anchor replaces it (re-running install is rotation).
+  # A bare supplied key ALWAYS drops any existing anchor — "sessions off at
+  # install" is simply omitting the suffix. Keyless install keeps the current
+  # line untouched.
   if [ -n "$SUPPLIED_ANCHOR" ]; then
     desired_anchor="$SUPPLIED_ANCHOR"
-  elif [ -n "$SUPPLIED_KEY" ] && [ "$SUPPLIED_KEY" != "$current_key" ]; then
+  elif [ -n "$SUPPLIED_KEY" ]; then
     desired_anchor=""
   else
     desired_anchor="$current_anchor"
@@ -684,23 +671,11 @@ fi
 # already stored it as OPENLLM_DEVICE_ANCHOR (never exported); `daemon anchor`
 # validates it, re-writes the same two lines and pins. The anchored key goes
 # over stdin (never argv); the daemon prints only the bare key, discarded.
-# An anchored install enables device sessions by default (the dashboard toggle
-# put the anchor on the clipboard for that reason). `--lock-device-sessions`
-# is the strict-host opt-out: pin + lock, leave sessions off for a local enable.
+# The anchor is the sessions opt-in (absent switch = on). No separate enable.
 if [ -n "$SUPPLIED_ANCHOR" ]; then
   printf '%s.%s' "$SUPPLIED_KEY" "$SUPPLIED_ANCHOR" \
     | "$BIN_DIR/openllm" daemon anchor >/dev/null \
     || die "the device trust anchor was rejected — copy the install command from the dashboard again"
-  if [ "$LOCK_DEVICE_SESSIONS" = 1 ]; then
-    "$BIN_DIR/openllm" daemon device lock >/dev/null \
-      || die "could not lock remote device sessions"
-  else
-    "$BIN_DIR/openllm" daemon device enable >/dev/null \
-      || die "could not enable device sessions"
-  fi
-elif [ "$LOCK_DEVICE_SESSIONS" = 1 ]; then
-  "$BIN_DIR/openllm" daemon device lock >/dev/null \
-    || die "could not lock remote device sessions"
 fi
 SUPPLIED_ANCHOR=""
 
