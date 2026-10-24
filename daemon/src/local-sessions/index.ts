@@ -5,12 +5,12 @@
 
 import type { TDeviceSessionCli, TLocalCliSession } from "@openllmsh/protocol";
 import { LISTABLE_SESSION_CLIS } from "@openllmsh/protocol";
-import { readClaudeHistory } from "./claude";
+import { readClaudeHistory, readClaudeLiveSessionIds } from "./claude";
 import { readCodexHistory } from "./codex";
 import { readGrokHistory } from "./grok";
 import { readLiveRuns } from "./live-run";
 import { readOpencodeHistory } from "./opencode";
-import { TITLE_MAX } from "./title";
+import { newSessionTitle, TITLE_MAX } from "./title";
 import type { TDeviceCliHistoryId, THistorySession, TLiveRun } from "./types";
 import {
   DEVICE_CLI_RECORD,
@@ -66,8 +66,24 @@ const defaultHistory = async (
 const defaultLive = async (cli: TDeviceSessionCli): Promise<TLiveRun[]> => {
   const clientId = openllmClientIdOf(cli);
   if (clientId === null) return [];
-  return readLiveRuns(clientId);
+  const runs = readLiveRuns(clientId);
+  if (clientId !== "claude" || runs.length === 0) return runs;
+  return withClaudeSessionIds(runs, readClaudeLiveSessionIds());
 };
+
+/**
+ * Give each live Claude run the session id its TUI is actually on (keyed by
+ * the run's wrapper pid). That id wins over the launch-time one: a `/resume`
+ * inside the TUI moves the run to another conversation.
+ */
+export const withClaudeSessionIds = (
+  runs: readonly TLiveRun[],
+  byPid: ReadonlyMap<number, string>,
+): TLiveRun[] =>
+  runs.map((run) => {
+    const current = byPid.get(run.pid);
+    return current === undefined ? run : { ...run, vendor_session_id: current };
+  });
 
 export const clampLimit = (limit: number | undefined): number => {
   if (limit === undefined || !Number.isFinite(limit)) return DEFAULT_LIMIT;
@@ -103,6 +119,11 @@ export const readLocalSessions = async (
   type TRow = {
     id: string;
     title: string;
+    /** History (the vendor's own record) names a conversation; live/device
+     *  titles are launch-time labels (often the folder name). */
+    titleFromHistory: boolean;
+    /** `id` is the vendor's conversation id (not an OpenLLM host id). */
+    vendorId: boolean;
     cwd: string | null;
     updated_at_ms: number;
     live: boolean;
@@ -115,11 +136,10 @@ export const readLocalSessions = async (
   const byOpenllmId = new Map<string, string>();
 
   const mergeRows = (previous: TRow, row: TRow): TRow => ({
-    id: row.id.length > 0 ? row.id : previous.id,
-    title:
-      row.title !== "Untitled" && row.title.length > 0
-        ? row.title
-        : previous.title,
+    id: previous.vendorId && !row.vendorId ? previous.id : row.id,
+    vendorId: previous.vendorId || row.vendorId,
+    title: previous.titleFromHistory ? previous.title : row.title,
+    titleFromHistory: previous.titleFromHistory || row.titleFromHistory,
     cwd: row.cwd ?? previous.cwd,
     updated_at_ms: Math.max(row.updated_at_ms, previous.updated_at_ms),
     live: row.live || previous.live,
@@ -148,6 +168,8 @@ export const readLocalSessions = async (
       {
         id: h.id,
         title: h.title,
+        titleFromHistory: true,
+        vendorId: true,
         cwd: h.cwd,
         updated_at_ms: h.updated_at_ms,
         live: false,
@@ -184,7 +206,9 @@ export const readLocalSessions = async (
               live.openllm_session_id.length > 0
             ? live.openllm_session_id
             : `live-${live.pid}`,
-        title: live.title ?? "Untitled",
+        title: newSessionTitle(DEVICE_CLI_RECORD[cli].label),
+        titleFromHistory: false,
+        vendorId: hasVendorSessionId,
         cwd: live.cwd,
         updated_at_ms: live.started_at_ms,
         live: true,
@@ -211,7 +235,9 @@ export const readLocalSessions = async (
     put(
       {
         id: vendorSessionId ?? s.id,
-        title: s.title ?? "Untitled",
+        title: newSessionTitle(DEVICE_CLI_RECORD[cli].label),
+        titleFromHistory: false,
+        vendorId: vendorSessionId !== null,
         cwd: s.cwd ?? null,
         updated_at_ms: s.started_at_ms,
         live: s.live,
