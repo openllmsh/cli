@@ -42,6 +42,7 @@ import {
 import { basename, isAbsolute, join, resolve, sep } from "node:path";
 import type {
   TAgentAttachmentMeta,
+  TAgentEvent,
   TAgentRequestKind,
   TAgentRespondCommand,
   TAgentUserInputAnswers,
@@ -55,6 +56,7 @@ import {
   SESSION_ID_PATTERN,
 } from "@openllmsh/protocol";
 import { stateDir } from "../env";
+import { readClaudeSessionIdUnderPid } from "../local-sessions/claude";
 import { logError } from "../logger";
 import { defaultSessionHostClient } from "../session-host-proc";
 import type { TClaudeTranscriptTail } from "./claude-transcript";
@@ -101,6 +103,14 @@ const MODEL_CONFIRM_MS = 1_500;
 const STOP_SETTLE_MS = 500;
 /** Gap between the bracketed paste and the submitting CR. */
 const SUBMIT_DELAY_MS = 80;
+/**
+ * Events one transcript drain emits at most. Attach replays a terminal
+ * session's WHOLE transcript; a long one is cut at a turn boundary so it fits
+ * the dispatcher's replay log and never floods a consumer into `lagging`.
+ */
+const REPLAY_MAX_EVENTS = 1_500;
+/** Transcript chunks one drain reads at most (1 MiB each). */
+const DRAIN_MAX_CHUNKS = 512;
 const TRANSCRIPT_POLL_MS = 250;
 
 const DETAIL_MAX = 16 * 1024;
@@ -379,12 +389,18 @@ const defaultOpenPtyLink: TOpenPtyLink = async (request) => {
   const hosts = await defaultSessionHostClient.discoverSessionHosts();
   // A terminal `openllm claude --resume X` runs under its own host id with
   // Claude session X: match either, so the web never forks a second process.
-  const live = hosts.find(
-    (host) =>
-      host.cli === "claude_code" &&
-      (host.id === request.sessionId ||
-        host.vendorSessionId === request.sessionId),
-  );
+  const claudeHosts = hosts.filter((host) => host.cli === "claude_code");
+  // A terminal run whose live meta has no (or a stale) Claude id is matched
+  // by the id its TUI is on right now (`~/.claude/sessions/<pid>.json`).
+  const live =
+    claudeHosts.find(
+      (host) =>
+        host.id === request.sessionId ||
+        host.vendorSessionId === request.sessionId,
+    ) ??
+    claudeHosts.find(
+      (host) => readClaudeSessionIdUnderPid(host.pid) === request.sessionId,
+    );
   if (live !== undefined) return dialObserver(live.socketPath, live.id, false);
   // Not running and nothing on disk to resume (a web start that never reached
   // Claude, or an id this device never ran): `claude --resume` would exit at
@@ -409,6 +425,59 @@ const defaultOpenPtyLink: TOpenPtyLink = async (request) => {
   return socketPath === null
     ? null
     : dialObserver(socketPath, request.sessionId, true);
+};
+
+/**
+ * The events of one transcript drain to emit: all of them, or for a long
+ * history the newest whole turns that fit `max` (cut at a `turn.started`),
+ * keeping the latest title / model the cut part configured.
+ */
+export const replayWindow = (
+  events: readonly TAgentEvent[],
+  max: number = REPLAY_MAX_EVENTS,
+): TAgentEvent[] => {
+  if (events.length <= max) return [...events];
+  let start = events.length - max;
+  while (start < events.length && events[start]?.type !== "turn.started")
+    start += 1;
+  if (start === events.length) start = events.length - max;
+  const carried: TAgentEvent[] = [];
+  let title: TAgentEvent | null = null;
+  let model: TAgentEvent | null = null;
+  for (const event of events.slice(0, start)) {
+    if (event.type !== "session.configured") continue;
+    if (event.title !== undefined) title = event;
+    if (event.model !== undefined) model = event;
+  }
+  if (title !== null) carried.push(title);
+  if (model !== null && model !== title) carried.push(model);
+  return [...carried, ...events.slice(start)];
+};
+
+/**
+ * The Claude session id the TUI behind agent session `sessionId` is on now.
+ * For a host this daemon spawned it is the host id; for a terminal
+ * `openllm claude` run it is NOT (the host id is the launcher's own), and a
+ * `/clear` or `/resume` moves it. Read from the host's meta (pid) and Claude's
+ * own per-process record. Null → no live host: `sessionId` is Claude's id.
+ */
+export const currentClaudeSessionIdOf = (sessionId: string): string | null => {
+  if (!SESSION_ID_PATTERN.test(sessionId)) return null;
+  let meta: unknown;
+  try {
+    meta = JSON.parse(
+      readFileSync(
+        join(stateDir(), "sessions", sessionId, "meta.json"),
+        "utf8",
+      ),
+    );
+  } catch {
+    return null;
+  }
+  if (!isRecord(meta) || typeof meta.pid !== "number") return null;
+  const vendor =
+    typeof meta.vendorSessionId === "string" ? meta.vendorSessionId : null;
+  return readClaudeSessionIdUnderPid(meta.pid) ?? vendor;
 };
 
 /**
@@ -805,6 +874,12 @@ type TPending =
 export type TClaudeTuiDeps = {
   readonly openLink?: TOpenPtyLink;
   readonly transcript?: (sessionId: string) => TClaudeTranscriptTail;
+  /** Claude's current id for a session (tests); see currentClaudeSessionIdOf. */
+  readonly currentClaudeSessionId?: (sessionId: string) => string | null;
+  /** `~/.claude/projects` override (tests). */
+  readonly projectsDir?: string;
+  /** Transcript re-resolve / re-scan cadence (tests). */
+  readonly transcriptScanMs?: number;
   readonly approvalWaitMs?: number;
   readonly readyMaxMs?: number;
   readonly readySettleMs?: number;
@@ -851,16 +926,35 @@ export const createClaudeTuiSession = (
   /** Whitespace-free, ANSI-stripped recent screen text (trust detection only). */
   let recentScreen = "";
 
+  /** Events of the drain in progress (emitted, possibly cut, at its end). */
+  let drained: TAgentEvent[] | null = null;
   const parser = createTranscriptParser({
     emit: (event) => {
       if (event.type === "session.configured") modelInFlight = false;
-      emit(event);
+      if (drained !== null) drained.push(event);
+      else emit(event);
     },
     toolOutputMax: AGENT_TOOL_OUTPUT_MAX_CHARS,
   });
+  const currentId = deps.currentClaudeSessionId ?? currentClaudeSessionIdOf;
   const tail =
     deps.transcript?.(options.sessionId) ??
-    createClaudeTranscriptTail(options.sessionId, { cwd: options.cwd });
+    createClaudeTranscriptTail(options.sessionId, {
+      cwd: options.cwd,
+      ...(deps.projectsDir === undefined
+        ? {}
+        : { projectsDir: deps.projectsDir }),
+      ...(deps.transcriptScanMs === undefined
+        ? {}
+        : { scanIntervalMs: deps.transcriptScanMs }),
+      // Resolve through the joined host (its pid leads to Claude's record):
+      // the web may attach by Claude's id while the host has its own.
+      currentId: () =>
+        currentId(link?.hostId ?? options.sessionId) ??
+        (link === null ? null : currentId(options.sessionId)),
+      // `/clear` or `/resume` in the TUI: the old conversation is over.
+      onSwitch: () => parser.completeTurn(),
+    });
 
   /** A `/model` waiting for the session to be ready and idle. */
   let pendingModel: string | null = null;
@@ -893,9 +987,20 @@ export const createClaudeTuiSession = (
     }, deps.modelConfirmMs ?? MODEL_CONFIRM_MS);
   };
 
+  /** Read everything the transcript has now (history on attach, then appends). */
   const pump = (): void => {
-    const chunk = tail.read();
-    if (chunk !== null && chunk.length > 0) parser.push(chunk);
+    drained = [];
+    try {
+      for (let chunk = 0; chunk < DRAIN_MAX_CHUNKS; chunk += 1) {
+        const text = tail.read();
+        if (text === null || text.length === 0) break;
+        parser.push(text);
+      }
+    } finally {
+      const events = drained;
+      drained = null;
+      for (const event of replayWindow(events)) emit(event);
+    }
     applyModel();
   };
 

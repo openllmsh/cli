@@ -26,8 +26,6 @@ import type {
 } from "@openllmsh/protocol";
 import { claudeConfigDir } from "../local-sessions/paths";
 
-/** Transcript bytes replayed from the end of an existing file. */
-export const CLAUDE_TRANSCRIPT_TAIL_BYTES = 1024 * 1024;
 /** Bytes read per poll at most (a burst is drained over several polls). */
 const READ_CHUNK_BYTES = 1024 * 1024;
 /** Re-scan the projects tree for a missing transcript at most this often. */
@@ -69,31 +67,61 @@ export const findClaudeTranscript = (
   return null;
 };
 
-/** Incremental reader of one transcript file. */
+/** Incremental reader of one session's transcript. */
 export type TClaudeTranscriptTail = {
   /** New text since the last read (complete or partial lines), or null. */
   readonly read: () => string | null;
 };
 
+/**
+ * Tail a session's transcript FROM ITS START (attach and resume replay the
+ * whole conversation, then follow appends).
+ *
+ * `currentId` names the Claude session the TUI is on right now. It differs
+ * from `sessionId` for a terminal `openllm claude` run (the host id is not
+ * Claude's id) and changes on `/clear` or `/resume` inside the TUI; the tail
+ * then moves to that id's transcript, from its start, and calls `onSwitch`.
+ */
 export const createClaudeTranscriptTail = (
   sessionId: string,
   options: {
     readonly projectsDir?: string;
     readonly cwd?: string;
     readonly now?: () => number;
+    /** Re-resolve / re-scan cadence (tests). */
+    readonly scanIntervalMs?: number;
+    readonly currentId?: () => string | null;
+    readonly onSwitch?: (claudeSessionId: string) => void;
   } = {},
 ): TClaudeTranscriptTail => {
   const now = options.now ?? Date.now;
+  const scanMs = options.scanIntervalMs ?? SCAN_INTERVAL_MS;
+  let readingId: string | null = null;
   let path: string | null = null;
-  let offset = -1;
+  let offset = 0;
   let lastScan = Number.NEGATIVE_INFINITY;
+  let lastResolve = Number.NEGATIVE_INFINITY;
+  const follow = (): void => {
+    if (readingId !== null && now() - lastResolve < scanMs) return;
+    lastResolve = now();
+    const target = options.currentId?.() ?? sessionId;
+    if (target === readingId) return;
+    const switched = readingId !== null;
+    readingId = target;
+    path = null;
+    offset = 0;
+    lastScan = Number.NEGATIVE_INFINITY;
+    if (switched) options.onSwitch?.(target);
+  };
   return {
     read: () => {
+      follow();
+      if (readingId === null) return null;
       if (path === null) {
-        if (now() - lastScan < SCAN_INTERVAL_MS) return null;
+        if (now() - lastScan < scanMs) return null;
         lastScan = now();
         path = findClaudeTranscript(
-          sessionId,
+          readingId,
           options.projectsDir ?? claudeProjectsDir(),
           options.cwd,
         );
@@ -107,11 +135,6 @@ export const createClaudeTranscriptTail = (
       }
       try {
         const size = fstatSync(fd).size;
-        let skipPartial = false;
-        if (offset < 0) {
-          offset = Math.max(0, size - CLAUDE_TRANSCRIPT_TAIL_BYTES);
-          skipPartial = offset > 0;
-        }
         if (size < offset) offset = 0; // truncated / rewritten
         const length = Math.min(size - offset, READ_CHUNK_BYTES);
         if (length <= 0) return null;
@@ -127,12 +150,7 @@ export const createClaudeTranscriptTail = (
         const lastNewline = buffer.subarray(0, read).lastIndexOf(0x0a);
         if (lastNewline >= 0) usable = lastNewline + 1;
         offset += usable;
-        let text = buffer.subarray(0, usable).toString("utf8");
-        if (skipPartial) {
-          const newline = text.indexOf("\n");
-          text = newline === -1 ? "" : text.slice(newline + 1);
-        }
-        return text;
+        return buffer.subarray(0, usable).toString("utf8");
       } finally {
         closeSync(fd);
       }

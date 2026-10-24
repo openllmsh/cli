@@ -346,3 +346,82 @@ const psParents = (pids: readonly number[]): Map<number, number> => {
   }
   return map;
 };
+
+/** Every process's parent pid (one `ps -A`); empty when ps is unavailable. */
+const psAllParents = (): Map<number, number> => {
+  const map = new Map<number, number>();
+  try {
+    const out = Bun.spawnSync(["ps", "-A", "-o", "pid=,ppid="], {
+      stdout: "pipe",
+      stderr: "ignore",
+    });
+    for (const line of out.stdout.toString().split("\n")) {
+      const match = line.trim().match(/^(\d+)\s+(\d+)$/);
+      if (match !== null) map.set(Number(match[1]), Number(match[2]));
+    }
+  } catch {
+    // No process inspector: the caller falls back to the ids it has.
+  }
+  return map;
+};
+
+/** Ancestor hops walked from a Claude pid looking for the root. */
+const MAX_ANCESTOR_HOPS = 16;
+
+/**
+ * The session id the Claude TUI running UNDER `rootPid` (a session-host
+ * process, whose child is the `openllm claude` wrapper, whose child is Claude)
+ * is on right now, from `~/.claude/sessions/<pid>.json`. That id follows a
+ * `/clear` or `/resume` inside the TUI, and is the only link from a terminal
+ * run's host id to its transcript. Null when no Claude descends from the root.
+ */
+export const readClaudeSessionIdUnderPid = (
+  rootPid: number,
+  options: {
+    readonly configDir?: string;
+    /** Every pid → parent pid (tests); defaults to one `ps -A`. */
+    readonly allParents?: () => Map<number, number>;
+  } = {},
+): string | null => {
+  const dir = join(options.configDir ?? claudeConfigDir(), "sessions");
+  let names: string[];
+  try {
+    names = readdirSync(dir);
+  } catch {
+    return null;
+  }
+  const rows: { pid: number; sessionId: string; updatedAt: number }[] = [];
+  for (const name of names) {
+    const match = name.match(/^(\d+)\.json$/);
+    if (match === null) continue;
+    try {
+      const row: unknown = JSON.parse(readFileSync(join(dir, name), "utf8"));
+      if (row === null || typeof row !== "object") continue;
+      const o = row as Record<string, unknown>;
+      if (typeof o.sessionId !== "string" || !SESSION_ID.test(o.sessionId))
+        continue;
+      rows.push({
+        pid: typeof o.pid === "number" ? o.pid : Number(match[1]),
+        sessionId: o.sessionId,
+        updatedAt: typeof o.updatedAt === "number" ? o.updatedAt : 0,
+      });
+    } catch {
+      // Being rewritten; the next scan reads it.
+    }
+  }
+  if (rows.length === 0) return null;
+  const parents = (options.allParents ?? psAllParents)();
+  let best: { sessionId: string; updatedAt: number } | null = null;
+  for (const row of rows) {
+    let pid: number | undefined = row.pid;
+    for (let hop = 0; hop < MAX_ANCESTOR_HOPS && pid !== undefined; hop += 1) {
+      if (pid === rootPid) {
+        if (best === null || row.updatedAt > best.updatedAt) best = row;
+        break;
+      }
+      const parent = parents.get(pid);
+      pid = parent === undefined || parent === pid ? undefined : parent;
+    }
+  }
+  return best?.sessionId ?? null;
+};
