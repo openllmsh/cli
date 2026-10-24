@@ -141,7 +141,7 @@ const runDevice = (args: readonly string[]): never => {
   process.stdout.write(
     `device sessions ${state.enabled ? "enabled" : "disabled"}${
       state.locked ? " (locked — remote enable refused)" : ""
-    }${report.anchored ? "" : "; this device is not anchored — run openllm login with the key from Manage device"}\n`,
+    }${report.anchored ? "" : "; this device is not anchored — turn on Enable device sessions in Manage device and re-run install/update"}\n`,
   );
   process.exit(0);
 };

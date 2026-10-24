@@ -16,11 +16,12 @@
  * through this command (`--start --json`, key on stdin), and `--json` reports
  * the outcome on stdout for callers that parse it.
  *
- * A key copied from "Set up device sessions" carries a device trust anchor
- * after it (`sk-llm-<key>.<anchor>`). Login splits it on the last dot: the
- * anchor goes to `openllm daemon anchor` over stdin (pinning the account
- * device-control key locally, never trust-on-first-use) and ONLY the bare
- * `sk-llm-<key>` is saved, exported, or ever used as a bearer.
+ * A key copied with Manage device → Enable device sessions carries a device
+ * trust anchor after it (`sk-llm-<key>.<anchor>`). Login splits it on the last
+ * dot: the anchor goes to `openllm daemon anchor` over stdin (pinning the
+ * account device-control key locally, never trust-on-first-use) and ONLY the
+ * bare `sk-llm-<key>` is saved, exported, or ever used as a bearer. Anchoring
+ * also enables device sessions unless `--lock-device-sessions` is set.
  *
  * `--lock-device-sessions` makes the daemon refuse a REMOTE enable of device
  * sessions; only `openllm daemon device enable` on this machine turns them on.
@@ -40,14 +41,15 @@ With no key argument, the key is read from piped stdin, or prompted for
 (hidden) on an interactive terminal. A running daemon is restarted to pick
 it up. Get a key under Keys after signing in.
 
-A key from Manage device > Set up device sessions ends in a device trust
-anchor (sk-llm-KEY.ANCHOR). It is kept on this machine only; the bare key
-is what gets saved.
+A key from Manage device with Enable device sessions ends in a device
+trust anchor (sk-llm-KEY.ANCHOR). It is kept on this machine only; the
+bare key is what gets saved. Anchoring enables device sessions unless
+--lock-device-sessions is set.
 
   --lock-device-sessions
                        refuse a remote enable of device sessions; only
                        openllm daemon device enable on this machine can
-                       turn them on
+                       turn them on (also skips the default enable)
   --start              also start the daemon when it isn't running
   --json               print {"saved":true,"daemon":"restarted"|"started"|
                        "not_running"} on stdout; everything else on stderr
@@ -71,6 +73,8 @@ export type TLoginIo = {
   /** Run `openllm daemon anchor` with `anchoredKey` on stdin; its exit
    *  status. Defaults to a self-spawn of the daemon half. */
   readonly anchorDaemon?: (anchoredKey: string) => Promise<number>;
+  /** Run `openllm daemon device enable`; its exit status. */
+  readonly enableDeviceSessions?: (quiet: boolean) => Promise<number>;
   /** Run `openllm daemon device lock`; its exit status. */
   readonly lockDeviceSessions?: (quiet: boolean) => Promise<number>;
 };
@@ -142,6 +146,9 @@ const anchorDaemon = async (anchoredKey: string): Promise<number> => {
   }
 };
 
+const enableDeviceSessions = (quiet: boolean): Promise<number> =>
+  runDaemonArgs(["device", "enable"], quiet);
+
 const lockDeviceSessions = (quiet: boolean): Promise<number> =>
   runDaemonArgs(["device", "lock"], quiet);
 
@@ -152,6 +159,7 @@ const defaultIo: TLoginIo = {
   runDaemon,
   writeStdout: (text) => process.stdout.write(text),
   anchorDaemon,
+  enableDeviceSessions,
   lockDeviceSessions,
 };
 
@@ -233,7 +241,8 @@ export const runLogin = async (
   const trimmed = split.key;
 
   // Pin the device-control key from the anchor BEFORE saving the key and
-  // restarting: the restarted daemon boots anchored.
+  // restarting: the restarted daemon boots anchored. An anchored login
+  // enables device sessions unless the caller opted into a locked install.
   if (split.anchor !== null) {
     const anchor = io.anchorDaemon ?? anchorDaemon;
     if ((await anchor(`${split.key}.${split.anchor}`)) !== 0) {
@@ -242,8 +251,20 @@ export const runLogin = async (
       );
       return 1;
     }
-  }
-  if (parsed.lock) {
+    if (parsed.lock) {
+      const lock = io.lockDeviceSessions ?? lockDeviceSessions;
+      if ((await lock(parsed.json)) !== 0) {
+        io.terminal.write("[openllm] Could not lock remote device sessions.\n");
+        return 1;
+      }
+    } else {
+      const enable = io.enableDeviceSessions ?? enableDeviceSessions;
+      if ((await enable(parsed.json)) !== 0) {
+        io.terminal.write("[openllm] Could not enable device sessions.\n");
+        return 1;
+      }
+    }
+  } else if (parsed.lock) {
     const lock = io.lockDeviceSessions ?? lockDeviceSessions;
     if ((await lock(parsed.json)) !== 0) {
       io.terminal.write("[openllm] Could not lock remote device sessions.\n");

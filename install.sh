@@ -17,7 +17,9 @@
 # Options (after `bash -s --`):
 #   --lock-device-sessions the daemon refuses a REMOTE enable of device (agent)
 #                          sessions; only `openllm daemon device enable` on this
-#                          machine turns them on
+#                          machine turns them on. Without this flag, an anchored
+#                          key (sk-llm-<key>.<anchor> from Manage device) pins
+#                          the trust root AND enables device sessions.
 #
 # Env (all optional):
 #   OPENLLM_CLOUD_ORIGIN   gateway origin (env → existing ~/.openllm/.env →
@@ -27,7 +29,9 @@
 #                          after the key (`sk-llm-<key>.<anchor>`): it is split
 #                          off here, pinned locally (state.json, 0600) and NEVER
 #                          written to .env, logged, or sent — only the bare
-#                          `sk-llm-<key>` is stored and used as the bearer
+#                          `sk-llm-<key>` is stored and used as the bearer.
+#                          An anchored key also enables device sessions unless
+#                          `--lock-device-sessions` is set.
 #   OPENLLM_DAEMON_PORT    local daemon port (default 8787; if unset AND
 #                          nothing is already persisted, and 8787 is taken on
 #                          this machine, the installer walks forward to the
@@ -660,16 +664,25 @@ fi
 # Pin the account device-control key from the anchor the dashboard put after
 # the key — a local trust root, so the cloud never chooses it. The anchored key
 # goes over stdin (never argv); the daemon prints only the bare key, discarded.
+# An anchored install enables device sessions by default (the dashboard toggle
+# put the anchor on the clipboard for that reason). `--lock-device-sessions`
+# is the strict-host opt-out: pin + lock, leave sessions off for a local enable.
 if [ -n "$SUPPLIED_ANCHOR" ]; then
   printf '%s.%s' "$SUPPLIED_KEY" "$SUPPLIED_ANCHOR" \
     | "$BIN_DIR/openllm" daemon anchor >/dev/null \
     || die "the device trust anchor was rejected — copy the install command from the dashboard again"
-fi
-SUPPLIED_ANCHOR=""
-if [ "$LOCK_DEVICE_SESSIONS" = 1 ]; then
+  if [ "$LOCK_DEVICE_SESSIONS" = 1 ]; then
+    "$BIN_DIR/openllm" daemon device lock >/dev/null \
+      || die "could not lock remote device sessions"
+  else
+    "$BIN_DIR/openllm" daemon device enable >/dev/null \
+      || die "could not enable device sessions"
+  fi
+elif [ "$LOCK_DEVICE_SESSIONS" = 1 ]; then
   "$BIN_DIR/openllm" daemon device lock >/dev/null \
     || die "could not lock remote device sessions"
 fi
+SUPPLIED_ANCHOR=""
 
 # --- start the service -----------------------------------------------------
 # `openllm daemon start` owns service registration (launchd / systemd user unit,
