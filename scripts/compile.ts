@@ -7,10 +7,9 @@
  * `bun build --compile` inlines the runtime deps (the MCP SDK, cheerio,
  * turndown, the committed generated SDK, and the daemon's protocol/wire/tunnel
  * + RTC stack) into a single executable that embeds the Bun runtime once.
- * `--minify` strips readable identifiers; no `.ts` source ships. Effect 4's
- * runtime uses `import.meta`, which Bun 1.4.3 cannot bytecode-compile after
- * bundling it as a script, so this artifact deliberately does not use
- * `--bytecode`.
+ * `--format=esm` preserves the ESM semantics required by Effect 4's
+ * `import.meta` runtime use; with it, `--minify --bytecode` strips readable
+ * identifiers + original source text. No `.ts` source ships.
  *
  * Targets (no Windows): darwin-{arm64,x64-baseline}, linux-{x64-baseline,arm64}.
  * x64 uses the `baseline` (Nehalem) tier — no AVX/AVX2/FMA required.
@@ -76,6 +75,8 @@ export const COMPILE_BUN_FLAGS = [
   "--compile",
   "--minify",
   "--sourcemap=none",
+  "--format=esm",
+  "--bytecode",
 ] as const;
 
 // OpenLLM's own Vercel preview deployments, anchored to the `openllm` project +
