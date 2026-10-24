@@ -28305,16 +28305,6 @@
                           "wrapped_dek": {
                             "type": "string"
                           },
-                          "wrapped_control": {
-                            "anyOf": [
-                              {
-                                "type": "string"
-                              },
-                              {
-                                "type": "null"
-                              }
-                            ]
-                          },
                           "vault_version": {
                             "type": "number"
                           },
@@ -28977,11 +28967,6 @@
                     "description": "a string matching the pattern ^[A-Za-z0-9+/]{80}$",
                     "pattern": "^[A-Za-z0-9+/]{80}$"
                   },
-                  "wrapped_control": {
-                    "type": "string",
-                    "description": "a string matching the pattern ^[A-Za-z0-9+/]{80}$",
-                    "pattern": "^[A-Za-z0-9+/]{80}$"
-                  },
                   "vault_version": {
                     "$ref": "#/components/schemas/Int",
                     "description": "a number greater than or equal to 1",
@@ -29378,17 +29363,6 @@
                     "enum": [
                       true
                     ]
-                  },
-                  "wrapped_control": {
-                    "type": "string",
-                    "description": "a string matching the pattern ^[A-Za-z0-9+/]{80}$",
-                    "pattern": "^[A-Za-z0-9+/]{80}$"
-                  },
-                  "vault_version": {
-                    "$ref": "#/components/schemas/Int",
-                    "description": "a number greater than or equal to 1",
-                    "title": "greaterThanOrEqualTo(1)",
-                    "minimum": 1
                   }
                 },
                 "additionalProperties": false
