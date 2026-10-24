@@ -1427,7 +1427,15 @@ export const createClaudeTuiSession = (
     },
     interrupt: () => {
       if (ended || !parser.turnActive()) return false;
-      writeText(ESC);
+      // Before the TUI is ready the prompt is only queued via whenReady; Esc
+      // would dismiss a startup/trust dialog instead of aborting a turn.
+      // Drop the queued send and still settle so a later ready paste cannot
+      // fire the cancelled prompt.
+      if (!ready) {
+        queued.splice(0);
+      } else {
+        writeText(ESC);
+      }
       parser.abortTurn("interrupted");
       // Esc abort often skips Claude's Stop hook; clear so a queued `/model`
       // is not stuck behind awaitingStop forever, then settle like Stop does.

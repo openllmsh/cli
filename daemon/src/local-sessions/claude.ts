@@ -259,12 +259,28 @@ export const readClaudeHistory = (
     }
 
     // A chain: the later file is the row; earlier sessions fold into it.
-    for (const [parent, child] of collapsedInto) {
+    // Resolve through collapsedInto to the terminal descendant so a→b→c
+    // still merges when Map order processes b→c before a→b (rows.get(b)
+    // would otherwise be undefined after b was already folded away).
+    const terminalOf = (start: string): string => {
+      const seen = new Set<string>();
+      let current = start;
+      for (;;) {
+        const next = collapsedInto.get(current);
+        if (next === undefined || seen.has(current)) return current;
+        seen.add(current);
+        current = next;
+      }
+    };
+    for (const parent of collapsedInto.keys()) {
       const earlier = rows.get(parent);
-      const later = rows.get(child);
-      if (earlier === undefined || later === undefined) continue;
+      if (earlier === undefined) continue;
+      const terminal = terminalOf(parent);
+      if (terminal === parent) continue;
+      const later = rows.get(terminal);
+      if (later === undefined) continue;
       rows.delete(parent);
-      rows.set(child, {
+      rows.set(terminal, {
         ...later,
         updated_at_ms: Math.max(later.updated_at_ms, earlier.updated_at_ms),
         title: later.title === "Untitled" ? earlier.title : later.title,
