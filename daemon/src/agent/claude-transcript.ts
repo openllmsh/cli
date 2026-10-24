@@ -214,6 +214,7 @@ export const createTranscriptParser = (args: {
   let turnCounter = 0;
   let turn: { id: string; awaitingPromptLine: boolean } | null = null;
   const tools = new Map<string, { toolName: string; input: unknown }>();
+  let lastTitle: string | null = null;
 
   const turnField = (): { turn_id?: string } =>
     turn === null ? {} : { turn_id: turn.id };
@@ -358,6 +359,16 @@ export const createTranscriptParser = (args: {
     }
     if (!isRecord(row) || row.isSidechain === true || row.isMeta === true)
       return;
+    // Claude names the conversation with an `ai-title` row (rewritten as it
+    // learns more): the title every viewer shows for this session.
+    if (row.type === "ai-title" && typeof row.aiTitle === "string") {
+      const title = row.aiTitle.trim().slice(0, 256);
+      if (title !== "" && title !== lastTitle) {
+        lastTitle = title;
+        emit({ type: "session.configured", title });
+      }
+      return;
+    }
     const message = row.message;
     if (!isRecord(message)) return;
     if (row.type === "user") onUser(row, message.content);
