@@ -644,4 +644,10 @@ export const runDaemon = (args: readonly string[]): void => {
 };
 
 // From-source runs (`bun packages/cli/daemon/src/main.ts`) still boot directly.
-if (import.meta.main) runDaemon(process.argv.slice(2));
+// Do not use `import.meta.main`: Bun's bytecode compiler emits it in the
+// compiled daemon module as a script, where `import.meta` is a syntax error.
+const isDaemonSourceEntry =
+  process.argv[1]
+    ?.replaceAll("\\", "/")
+    .endsWith("packages/cli/daemon/src/main.ts") === true;
+if (isDaemonSourceEntry) runDaemon(process.argv.slice(2));

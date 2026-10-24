@@ -103,7 +103,7 @@ export const handleDoctorLocal = async (
       return json(400, { error: "invalid" });
     }
     const result = await engine.flushDoctorReport({
-      dryRun: parsed.dry_run,
+      dryRun: parsed.dry_run ?? false,
       ...(parsed.reporter_cli_version !== undefined
         ? { reporterCliVersion: parsed.reporter_cli_version }
         : {}),

@@ -212,7 +212,7 @@ export const trustedChatgptBackendOriginOf = (
 };
 
 const ChatGptStreamEventSchema: Schema.Schema<TChatGptStreamEvent> =
-  Schema.Record({ key: Schema.String, value: Schema.Unknown });
+  Schema.Record(Schema.String, Schema.Unknown);
 
 export type TCodexCaptureRedirectArgs = {
   readonly chatgptBaseUrl: string;

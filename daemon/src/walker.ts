@@ -301,7 +301,7 @@ const wantsCodexPreamble = (provider: string): boolean =>
 // discrimination happens inside `chatGptEventToChunk`. Mirrors the core
 // spec's `Schema.Record(string, unknown)` validator.
 const ChatGptStreamEventSchema: Schema.Schema<TChatGptStreamEvent> =
-  Schema.Record({ key: Schema.String, value: Schema.Unknown });
+  Schema.Record(Schema.String, Schema.Unknown);
 
 export type TWalkArgs = {
   readonly req: Request;

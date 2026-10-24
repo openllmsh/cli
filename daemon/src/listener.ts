@@ -89,6 +89,19 @@ const parseAnthropicRequest = Schema.decodeUnknownSync(AnthropicRequest);
 const parseOpenAIRequest = Schema.decodeUnknownSync(ChatCompletionRequest);
 const parseImageRequest = Schema.decodeUnknownSync(ImageGenerationRequest);
 const parseImageInput = Schema.decodeUnknownSync(ImageGenerationInput);
+
+/**
+ * Validate the normalized image fields while retaining provider-specific
+ * extensions for the model-less forwarding path.
+ */
+const parseImageInputPreservingExtras = (input: unknown): unknown => {
+  const parsed = parseImageInput(input);
+  if (input === null || typeof input !== "object" || Array.isArray(input)) {
+    return parsed;
+  }
+  return { ...input, ...parsed };
+};
+
 const parseResponsesRequest = Schema.decodeUnknownSync(ResponsesRequest);
 const parseCountTokensRequest = Schema.decodeUnknownSync(
   AnthropicCountTokensRequest,
@@ -286,7 +299,7 @@ export const handleInference = async (req: Request): Promise<Response> => {
     } else if (isImages) {
       if (modelField.kind === "explicit") parseImageRequest(rawBody);
       else {
-        rawBody = parseImageInput(rawBody, { onExcessProperty: "preserve" });
+        rawBody = parseImageInputPreservingExtras(rawBody);
         normalizedJsonBody = true;
       }
     } else if (isImageEdits) {
