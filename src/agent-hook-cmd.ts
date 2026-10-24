@@ -21,7 +21,11 @@ import { DOCTOR_REPORT_CLI_CONSTANTS } from "./generated/doctor-report-cli";
 // The CLI command code never imports the protocol package; these mirror
 // `AGENT_HOOK_LOCAL_PATH` / `AGENT_HOOK_EVENTS` (parity-tested).
 export const AGENT_HOOK_PATH = "/local/agent-hook";
-export const AGENT_HOOK_EVENT_NAMES = ["PermissionRequest", "Stop"] as const;
+export const AGENT_HOOK_EVENT_NAMES = [
+  "PermissionRequest",
+  "Stop",
+  "SessionStart",
+] as const;
 
 /** Upper bound on one hook round trip (under the hook's own `timeout`). */
 export const AGENT_HOOK_FETCH_TIMEOUT_MS = 110_000;

@@ -693,9 +693,15 @@ const fanOut = (session: TSession, chunk: Uint8Array): void => {
     writeConsumer(session, consumer, chunk);
 };
 
-/** Fan out one out-direction chunk to every attached transport-neutral consumer. */
+/**
+ * Fan out one out-direction chunk to every connected consumer, observers
+ * included. An observer is not a VIEWER (it never counts for detach / idle
+ * reap), but the agent engine reads the paint for Claude's folder-trust
+ * dialog. Gating on `isAttached` sent a web-only session's observer nothing,
+ * so the dialog was never seen and the session sat on it.
+ */
 const sendOut = (session: TSession, chunk: Uint8Array): void => {
-  if (isAttached(session)) fanOut(session, chunk);
+  if (session.consumers.size > 0) fanOut(session, chunk);
 };
 
 /** Paint the current screen for a newly attached consumer: one serialize of the

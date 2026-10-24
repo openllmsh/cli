@@ -10,14 +10,21 @@
  *
  * The daemon drives it as a hidden OBSERVER consumer of the host's ctl.sock
  * (never a viewer: no resize, no primacy, never counts as attached for the
- * host's detach / idle reap):
+ * host's detach / idle reap). The PTY carries input; the screen is read for
+ * ONE thing only, Claude's folder-trust dialog (below). Content, readiness and
+ * turn state never come from the screen.
  *   - input: prompts are bracketed-pasted into the PTY then submitted with CR,
  *     exactly like a keystroke; interrupt is Esc; attachments are written to
  *     the host's 0700 session dir and referenced as `@<path>`;
  *   - output: structured items come from Claude's own transcript
  *     (`~/.claude/projects/<slug>/<id>.jsonl`, appended per message), tailed;
- *   - busy/idle + approvals: Claude hooks (`openllm exec agent hook`) post to
- *     the daemon loopback (`/local/agent-hook`, local control capability).
+ *   - readiness, busy/idle + approvals: Claude hooks (`openllm exec agent
+ *     hook`) post to the daemon loopback (`/local/agent-hook`, local control
+ *     capability). A freshly spawned TUI takes input only after its
+ *     `SessionStart` hook (plus a short settle); an attached, already-running
+ *     TUI is ready at once;
+ *   - folder trust: the one screen read. Claude asks before its first run in a
+ *     folder; the dialog becomes a web approval and the answer is typed back.
  *     A PermissionRequest waits for a web decision; with no viewer, or after
  *     {@link AGENT_APPROVAL_WAIT_MS}, it returns NO decision and Claude shows
  *     its native dialog in the terminal. A timeout never allows.
@@ -68,10 +75,20 @@ import type {
 export const AGENT_TOOL_OUTPUT_MAX_CHARS = 64 * 1024;
 /** How long a PermissionRequest waits for a web decision before the TUI asks. */
 export const AGENT_APPROVAL_WAIT_MS = 90_000;
-/** Max wait for the TUI to settle before the first paste. */
-const READY_MAX_MS = 10_000;
-/** Output-quiet window that marks the TUI ready for input. */
-const READY_QUIET_MS = 400;
+/**
+ * How long a fresh TUI may take to report `SessionStart` before the web is
+ * told it is waiting in the terminal. The queued prompt is NOT pasted then:
+ * an unanswered dialog would take the keystrokes.
+ */
+const READY_MAX_MS = 30_000;
+/** Settle after `SessionStart` before the first paste (the input box mounts). */
+const READY_SETTLE_MS = 300;
+/**
+ * Claude runs the Stop hook BEFORE the turn's last assistant line reaches the
+ * transcript. The transcript's own `end_turn` completes the turn; Stop only
+ * completes it if the transcript has not within this grace.
+ */
+const STOP_GRACE_MS = 3_000;
 /** Gap between the bracketed paste and the submitting CR. */
 const SUBMIT_DELAY_MS = 80;
 const TRANSCRIPT_POLL_MS = 250;
@@ -199,10 +216,18 @@ export { requestDetailOf, toolTitleOf };
 
 // ─── PTY link ────────────────────────────────────────────────────────────
 
-/** The daemon's observer connection to a session-host PTY. */
+/**
+ * The daemon's observer connection to a session-host PTY. Output is consumed
+ * only by the folder-trust detector.
+ */
 export type TPtyLink = {
   /** The session-host id (its Claude hooks report it as the session). */
   readonly hostId: string;
+  /**
+   * True when this link spawned the TUI (it still has to boot and report
+   * `SessionStart`); false when it joined one that is already running.
+   */
+  readonly fresh: boolean;
   readonly write: (bytes: Uint8Array) => void;
   /** End the session (kill the PTY). */
   readonly kill: () => void;
@@ -235,6 +260,7 @@ const OBSERVER_ROWS = 40;
 export const dialObserver = (
   socketPath: string,
   sessionId: string,
+  fresh: boolean,
 ): Promise<TPtyLink | null> =>
   new Promise((resolve) => {
     let ws: WebSocket;
@@ -260,6 +286,7 @@ export const dialObserver = (
     }, 5_000);
     const link: TPtyLink = {
       hostId: sessionId,
+      fresh,
       write: (bytes) => {
         if (ws.readyState === WebSocket.OPEN) ws.send(new Uint8Array(bytes));
       },
@@ -348,7 +375,7 @@ const defaultOpenPtyLink: TOpenPtyLink = async (request) => {
       (host.id === request.sessionId ||
         host.vendorSessionId === request.sessionId),
   );
-  if (live !== undefined) return dialObserver(live.socketPath, live.id);
+  if (live !== undefined) return dialObserver(live.socketPath, live.id, false);
   const socketPath = await defaultSessionHostClient.spawnSessionHostProc({
     id: request.sessionId,
     cli: "claude_code",
@@ -364,7 +391,7 @@ const defaultOpenPtyLink: TOpenPtyLink = async (request) => {
   });
   return socketPath === null
     ? null
-    : dialObserver(socketPath, request.sessionId);
+    : dialObserver(socketPath, request.sessionId, true);
 };
 
 // ─── hooks → sessions ──────────────────────────────────────────────────────
@@ -688,8 +715,23 @@ const ANSI = new RegExp(
   `${ESC}\\[[0-9;?]*[ -/]*[@-~]|${ESC}\\][^\u0007]*\u0007|${ESC}[()][A-Za-z0-9]`,
   "g",
 );
-const TRUST_PROMPT =
-  /trust\s*the\s*files\s*in\s*this\s*folder|Do\s*you\s*trust/i;
+/**
+ * Claude's folder-trust dialog, matched with whitespace removed: the TUI lays
+ * words out with cursor moves, so after ANSI stripping "Yes, I trust this
+ * folder" can arrive as "Yes,Itrustthisfolder". Covers the current wording
+ * and the older "Do you trust the files in this folder?".
+ */
+const TRUST_PROMPT = /trustthefilesinthisfolder|doyoutrust|itrustthisfolder/i;
+/** Newer Claude lists "No, exit" first, with the cursor on it. */
+const TRUST_CURSOR_ON_NO = /❯(?:\d+\.)?No\b/;
+const DOWN_ARROW = "\x1b[B";
+/**
+ * The dialog takes keys only once its input handler is mounted, a beat after
+ * the text paints. An instant web answer typed earlier is lost (measured:
+ * keys sent with no delay left the dialog up), so answer no sooner than this
+ * after detection.
+ */
+const TRUST_ANSWER_MIN_DELAY_MS = 500;
 
 type TPending =
   | {
@@ -710,9 +752,11 @@ export type TClaudeTuiDeps = {
   readonly transcript?: (sessionId: string) => TClaudeTranscriptTail;
   readonly approvalWaitMs?: number;
   readonly readyMaxMs?: number;
-  readonly readyQuietMs?: number;
+  readonly readySettleMs?: number;
   readonly submitDelayMs?: number;
   readonly pollMs?: number;
+  readonly stopGraceMs?: number;
+  readonly trustAnswerDelayMs?: number;
   readonly attachmentsDir?: (sessionId: string) => string;
 };
 
@@ -735,13 +779,20 @@ export const createClaudeTuiSession = (
   let link: TPtyLink | null = null;
   let ended = false;
   let ready = false;
+  /** Claude reported `SessionStart` (or any hook): the TUI is up. */
+  let started = false;
   let readyTimer: ReturnType<typeof setTimeout> | undefined;
+  let readyMaxTimer: ReturnType<typeof setTimeout> | undefined;
   let pollTimer: ReturnType<typeof setInterval> | undefined;
+  let stopTimer: ReturnType<typeof setTimeout> | undefined;
   const queued: (() => void)[] = [];
-  let recentOutput = "";
   let requestCounter = 0;
   const pending = new Map<string, TPending>();
   let trustRequestId: string | null = null;
+  let trustAnswered = false;
+  let trustSeenAt = 0;
+  /** Whitespace-free, ANSI-stripped recent screen text (trust detection only). */
+  let recentScreen = "";
 
   const parser = createTranscriptParser({
     emit,
@@ -764,7 +815,9 @@ export const createClaudeTuiSession = (
     ended = true;
     for (const key of hookKeys) hookHandlers.delete(key);
     if (readyTimer !== undefined) clearTimeout(readyTimer);
+    if (readyMaxTimer !== undefined) clearTimeout(readyMaxTimer);
     if (pollTimer !== undefined) clearInterval(pollTimer);
+    if (stopTimer !== undefined) clearTimeout(stopTimer);
     try {
       pump();
     } catch {}
@@ -788,14 +841,23 @@ export const createClaudeTuiSession = (
   const markReady = (): void => {
     if (ready || ended || trustRequestId !== null) return;
     ready = true;
-    if (readyTimer !== undefined) clearTimeout(readyTimer);
+    if (readyMaxTimer !== undefined) clearTimeout(readyMaxTimer);
     for (const run of queued.splice(0)) run();
   };
 
-  const armReady = (): void => {
-    if (ready) return;
-    if (readyTimer !== undefined) clearTimeout(readyTimer);
-    readyTimer = setTimeout(markReady, deps.readyQuietMs ?? READY_QUIET_MS);
+  /**
+   * Input opens once the link exists AND the TUI is up: an attached TUI is
+   * already running; a fresh one has to report `SessionStart` first, then
+   * settle for a beat while its input box mounts.
+   */
+  const maybeReady = (): void => {
+    if (ready || ended || link === null || readyTimer !== undefined) return;
+    if (!link.fresh) {
+      markReady();
+      return;
+    }
+    if (!started) return;
+    readyTimer = setTimeout(markReady, deps.readySettleMs ?? READY_SETTLE_MS);
   };
 
   const whenReady = (run: () => void): void => {
@@ -807,33 +869,55 @@ export const createClaudeTuiSession = (
     link?.write(textEncoder.encode(text));
   };
 
-  const onOutput = (bytes: Uint8Array): void => {
-    armReady();
-    recentOutput = (
-      recentOutput + new TextDecoder().decode(bytes).replace(ANSI, "")
-    ).slice(-4096);
-    if (trustRequestId === null && TRUST_PROMPT.test(recentOutput)) {
-      requestCounter += 1;
-      trustRequestId = `trust${requestCounter}`;
-      recentOutput = "";
-      ready = false; // hold queued prompts until the dialog is answered
-      pending.set(trustRequestId, { kind: "trust" });
-      emit({
-        type: "request.opened",
-        request_id: trustRequestId,
-        request_kind: "other",
-        title: "Trust this folder?",
-        detail: `Claude Code asks whether to trust the files in ${clip(options.cwd, 1024)}.`,
-      });
-    }
-  };
-
   // Hooks from this session's Claude process (keyed by its host id).
   const hookKeys = new Set<string>([options.sessionId]);
+  // The ONE screen read: Claude's folder-trust dialog. Input stays held (it is
+  // asked before SessionStart) until the web answers it.
+  const onOutput = (bytes: Uint8Array): void => {
+    if (trustAnswered || ended) return;
+    recentScreen = (
+      recentScreen +
+      new TextDecoder().decode(bytes).replace(ANSI, "").replace(/\s+/g, "")
+    ).slice(-4096);
+    if (trustRequestId !== null || !TRUST_PROMPT.test(recentScreen)) return;
+    requestCounter += 1;
+    trustRequestId = `trust${requestCounter}`;
+    trustSeenAt = Date.now();
+    pending.set(trustRequestId, { kind: "trust" });
+    emit({
+      type: "request.opened",
+      request_id: trustRequestId,
+      request_kind: "other",
+      title: "Trust this folder?",
+      detail: `Claude Code asks whether to trust the files in ${clip(options.cwd, 1024)}.`,
+    });
+  };
+
   const onHook: THookHandler = async (event, payload) => {
     pump();
+    // Any hook means Claude's session is running past its startup dialogs.
+    if (!started) {
+      started = true;
+      maybeReady();
+    }
+    if (event === "SessionStart") return null;
     if (event === "Stop") {
-      parser.completeTurn();
+      // Never block the hook (Claude flushes the transcript after it): the
+      // tail keeps polling, and the transcript's end_turn normally lands the
+      // final item and completes the turn. Stop is the fallback.
+      if (parser.turnActive() && stopTimer === undefined) {
+        stopTimer = setTimeout(() => {
+          stopTimer = undefined;
+          if (ended) return;
+          try {
+            pump();
+          } catch (err) {
+            logError("agent", err);
+          }
+          parser.completeTurn();
+        }, deps.stopGraceMs ?? STOP_GRACE_MS);
+        stopTimer.unref?.();
+      }
       return null;
     }
     if (event !== "PermissionRequest") return null;
@@ -924,9 +1008,22 @@ export const createClaudeTuiSession = (
       hookHandlers.set(opened.hostId, onHook);
       opened.onOutput(onOutput);
       opened.onExit(() => finish("completed"));
-      // An already-running TUI (re-attach) may be idle and silent.
-      readyTimer = setTimeout(markReady, deps.readyMaxMs ?? READY_MAX_MS);
-      armReady();
+      maybeReady();
+      if (!ready && readyTimer === undefined) {
+        readyMaxTimer = setTimeout(() => {
+          if (ready || ended || started) return;
+          // Never paste blind: a dialog would take the keystrokes. Say where
+          // the session is waiting; SessionStart still opens input later.
+          emit({
+            type: "runtime.error",
+            code: "engine_not_ready",
+            message:
+              "Claude Code is waiting for input in its terminal (sign-in or a dialog). Answer it with `openllm sessions attach` on the device; your prompt is sent once it is ready.",
+            fatal: false,
+          });
+        }, deps.readyMaxMs ?? READY_MAX_MS);
+        readyMaxTimer.unref?.();
+      }
       pollTimer = setInterval(() => {
         try {
           pump();
@@ -997,17 +1094,43 @@ export const createClaudeTuiSession = (
       pending.delete(command.request_id);
       if (request.kind === "trust") {
         trustRequestId = null;
+        trustAnswered = true;
         const accept =
           command.decision === "accept" ||
           command.decision === "accept_for_session";
-        // Option 1 is "Yes, proceed"; Esc declines (and Claude exits).
-        writeText(accept ? "\r" : ESC);
-        armReady();
+        // Esc declines (Claude exits). Accept confirms "Yes": older Claude
+        // lists it first (cursor on it); newer Claude lists "No, exit" first,
+        // so step down onto "Yes" before Enter.
+        const keys = !accept
+          ? [ESC]
+          : TRUST_CURSOR_ON_NO.test(recentScreen)
+            ? [DOWN_ARROW, "\r"]
+            : ["\r"];
+        recentScreen = "";
+        const typeKeys = (): void => {
+          if (ended) return;
+          writeText(keys[0] ?? "");
+          if (keys[1] !== undefined) {
+            const second = keys[1];
+            setTimeout(() => {
+              if (!ended) writeText(second);
+            }, submitDelayMs);
+          }
+        };
+        const wait = Math.max(
+          0,
+          trustSeenAt +
+            (deps.trustAnswerDelayMs ?? TRUST_ANSWER_MIN_DELAY_MS) -
+            Date.now(),
+        );
+        if (wait === 0) typeKeys();
+        else setTimeout(typeKeys, wait);
         emit({
           type: "request.resolved",
           request_id: command.request_id,
           decision: accept ? "accept" : "decline",
         });
+        maybeReady();
         return true;
       }
       if (request.kind === "user-input") {
