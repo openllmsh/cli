@@ -20,7 +20,11 @@ import type {
   TAgentEvent,
   TAgentItem,
 } from "@openllmsh/protocol";
-import { AGENT_SESSION_ID_PATTERN, encodeAgentLine } from "@openllmsh/protocol";
+import {
+  AGENT_SESSION_ID_PATTERN,
+  encodeAgentLine,
+  SESSION_ID_PATTERN,
+} from "@openllmsh/protocol";
 import { logError, logInfo } from "../logger";
 import {
   AGENT_TOOL_OUTPUT_MAX_CHARS,
@@ -432,8 +436,28 @@ export const createAgentDispatcher = (
               );
               return;
             }
+            const requestedId = command.session_id;
+            if (requestedId !== undefined) {
+              // The consumer names the session (its own record id). A host
+              // or Claude session pinned to it must be NEW: an id already in
+              // use would join or fork someone else's conversation.
+              const existing = sessions.get(requestedId);
+              if (
+                !SESSION_ID_PATTERN.test(requestedId) ||
+                (existing !== undefined && !existing.exited)
+              ) {
+                error(
+                  state,
+                  null,
+                  "invalid_session",
+                  "That session id cannot start a new session.",
+                  commandId,
+                );
+                return;
+              }
+            }
             bound = startSession({
-              id: crypto.randomUUID(),
+              id: requestedId ?? crypto.randomUUID(),
               engine: command.engine,
               resume: false,
               ...(command.model === undefined ? {} : { model: command.model }),
