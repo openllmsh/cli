@@ -852,6 +852,7 @@ export const createClaudeCodeSession = (
         type: "turn.started",
         turn_id: turn.id,
         ...(options.model === undefined ? {} : { model: options.model }),
+        ...(input.prompt.trim() === "" ? {} : { prompt: input.prompt }),
       });
       if (content.skipped.length > 0)
         emit({
@@ -990,6 +991,8 @@ export type TClaudeCodeAdapterOptions = {
   readonly spawn?: TAgentEngineSpawn;
   /** Override the `openllm` CLI lookup (tests). */
   readonly resolveCli?: () => string | null;
+  /** Override the resumed-session history reader (tests). */
+  readonly readHistory?: (sessionId: string) => readonly TAgentEvent[];
   /** Override the child env (tests). */
   readonly env?: (options: TAgentEngineStartOptions) => Record<string, string>;
 };
@@ -1005,6 +1008,9 @@ const defaultEngineEnv = (
   mergeSpawnEnv(process.env, {
     ...sessionEnv(),
     OPENLLM_DEVICE_SESSION_ID: options.sessionId,
+    // live.json marks the run as a headless agent session (listed + resumable,
+    // never offered for PTY attach). Literal = the CLI's AGENT_SESSION_ENV.
+    OPENLLM_AGENT_SESSION: "1",
     ...(options.title === undefined || options.title.length === 0
       ? {}
       : { OPENLLM_DEVICE_TITLE: options.title.slice(0, 80) }),
@@ -1023,6 +1029,13 @@ export const createClaudeCodeAdapter = (
         "cli_missing",
         "The OpenLLM CLI is not installed on this device.",
       );
+    // Resumed (engine had exited): replay Claude's own transcript first so a
+    // re-opened session shows its earlier turns.
+    if (options.resume)
+      for (const event of (
+        adapterOptions.readHistory ?? readClaudeTranscriptEvents
+      )(options.sessionId))
+        emit(event);
     let child: TAgentEngineProcess;
     try {
       child = (adapterOptions.spawn ?? spawnAgentEngineProcess)({
