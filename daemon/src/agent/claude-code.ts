@@ -428,13 +428,22 @@ export const findClaudeSessionHost = <
   hosts: readonly THost[],
   sessionId: string,
   readLiveId: (pid: number) => string | null = readClaudeSessionIdUnderPid,
-): THost | undefined =>
-  hosts.find(
-    (host) =>
-      host.cli === "claude_code" &&
-      (host.id === sessionId || host.vendorSessionId === sessionId),
-  ) ??
-  hosts.find((host) => isClaudeSessionHostFor(host, sessionId, readLiveId));
+): THost | undefined => {
+  const claude = hosts.filter((host) => host.cli === "claude_code");
+  // 1. The host's own id is authoritative.
+  const byHostId = claude.find((host) => host.id === sessionId);
+  if (byHostId !== undefined) return byHostId;
+  // 2. A stored vendor id counts only while the TUI is still on it: after a
+  //    `/resume` or `/clear` the live id moves on and the stored one is stale.
+  const byVendor = claude.find((host) => {
+    if (host.vendorSessionId !== sessionId) return false;
+    const live = readLiveId(host.pid);
+    return live === null || live === sessionId;
+  });
+  if (byVendor !== undefined) return byVendor;
+  // 3. Otherwise, whichever host's TUI is on this id right now.
+  return claude.find((host) => readLiveId(host.pid) === sessionId);
+};
 
 /** Production link: join the live host for this id, else spawn one. */
 const defaultOpenPtyLink: TOpenPtyLink = async (request) => {
