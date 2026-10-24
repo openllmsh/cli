@@ -72,6 +72,19 @@ export type TAgentEngineSession = {
    * Emits `session.exited{closed}`. Absent → {@link close} is used.
    */
   readonly release?: () => void;
+  /**
+   * Older history from the engine's own record: the whole turns strictly
+   * before `beforeTurnId`, newest `limit` of them. Absent, or null for a turn
+   * it does not know → the dispatcher pages its in-memory log instead.
+   */
+  readonly history?: (
+    beforeTurnId: string,
+    limit: number,
+  ) => {
+    readonly events: readonly TAgentEvent[];
+    readonly firstTurnId: string | null;
+    readonly hasMore: boolean;
+  } | null;
 };
 
 export type TAgentEngineAdapter = {

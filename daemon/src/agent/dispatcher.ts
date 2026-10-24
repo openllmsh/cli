@@ -31,6 +31,14 @@ import {
   chunkAgentAttachment,
   resolveAgentAttachment,
 } from "./claude-code";
+import {
+  AGENT_HISTORY_DEFAULT_TURNS,
+  boundHistoryPage,
+  historyCursorOf,
+  latestReplayWindow,
+  logHistoryPage,
+  turnIdOfCursor,
+} from "./history-window";
 import type {
   TAgentConnection,
   TAgentConsumer,
@@ -110,6 +118,7 @@ const clip = (text: string, max: number): string =>
 
 /** Shrink an event's bulky fields so it fits one NDJSON line. */
 const shrinkItem = (item: TAgentItem): TAgentItem => {
+  if (item.kind === "notice") return item;
   if (item.kind !== "tool_call")
     return { ...item, text: clip(item.text, 512 * 1024) };
   const { input: _input, ...rest } = item;
@@ -265,7 +274,8 @@ export const createAgentDispatcher = (
       at: now(),
       ...(id === undefined ? {} : { command_id: id }),
     };
-    session.log.push(stamped);
+    // A history marker is per-consumer framing, never part of the replay.
+    if (event.type !== "history.page") session.log.push(stamped);
     if (session.log.length > AGENT_REPLAY_LOG_EVENTS)
       session.log.splice(0, session.log.length - AGENT_REPLAY_LOG_EVENTS);
     for (const state of session.consumers) deliver(session, state, stamped);
@@ -518,8 +528,21 @@ export const createAgentDispatcher = (
               bound = live;
               if (live.idleTimer !== undefined) clearTimeout(live.idleTimer);
               live.idleTimer = undefined;
-              for (const event of replayOf(live.log))
-                deliver(live, state, event);
+              // The latest window only; older turns page in on demand.
+              const window = latestReplayWindow(replayOf(live.log));
+              reply(
+                state,
+                live,
+                {
+                  type: "history.page",
+                  has_more: window.hasMore,
+                  ...(window.firstTurnId === null
+                    ? {}
+                    : { before_cursor: historyCursorOf(window.firstTurnId) }),
+                },
+                commandId,
+              );
+              for (const event of window.events) deliver(live, state, event);
               live.consumers.add(state);
               void state.chain.then(() => {
                 if (!state.gone) consumer.replayDone();
@@ -712,6 +735,66 @@ export const createAgentDispatcher = (
                   );
                 },
               );
+            return;
+          }
+          case "history_get": {
+            const session = bound;
+            if (session === null) {
+              error(
+                state,
+                null,
+                "no_session",
+                "Start or attach a session first.",
+                commandId,
+              );
+              return;
+            }
+            const beforeTurnId = turnIdOfCursor(command.before);
+            if (beforeTurnId === null) {
+              error(
+                state,
+                session,
+                "invalid_cursor",
+                "Unrecognized history cursor.",
+                commandId,
+              );
+              return;
+            }
+            const limit = command.limit ?? AGENT_HISTORY_DEFAULT_TURNS;
+            const page =
+              session.engineSession?.history?.(beforeTurnId, limit) ??
+              logHistoryPage(session.log, beforeTurnId, limit);
+            if (page === null) {
+              // Nothing older is known for that cursor: the start.
+              reply(
+                state,
+                session,
+                { type: "history.page", has_more: false, events: [] },
+                commandId,
+              );
+              return;
+            }
+            const bounded = boundHistoryPage({
+              events: [...page.events],
+              firstTurnId: page.firstTurnId,
+              hasMore: page.hasMore,
+            });
+            reply(
+              state,
+              session,
+              {
+                type: "history.page",
+                has_more: bounded.hasMore,
+                ...(bounded.firstTurnId === null
+                  ? {}
+                  : { before_cursor: historyCursorOf(bounded.firstTurnId) }),
+                events: bounded.events.map((event) => ({
+                  ...fitAgentEvent(event),
+                  session_id: session.id,
+                })),
+              },
+              commandId,
+            );
             return;
           }
           case "attachment_get": {

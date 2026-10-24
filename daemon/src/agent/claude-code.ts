@@ -59,12 +59,20 @@ import { stateDir } from "../env";
 import { readClaudeSessionIdUnderPid } from "../local-sessions/claude";
 import { logError } from "../logger";
 import { defaultSessionHostClient } from "../session-host-proc";
+import { createClaudeHistory } from "./claude-history";
+import {
+  createSubagentFollower,
+  subagentDirOf,
+  subagentEvents,
+} from "./claude-subagents";
 import type { TClaudeTranscriptTail } from "./claude-transcript";
 import {
   createClaudeTranscriptTail,
   createTranscriptParser,
   findClaudeTranscript,
+  SUBAGENT_TOOL_NAMES,
 } from "./claude-transcript";
+import { historyCursorOf, latestReplayWindow } from "./history-window";
 import type {
   TAgentEngineAdapter,
   TAgentEngineEmit,
@@ -987,6 +995,62 @@ export const createClaudeTuiSession = (
     }, deps.modelConfirmMs ?? MODEL_CONFIRM_MS);
   };
 
+  const transcriptPath = (): string | null => tail.path?.() ?? null;
+  /** Subagents (Task / Agent calls) followed live, nested under their call. */
+  const subagents = createSubagentFollower({
+    transcriptPath,
+    emit: (event) => {
+      if (drained !== null) drained.push(event);
+      else emit(event);
+    },
+    toolOutputMax: AGENT_TOOL_OUTPUT_MAX_CHARS,
+  });
+  const history = createClaudeHistory({
+    path: transcriptPath,
+    toolOutputMax: AGENT_TOOL_OUTPUT_MAX_CHARS,
+  });
+  /**
+   * The first drain of a resumed / attached session is its replay: windowed,
+   * behind a history cursor. A new session has no history to page.
+   */
+  let replayed = !options.resume;
+
+  /** Subagent calls of a drain: snapshot each, follow the unfinished ones. */
+  const withSubagents = (events: readonly TAgentEvent[]): TAgentEvent[] => {
+    const path = transcriptPath();
+    const out: TAgentEvent[] = [];
+    for (const event of events) {
+      out.push(event);
+      if (
+        event.type !== "item.started" ||
+        event.item.kind !== "tool_call" ||
+        event.parent_item_id !== undefined ||
+        !SUBAGENT_TOOL_NAMES.has(event.item.tool_name)
+      )
+        continue;
+      if (path === null) {
+        subagents.track(event.item_id, event.turn_id);
+        continue;
+      }
+      const snapshot = subagentEvents({
+        dir: subagentDirOf(path),
+        toolUseId: event.item_id,
+        turnId: event.turn_id,
+        toolOutputMax: AGENT_TOOL_OUTPUT_MAX_CHARS,
+      });
+      out.push(...snapshot.events);
+      if (!snapshot.finished)
+        subagents.track(
+          event.item_id,
+          event.turn_id,
+          snapshot.file === null
+            ? undefined
+            : { file: snapshot.file, offset: snapshot.readTo },
+        );
+    }
+    return out;
+  };
+
   /** Read everything the transcript has now (history on attach, then appends). */
   const pump = (): void => {
     drained = [];
@@ -996,10 +1060,30 @@ export const createClaudeTuiSession = (
         if (text === null || text.length === 0) break;
         parser.push(text);
       }
+      subagents.pump();
     } finally {
       const events = drained;
       drained = null;
-      for (const event of replayWindow(events)) emit(event);
+      if (!replayed && events.length > 0) {
+        // Attach / resume: only the latest window, then the cursor before it
+        // (`history_get` pages the rest from the transcript index).
+        replayed = true;
+        const window = latestReplayWindow(events);
+        const kept = new Set<string>();
+        for (const event of window.events)
+          if (event.type === "item.started") kept.add(event.item_id);
+        subagents.retain(kept);
+        emit({
+          type: "history.page",
+          has_more: window.hasMore,
+          ...(window.firstTurnId === null
+            ? {}
+            : { before_cursor: historyCursorOf(window.firstTurnId) }),
+        });
+        for (const event of withSubagents(window.events)) emit(event);
+      } else {
+        for (const event of withSubagents(replayWindow(events))) emit(event);
+      }
     }
     applyModel();
   };
@@ -1394,6 +1478,7 @@ export const createClaudeTuiSession = (
       return true;
     },
     turnActive: () => parser.turnActive(),
+    history: (beforeTurnId, limit) => history.page(beforeTurnId, limit),
     setModel: (model) => {
       if (ended)
         return {
