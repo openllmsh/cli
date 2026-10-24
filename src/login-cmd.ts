@@ -16,15 +16,14 @@
  * through this command (`--start --json`, key on stdin), and `--json` reports
  * the outcome on stdout for callers that parse it.
  *
- * A key copied with Manage device → Enable device sessions carries a device
- * trust anchor after it (`sk-llm-<key>.<anchor>`). Login splits it on the last
- * dot: the anchored key goes to `openllm daemon anchor` over stdin, which
- * writes `OPENLLM_API_KEY=<bare>` and `OPENLLM_DEVICE_ANCHOR=<anchor>` to the
+ * A key copied with Device sessions on carries a device trust anchor after
+ * it (`sk-llm-<key>.<anchor>`). Login splits it on the last dot: the anchored
+ * key goes to `openllm daemon anchor` over stdin, which writes
+ * `OPENLLM_API_KEY=<bare>` and `OPENLLM_DEVICE_ANCHOR=<anchor>` to the
  * runtime's env file (the daemon derives its pin from that line, never
  * trust-on-first-use). ONLY the bare `sk-llm-<key>` is exported or ever used
- * as a bearer; the anchor never enters process.env. The anchor is the
- * sessions opt-in — an anchored device serves agent sessions by default
- * until someone explicitly turns them off.
+ * as a bearer; the anchor never enters process.env. Sessions on == the
+ * anchor is present; disable blanks that line.
  */
 
 import { daemonPort, daemonReachable } from "./clients/gateway";
@@ -41,11 +40,11 @@ With no key argument, the key is read from piped stdin, or prompted for
 (hidden) on an interactive terminal. A running daemon is restarted to pick
 it up. Get a key under Keys after signing in.
 
-A key from Manage device with Enable device sessions ends in a device
-trust anchor (sk-llm-KEY.ANCHOR). It is kept on this machine only, as
-a separate line of the env file; the bare key is the bearer. Anchoring
-is the sessions opt-in — agent sessions stay on until someone turns them
-off (Manage device, or openllm daemon device disable).
+A key copied with Device sessions on ends in a device trust anchor
+(sk-llm-KEY.ANCHOR). It is kept on this machine only, as a separate
+line of the env file; the bare key is the bearer. Sessions on == the
+anchor is present; disable blanks it (Manage device, or
+openllm daemon device disable).
 
   --start              also start the daemon when it isn't running
   --json               print {"saved":true,"daemon":"restarted"|"started"|

@@ -71,40 +71,6 @@ export type TDeviceAccessPinVia = "anchor" | "tofu" | "local" | "rotation";
 const isPinVia = (v: unknown): v is TDeviceAccessPinVia =>
   v === "anchor" || v === "tofu" || v === "local" || v === "rotation";
 
-/**
- * Remote device (agent) sessions — the only device-trust state kept here (the
- * install anchor itself lives in the runtime env file as
- * `OPENLLM_DEVICE_ANCHOR`, never in this file). The anchor is the opt-in: an
- * absent switch means enabled. Disabled only when someone explicitly turned
- * sessions off (local `openllm daemon device disable` or a signed remote
- * disable). `lastCommandTs` is the newest accepted signed command — an older
- * or equal one is a replay. A legacy `locked` field in on-disk state is
- * ignored.
- */
-export type TDeviceSessionsState = {
-  readonly enabled: boolean;
-  readonly lastCommandTs?: number;
-};
-
-const coerceDeviceSessions = (v: unknown): TDeviceSessionsState | undefined => {
-  if (typeof v !== "object" || v === null) return undefined;
-  const raw = v as {
-    enabled?: unknown;
-    lastCommandTs?: unknown;
-  };
-  if (typeof raw.enabled !== "boolean") {
-    return undefined;
-  }
-  return {
-    enabled: raw.enabled,
-    ...(typeof raw.lastCommandTs === "number" &&
-    Number.isInteger(raw.lastCommandTs) &&
-    raw.lastCommandTs > 0
-      ? { lastCommandTs: raw.lastCommandTs }
-      : {}),
-  };
-};
-
 export type TDaemonState = {
   readonly updateAttempts: {
     readonly daemon?: TUpdateAttempt;
@@ -142,8 +108,6 @@ export type TDaemonState = {
    * agent sessions (`device_not_anchored` otherwise).
    */
   readonly deviceAccessPinAnchored?: true;
-  /** Remote device-sessions switch; absent = enabled (anchor is the opt-in). */
-  readonly deviceSessions?: TDeviceSessionsState;
   /** RTC native-crash breaker: this run's liveness sentinel (see {@link TRtcRun}). */
   readonly rtcRun?: TRtcRun | null;
   /** Timestamps of detected native crashes while RTC was live (bounded window). */
@@ -200,7 +164,6 @@ const coerceState = (v: unknown): TDaemonState => {
     deviceAccessPinVersion?: unknown;
     deviceAccessPinVia?: unknown;
     deviceAccessPinAnchored?: unknown;
-    deviceSessions?: unknown;
     rtcRun?: unknown;
     rtcCrashes?: unknown;
     rtcCrashesVersion?: unknown;
@@ -244,7 +207,6 @@ const coerceState = (v: unknown): TDaemonState => {
             : {}),
         }
       : {};
-  const deviceSessions = coerceDeviceSessions(raw.deviceSessions);
   const rtcCrashes = numberList(raw.rtcCrashes);
   const rtcCrashesVersion =
     typeof raw.rtcCrashesVersion === "string" &&
@@ -260,7 +222,6 @@ const coerceState = (v: unknown): TDaemonState => {
     bootHistory: numberList(raw.bootHistory),
     ...(pubkey !== undefined ? { deviceAccessPubkey: pubkey } : {}),
     ...pinMeta,
-    ...(deviceSessions !== undefined ? { deviceSessions } : {}),
     ...(isRtcRun(raw.rtcRun) ? { rtcRun: raw.rtcRun } : {}),
     ...(rtcCrashes.length > 0 ? { rtcCrashes } : {}),
     ...(rtcCrashesVersion !== undefined ? { rtcCrashesVersion } : {}),

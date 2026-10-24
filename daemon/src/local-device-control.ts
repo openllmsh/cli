@@ -6,20 +6,21 @@
  *   key without trusting the cloud's copy.
  * - `POST /local/device-control` — pin the account device-control public key
  *   as a LOCAL confirmation (`via: "local"`, an anchored pin, never TOFU).
- * - `POST /local/device-anchor` — accept the install-time trust anchor for the
- *   key this daemon runs on (the desktop app's Device sessions toggle). Written
- *   by the same writer as `openllm daemon anchor` ({@link installDeviceAnchor}).
- *   The anchor is the sessions opt-in; the endpoint also persists `enabled:
- *   true` so a prior explicit disable is cleared by the toggle. The anchor is
+ * - `POST /local/device-anchor` — install (`{ key_id, anchor }`) or remove
+ *   (`{ key_id, remove: true }`) the install-time trust anchor for the key
+ *   this daemon runs on (the desktop app's Device sessions toggle). Written
+ *   by the same writer as `openllm daemon anchor` /
+ *   {@link removeDeviceAnchor}. Sessions on == anchor present. The anchor is
  *   never logged.
  *
- * Both use the `/local/agent` admission: loopback peer + loopback Host, an
+ * All use the `/local/agent` admission: loopback peer + loopback Host, an
  * allowed Origin (Tauri / OpenLLM deployment / none), and this boot's local
  * control capability. A remote page can neither read nor pin.
  */
 import type {
   TDeviceAccessPinReport,
   TLocalDeviceAnchorRefusal,
+  TLocalDeviceAnchorRequest,
   TLocalDeviceAnchorResponse,
   TLocalDeviceControlRequest,
   TLocalIdentityResponse,
@@ -42,7 +43,11 @@ import {
   isEd25519SpkiB64,
   setDeviceAccessPubkey,
 } from "./device-access-verify";
-import { deviceSessionsReport, installDeviceAnchor } from "./device-anchor";
+import {
+  deviceSessionsReport,
+  installDeviceAnchor,
+  removeDeviceAnchor,
+} from "./device-anchor";
 import { daemonEnv, parseApiKeyId } from "./env";
 import { daemonPublicKey } from "./keypair";
 
@@ -132,10 +137,9 @@ const anchorRefusal = (
 };
 
 /**
- * `POST /local/device-anchor`. Binds the anchor to the key this daemon runs
- * on: the caller names the key id it derived the anchor for, and anything
- * else is refused (a pair secret for another key would yield a dpk proof the
- * browser rejects). Nothing here logs — the body holds the pair secret.
+ * `POST /local/device-anchor`. Install binds the anchor to the key this daemon
+ * runs on; remove blanks `OPENLLM_DEVICE_ANCHOR`. Nothing here logs — the
+ * install body holds the pair secret.
  */
 const anchorResponse = async (req: Request): Promise<Response> => {
   const declared = Number(req.headers.get("content-length") ?? "0");
@@ -154,16 +158,24 @@ const anchorResponse = async (req: Request): Promise<Response> => {
   }
   const decoded = decodeAnchorRequest(raw);
   if (decoded._tag === "Left") return anchorRefusal(400, "invalid_body");
-  const { key_id: keyId, anchor } = decoded.right;
-  if (!isOpenllmDeviceAnchorSyntax(anchor)) {
-    return anchorRefusal(400, "malformed_anchor");
-  }
+  const input: TLocalDeviceAnchorRequest = decoded.right;
   const key = daemonEnv().apiKey;
-  if (key === null || parseApiKeyId(key) !== keyId) {
+  if (key === null || parseApiKeyId(key) !== input.key_id) {
     return anchorRefusal(409, "key_id_mismatch");
   }
-  // The same writer as `openllm daemon anchor`: env file + derived pin.
-  const result = installDeviceAnchor(`${key}.${anchor}`);
+  if ("remove" in input) {
+    const removed = removeDeviceAnchor();
+    if (!removed.ok) return anchorRefusal(500, "persist_failed");
+    const body: TLocalDeviceAnchorResponse = {
+      ok: true,
+      device_sessions: deviceSessionsReport(),
+    };
+    return json(200, body);
+  }
+  if (!isOpenllmDeviceAnchorSyntax(input.anchor)) {
+    return anchorRefusal(400, "malformed_anchor");
+  }
+  const result = installDeviceAnchor(`${key}.${input.anchor}`);
   if (!result.ok) {
     return anchorRefusal(
       result.reason === "persist_failed" ? 500 : 400,
@@ -172,7 +184,6 @@ const anchorResponse = async (req: Request): Promise<Response> => {
         : "malformed_anchor",
     );
   }
-  // `installDeviceAnchor` already clears a persisted disable.
   const body: TLocalDeviceAnchorResponse = {
     ok: true,
     device_sessions: deviceSessionsReport(),

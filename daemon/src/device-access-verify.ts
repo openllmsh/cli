@@ -26,10 +26,11 @@
  * The cloud can only ever produce an UNANCHORED pin: an unpinned daemon still
  * trust-on-first-use pins bootstrap's key (`via: "tofu"`), which serves `/v1`,
  * tunnel and realtime (RTC grant checks) and nothing else. Agent streams
- * (`requireDpk`) refuse an unanchored or legacy pin with `device_not_anchored`
- * and a disabled device-sessions switch with `device_sessions_disabled`. A
- * legacy (DEK-derived) pin is never upgraded by the cloud, and an established
- * pin never moves except along a signed rotation chain or a local root.
+ * (`requireDpk`) refuse an unanchored or legacy pin with
+ * `device_not_anchored`. Sessions on == the install/loopback anchor is
+ * present; there is no separate enabled flag. A legacy (DEK-derived) pin is
+ * never upgraded by the cloud, and an established pin never moves except
+ * along a signed rotation chain or a local root.
  */
 import { createHash, createPublicKey, verify as nodeVerify } from "node:crypto";
 import {
@@ -186,12 +187,6 @@ export type TDeviceAccessVerifyDeps = {
    */
   readonly ownPublicKey?: () => string;
   /**
-   * Whether remote device (agent) sessions are switched on. Defaults to the
-   * persisted switch (`state.json` `deviceSessions`, read fresh so a local
-   * `openllm device enable|disable` reaches a running daemon).
-   */
-  readonly deviceSessionsEnabled?: () => boolean;
-  /**
    * The control pubkey of the install anchor, or null when there is none.
    * Defaults to {@link envAnchorControlPubkey} (the runtime env file's
    * `OPENLLM_DEVICE_ANCHOR`).
@@ -233,13 +228,6 @@ export type TDeviceAccessVerify = {
   /** Drop the in-memory pin so the next read re-hydrates from disk. */
   readonly invalidatePin: () => void;
 };
-
-/**
- * The persisted remote device-sessions switch. Absent = enabled — the anchor
- * is the opt-in; only an explicit disable turns sessions off.
- */
-export const persistedDeviceSessionsEnabled = (): boolean =>
-  readState().deviceSessions?.enabled !== false;
 
 /**
  * Verify an Ed25519 signature over `message` with a base64(SPKI) public key.
@@ -314,8 +302,6 @@ export const createDeviceAccessVerify = (
   // Deferred reference: this module sits inside an import cycle with
   // keypair/env, so the binding may not be initialised at module load.
   const ownPublicKey = deps.ownPublicKey ?? ((): string => daemonPublicKey());
-  const sessionsEnabled =
-    deps.deviceSessionsEnabled ?? persistedDeviceSessionsEnabled;
   const anchorPubkey = deps.anchorControlPubkey ?? envAnchorControlPubkey;
   /** Nonce LRU — expire after the grant ts window; hard-cap above. */
   const nonceOrder: string[] = [];
@@ -553,8 +539,13 @@ export const createDeviceAccessVerify = (
   };
 
   const agentRefusal = (): (typeof AGENT_PIN_REFUSALS)[number] | null => {
+    // Sessions on == OPENLLM_DEVICE_ANCHOR present. A via:local state pin
+    // alone is not enough (desktop disable blanks the env line). The retired
+    // `device_sessions_disabled` code stays in the closed vocabulary for older
+    // peers decoding a nack, but this daemon never emits it.
+    if (anchorPubkey() === null) return "device_not_anchored";
     if (!isAgentEligiblePin(hydrate())) return "device_not_anchored";
-    return sessionsEnabled() ? null : "device_sessions_disabled";
+    return null;
   };
 
   /**

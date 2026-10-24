@@ -15,7 +15,7 @@
  *   openllmd logs [-f] [-n N]     show or follow daemon logs
  *   openllmd auto-update <on|off|status>  opt in/out of self-update (default on)
  *   openllmd anchor < key         accept sk-llm-KEY.ANCHOR (prints the bare key)
- *   openllmd device <enable|disable|lock|unlock|status>  device sessions
+ *   openllmd device <disable|status>  device sessions (disable removes the anchor)
  *   openllmd uninstall [--yes] [--keep-logins|--remove-logins]  remove the daemon
  *                                 (--keep-logins preserves ~/.openllm/cli logins)
  *   openllmd completion <shell>   emit / install shell completion
@@ -33,9 +33,8 @@ import {
 } from "./device-access-verify";
 import {
   deviceSessionsReport,
-  deviceSessionsState,
   installDeviceAnchor,
-  setDeviceSessionsLocal,
+  removeDeviceAnchor,
 } from "./device-anchor";
 import { loadIdentityKey } from "./keypair";
 import { logError } from "./logger";
@@ -74,7 +73,7 @@ ${formatHelpRows(FLAGS.map((f) => ({ left: f.name, right: f.description })))}
 State lives under ~/.openllm (override with OPENLLM_DAEMON_STATE_DIR).
 `;
 
-const DEVICE_USAGE = "usage: openllm daemon device <enable|disable|status>\n";
+const DEVICE_USAGE = "usage: openllm daemon device <disable|status>\n";
 
 /**
  * `openllm daemon anchor` — read `sk-llm-<id>.<secret>.<anchor>` from stdin
@@ -105,38 +104,28 @@ const runAnchor = async (args: readonly string[]): Promise<number> => {
   return 0;
 };
 
-/** `openllm daemon device <enable|disable|status>`. */
+/** `openllm daemon device <disable|status>`. Disable blanks the anchor. */
 const runDevice = (args: readonly string[]): never => {
   const action = args[0];
   if (args.length !== 1 || action === undefined) {
     process.stderr.write(DEVICE_USAGE);
     process.exit(2);
   }
-  const change =
-    action === "enable"
-      ? { enabled: true as const }
-      : action === "disable"
-        ? { enabled: false as const }
-        : action === "status"
-          ? null
-          : undefined;
-  if (change === undefined) {
+  if (action === "disable") {
+    const removed = removeDeviceAnchor();
+    if (!removed.ok) {
+      process.stderr.write("could not remove the device trust anchor\n");
+      process.exit(1);
+    }
+  } else if (action !== "status") {
     process.stderr.write(DEVICE_USAGE);
     process.exit(2);
   }
-  const state =
-    change === null ? deviceSessionsState() : setDeviceSessionsLocal(change);
-  if (state === null) {
-    process.stderr.write("could not save the device-sessions setting\n");
-    process.exit(1);
-  }
   const report = deviceSessionsReport();
   process.stdout.write(
-    `device sessions ${state.enabled ? "enabled" : "disabled"}${
-      report.anchored
-        ? ""
-        : "; this device is not anchored — turn on Enable device sessions in Manage device and re-run install/update"
-    }\n`,
+    report.anchored
+      ? "device sessions enabled (anchor present)\n"
+      : "device sessions disabled (no anchor) — re-run install/update/login with Device sessions on\n",
   );
   process.exit(0);
 };

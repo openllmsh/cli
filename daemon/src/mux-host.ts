@@ -194,8 +194,8 @@ export const admitStreamKind = (
 ): boolean => {
   if (streamKindGateOf(kind) !== "seedgated") return true;
   // Re-checked per OPEN: a channel / RTC session admitted while the device was
-  // anchored and switched on must not keep serving agent streams after a
-  // (signed) remote disable or a local `openllm device disable`.
+  // anchored must not keep serving agent streams after a signed remote
+  // disable or a local `openllm daemon device disable` (both blank the anchor).
   const refusal = context.seedGated ? agentSessionRefusal() : null;
   if (context.seedGated && refusal === null) return true;
   logWarn(
