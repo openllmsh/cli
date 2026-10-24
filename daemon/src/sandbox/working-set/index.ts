@@ -9,13 +9,18 @@
  * the working set is split into a shared `base` plus one module per
  * externally-reachable sub-process concern —
  *
- *   - `auth-state`        — vendor CLI delegation: login, credential capture,
- *                           usage reads (owns the FS-secret grants);
- *   - `browser-chat`      — RTC + mux + `/v1` serving for the dashboard
- *                           (`/v1`-only, no FS secrets);
- *   - `fleet`             — daemon-to-daemon peer channel (`/v1`-only);
- *   - `vendor-cli-tunnel` — device-session PTY hosting (vendor-CLI exec, as
- *                           required, incrementally).
+ *   - `auth-state`   — vendor CLI delegation: login, credential capture,
+ *                      usage reads (owns the FS-secret grants + vendor-CLI
+ *                      exec dirs; also covers the local session-host);
+ *   - `browser-chat` — RTC + mux + `/v1` serving for the dashboard
+ *                      (`/v1`-only, no FS secrets);
+ *   - `fleet`        — daemon-to-daemon peer channel (`/v1`-only).
+ *
+ * The former `vendor-cli-tunnel` layer (device-session PTY hosting over the
+ * tunnel) was removed with remote PTY — its grants
+ * (`delegatedCliRuntimeSet ∪ vendorExecDirs`) were already a subset of
+ * `auth-state`, so `daemonWorkingSet()` stayed byte-identical. See
+ * `docs/plan/2026-10-23-agent-sessions-replace-remote-pty.md` key finding 5.
  *
  * Today the daemon still runs as ONE process: `daemonWorkingSet()` returns the
  * UNION of every layer + base, and the current callers (`landlock.ts`,
@@ -37,7 +42,6 @@ import {
   MAC_SEATBELT_RUNTIME_WRITE_EXTRAS,
 } from "./delegated-cli-runtime";
 import { fleetLayer } from "./fleet";
-import { vendorCliTunnelLayer } from "./vendor-cli-tunnel";
 
 export type { TWorkingSet } from "./base";
 export { daemonTempDir, resolveCliExecDirs } from "./base";
@@ -47,12 +51,8 @@ export {
   MAC_SEATBELT_RUNTIME_WRITE_EXTRAS,
 };
 
-/** The four sub-process sandbox layers M2's `--sub` bootstrap selects between. */
-export type TWorkingSetLayer =
-  | "auth-state"
-  | "browser-chat"
-  | "fleet"
-  | "vendor-cli-tunnel";
+/** The three sub-process sandbox layers M2's `--sub` bootstrap selects between. */
+export type TWorkingSetLayer = "auth-state" | "browser-chat" | "fleet";
 
 const LAYER_BUILDERS: Readonly<
   Record<TWorkingSetLayer, (home: string) => TWorkingSet>
@@ -60,7 +60,6 @@ const LAYER_BUILDERS: Readonly<
   "auth-state": authStateLayer,
   "browser-chat": browserChatLayer,
   fleet: fleetLayer,
-  "vendor-cli-tunnel": vendorCliTunnelLayer,
 };
 
 /** Merge a set of layer results into deduped read-write / read-only sets, then
@@ -89,7 +88,7 @@ const composeWorkingSet = (
 /**
  * The daemon's full base working set (no user grants — the §3.4 consent flow
  * will union persisted grants in here when it lands). The UNION of the shared
- * base and all four sub-process layers — the single-process daemon's allow-list,
+ * base and all three sub-process layers — the single-process daemon's allow-list,
  * consumed unchanged by `landlock.ts` + `seatbelt.ts`.
  *
  * `homeOverride` supplies the DAEMON's home explicitly instead of reading
@@ -104,7 +103,6 @@ export const daemonWorkingSet = (homeOverride?: string): TWorkingSet => {
       authStateLayer(home),
       browserChatLayer(home),
       fleetLayer(home),
-      vendorCliTunnelLayer(home),
     ],
     home,
   );

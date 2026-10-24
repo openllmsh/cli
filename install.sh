@@ -14,14 +14,22 @@
 # Env (all optional):
 #   OPENLLM_CLOUD_ORIGIN   gateway origin (env → existing ~/.openllm/.env →
 #                          default https://www.openllm.sh; a re-run keeps your origin)
-#   OPENLLM_API_KEY        pair the daemon now; otherwise pair from the dashboard
+#   OPENLLM_API_KEY        pair the daemon now; otherwise pair from the dashboard.
+#                          The dashboard's command carries a device trust anchor
+#                          after the key (`sk-llm-<key>.<anchor>`): it is split
+#                          off here and stored as its own line,
+#                          OPENLLM_DEVICE_ANCHOR, in the env file (0600) next
+#                          to the BARE key. It is never exported, logged, or
+#                          sent — only the bare `sk-llm-<key>` is the bearer.
+#                          Re-running install with a new anchor rotates it.
+#                          The anchor is the sessions opt-in — an anchored
+#                          device serves agent sessions by default.
 #   OPENLLM_DAEMON_PORT    local daemon port (default 8787; if unset AND
 #                          nothing is already persisted, and 8787 is taken on
 #                          this machine, the installer walks forward to the
 #                          next free port nearby and persists that instead —
 #                          an explicit or already-persisted port is never
 #                          probed or changed)
-#   OPENLLM_DAEMON_PTY_SESSIONS  enable remote terminal sessions (1/true; default off)
 #   OPENLLM_SKIP_SHELL_SETUP     set to skip `openllm setup` + completion install
 #                                (PATH symlinks / shell rc / completion stay untouched)
 #   OPENLLM_SKIP_VENDOR_CLIS     set to skip background vendor CLI provisioning
@@ -60,6 +68,11 @@ INSTALLED_COMPONENTS=""
 has_command() { command -v "$1" >/dev/null 2>&1; }
 
 die() { echo "Error: $*" >&2; exit 1; }
+
+# Reject unknown installer options so a mistyped flag never silently no-ops.
+for arg in "$@"; do
+  die "unknown installer option: $arg"
+done
 
 # Can we prompt the human running this install? A piped `curl … | bash` leaves
 # the script's own stdin as the download stream, but the user's terminal is still
@@ -140,6 +153,11 @@ is_usable_api_key() {
   # a 32-byte base64url secret (43 chars). Restricting this shell boundary to
   # the wire grammar keeps values safe to persist in KEY=value config files.
   [[ "$key" =~ ^sk-llm-[A-Za-z0-9_-]{14}[.][A-Za-z0-9_-]{43}$ ]]
+}
+
+# A device trust anchor: base64url of 64 bytes (86 chars, unpadded).
+is_device_anchor() {
+  [[ "$1" =~ ^[A-Za-z0-9_-]{86}$ ]]
 }
 
 sha256_of() {
@@ -389,9 +407,23 @@ fi
 # lock: downloads can take long enough for the daemon or another installer to update
 # the file in the meantime.
 SUPPLIED_KEY="$(trim_whitespace "${OPENLLM_API_KEY:-}")"
+SUPPLIED_ANCHOR=""
 if [ -n "$SUPPLIED_KEY" ]; then
   has_line_break "$SUPPLIED_KEY" && die "OPENLLM_API_KEY must not contain a line break"
+  # `sk-llm-<key>.<anchor>`: split on the LAST dot. The anchor never leaves this
+  # machine — from here on SUPPLIED_KEY is the bare key, and the exported
+  # OPENLLM_API_KEY every child process inherits is overwritten with it.
+  if ! is_usable_api_key "$SUPPLIED_KEY"; then
+    candidate_anchor="${SUPPLIED_KEY##*.}"
+    candidate_key="${SUPPLIED_KEY%.*}"
+    if is_usable_api_key "$candidate_key" && is_device_anchor "$candidate_anchor"; then
+      SUPPLIED_ANCHOR="$candidate_anchor"
+      SUPPLIED_KEY="$candidate_key"
+    fi
+    unset candidate_anchor candidate_key
+  fi
   is_usable_api_key "$SUPPLIED_KEY" || die "OPENLLM_API_KEY has an invalid format"
+  export OPENLLM_API_KEY="$SUPPLIED_KEY"
 fi
 API_KEY=""
 
@@ -533,10 +565,10 @@ write_env_file() {
   done
   [ "$acquired" = 1 ] || die "could not acquire config lock: $lock"
 
-  local current_key current_device current_pty desired_key desired_pty tmp line key
+  local current_key current_device current_anchor desired_key desired_anchor tmp line key
   current_key="$(trim_whitespace "$(read_env_value OPENLLM_API_KEY || true)")"
   current_device="$(read_env_value OPENLLM_DEVICE_ID || true)"
-  current_pty="$(read_env_value OPENLLM_DAEMON_PTY_SESSIONS || true)"
+  current_anchor="$(trim_whitespace "$(read_env_value OPENLLM_DEVICE_ANCHOR || true)")"
   if [ -n "$SUPPLIED_KEY" ]; then
     desired_key="$SUPPLIED_KEY"
   else
@@ -546,11 +578,24 @@ write_env_file() {
       desired_key=""
     fi
   fi
-  case "${OPENLLM_DAEMON_PTY_SESSIONS:-}" in
-    1|true) desired_pty="1" ;;
-    0|false) desired_pty="0" ;;
-    *) desired_pty="$current_pty" ;;
-  esac
+  # The device trust anchor is its own line, OPENLLM_DEVICE_ANCHOR, beside the
+  # BARE key. A supplied anchor replaces it (re-running install is rotation).
+  # A bare supplied key drops an existing anchor only when its public key id
+  # differs from the saved key's id (or either cannot be parsed). The anchor's
+  # pair secret is bound to that id, so a new secret for the same id leaves it.
+  # Keyless install keeps the current line untouched.
+  local supplied_key_id current_key_id
+  supplied_key_id="${SUPPLIED_KEY#sk-llm-}"
+  supplied_key_id="${supplied_key_id%%.*}"
+  current_key_id="${current_key#sk-llm-}"
+  current_key_id="${current_key_id%%.*}"
+  if [ -n "$SUPPLIED_ANCHOR" ]; then
+    desired_anchor="$SUPPLIED_ANCHOR"
+  elif [ -n "$SUPPLIED_KEY" ] && { ! is_usable_api_key "$current_key" || [ "$supplied_key_id" != "$current_key_id" ]; }; then
+    desired_anchor=""
+  else
+    desired_anchor="$current_anchor"
+  fi
 
   tmp="$ENV_FILE.tmp.$$"
   # Install the RETURN cleanup only after all nested reads have completed: Bash
@@ -565,7 +610,7 @@ write_env_file() {
   : > "$tmp"
   # Keep unrelated lines byte-for-byte, but replace every installer-owned key with
   # one canonical occurrence. An ignored invalid persisted key is therefore removed.
-  local wrote_origin=0 wrote_port=0 wrote_key=0 wrote_device=0 wrote_pty=0
+  local wrote_origin=0 wrote_port=0 wrote_key=0 wrote_device=0 wrote_anchor=0
   if [ -f "$ENV_FILE" ]; then
     while IFS= read -r line || [ -n "$line" ]; do
       key="${line%%=*}"
@@ -579,11 +624,11 @@ write_env_file() {
         OPENLLM_API_KEY)
           if [ -n "$desired_key" ] && [ "$wrote_key" = 0 ]; then printf 'OPENLLM_API_KEY=%s\n' "$desired_key" >> "$tmp"; wrote_key=1; fi
           ;;
+        OPENLLM_DEVICE_ANCHOR)
+          if [ -n "$desired_anchor" ] && [ "$wrote_anchor" = 0 ]; then printf 'OPENLLM_DEVICE_ANCHOR=%s\n' "$desired_anchor" >> "$tmp"; wrote_anchor=1; fi
+          ;;
         OPENLLM_DEVICE_ID)
           if [ -n "$current_device" ] && [ "$wrote_device" = 0 ]; then printf 'OPENLLM_DEVICE_ID=%s\n' "$current_device" >> "$tmp"; wrote_device=1; fi
-          ;;
-        OPENLLM_DAEMON_PTY_SESSIONS)
-          if [ -n "$desired_pty" ] && [ "$wrote_pty" = 0 ]; then printf 'OPENLLM_DAEMON_PTY_SESSIONS=%s\n' "$desired_pty" >> "$tmp"; wrote_pty=1; fi
           ;;
         *) printf '%s\n' "$line" >> "$tmp" ;;
       esac
@@ -593,7 +638,7 @@ write_env_file() {
   [ "$wrote_port" = 1 ] || printf 'OPENLLM_DAEMON_PORT=%s\n' "$DAEMON_PORT" >> "$tmp"
   [ -z "$desired_key" ] || [ "$wrote_key" = 1 ] || printf 'OPENLLM_API_KEY=%s\n' "$desired_key" >> "$tmp"
   [ -z "$current_device" ] || [ "$wrote_device" = 1 ] || printf 'OPENLLM_DEVICE_ID=%s\n' "$current_device" >> "$tmp"
-  [ -z "$desired_pty" ] || [ "$wrote_pty" = 1 ] || printf 'OPENLLM_DAEMON_PTY_SESSIONS=%s\n' "$desired_pty" >> "$tmp"
+  [ -z "$desired_anchor" ] || [ "$wrote_anchor" = 1 ] || printf 'OPENLLM_DEVICE_ANCHOR=%s\n' "$desired_anchor" >> "$tmp"
   chmod 0600 "$tmp"
   # Abort with a clear error if the atomic replace fails — never fall through to
   # announce success (or set API_KEY) on a config that was not written. The
@@ -625,6 +670,20 @@ if [ "$INSTALL_MODE" != update ]; then
     "$BIN_DIR/openllm" daemon completion install >/dev/null 2>&1 || true
   fi
 fi
+
+# --- device trust anchor ---------------------------------------------------
+# Pin the account device-control key from the anchor the dashboard put after
+# the key — a local trust root, so the cloud never chooses it. write_env_file
+# already stored it as OPENLLM_DEVICE_ANCHOR (never exported); `daemon anchor`
+# validates it, re-writes the same two lines and pins. The anchored key goes
+# over stdin (never argv); the daemon prints only the bare key, discarded.
+# The anchor is the sessions opt-in (absent switch = on). No separate enable.
+if [ -n "$SUPPLIED_ANCHOR" ]; then
+  printf '%s.%s' "$SUPPLIED_KEY" "$SUPPLIED_ANCHOR" \
+    | "$BIN_DIR/openllm" daemon anchor >/dev/null \
+    || die "the device trust anchor was rejected — copy the install command from the dashboard again"
+fi
+SUPPLIED_ANCHOR=""
 
 # --- start the service -----------------------------------------------------
 # `openllm daemon start` owns service registration (launchd / systemd user unit,

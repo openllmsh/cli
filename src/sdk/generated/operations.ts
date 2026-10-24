@@ -180,6 +180,30 @@ export const API_OPERATIONS: readonly TApiOperation[] = [
     "hasBody": false
   },
   {
+    "id": "daemonAttestations.list",
+    "method": "get",
+    "path": "/daemon/attestations",
+    "summary": "",
+    "tags": [
+      "daemonAttestations"
+    ],
+    "pathParams": [],
+    "queryParams": [],
+    "hasBody": false
+  },
+  {
+    "id": "daemonAttestations.put",
+    "method": "put",
+    "path": "/daemon/attestations",
+    "summary": "",
+    "tags": [
+      "daemonAttestations"
+    ],
+    "pathParams": [],
+    "queryParams": [],
+    "hasBody": true
+  },
+  {
     "id": "daemonDoctorReports.submit",
     "method": "post",
     "path": "/daemon/doctor-reports",
@@ -1170,6 +1194,18 @@ export const API_OPERATIONS: readonly TApiOperation[] = [
     "summary": "",
     "tags": [
       "vault"
+    ],
+    "pathParams": [],
+    "queryParams": [],
+    "hasBody": true
+  },
+  {
+    "id": "deviceControl.put",
+    "method": "put",
+    "path": "/vault/device-control",
+    "summary": "",
+    "tags": [
+      "deviceControl"
     ],
     "pathParams": [],
     "queryParams": [],

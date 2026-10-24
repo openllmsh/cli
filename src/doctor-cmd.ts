@@ -92,7 +92,6 @@ type TDaemonHealth = {
   readonly sandbox: string;
   readonly cloud_state: string;
   readonly key_configured: boolean;
-  readonly pty_sessions: boolean;
   readonly cloud_origin: string;
   readonly uptime_s: number;
   readonly keychain_spawns?: TKeychainSpawns;

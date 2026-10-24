@@ -23,7 +23,11 @@
 import * as fs from "node:fs";
 import { homedir } from "node:os";
 import { isAbsolute, join } from "node:path";
-import { DEV_CLOUD_ORIGIN, isOpenllmDevMode } from "./runtime-contracts";
+import {
+  bearerApiKeyOf,
+  DEV_CLOUD_ORIGIN,
+  isOpenllmDevMode,
+} from "./runtime-contracts";
 
 export { CLI_VERSION } from "./cli-version";
 
@@ -120,10 +124,34 @@ const parseEnvFile = (path: string): Record<string, string> => {
   return out;
 };
 
+/**
+ * The env-file line holding the install-time device trust anchor, written
+ * beside the BARE `OPENLLM_API_KEY`. Only the daemon reads it (from the file);
+ * the CLI never forwards it. Must match `packages/cli/daemon/src/env.ts`
+ * `DEVICE_ANCHOR_ENV` (parity-tested).
+ */
+export const DEVICE_ANCHOR_ENV = "OPENLLM_DEVICE_ANCHOR";
+
+/**
+ * Drop an inherited `OPENLLM_DEVICE_ANCHOR` from `process.env` so no child
+ * (vendor CLI, mcp upstream, hook, session host, daemon delegation) inherits
+ * it. Called first thing at CLI entry.
+ */
+export const scrubDeviceAnchorFromProcessEnv = (): void => {
+  delete process.env[DEVICE_ANCHOR_ENV];
+};
+
+/** True when this environment's env file carries a non-blank anchor line
+ *  (the value itself is never returned). */
+export const envFileHasDeviceAnchor = (): boolean =>
+  (parseEnvFile(cliEnvFile())[DEVICE_ANCHOR_ENV] ?? "").length > 0;
+
 /** This environment's file values (read-only): `.dev.env` in dev, `.env`
- *  otherwise. */
-export const sharedFileConfig = (): Record<string, string> =>
-  parseEnvFile(cliEnvFile());
+ *  otherwise. Never includes the device anchor. */
+export const sharedFileConfig = (): Record<string, string> => {
+  const { [DEVICE_ANCHOR_ENV]: _anchor, ...rest } = parseEnvFile(cliEnvFile());
+  return rest;
+};
 
 export type TCliConfig = {
   readonly gatewayUrl: string;
@@ -147,12 +175,16 @@ export const cliConfig = (): TCliConfig => {
     file.OPENLLM_API_KEY !== undefined && file.OPENLLM_API_KEY.length > 0
       ? file.OPENLLM_API_KEY
       : undefined;
-  const apiKey =
+  const rawKey =
     process.env.OPENLLM_API_KEY ??
     fileKey ??
     (dev
       ? parseEnvFile(join(openllmDir(), ".env")).OPENLLM_API_KEY
       : undefined) ??
     "";
+  // Defense in depth: a device trust anchor pasted into the env
+  // (`sk-llm-<key>.<anchor>`) never becomes part of the bearer, and a key
+  // whose suffix is malformed is treated as no key at all — never sent.
+  const apiKey = bearerApiKeyOf(rawKey) ?? "";
   return { gatewayUrl, apiKey };
 };

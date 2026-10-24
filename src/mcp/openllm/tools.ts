@@ -186,6 +186,8 @@ const inputSchemaFor = (op: TApiOperation): Record<string, unknown> => {
  *  delegation anyone asked for. `/vault/handoff*` hands the vault to a new
  *  device: an agent must neither ask for it (every request prompts the user's
  *  devices) nor see or answer one — browser-session only, like the passkeys.
+ *  `/vault/device-control` and `/daemon/attestations` hold the device-control
+ *  trust root for agent sessions — same reasoning.
  *  Web chat runs the full tool list with the session cookie, so the handlers'
  *  own `sk-llm` refusal is not enough on its own. */
 const AGENT_FORBIDDEN_PATHS: ReadonlySet<string> = new Set([
@@ -207,6 +209,12 @@ const AGENT_FORBIDDEN_PATHS: ReadonlySet<string> = new Set([
   "/vault/handoff/{id}/cancel",
   "/vault/handoff/{id}/claim",
   "/vault/handoff/{id}/deny",
+  // Device-control trust material (the phrase-derived key that gates agent
+  // sessions on the user's machines, and the attestations of which daemon
+  // keys it trusts). Session-only; an agent writing either would let it
+  // authorise itself onto the user's devices.
+  "/vault/device-control",
+  "/daemon/attestations",
 ]);
 
 const AGENT_OPERATIONS: ReadonlyArray<TApiOperation> = API_OPERATIONS.filter(

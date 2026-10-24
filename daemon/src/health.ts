@@ -39,8 +39,6 @@ export type TDaemonHealth = {
   readonly sandbox: TSandboxState;
   readonly cloud_state: TCloudState;
   readonly key_configured: boolean;
-  /** Whether new remote terminal-session opens are allowed on this device. */
-  readonly pty_sessions: boolean;
   /**
    * Where this process pulls bootstrap/plans and forwards BYOK hops
    * (`daemonEnv().cloudOrigin`). Secret-free — origin only, no key. Lets
@@ -73,7 +71,6 @@ export const buildHealth = (deps: {
   readonly sandbox: TSandboxState;
   readonly cloudState: TCloudState;
   readonly keyConfigured: boolean;
-  readonly ptySessions: boolean;
   readonly cloudOrigin: string;
   readonly bootAt: number;
   readonly now: number;
@@ -84,7 +81,6 @@ export const buildHealth = (deps: {
   sandbox: deps.sandbox,
   cloud_state: deps.cloudState,
   key_configured: deps.keyConfigured,
-  pty_sessions: deps.ptySessions,
   cloud_origin: deps.cloudOrigin,
   uptime_s: Math.max(0, Math.floor((deps.now - deps.bootAt) / 1000)),
   keychain_spawns: keychainTelemetrySnapshot(),

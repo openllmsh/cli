@@ -27,6 +27,8 @@ export type TDeviceCliResume =
 export type TDeviceCliHistoryId = "claude" | "codex" | "grok" | "opencode";
 
 export type TDeviceCliSpec = {
+  /** Human name, for titles such as "New session · Claude Code". */
+  readonly label: string;
   readonly clientId: TOpenllmClientId | null;
   readonly resume: TDeviceCliResume;
   readonly listable: boolean;
@@ -38,35 +40,41 @@ export type TDeviceCliSpec = {
  */
 export const DEVICE_CLI_RECORD = {
   claude_code: {
+    label: "Claude Code",
     clientId: "claude",
     resume: { kind: "flag", flag: "--resume" },
     listable: true,
     history: "claude",
   },
   chatgpt: {
+    label: "Codex",
     clientId: "codex",
     resume: { kind: "subcommand", name: "resume" },
     listable: true,
     history: "codex",
   },
   grok: {
+    label: "Grok",
     clientId: "grok",
     resume: { kind: "flag", flag: "--resume" },
     listable: true,
     history: "grok",
   },
   opencode: {
+    label: "OpenCode",
     clientId: "opencode",
     resume: { kind: "flag", flag: "--session" },
     listable: true,
     history: "opencode",
   },
   hermes: {
+    label: "Hermes",
     clientId: "hermes",
     resume: { kind: "flag", flag: "--resume" },
     listable: true,
   },
   shell: {
+    label: "Shell",
     clientId: null,
     resume: { kind: "none" },
     listable: false,

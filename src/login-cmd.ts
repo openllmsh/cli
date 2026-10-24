@@ -13,34 +13,48 @@
  *
  * A daemon already running reads its key at start, so login restarts it; one
  * that isn't running is left alone unless `--start`. The desktop app pairs
- * through this command (`--start --json`, key on stdin), so terminal and app
- * share one path: `--pty-sessions` / `--no-pty-sessions` set the daemon's
- * remote-terminal switch in the same write, and `--json` reports the outcome
- * on stdout for callers that parse it.
+ * through this command (`--start --json`, key on stdin), and `--json` reports
+ * the outcome on stdout for callers that parse it.
+ *
+ * A key copied with Device sessions on carries a device trust anchor after
+ * it (`sk-llm-<key>.<anchor>`). Login splits it on the last dot: the anchored
+ * key goes to `openllm daemon anchor` over stdin, which writes
+ * `OPENLLM_API_KEY=<bare>` and `OPENLLM_DEVICE_ANCHOR=<anchor>` to the
+ * runtime's env file (the daemon derives its pin from that line, never
+ * trust-on-first-use). ONLY the bare `sk-llm-<key>` is exported or ever used
+ * as a bearer; the anchor never enters process.env. Sessions on == the
+ * anchor is present; disable blanks that line.
  */
 
 import { daemonPort, daemonReachable } from "./clients/gateway";
 import { daemonInvocation } from "./daemon-delegation";
-import { cliConfig } from "./env";
-import { defaultTerminal, isUsableApiKey, saveEnvVars } from "./onboarding";
+import {
+  cliConfig,
+  DEVICE_ANCHOR_ENV,
+  envFileHasDeviceAnchor,
+  sharedFileConfig,
+} from "./env";
+import { defaultTerminal, saveEnvVars } from "./onboarding";
 import type { TCredentialGateTerminal } from "./runtime-contracts";
+import { parseApiKeyId, splitAnchoredApiKey } from "./runtime-contracts";
 
-export const LOGIN_USAGE = `usage: openllm login [--key <sk-llm-...>] [--start]
-                     [--pty-sessions | --no-pty-sessions] [--json]
+export const LOGIN_USAGE = `usage: openllm login [sk-llm-...] [--key <sk-llm-...>] [--start] [--json]
 
 Save your OpenLLM API key to ~/.openllm/.env, replacing any existing key.
-With no --key, the key is read from piped stdin, or prompted for (hidden)
-on an interactive terminal. A running daemon is restarted to pick it up.
-Get a key under Keys after signing in.
+With no key argument, the key is read from piped stdin, or prompted for
+(hidden) on an interactive terminal. A running daemon is restarted to pick
+it up. Get a key under Keys after signing in.
+
+A key copied with Device sessions on ends in a device trust anchor
+(sk-llm-KEY.ANCHOR). It is kept on this machine only, as a separate
+line of the env file; the bare key is the bearer. Sessions on == the
+anchor is present; disable blanks it (Manage device, or
+openllm daemon device disable).
 
   --start              also start the daemon when it isn't running
-  --pty-sessions       allow remote terminal sessions on this machine
-  --no-pty-sessions    disallow them (unchanged when neither is given)
   --json               print {"saved":true,"daemon":"restarted"|"started"|
                        "not_running"} on stdout; everything else on stderr
 `;
-
-const PTY_SESSIONS_VAR = "OPENLLM_DAEMON_PTY_SESSIONS";
 
 export type TLoginDaemonOutcome = "restarted" | "started" | "not_running";
 
@@ -57,6 +71,9 @@ export type TLoginIo = {
   ) => Promise<number>;
   /** Machine-readable output (`--json`). */
   readonly writeStdout: (text: string) => void;
+  /** Run `openllm daemon anchor` with `anchoredKey` on stdin; its exit
+   *  status. Defaults to a self-spawn of the daemon half. */
+  readonly anchorDaemon?: (anchoredKey: string) => Promise<number>;
 };
 
 /** How long piped stdin may stay silent. A caller that inherits an open but
@@ -84,14 +101,37 @@ const readPipedStdin = async (): Promise<string | null> => {
   }
 };
 
-const runDaemon = async (
-  command: "restart" | "start",
+const runDaemonArgs = async (
+  args: readonly string[],
   quiet: boolean,
 ): Promise<number> => {
   try {
-    const proc = Bun.spawn([...daemonInvocation(), command], {
+    const proc = Bun.spawn([...daemonInvocation(), ...args], {
       stdin: "ignore",
       stdout: quiet ? 2 : "inherit",
+      stderr: "inherit",
+    });
+    return await proc.exited;
+  } catch (error) {
+    process.stderr.write(
+      `[openllm] could not run managed daemon: ${error instanceof Error ? error.message : String(error)}\n`,
+    );
+    return 1;
+  }
+};
+
+const runDaemon = (
+  command: "restart" | "start",
+  quiet: boolean,
+): Promise<number> => runDaemonArgs([command], quiet);
+
+/** The anchored key travels on stdin (never argv, which `ps` shows); the
+ *  daemon's stdout (the bare key) is discarded. */
+const anchorDaemon = async (anchoredKey: string): Promise<number> => {
+  try {
+    const proc = Bun.spawn([...daemonInvocation(), "anchor"], {
+      stdin: new TextEncoder().encode(anchoredKey),
+      stdout: "ignore",
       stderr: "inherit",
     });
     return await proc.exited;
@@ -109,19 +149,18 @@ const defaultIo: TLoginIo = {
   daemonRunning: () => daemonReachable(daemonPort()),
   runDaemon,
   writeStdout: (text) => process.stdout.write(text),
+  anchorDaemon,
 };
 
 type TLoginArgs = {
   readonly key: string | null;
   readonly start: boolean;
-  readonly ptySessions: boolean | null;
   readonly json: boolean;
 };
 
 const parseLoginArgs = (args: readonly string[]): TLoginArgs | null => {
   let key: string | null = null;
   let start = false;
-  let ptySessions: boolean | null = null;
   let json = false;
   for (let i = 0; i < args.length; i += 1) {
     const arg = args[i];
@@ -132,19 +171,18 @@ const parseLoginArgs = (args: readonly string[]): TLoginArgs | null => {
       i += 1;
     } else if (arg?.startsWith("--key=")) {
       key = arg.slice("--key=".length);
+    } else if (key === null && arg !== undefined && arg.startsWith("sk-llm-")) {
+      // `openllm login sk-llm-<key>.<anchor>` — the one-line setup command.
+      key = arg;
     } else if (arg === "--start") {
       start = true;
-    } else if (arg === "--pty-sessions" || arg === "--no-pty-sessions") {
-      const value = arg === "--pty-sessions";
-      if (ptySessions !== null && ptySessions !== value) return null;
-      ptySessions = value;
     } else if (arg === "--json") {
       json = true;
     } else {
       return null;
     }
   }
-  return { key, start, ptySessions, json };
+  return { key, start, json };
 };
 
 export const runLogin = async (
@@ -179,14 +217,43 @@ export const runLogin = async (
     }
   }
 
-  const trimmed = key.trim();
-  if (!isUsableApiKey(trimmed)) {
+  const split = splitAnchoredApiKey(key);
+  if (split === null) {
     io.terminal.write("[openllm] The API key format is invalid.\n");
     return 1;
   }
+  // From here on only the bare key exists in this process's config surface.
+  const trimmed = split.key;
+
+  // Pin the device-control key from the anchor BEFORE saving the key and
+  // restarting: the restarted daemon boots anchored. Sessions default on
+  // once anchored — no separate enable step.
+  if (split.anchor !== null) {
+    const anchor = io.anchorDaemon ?? anchorDaemon;
+    if ((await anchor(`${split.key}.${split.anchor}`)) !== 0) {
+      io.terminal.write(
+        "[openllm] The device trust anchor was rejected. Copy the command from Manage device again.\n",
+      );
+      return 1;
+    }
+  }
+
   const vars: Record<string, string> = { OPENLLM_API_KEY: trimmed };
-  if (parsed.ptySessions !== null)
-    vars[PTY_SESSIONS_VAR] = parsed.ptySessions ? "1" : "0";
+  // `openllm daemon anchor` already wrote OPENLLM_DEVICE_ANCHOR beside the
+  // key. The anchor's pair secret is bound to the key id: a bare login with
+  // the SAME id leaves it (re-saving is not "sessions off"). It blanks only
+  // when either id is absent/invalid or the ids differ — that anchor is stale
+  // (same rule as install.sh and the credential gate).
+  const savedKey = sharedFileConfig().OPENLLM_API_KEY;
+  if (
+    split.anchor === null &&
+    envFileHasDeviceAnchor() &&
+    (savedKey === undefined ||
+      parseApiKeyId(savedKey) === null ||
+      parseApiKeyId(savedKey) !== parseApiKeyId(trimmed))
+  ) {
+    vars[DEVICE_ANCHOR_ENV] = "";
+  }
   if (!saveEnvVars(vars)) {
     io.terminal.write("[openllm] Could not save the API key.\n");
     return 1;

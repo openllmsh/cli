@@ -35,6 +35,10 @@ import {
   runWithAuthOperation,
   runWithLoginCommand,
 } from "./delegation/login-flow";
+import {
+  applyDeviceSessionsDisable,
+  deviceSessionsReport,
+} from "./device-anchor";
 import { daemonApiKeyId } from "./env";
 import { openSealed } from "./keypair";
 import {
@@ -670,6 +674,29 @@ const runCommandInAccount = async (
           id: cmd.id,
           status: "done",
           result: { local_server: state },
+        };
+      }
+      // Control-key-signed device-sessions DISABLE. The cloud only relays the
+      // statement; it is verified against this daemon's ANCHORED pin (a
+      // cloud-chosen pin never authorises it) and blanks OPENLLM_DEVICE_ANCHOR.
+      // There is no remote enable. The post-command status push carries the
+      // new state.
+      case "set_device_sessions": {
+        const applied = applyDeviceSessionsDisable(cmd.payload.statement);
+        if (!applied.ok) {
+          return {
+            id: cmd.id,
+            status: "error",
+            result: {
+              error: applied.reason,
+              device_sessions: deviceSessionsReport(),
+            },
+          };
+        }
+        return {
+          id: cmd.id,
+          status: "done",
+          result: { device_sessions: deviceSessionsReport() },
         };
       }
       default: {
