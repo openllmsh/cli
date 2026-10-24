@@ -412,6 +412,30 @@ export const isClaudeSessionHostFor = (
     host.vendorSessionId === sessionId ||
     readLiveId(host.pid) === sessionId);
 
+/**
+ * Prefer an exact host / vendor id match over a live-PID match. Another host
+ * can briefly claim the same Claude id via its pid file; attaching or killing
+ * that one would miss the real session.
+ */
+export const findClaudeSessionHost = <
+  THost extends {
+    readonly cli: string;
+    readonly id: string;
+    readonly vendorSessionId: string | null;
+    readonly pid: number;
+  },
+>(
+  hosts: readonly THost[],
+  sessionId: string,
+  readLiveId: (pid: number) => string | null = readClaudeSessionIdUnderPid,
+): THost | undefined =>
+  hosts.find(
+    (host) =>
+      host.cli === "claude_code" &&
+      (host.id === sessionId || host.vendorSessionId === sessionId),
+  ) ??
+  hosts.find((host) => isClaudeSessionHostFor(host, sessionId, readLiveId));
+
 /** Production link: join the live host for this id, else spawn one. */
 const defaultOpenPtyLink: TOpenPtyLink = async (request) => {
   if (!SESSION_ID_PATTERN.test(request.sessionId)) return null;
@@ -420,9 +444,8 @@ const defaultOpenPtyLink: TOpenPtyLink = async (request) => {
   // Claude session X: match either, so the web never forks a second process.
   // A terminal run whose live meta has no (or a stale) Claude id is matched
   // by the id its TUI is on right now (`~/.claude/sessions/<pid>.json`).
-  const live = hosts.find((host) =>
-    isClaudeSessionHostFor(host, request.sessionId),
-  );
+  // Exact host / vendor id wins over a PID claim from another host.
+  const live = findClaudeSessionHost(hosts, request.sessionId);
   if (live !== undefined) return dialObserver(live.socketPath, live.id, false);
   // Not running and nothing on disk to resume (a web start that never reached
   // Claude, or an id this device never ran): `claude --resume` would exit at
@@ -519,7 +542,7 @@ export const killClaudeSessionHost = async (
     | undefined
   > => {
     const hosts = await defaultSessionHostClient.discoverSessionHosts();
-    return hosts.find((host) => isClaudeSessionHostFor(host, sessionId));
+    return findClaudeSessionHost(hosts, sessionId);
   };
   const live = await find();
   if (live === undefined) return true;
