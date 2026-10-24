@@ -40,9 +40,20 @@ export const COMMANDS: readonly TCommand[] = [
       "Enable or disable automatic daemon self-updates (on by default)",
   },
   {
-    name: "sessions",
-    args: "<on|off|status>",
-    description: "Enable or disable remote terminal sessions (off by default)",
+    name: "anchor",
+    description:
+      "Read an anchored key (sk-llm-KEY.ANCHOR) on stdin, pin its device-control key and print the bare key",
+  },
+  {
+    name: "device",
+    args: "<enable|disable|lock|unlock|status>",
+    description:
+      "Switch remote device sessions on this machine (lock refuses a remote enable)",
+  },
+  {
+    name: "identity",
+    description:
+      "Print this daemon's identity fingerprint and its device-control pin (compare with the browser's Verify device dialog)",
   },
   {
     name: "uninstall",
@@ -91,9 +102,9 @@ export const COMMAND_ARGS: Readonly<Record<string, readonly string[]>> = {
   auth: AUTH_COMMANDS.map((item) => item.name),
   completion: [...COMPLETION_SHELLS, "install"],
   "auto-update": [...AUTO_UPDATE_ACTIONS],
-  sessions: [...AUTO_UPDATE_ACTIONS],
   logs: ["-f", "--follow", "-n", "--lines"],
   uninstall: ["--yes", "-y", "--keep-logins", "--remove-logins"],
+  device: ["enable", "disable", "lock", "unlock", "status"],
 };
 
 const padRight = (value: string, width: number): string =>

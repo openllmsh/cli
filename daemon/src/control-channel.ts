@@ -183,11 +183,28 @@ export const statusChangeKey = (status: TDaemonStatus): string => {
     status.daemon_version,
     status.key_configured ? "1" : "0",
     status.auto_update === undefined ? "" : String(status.auto_update),
-    status.pty_sessions === undefined ? "" : String(status.pty_sessions),
     status.cloud_state,
     // Omitted/undefined is "0" so a false→true flip is a real key change.
     status.identity_conflict ? "1" : "0",
     status.pubkey ?? "",
+    // The device-trust surface: a pin / anchor / switch change must reach the
+    // dashboard (Manage device status, dpk proof) without waiting for an
+    // unrelated field to move.
+    status.device_access_pin === undefined
+      ? ""
+      : joinChangeKeyParts([
+          status.device_access_pin.fp,
+          status.device_access_pin.kind,
+          status.device_access_pin.via ?? "",
+        ]),
+    status.device_sessions === undefined
+      ? ""
+      : joinChangeKeyParts([
+          String(status.device_sessions.anchored),
+          String(status.device_sessions.enabled),
+          String(status.device_sessions.locked),
+          status.device_sessions.dpk_proof ?? "",
+        ]),
     status.port === undefined ? "" : String(status.port),
     status.sandbox ?? "",
     status.cli === undefined

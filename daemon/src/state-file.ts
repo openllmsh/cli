@@ -60,6 +60,70 @@ export type TRtcRun = {
   readonly rtcEnabled: boolean;
 };
 
+/**
+ * Path that set the device-access pin (see `device-access-verify.ts`).
+ * `anchor` / `local` / `rotation` (from an anchored pin) are the only
+ * agent-eligible paths; `tofu` is cloud-delivered and serves `/v1` + tunnel +
+ * realtime only.
+ */
+export type TDeviceAccessPinVia = "anchor" | "tofu" | "local" | "rotation";
+
+const isPinVia = (v: unknown): v is TDeviceAccessPinVia =>
+  v === "anchor" || v === "tofu" || v === "local" || v === "rotation";
+
+/**
+ * The install-time device trust anchor (`@openllmsh/tunnel`
+ * `device-anchor.ts`), split off `sk-llm-<id>.<secret>.<anchor>` and never
+ * sent anywhere. `keyId` is the api key it was minted for — the pair secret
+ * inside is bound to it, so the dpk proof is published only while the daemon
+ * runs on that key.
+ */
+export type TDeviceAnchorRecord = {
+  readonly anchor: string;
+  readonly keyId: string;
+};
+
+/**
+ * Remote device (agent) sessions. Fresh installs start disabled; `locked`
+ * (`--lock-device-sessions`) refuses a remote enable so only a local
+ * `openllm device enable` can turn them on. `lastCommandTs` is the newest
+ * accepted signed command — an older or equal one is a replay.
+ */
+export type TDeviceSessionsState = {
+  readonly enabled: boolean;
+  readonly locked: boolean;
+  readonly lastCommandTs?: number;
+};
+
+const isAnchorRecord = (v: unknown): v is TDeviceAnchorRecord =>
+  typeof v === "object" &&
+  v !== null &&
+  typeof (v as TDeviceAnchorRecord).anchor === "string" &&
+  (v as TDeviceAnchorRecord).anchor.length > 0 &&
+  typeof (v as TDeviceAnchorRecord).keyId === "string" &&
+  (v as TDeviceAnchorRecord).keyId.length > 0;
+
+const coerceDeviceSessions = (v: unknown): TDeviceSessionsState | undefined => {
+  if (typeof v !== "object" || v === null) return undefined;
+  const raw = v as {
+    enabled?: unknown;
+    locked?: unknown;
+    lastCommandTs?: unknown;
+  };
+  if (typeof raw.enabled !== "boolean" || typeof raw.locked !== "boolean") {
+    return undefined;
+  }
+  return {
+    enabled: raw.enabled,
+    locked: raw.locked,
+    ...(typeof raw.lastCommandTs === "number" &&
+    Number.isInteger(raw.lastCommandTs) &&
+    raw.lastCommandTs > 0
+      ? { lastCommandTs: raw.lastCommandTs }
+      : {}),
+  };
+};
+
 export type TDaemonState = {
   readonly updateAttempts: {
     readonly daemon?: TUpdateAttempt;
@@ -72,11 +136,35 @@ export type TDaemonState = {
     readonly cli?: TUpdateFailure;
   };
   /**
-   * Seed-derived device-access public key (SPKI DER, base64) pinned from
-   * bootstrap. `null` means explicitly un-provisioned; absent means never
+   * Device-access public key (SPKI DER, base64) pinned from bootstrap — the
+   * account device-control key when {@link deviceAccessPinKind} is
+   * `"control"`, else a legacy per-key value. `null` means explicitly un-provisioned; absent means never
    * set. Survives restarts so enforcement does not wait on the next poll.
+   * Once set, bootstrap cannot replace it without a signed rotation or a
+   * local confirmation (the install anchor, loopback).
    */
   readonly deviceAccessPubkey?: string | null;
+  /**
+   * `"control"` when {@link deviceAccessPubkey} is the account device-control
+   * key (phrase-derived). Absent = legacy per-key DEK-derived pin, which agent
+   * sessions refuse (`device_not_anchored`). See `device-access-verify.ts`.
+   */
+  readonly deviceAccessPinKind?: "control";
+  /** Control-key generation of the pin (`cv`), when known. */
+  readonly deviceAccessPinVersion?: number;
+  /** Which path set the pin — `tofu` is trust-on-first-use. */
+  readonly deviceAccessPinVia?: TDeviceAccessPinVia;
+  /**
+   * True when the pin descends from a local trust root (the install anchor,
+   * the desktop app over loopback) — directly or along
+   * a rotation chain signed by such a pin. Only an anchored pin authorises
+   * agent sessions (`device_not_anchored` otherwise).
+   */
+  readonly deviceAccessPinAnchored?: true;
+  /** The install-time trust anchor, when one was supplied (0600 file). */
+  readonly deviceAnchor?: TDeviceAnchorRecord;
+  /** Remote device-sessions switch; absent = disabled, unlocked. */
+  readonly deviceSessions?: TDeviceSessionsState;
   /** RTC native-crash breaker: this run's liveness sentinel (see {@link TRtcRun}). */
   readonly rtcRun?: TRtcRun | null;
   /** Timestamps of detected native crashes while RTC was live (bounded window). */
@@ -129,6 +217,12 @@ const coerceState = (v: unknown): TDaemonState => {
     updateFailures?: unknown;
     bootHistory?: unknown;
     deviceAccessPubkey?: unknown;
+    deviceAccessPinKind?: unknown;
+    deviceAccessPinVersion?: unknown;
+    deviceAccessPinVia?: unknown;
+    deviceAccessPinAnchored?: unknown;
+    deviceAnchor?: unknown;
+    deviceSessions?: unknown;
     rtcRun?: unknown;
     rtcCrashes?: unknown;
     rtcCrashesVersion?: unknown;
@@ -152,6 +246,27 @@ const coerceState = (v: unknown): TDaemonState => {
           raw.deviceAccessPubkey.length > 0
         ? raw.deviceAccessPubkey
         : undefined;
+  // Pin metadata only means something next to a pin.
+  const pinMeta =
+    typeof pubkey === "string"
+      ? {
+          ...(raw.deviceAccessPinKind === "control"
+            ? { deviceAccessPinKind: "control" as const }
+            : {}),
+          ...(typeof raw.deviceAccessPinVersion === "number" &&
+          Number.isInteger(raw.deviceAccessPinVersion) &&
+          raw.deviceAccessPinVersion >= 1
+            ? { deviceAccessPinVersion: raw.deviceAccessPinVersion }
+            : {}),
+          ...(isPinVia(raw.deviceAccessPinVia)
+            ? { deviceAccessPinVia: raw.deviceAccessPinVia }
+            : {}),
+          ...(raw.deviceAccessPinAnchored === true
+            ? { deviceAccessPinAnchored: true as const }
+            : {}),
+        }
+      : {};
+  const deviceSessions = coerceDeviceSessions(raw.deviceSessions);
   const rtcCrashes = numberList(raw.rtcCrashes);
   const rtcCrashesVersion =
     typeof raw.rtcCrashesVersion === "string" &&
@@ -166,6 +281,16 @@ const coerceState = (v: unknown): TDaemonState => {
     ...(Object.keys(updateFailures).length > 0 ? { updateFailures } : {}),
     bootHistory: numberList(raw.bootHistory),
     ...(pubkey !== undefined ? { deviceAccessPubkey: pubkey } : {}),
+    ...pinMeta,
+    ...(isAnchorRecord(raw.deviceAnchor)
+      ? {
+          deviceAnchor: {
+            anchor: raw.deviceAnchor.anchor,
+            keyId: raw.deviceAnchor.keyId,
+          },
+        }
+      : {}),
+    ...(deviceSessions !== undefined ? { deviceSessions } : {}),
     ...(isRtcRun(raw.rtcRun) ? { rtcRun: raw.rtcRun } : {}),
     ...(rtcCrashes.length > 0 ? { rtcCrashes } : {}),
     ...(rtcCrashesVersion !== undefined ? { rtcCrashesVersion } : {}),

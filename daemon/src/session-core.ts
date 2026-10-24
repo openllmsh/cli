@@ -11,11 +11,11 @@ import { homedir } from "node:os";
 import { basename, isAbsolute, resolve } from "node:path";
 import type {
   TDeviceSessionCli,
-  TSessionStreamOpenPayload,
+  TLocalSessionOpenPayload,
 } from "@openllmsh/protocol";
 import {
   DANGEROUS_SESSION_CLIS,
-  parseStreamCtrlPayload,
+  parseLocalSessionCtrlPayload,
   SESSION_ID_PATTERN,
 } from "@openllmsh/protocol";
 import { decodeJsonPayload, encodeJsonPayload } from "@openllmsh/tunnel/codec";
@@ -1403,7 +1403,7 @@ export const openSession = (
 /** Bind a transport-neutral session stream without changing the legacy JSON state machine. */
 export const bindSessionStream = (
   stream: TSessionStream,
-  open: TSessionStreamOpenPayload,
+  open: TLocalSessionOpenPayload,
   opts: {
     readonly vendorArgs?: readonly string[];
     readonly onExit?: (code: number) => void;
@@ -1502,7 +1502,7 @@ export const bindSessionStream = (
     }),
     stream.onCtrl((payload) => {
       if (!session.consumers.has(consumer)) return;
-      const ctrl = parseStreamCtrlPayload(decodeJsonPayload(payload));
+      const ctrl = parseLocalSessionCtrlPayload(decodeJsonPayload(payload));
       if (ctrl?.t === "resize") {
         // Someone dragged THIS viewer's window. A deliberate act on a specific
         // viewer, so it takes the PTY size with it.
@@ -1519,7 +1519,7 @@ export const bindSessionStream = (
       }
       if (ctrl?.t === "close" && ctrl.intent === "kill") {
         endPty(session, "killed");
-        // END is a clean terminal close to sessionStream.closed ("done").
+        // END is a clean terminal close to the local session broker ("done").
         terminalClose(session);
       }
     }),

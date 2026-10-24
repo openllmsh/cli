@@ -39,7 +39,7 @@ export const COMMANDS = [
   },
   {
     name: "login",
-    args: "[--key <key>] [--start] [--pty-sessions|--no-pty-sessions] [--json]",
+    args: "[--key <key>] [--start] [--json]",
     description: "Save or replace your OpenLLM API key",
   },
   {
@@ -239,7 +239,7 @@ export const COMMAND_ARGS: Readonly<
   Partial<Record<TCommandName, readonly string[]>>
 > = {
   auth: AUTH_COMMANDS.map((item) => item.name),
-  login: ["--key"],
+  login: ["--key", "--lock-device-sessions"],
   completion: [...COMPLETION_SHELLS, "install"],
   "auto-update": [...AUTO_UPDATE_ACTIONS],
   mcp: ["--only", ...MCP_ONLY_GROUPS],

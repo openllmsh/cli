@@ -777,11 +777,21 @@ silent signaling timeouts. Detail lives in
   `channel_open_ack`, receives mux OPEN frames, and dispatches via
   `serveStream` into `tunnel-server.ts`. Advertises `mux` (wire `mux2`) +
   `rtc1`, and layers `seedgate1` when a device-access pubkey is pinned from
-  bootstrap.
+  bootstrap. Seed-gating applies **only** to `consumer:"browser"` channels
+  whose grant carries this daemon's `dpk`; `consumer:"daemon"` (origin /
+  fleet) is never seed-gated and admits only `tunnel` + `realtime` (`agent`
+  resets `unauthorized`). A gated relay-mux `agent` OPEN runs Noise_IK as
+  responder (`serveSecureAgentStream`) with a second fresh grant as the
+  message-1 payload before the agent handler sees the stream.
 - `rtc-host.ts` is the werift RTC answerer for browser or fleet-peer offers:
   same-user `rtc_offer` / `rtc_answer` / `rtc_ice` / `rtc_nack` traverse the
   relay, then the mux runs over the data channel (signaling-only relay;
   payload-cap negotiation; kill-switch / failure-cache fallthrough to mux).
+  RTC applies the same per-kind admit table as the relay mux
+  (`admitStreamKind`): a browser offer whose grant has our `dpk` is
+  seed-gated (DTLS already E2E — no Noise layer); a `consumer:"daemon"`
+  offer is never seed-gated so `agent` is refused; a grant with no `dpk`
+  fails `dpk_missing` before the nonce is spent (retry admits tunnel-only).
 - `rtc-client.ts` is the fleet WebRTC offerer for daemon→daemon tunnels.
   It reuses `rtc-auth`, `rtc-duplex`, and mux; it does not introduce a second
   direct-path or hole-punch transport.
@@ -793,9 +803,40 @@ silent signaling timeouts. Detail lives in
   `consumer:"daemon"` (fleet hop from another daemon) so the peer walker
   cannot re-tunnel. Browser tunnels omit the stamp so the selected device
   may still `tryFleetTunnel` once (browser→A→B).
-- `device-access-verify.ts` verifies vault-signed device grants (node:crypto)
-  with ts window + nonce map; browser-only enforcement (daemon fleet hops
-  skip grant). Locked-vault consumers fail closed before probing transports.
+- `device-access-verify.ts` verifies device grants signed by the account
+  **device-control key** (phrase-derived in the browser, never from the DEK —
+  so the cloud cannot sign) with node:crypto: ts window + nonce map + optional
+  `requireDpk`; browser-only enforcement (daemon fleet hops skip grant).
+  Locked-vault consumers fail closed before probing transports. The daemon
+  holds NO DEK material — bootstrap carries only the public key plus
+  `device_access_kind` / `_version` / `_rotations`. Pin rules: a pin is
+  **anchored** (agent-eligible) only from a local trust root — the install
+  anchor (`sk-llm-<key>.<anchor>`, split on the last dot by install.sh /
+  `openllm login` / the credential gate and handed to `openllm daemon anchor`
+  on stdin; `via: anchor`), loopback `POST /local/device-control`
+  (`via: local`), or a v2 rotation chain
+  signed by the current anchored pin (`via: rotation`, anchoring inherited).
+  An unpinned daemon still first-use pins bootstrap's key (`via: tofu`), but
+  UNANCHORED: it serves `/v1`, tunnel and realtime only. There is no
+  cloud-driven legacy→control upgrade; a cloud-sent null never
+  clears a pin. Agent streams (`requireDpk`) refuse an unanchored or legacy
+  pin with `device_not_anchored` and a switched-off device with
+  `device_sessions_disabled` (re-checked on every agent OPEN); RTC degrades
+  such an offer, or a dpk-less grant, to a tunnel-only session.
+  `device-anchor.ts` owns the anchor: it keeps it in `state.json` (0600, never
+  `.env`, never logged or sent), publishes `DaemonStatus.device_sessions`
+  (`anchored`, `enabled`, `locked`, `dpk_proof = HMAC(pair_secret,
+  "openllm-dpk-proof-v1" || key_id || pubkey)`) so a browser holding the
+  control seed trusts this daemon's X25519 key without a first-use window,
+  and applies the control-signed `set_device_sessions` command (anchored pin,
+  this key id, fresh + monotonic `ts`). Fresh installs are disabled;
+  `--lock-device-sessions` (install.sh / `openllm login`) refuses a remote
+  enable, and `openllm daemon device enable|disable|lock|unlock` is the local
+  switch that always wins. `openllm daemon identity` and
+  `DaemonStatus.device_access_pin` show the pin's fingerprint and `via`
+  (agent eligibility is reported once, as `device_sessions.anchored`);
+  loopback `GET /local/identity` returns the same plus `device_sessions`
+  (`local-device-control.ts`).
 
 **Kill-switches.** `OPENLLM_MUX_DISABLE=1` withdraws the mux transport
 wholesale — including the terminal sessions that ride it. `OPENLLM_RTC_DISABLE=1`
@@ -859,16 +900,33 @@ session. On boot the daemon reconciles the socket-directory registry: valid
 `meta.json` + live host pid + present socket is **adopted** (kept, never
 signalled); a dead or incomplete directory is removed.
 
-`mux-host.ts` attaches browser mux session streams to the durable host through
-`attachSessionHostViaCli`; `session-host.ts` is now only the durable
-registry/status adapter and boot reconciler. There is no legacy JSON
-`session_*` relay splice. See
+`session-host.ts` is the durable registry/status adapter and boot reconciler.
+There is no legacy JSON `session_*` relay splice. See
 [`durable-session-host.md`](../../docs/proposals/durable-session-host.md) and
 [`shared-session-viewing.md`](../../docs/proposals/shared-session-viewing.md).
 
 The session PTY spawn remains deliberately outside the per-child sandbox: it
 runs the user's real vendor CLI against the user's real `$HOME`; only its
 standalone host owns lifecycle and transport fan-out.
+
+## Agent sessions
+
+Agent sessions (structured command/event protocol driving a vendor CLI engine on
+the device) replace remote PTY mirroring. The daemon hosts the agent dispatcher
+(`agent/`), which receives commands over a seed-gated `kind:"agent"` stream from
+the browser or via a loopback endpoint from the desktop app (no grant required on
+loopback). An agent stream is served **only** with a browser grant carrying this
+daemon's `dpk` (from a device-control-signed attestation — the daemon itself
+seals nothing), plus either Noise_IK on the relay
+mux (second fresh grant as message-1 payload; prologue
+`openllm-agent-secure-v1|<channel_id>|<stream_id>` from `@openllmsh/tunnel`) or a
+gated DTLS session on RTC. Every other path resets `unauthorized`. Each engine
+adapter (`claude-code`, …) emits the same event stream to a unified UI rendered
+by the client. The engine runs with its normal permission model (approvals
+surfaced as events; skip-permissions is a per-session opt-in), not an extra
+sandbox layer. Attach via `--resume <id>` where the engine supports resume;
+spawn and attach both go through the same engine adapter. See the
+[agent sessions plan](../../docs/plan/2026-10-23-agent-sessions-replace-remote-pty.md).
 
 ## Localhost surfaces and provider auth
 

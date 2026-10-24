@@ -38,7 +38,7 @@
  * whole payload and presents it atomically, so the intermediate blank frame is
  * never shown. `?2026` is ignored by terminals that do not implement it (an
  * unknown DEC private mode is a no-op), so this is safe for every consumer —
- * and `@xterm/xterm` v6, which the browser pane uses, implements it.
+ * and the browser terminal renderer formerly implemented it.
  */
 
 import { SerializeAddon } from "@xterm/addon-serialize";
@@ -52,7 +52,7 @@ const addonFor = (term: Terminal): SerializeAddon => {
   const existing = addons.get(term);
   if (existing !== undefined) return existing;
   const addon = new SerializeAddon();
-  // `@xterm/addon-serialize` typings are declared against `@xterm/xterm`'s
+  // `@xterm/addon-serialize` typings are declared against the renderer's
   // Terminal, but the addon only touches the shared core buffer API that the
   // headless build also exposes (this is how VS Code drives it headless).
   addon.activate(term as unknown as Parameters<SerializeAddon["activate"]>[0]);

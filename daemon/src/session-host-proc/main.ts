@@ -17,7 +17,7 @@ import {
 import { join } from "node:path";
 import type {
   TDeviceSessionCli,
-  TSessionStreamOpenPayload,
+  TLocalSessionOpenPayload,
 } from "@openllmsh/protocol";
 import {
   DeviceSessionCli,
@@ -325,7 +325,7 @@ const protocolError = (socket: TSocket): void => {
 const parseAttachOpen = (
   value: unknown,
   expected: TSessionHostArgs,
-): TSessionStreamOpenPayload | null => {
+): TLocalSessionOpenPayload | null => {
   if (!isRecord(value)) return null;
   if (
     value.session_id !== expected.id ||

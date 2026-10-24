@@ -4,7 +4,15 @@
  * Browser creates the offer + data channel; this module answers, seals a
  * DTLS-fingerprint proof under the daemon's long-lived X25519 key, trickles
  * ICE, and once the data channel opens mounts the same mux OPEN dispatcher
- * that the relay-WS path uses ({@link serveMuxOnStream}).
+ * that the relay-WS path uses ({@link serveMuxOnStream}), behind the same
+ * per-kind gate table ({@link admitStreamKind}).
+ *
+ * Seed-gated kinds (`agent`) are served on an RTC session only when the offer
+ * came from a BROWSER consumer whose nested grant verified with `dpk` equal to
+ * this daemon's key. A `consumer:"daemon"` (fleet) offer, or a browser offer
+ * whose grant carries no `dpk`, mounts a mux that serves `tunnel`/`realtime`
+ * only. No Noise layer here: DTLS is already bound to the daemon key through
+ * the sealed fingerprint proof.
  *
  * Signaling frames (`rtc_offer` / `rtc_answer` / `rtc_ice`) ride the control
  * channel through the relay; payload bytes never touch the relay after the
@@ -15,7 +23,8 @@ import type {
   TRelayFrame,
   TRtcNackReason,
 } from "@openllmsh/protocol";
-import { MAX_PAYLOAD_BYTES } from "@openllmsh/tunnel/codec";
+import { streamOpenKindOf } from "@openllmsh/protocol";
+import { decodeJsonPayload, MAX_PAYLOAD_BYTES } from "@openllmsh/tunnel/codec";
 import type { TMuxChannel } from "@openllmsh/tunnel/mux";
 import { createChannel } from "@openllmsh/tunnel/mux";
 import {
@@ -33,11 +42,11 @@ import { rtcDuplex } from "@openllmsh/tunnel/rtc-duplex";
 import { preflightIceCandidate } from "@openllmsh/tunnel/rtc-ice";
 import type { RTCDataChannel, RTCIceCandidate } from "werift";
 import { RTCPeerConnection } from "werift";
-import { enforceRtcSeedGate } from "./device-access-verify";
+import { AGENT_PIN_REFUSALS, enforceRtcSeedGate } from "./device-access-verify";
 import { daemonApiKeyId } from "./env";
 import { daemonPublicKey, openSealed, sealTo } from "./keypair";
 import { logDebug, logWarn, safeDiagnosticMessage } from "./logger";
-import { serveMuxOnStream } from "./mux-host";
+import { admitStreamKind, serveMuxOnStream } from "./mux-host";
 
 /** Bound concurrent RTC sessions per daemon process. */
 const MAX_CONCURRENT_RTC = 8;
@@ -53,6 +62,11 @@ type TRtcSession = {
   readonly channelId: string;
   readonly pc: RTCPeerConnection;
   mux: TMuxChannel | null;
+  /**
+   * Seed-gated kinds may be served: browser consumer + verified grant whose
+   * `dpk` is this daemon's key. Fixed at offer time.
+   */
+  readonly seedGated: boolean;
   closed: boolean;
   nacked: boolean;
   handshakeTimer: ReturnType<typeof setTimeout> | null;
@@ -73,8 +87,9 @@ export type TRtcOfferFrame = {
   /**
    * Who offered. The relay stamps this from the authenticated socket role
    * (`daemon` vs `browser`); a self-asserted value is not a trust signal.
-   * Fleet hops skip seedgate — they have no vault DEK (parity with
-   * mux-host `admitBySeedGate`).
+   * Fleet hops skip the offer-level seedgate — they have no vault DEK — and
+   * so never get seed-gated kinds on the mounted mux (parity with mux-host
+   * `seedGateOf`).
    */
   readonly consumer?: "browser" | "daemon";
 };
@@ -94,6 +109,76 @@ export type TRtcHost = {
   readonly handleRtcIce: (frame: TRtcIceFrame) => Promise<void>;
   readonly rtcSessionCount: () => number;
 };
+
+export type TRtcOfferGate =
+  | { readonly mode: "ok"; readonly seedGated: boolean }
+  | { readonly mode: "reject"; readonly reason: string };
+
+/**
+ * Offer-level seed gate plus the session's seed-gated flag.
+ *
+ * - `consumer:"daemon"` (fleet): no vault DEK, so no offer gate — but the
+ *   session is never seed-gated, so `agent` is refused on its mux.
+ * - Browser: a provisioned pin, a v2 offer and a valid nested grant, or the
+ *   offer is rejected. The session is seed-gated only when that grant also
+ *   carries `dpk` equal to this daemon's key; a dpk-less grant fails
+ *   `dpk_missing` BEFORE its nonce is spent, so the retry still admits it as
+ *   a tunnel-only session. An unanchored pin (`device_not_anchored`) or a
+ *   switched-off device (`device_sessions_disabled`) degrades identically.
+ */
+const RTC_TUNNEL_ONLY_REASONS: ReadonlySet<string> = new Set([
+  "dpk_missing",
+  ...AGENT_PIN_REFUSALS,
+]);
+
+export const rtcOfferSeedGate = (
+  consumer: "browser" | "daemon" | undefined,
+  grant: string | undefined,
+  offer: { readonly cid: string; readonly offerVersion: number },
+): TRtcOfferGate => {
+  if (consumer === "daemon") return { mode: "ok", seedGated: false };
+  const expect = {
+    keyId: daemonApiKeyId(),
+    cid: offer.cid,
+    aud: daemonPublicKey(),
+    offerVersion: offer.offerVersion,
+  };
+  const strict = enforceRtcSeedGate(grant, { ...expect, requireDpk: true });
+  if (strict.mode === "ok") return { mode: "ok", seedGated: true };
+  // A dpk-less grant (the browser has not verified this daemon's dpk proof),
+  // an UNANCHORED pin (first-use / legacy — the cloud chose it), or a
+  // switched-off device still admits a tunnel-only session: those checks run
+  // before the nonce is spent. Agent stays refused on that session.
+  if (!RTC_TUNNEL_ONLY_REASONS.has(strict.reason)) {
+    return strict;
+  }
+  const relaxed = enforceRtcSeedGate(grant, expect);
+  return relaxed.mode === "ok" ? { mode: "ok", seedGated: false } : relaxed;
+};
+
+/**
+ * OPEN dispatcher for an RTC-mounted mux: the per-kind gate table
+ * ({@link admitStreamKind}) first, then `handler`.
+ */
+export const createRtcMuxOnStream =
+  (options: {
+    readonly channelId: string;
+    readonly seedGated: boolean;
+    readonly handler: typeof serveMuxOnStream;
+  }): typeof serveMuxOnStream =>
+  (stream, open) => {
+    const kind = streamOpenKindOf(decodeJsonPayload(open));
+    if (
+      !admitStreamKind(stream, kind, {
+        transport: "rtc",
+        channelId: options.channelId,
+        seedGated: options.seedGated,
+      })
+    ) {
+      return;
+    }
+    options.handler(stream, open);
+  };
 
 /**
  * One RTC host with its own sessions and wiring. The daemon runs
@@ -279,7 +364,11 @@ export const createRtcHost = (): TRtcHost => {
         duplex,
         side: "daemon",
         maxPayloadBytes,
-        onStream: streamHandler ?? serveMuxOnStream,
+        onStream: createRtcMuxOnStream({
+          channelId: session.channelId,
+          seedGated: session.seedGated,
+          handler: streamHandler ?? serveMuxOnStream,
+        }),
         onClose: () => {
           session.mux = null;
           closeSession(session.channelId, "mux_closed");
@@ -376,30 +465,26 @@ export const createRtcHost = (): TRtcHost => {
 
     // Seed-gate: browser consumers need a provisioned pin + v2 grant.
     // Fleet daemon→daemon hops (`consumer: "daemon"`) have no vault DEK —
-    // skip, matching mux-host. The relay (or an in-process loopback that
-    // stands in for it) stamps this from the authenticated socket role.
-    if (frame.consumer !== "daemon") {
-      const gate = enforceRtcSeedGate(
-        "grant" in inner ? inner.grant : undefined,
-        {
-          keyId: daemonApiKeyId(),
-          cid: frame.channel_id,
-          aud: daemonPublicKey(),
-          offerVersion: inner.v,
-        },
-      );
-      if (gate.mode === "reject") {
-        logWarn("rtc-host", safeDiagnosticMessage`seedgate rejected`, {
-          channelId: frame.channel_id,
-          reason: gate.reason,
-        });
-        // The offer WAS authenticated (sealed proof opened + fb bound) — the
-        // vault is just locked. Nack so the offerer surfaces "unlock to
-        // connect" instead of timing out.
-        sendNack(frame.channel_id, "seedgate");
-        return;
-      }
+    // they skip the offer gate but the session is NEVER seed-gated, so the
+    // mounted mux refuses `agent` on it. The relay (or an in-process loopback
+    // that stands in for it) stamps this from the authenticated socket role.
+    const gate = rtcOfferSeedGate(
+      frame.consumer,
+      "grant" in inner ? inner.grant : undefined,
+      { cid: frame.channel_id, offerVersion: inner.v },
+    );
+    if (gate.mode === "reject") {
+      logWarn("rtc-host", safeDiagnosticMessage`seedgate rejected`, {
+        channelId: frame.channel_id,
+        reason: gate.reason,
+      });
+      // The offer WAS authenticated (sealed proof opened + fb bound) — the
+      // vault is just locked. Nack so the offerer surfaces "unlock to
+      // connect" instead of timing out.
+      sendNack(frame.channel_id, "seedgate");
+      return;
     }
+    const seedGated = gate.seedGated;
 
     const offerSdpMax = maxMessageSizeFromSdp(frame.sdp);
     const maxPayloadBytes = negotiateRtcPayloadCapFromSdp(frame.sdp);
@@ -437,6 +522,7 @@ export const createRtcHost = (): TRtcHost => {
       channelId: frame.channel_id,
       pc,
       mux: null,
+      seedGated,
       closed: false,
       nacked: false,
       handshakeTimer: null,

@@ -23,7 +23,11 @@
 import * as fs from "node:fs";
 import { homedir } from "node:os";
 import { isAbsolute, join } from "node:path";
-import { DEV_CLOUD_ORIGIN, isOpenllmDevMode } from "./runtime-contracts";
+import {
+  bearerApiKeyOf,
+  DEV_CLOUD_ORIGIN,
+  isOpenllmDevMode,
+} from "./runtime-contracts";
 
 export { CLI_VERSION } from "./cli-version";
 
@@ -147,12 +151,16 @@ export const cliConfig = (): TCliConfig => {
     file.OPENLLM_API_KEY !== undefined && file.OPENLLM_API_KEY.length > 0
       ? file.OPENLLM_API_KEY
       : undefined;
-  const apiKey =
+  const rawKey =
     process.env.OPENLLM_API_KEY ??
     fileKey ??
     (dev
       ? parseEnvFile(join(openllmDir(), ".env")).OPENLLM_API_KEY
       : undefined) ??
     "";
+  // Defense in depth: a device trust anchor pasted into the env
+  // (`sk-llm-<key>.<anchor>`) never becomes part of the bearer, and a key
+  // whose suffix is malformed is treated as no key at all — never sent.
+  const apiKey = bearerApiKeyOf(rawKey) ?? "";
   return { gatewayUrl, apiKey };
 };

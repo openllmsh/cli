@@ -4,7 +4,11 @@ import type {
   TCredentialGateMode,
   TCredentialGateTerminal,
 } from "@openllmsh/protocol";
-import { isUsableOpenllmApiKey } from "@openllmsh/protocol";
+import {
+  isUsableOpenllmApiKey,
+  splitAnchoredApiKey,
+} from "@openllmsh/protocol";
+import { installDeviceAnchor } from "./device-anchor";
 import {
   applyPersistedApiKey,
   daemonEnv,
@@ -190,11 +194,23 @@ export const requireServiceApiKey = (
     if (pasted === null || pasted.trim().length === 0) {
       return { ok: false, message: "[openllm] API key setup cancelled.\n" };
     }
-    if (!isUsableApiKey(pasted)) {
+    const split = splitAnchoredApiKey(pasted);
+    if (split === null) {
       terminal.write("The API key format is invalid. Please try again.\n");
       continue;
     }
-    if (!persistServiceKey(pasted.trim(), targetPath)) {
+    // A key from "Set up device sessions" carries a device trust anchor: pin
+    // it locally; only the bare key is ever saved.
+    if (split.anchor !== null) {
+      const anchored = installDeviceAnchor(`${split.key}.${split.anchor}`);
+      if (!anchored.ok) {
+        return {
+          ok: false,
+          message: "[openllm] Could not save the device trust anchor.\n",
+        };
+      }
+    }
+    if (!persistServiceKey(split.key, targetPath)) {
       return { ok: false, message: "[openllm] Could not save the API key.\n" };
     }
     terminal.write(`Saved to ${targetPath}.\n`);

@@ -70,7 +70,7 @@ import {
 } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join } from "node:path";
-import { parseOpenllmDaemonPort } from "@openllmsh/protocol";
+import { bearerApiKeyOf, parseOpenllmDaemonPort } from "@openllmsh/protocol";
 // NOTE: logger.ts imports `stateDir` from this module — a benign cycle, since
 // both sides only dereference the other's exports lazily inside functions.
 import {
@@ -575,15 +575,28 @@ export const deviceId = (): string => {
  * merge, which would leak the prod origin/port/device-id into dev) and never
  * written anywhere, so dev reuses the paired key without forking it.
  */
+/**
+ * Defense in depth: a device trust anchor that reached the env
+ * (`sk-llm-<key>.<anchor>`) is dropped here, so it can never become the
+ * bearer, a log field, or a cloud payload. A key whose suffix is MALFORMED
+ * (truncated / wrong-charset anchor) loads as no key at all — the daemon
+ * stays keyless rather than send it. The anchor itself is accepted only by
+ * `openllm daemon anchor`.
+ */
+const withoutAnchor = (key: string): string | null => bearerApiKeyOf(key);
+
 const loadApiKey = (): string | null => {
   const fromEnv = process.env.OPENLLM_API_KEY?.trim();
-  if (fromEnv !== undefined && fromEnv.length > 0) return fromEnv;
+  if (fromEnv !== undefined && fromEnv.length > 0)
+    return withoutAnchor(fromEnv);
   if (isDevMode()) {
     try {
       const shared = parseEnvLines(readFileSync(sharedEnvFilePath(), "utf-8"))
         .get("OPENLLM_API_KEY")
         ?.trim();
-      if (shared !== undefined && shared.length > 0) return shared;
+      if (shared !== undefined && shared.length > 0) {
+        return withoutAnchor(shared);
+      }
     } catch {
       // no shared file — keyless
     }

@@ -11,17 +11,29 @@
 #   # with a key, so the daemon is paired immediately:
 #   curl -fsSL https://www.openllm.sh/install | OPENLLM_API_KEY=sk-llm-... bash
 #
+#   # a strict machine: remote device sessions can only be enabled locally
+#   curl -fsSL https://www.openllm.sh/install | OPENLLM_API_KEY=sk-llm-... bash -s -- --lock-device-sessions
+#
+# Options (after `bash -s --`):
+#   --lock-device-sessions the daemon refuses a REMOTE enable of device (agent)
+#                          sessions; only `openllm device enable` on this
+#                          machine turns them on
+#
 # Env (all optional):
 #   OPENLLM_CLOUD_ORIGIN   gateway origin (env → existing ~/.openllm/.env →
 #                          default https://www.openllm.sh; a re-run keeps your origin)
-#   OPENLLM_API_KEY        pair the daemon now; otherwise pair from the dashboard
+#   OPENLLM_API_KEY        pair the daemon now; otherwise pair from the dashboard.
+#                          The dashboard's command carries a device trust anchor
+#                          after the key (`sk-llm-<key>.<anchor>`): it is split
+#                          off here, pinned locally (state.json, 0600) and NEVER
+#                          written to .env, logged, or sent — only the bare
+#                          `sk-llm-<key>` is stored and used as the bearer
 #   OPENLLM_DAEMON_PORT    local daemon port (default 8787; if unset AND
 #                          nothing is already persisted, and 8787 is taken on
 #                          this machine, the installer walks forward to the
 #                          next free port nearby and persists that instead —
 #                          an explicit or already-persisted port is never
 #                          probed or changed)
-#   OPENLLM_DAEMON_PTY_SESSIONS  enable remote terminal sessions (1/true; default off)
 #   OPENLLM_SKIP_SHELL_SETUP     set to skip `openllm setup` + completion install
 #                                (PATH symlinks / shell rc / completion stay untouched)
 #   OPENLLM_SKIP_VENDOR_CLIS     set to skip background vendor CLI provisioning
@@ -60,6 +72,15 @@ INSTALLED_COMPONENTS=""
 has_command() { command -v "$1" >/dev/null 2>&1; }
 
 die() { echo "Error: $*" >&2; exit 1; }
+
+# Installer options (`curl … | bash -s -- --lock-device-sessions`).
+LOCK_DEVICE_SESSIONS=0
+for arg in "$@"; do
+  case "$arg" in
+    --lock-device-sessions) LOCK_DEVICE_SESSIONS=1 ;;
+    *) die "unknown installer option: $arg" ;;
+  esac
+done
 
 # Can we prompt the human running this install? A piped `curl … | bash` leaves
 # the script's own stdin as the download stream, but the user's terminal is still
@@ -140,6 +161,11 @@ is_usable_api_key() {
   # a 32-byte base64url secret (43 chars). Restricting this shell boundary to
   # the wire grammar keeps values safe to persist in KEY=value config files.
   [[ "$key" =~ ^sk-llm-[A-Za-z0-9_-]{14}[.][A-Za-z0-9_-]{43}$ ]]
+}
+
+# A device trust anchor: base64url of 64 bytes (86 chars, unpadded).
+is_device_anchor() {
+  [[ "$1" =~ ^[A-Za-z0-9_-]{86}$ ]]
 }
 
 sha256_of() {
@@ -389,9 +415,23 @@ fi
 # lock: downloads can take long enough for the daemon or another installer to update
 # the file in the meantime.
 SUPPLIED_KEY="$(trim_whitespace "${OPENLLM_API_KEY:-}")"
+SUPPLIED_ANCHOR=""
 if [ -n "$SUPPLIED_KEY" ]; then
   has_line_break "$SUPPLIED_KEY" && die "OPENLLM_API_KEY must not contain a line break"
+  # `sk-llm-<key>.<anchor>`: split on the LAST dot. The anchor never leaves this
+  # machine — from here on SUPPLIED_KEY is the bare key, and the exported
+  # OPENLLM_API_KEY every child process inherits is overwritten with it.
+  if ! is_usable_api_key "$SUPPLIED_KEY"; then
+    candidate_anchor="${SUPPLIED_KEY##*.}"
+    candidate_key="${SUPPLIED_KEY%.*}"
+    if is_usable_api_key "$candidate_key" && is_device_anchor "$candidate_anchor"; then
+      SUPPLIED_ANCHOR="$candidate_anchor"
+      SUPPLIED_KEY="$candidate_key"
+    fi
+    unset candidate_anchor candidate_key
+  fi
   is_usable_api_key "$SUPPLIED_KEY" || die "OPENLLM_API_KEY has an invalid format"
+  export OPENLLM_API_KEY="$SUPPLIED_KEY"
 fi
 API_KEY=""
 
@@ -533,10 +573,9 @@ write_env_file() {
   done
   [ "$acquired" = 1 ] || die "could not acquire config lock: $lock"
 
-  local current_key current_device current_pty desired_key desired_pty tmp line key
+  local current_key current_device desired_key tmp line key
   current_key="$(trim_whitespace "$(read_env_value OPENLLM_API_KEY || true)")"
   current_device="$(read_env_value OPENLLM_DEVICE_ID || true)"
-  current_pty="$(read_env_value OPENLLM_DAEMON_PTY_SESSIONS || true)"
   if [ -n "$SUPPLIED_KEY" ]; then
     desired_key="$SUPPLIED_KEY"
   else
@@ -546,11 +585,6 @@ write_env_file() {
       desired_key=""
     fi
   fi
-  case "${OPENLLM_DAEMON_PTY_SESSIONS:-}" in
-    1|true) desired_pty="1" ;;
-    0|false) desired_pty="0" ;;
-    *) desired_pty="$current_pty" ;;
-  esac
 
   tmp="$ENV_FILE.tmp.$$"
   # Install the RETURN cleanup only after all nested reads have completed: Bash
@@ -565,7 +599,7 @@ write_env_file() {
   : > "$tmp"
   # Keep unrelated lines byte-for-byte, but replace every installer-owned key with
   # one canonical occurrence. An ignored invalid persisted key is therefore removed.
-  local wrote_origin=0 wrote_port=0 wrote_key=0 wrote_device=0 wrote_pty=0
+  local wrote_origin=0 wrote_port=0 wrote_key=0 wrote_device=0
   if [ -f "$ENV_FILE" ]; then
     while IFS= read -r line || [ -n "$line" ]; do
       key="${line%%=*}"
@@ -582,9 +616,6 @@ write_env_file() {
         OPENLLM_DEVICE_ID)
           if [ -n "$current_device" ] && [ "$wrote_device" = 0 ]; then printf 'OPENLLM_DEVICE_ID=%s\n' "$current_device" >> "$tmp"; wrote_device=1; fi
           ;;
-        OPENLLM_DAEMON_PTY_SESSIONS)
-          if [ -n "$desired_pty" ] && [ "$wrote_pty" = 0 ]; then printf 'OPENLLM_DAEMON_PTY_SESSIONS=%s\n' "$desired_pty" >> "$tmp"; wrote_pty=1; fi
-          ;;
         *) printf '%s\n' "$line" >> "$tmp" ;;
       esac
     done < "$ENV_FILE"
@@ -593,7 +624,6 @@ write_env_file() {
   [ "$wrote_port" = 1 ] || printf 'OPENLLM_DAEMON_PORT=%s\n' "$DAEMON_PORT" >> "$tmp"
   [ -z "$desired_key" ] || [ "$wrote_key" = 1 ] || printf 'OPENLLM_API_KEY=%s\n' "$desired_key" >> "$tmp"
   [ -z "$current_device" ] || [ "$wrote_device" = 1 ] || printf 'OPENLLM_DEVICE_ID=%s\n' "$current_device" >> "$tmp"
-  [ -z "$desired_pty" ] || [ "$wrote_pty" = 1 ] || printf 'OPENLLM_DAEMON_PTY_SESSIONS=%s\n' "$desired_pty" >> "$tmp"
   chmod 0600 "$tmp"
   # Abort with a clear error if the atomic replace fails — never fall through to
   # announce success (or set API_KEY) on a config that was not written. The
@@ -624,6 +654,21 @@ if [ "$INSTALL_MODE" != update ]; then
     "$BIN_DIR/openllm" setup || echo "  note: run '$BIN_DIR/openllm setup' yourself to finish shell setup"
     "$BIN_DIR/openllm" daemon completion install >/dev/null 2>&1 || true
   fi
+fi
+
+# --- device trust anchor ---------------------------------------------------
+# Pin the account device-control key from the anchor the dashboard put after
+# the key — a local trust root, so the cloud never chooses it. The anchored key
+# goes over stdin (never argv); the daemon prints only the bare key, discarded.
+if [ -n "$SUPPLIED_ANCHOR" ]; then
+  printf '%s.%s' "$SUPPLIED_KEY" "$SUPPLIED_ANCHOR" \
+    | "$BIN_DIR/openllm" daemon anchor >/dev/null \
+    || die "the device trust anchor was rejected — copy the install command from the dashboard again"
+fi
+SUPPLIED_ANCHOR=""
+if [ "$LOCK_DEVICE_SESSIONS" = 1 ]; then
+  "$BIN_DIR/openllm" daemon device lock >/dev/null \
+    || die "could not lock remote device sessions"
 fi
 
 # --- start the service -----------------------------------------------------

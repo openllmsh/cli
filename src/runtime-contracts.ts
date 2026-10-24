@@ -34,6 +34,60 @@ export const isUsableOpenllmApiKey = (
 ): boolean =>
   value !== null && value !== undefined && isOpenllmApiKeySyntax(value.trim());
 
+/** Must match `packages/protocol/api-key-syntax.ts` (parity-tested). */
+export const OPENLLM_DEVICE_ANCHOR_LENGTH = 86;
+
+const deviceAnchorPattern = new RegExp(
+  `^${BASE64URL}{${OPENLLM_DEVICE_ANCHOR_LENGTH}}$`,
+);
+
+/**
+ * Split `sk-llm-<id>.<secret>[.<anchor>]` on the LAST dot. Only `key` may
+ * ever be stored, logged, or sent; `anchor` goes to `openllm daemon anchor`.
+ * Null unless a bare key or a key plus a well-formed device anchor.
+ */
+export const splitAnchoredApiKey = (
+  raw: string,
+): { readonly key: string; readonly anchor: string | null } | null => {
+  const value = raw.trim();
+  if (isOpenllmApiKeySyntax(value)) return { key: value, anchor: null };
+  const dot = value.lastIndexOf(".");
+  if (dot <= 0) return null;
+  const key = value.slice(0, dot);
+  const anchor = value.slice(dot + 1);
+  if (!isOpenllmApiKeySyntax(key) || !deviceAnchorPattern.test(anchor)) {
+    return null;
+  }
+  return { key, anchor };
+};
+
+/**
+ * True when `raw` starts like an OpenLLM key but carries anything after the
+ * secret (`sk-llm-<id>.<secret>.<…>`). Must match
+ * `packages/protocol/api-key-syntax.ts` (parity-tested).
+ */
+export const hasOpenllmApiKeySuffix = (raw: string): boolean => {
+  const value = raw.trim();
+  if (!value.startsWith(OPENLLM_API_KEY_PREFIX)) return false;
+  const rest = value.slice(OPENLLM_API_KEY_PREFIX.length);
+  const first = rest.indexOf(".");
+  return first >= 0 && rest.indexOf(".", first + 1) >= 0;
+};
+
+/**
+ * The bearer a configured key value may be sent as, or `null` when it must
+ * not be sent at all. A well-formed anchored key yields its bare key; a key
+ * with a MALFORMED suffix (truncated / wrong-charset anchor, extra dots) is
+ * refused outright rather than passed through — it would leak whatever the
+ * suffix holds to the cloud as part of the bearer. Anything else is returned
+ * as-is for the caller's own syntax check.
+ */
+export const bearerApiKeyOf = (raw: string): string | null => {
+  const split = splitAnchoredApiKey(raw);
+  if (split !== null) return split.key;
+  return hasOpenllmApiKeySuffix(raw) ? null : raw;
+};
+
 /** Parse a daemon port from an env-file compatible scalar. */
 /** The default loopback port for the daemon's `/v1/*` + `/whoami` surface. */
 export const DEFAULT_DAEMON_PORT = 8787;

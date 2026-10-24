@@ -14,7 +14,8 @@
  *   openllmd restart              stop then start
  *   openllmd logs [-f] [-n N]     show or follow daemon logs
  *   openllmd auto-update <on|off|status>  opt in/out of self-update (default on)
- *   openllmd sessions <on|off|status>  opt in/out of remote terminal sessions (default off)
+ *   openllmd anchor < key         accept sk-llm-KEY.ANCHOR (prints the bare key)
+ *   openllmd device <enable|disable|lock|unlock|status>  device sessions
  *   openllmd uninstall [--yes] [--keep-logins|--remove-logins]  remove the daemon
  *                                 (--keep-logins preserves ~/.openllm/cli logins)
  *   openllmd completion <shell>   emit / install shell completion
@@ -26,9 +27,19 @@ import { autoUpdateEnabled, setAutoUpdate } from "./auto-update-pref";
 import { runLinuxPdeathsigWrapper } from "./child-supervisor";
 import { COMMANDS, FLAGS, formatHelpRows } from "./commands";
 import { runCompletion } from "./completion";
+import {
+  deviceKeyFingerprint,
+  getDeviceAccessPin,
+} from "./device-access-verify";
+import {
+  deviceSessionsReport,
+  deviceSessionsState,
+  installDeviceAnchor,
+  setDeviceSessionsLocal,
+} from "./device-anchor";
+import { loadIdentityKey } from "./keypair";
 import { logError } from "./logger";
 import { runLogs } from "./logs";
-import { ptySessionsEnabled, setPtySessions } from "./pty-sessions-pref";
 import { runSandboxExec } from "./sandbox/exec";
 import {
   serviceRestart,
@@ -63,6 +74,102 @@ ${formatHelpRows(FLAGS.map((f) => ({ left: f.name, right: f.description })))}
 State lives under ~/.openllm (override with OPENLLM_DAEMON_STATE_DIR).
 `;
 
+const DEVICE_USAGE =
+  "usage: openllm daemon device <enable|disable|lock|unlock|status>\n";
+
+/**
+ * `openllm daemon anchor` — read `sk-llm-<id>.<secret>.<anchor>` from stdin
+ * (never argv, so it stays out of `ps`), pin the anchor's control key as an
+ * anchored pin, keep the anchor in `state.json`, and print ONLY the bare key
+ * on stdout for the caller to store in `.env`. Exit 2 on a malformed or
+ * anchor-less key, 1 when the state write did not stick.
+ */
+const runAnchor = async (args: readonly string[]): Promise<number> => {
+  if (args.length > 0) {
+    process.stderr.write("usage: openllm daemon anchor < anchored-key\n");
+    return 2;
+  }
+  const input = (await Bun.stdin.text()).trim();
+  const result = installDeviceAnchor(input);
+  if (!result.ok) {
+    process.stderr.write(
+      result.reason === "persist_failed"
+        ? "could not save the device trust anchor\n"
+        : "expected an anchored key (sk-llm-KEY.ANCHOR) on stdin\n",
+    );
+    return result.reason === "persist_failed" ? 1 : 2;
+  }
+  process.stderr.write(
+    `device-control pinned from the install anchor (${result.controlFingerprint})\n`,
+  );
+  process.stdout.write(`${result.key}\n`);
+  return 0;
+};
+
+/** `openllm daemon device <enable|disable|lock|unlock|status>`. */
+const runDevice = (args: readonly string[]): never => {
+  const action = args[0];
+  if (args.length !== 1 || action === undefined) {
+    process.stderr.write(DEVICE_USAGE);
+    process.exit(2);
+  }
+  const change =
+    action === "enable"
+      ? { enabled: true }
+      : action === "disable"
+        ? { enabled: false }
+        : action === "lock"
+          ? { locked: true }
+          : action === "unlock"
+            ? { locked: false }
+            : action === "status"
+              ? {}
+              : null;
+  if (change === null) {
+    process.stderr.write(DEVICE_USAGE);
+    process.exit(2);
+  }
+  const state =
+    action === "status"
+      ? deviceSessionsState()
+      : setDeviceSessionsLocal(change);
+  if (state === null) {
+    process.stderr.write("could not save the device-sessions setting\n");
+    process.exit(1);
+  }
+  const report = deviceSessionsReport();
+  process.stdout.write(
+    `device sessions ${state.enabled ? "enabled" : "disabled"}${
+      state.locked ? " (locked — remote enable refused)" : ""
+    }${report.anchored ? "" : "; this device is not anchored — run openllm login with the key from Manage device"}\n`,
+  );
+  process.exit(0);
+};
+
+/**
+ * Print this daemon's X25519 identity fingerprint and its device-control pin,
+ * then exit. Read-only and offline: both come from local state, so a user can
+ * compare them with the browser's "Verify device" dialog out of band.
+ */
+const runIdentity = (args: readonly string[]): never => {
+  if (args.length > 0) {
+    process.stderr.write("usage: openllm daemon identity\n");
+    process.exit(2);
+  }
+  const identity = loadIdentityKey();
+  const pin = getDeviceAccessPin();
+  const pinFp = pin === null ? null : deviceKeyFingerprint(pin.pubkey);
+  process.stdout.write(
+    `identity       ${deviceKeyFingerprint(identity.publicKeyB64) ?? "unknown"}\n` +
+      `device-control ${
+        pin === null || pinFp === null
+          ? "not pinned"
+          : `${pinFp} (${pin.kind}${pin.via === null ? "" : `, via ${pin.via}`}${pin.anchored ? ", anchored" : ", not anchored"})`
+      }\n`,
+  );
+  process.exit(0);
+};
+
 /**
  * The daemon's user arguments. Bun keeps the entry path at `argv[1]` in BOTH
  * forms — a from-source run (`bun src/main.ts …` → `argv[1]` is the script) and
@@ -96,37 +203,6 @@ const runAutoUpdate = (args: readonly string[]): never => {
     }
   }
   process.stderr.write("usage: openllmd auto-update <on|off|status>\n");
-  process.exit(2);
-};
-
-/**
- * Opt in/out of remote terminal sessions (or print the current state), then
- * exit. This preference is local-only because a remote PTY is RCE-grade.
- */
-const runSessions = (args: readonly string[]): never => {
-  const sub = args[0];
-  if (args.length <= 1) {
-    if (sub === "on" || sub === "off") {
-      const persisted = setPtySessions(sub === "on");
-      if (!persisted) {
-        process.stderr.write(
-          "failed to persist the sessions preference to the env file\n",
-        );
-        process.exit(1);
-      }
-      process.stdout.write(
-        `sessions ${sub === "on" ? "enabled" : "disabled"}\n`,
-      );
-      process.exit(0);
-    }
-    if (sub === undefined || sub === "status") {
-      process.stdout.write(
-        `sessions are ${ptySessionsEnabled() ? "enabled" : "disabled"} (local-only preference; run: openllmd sessions on)\n`,
-      );
-      process.exit(0);
-    }
-  }
-  process.stderr.write("usage: openllmd sessions <on|off|status>\n");
   process.exit(2);
 };
 
@@ -273,8 +349,14 @@ export const runCli = (args: readonly string[] = userArgs()): boolean => {
     case "auto-update":
       runAutoUpdate(rest);
       break;
-    case "sessions":
-      runSessions(rest);
+    case "anchor":
+      void runAnchor(rest).then((code) => process.exit(code));
+      return true;
+    case "device":
+      runDevice(rest);
+      break;
+    case "identity":
+      runIdentity(rest);
       break;
     case "uninstall":
       runUninstall(rest);
