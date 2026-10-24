@@ -559,6 +559,37 @@ export const createAgentDispatcher = (
               error(state, session, result.code, result.message, commandId);
             return;
           }
+          case "set_model": {
+            const session = bound;
+            if (session === null || session.engineSession === null) {
+              error(
+                state,
+                null,
+                "no_session",
+                "Start or attach a session first.",
+                commandId,
+              );
+              return;
+            }
+            const engineSession = session.engineSession;
+            const setModel = engineSession.setModel;
+            if (setModel === undefined) {
+              error(
+                state,
+                session,
+                "unsupported",
+                "This engine cannot switch models.",
+                commandId,
+              );
+              return;
+            }
+            const result = withCommand(session, commandId, () =>
+              setModel(command.model),
+            );
+            if (!result.ok)
+              error(state, session, result.code, result.message, commandId);
+            return;
+          }
           case "interrupt": {
             const session = bound;
             if (session === null || session.engineSession === null) {

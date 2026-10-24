@@ -142,6 +142,9 @@ export const createClaudeTranscriptTail = (
 
 type TJson = Record<string, unknown>;
 
+/** Claude's reply to `/model <id>` in the transcript. */
+const MODEL_SET = /^<local-command-stdout>Set model to `([^`\n]{1,256})`/;
+
 const isRecord = (value: unknown): value is TJson =>
   typeof value === "object" && value !== null && !Array.isArray(value);
 
@@ -275,6 +278,13 @@ export const createTranscriptParser = (args: {
     if (prompt === null || prompt.trim() === "") return;
     if (prompt.startsWith(INTERRUPTED)) {
       abortTurn("interrupted");
+      return;
+    }
+    // `/model` (from the web's set_model or typed in the terminal) answers
+    // with "Set model to `<id>`": the session's model, from Claude's record.
+    const switched = MODEL_SET.exec(prompt);
+    if (switched?.[1] !== undefined) {
+      emit({ type: "session.configured", model: switched[1] });
       return;
     }
     // Slash-command / hook / system-reminder wrappers are not prompts.

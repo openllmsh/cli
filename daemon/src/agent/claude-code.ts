@@ -51,6 +51,7 @@ import {
   AGENT_MAX_ATTACHMENT_BASE64_LENGTH,
   AGENT_MAX_ATTACHMENT_BYTES,
   AGENT_MAX_LINE_BYTES,
+  AGENT_SWITCH_MODEL_PATTERN,
   SESSION_ID_PATTERN,
 } from "@openllmsh/protocol";
 import { stateDir } from "../env";
@@ -89,6 +90,15 @@ const READY_SETTLE_MS = 300;
  * completes it if the transcript has not within this grace.
  */
 const STOP_GRACE_MS = 3_000;
+/** After Stop, how long before typing `/model` (other Stop hooks still run). */
+/**
+ * Mid-conversation, Claude asks "Switch model?" (cache re-read) with "Yes"
+ * preselected. If the switch is not confirmed in the transcript by then, one
+ * more Enter confirms it; with no dialog an Enter on the empty prompt is a
+ * no-op. Decided from the transcript, never from the screen.
+ */
+const MODEL_CONFIRM_MS = 1_500;
+const STOP_SETTLE_MS = 500;
 /** Gap between the bracketed paste and the submitting CR. */
 const SUBMIT_DELAY_MS = 80;
 const TRANSCRIPT_POLL_MS = 250;
@@ -756,6 +766,8 @@ export type TClaudeTuiDeps = {
   readonly submitDelayMs?: number;
   readonly pollMs?: number;
   readonly stopGraceMs?: number;
+  readonly stopSettleMs?: number;
+  readonly modelConfirmMs?: number;
   readonly trustAnswerDelayMs?: number;
   readonly attachmentsDir?: (sessionId: string) => string;
 };
@@ -795,16 +807,51 @@ export const createClaudeTuiSession = (
   let recentScreen = "";
 
   const parser = createTranscriptParser({
-    emit,
+    emit: (event) => {
+      if (event.type === "session.configured") modelInFlight = false;
+      emit(event);
+    },
     toolOutputMax: AGENT_TOOL_OUTPUT_MAX_CHARS,
   });
   const tail =
     deps.transcript?.(options.sessionId) ??
     createClaudeTranscriptTail(options.sessionId, { cwd: options.cwd });
 
+  /** A `/model` waiting for the session to be ready and idle. */
+  let pendingModel: string | null = null;
+  /** A `/model` typed and not yet confirmed by the transcript. */
+  let modelInFlight = false;
+  /**
+   * A web turn is running until Claude's Stop hook: the transcript's end_turn
+   * lands while Stop hooks still run, and keys typed then are lost.
+   */
+  let awaitingStop = false;
+  const applyModel = (): void => {
+    if (
+      pendingModel === null ||
+      !ready ||
+      ended ||
+      awaitingStop ||
+      parser.turnActive()
+    )
+      return;
+    const model = pendingModel;
+    pendingModel = null;
+    // Claude's own slash command, typed like any prompt (PTY input only).
+    modelInFlight = true;
+    writeText(`${PASTE_START}/model ${model}${PASTE_END}`);
+    setTimeout(() => {
+      if (!ended) writeText("\r");
+    }, submitDelayMs);
+    setTimeout(() => {
+      if (!ended && modelInFlight) writeText("\r");
+    }, deps.modelConfirmMs ?? MODEL_CONFIRM_MS);
+  };
+
   const pump = (): void => {
     const chunk = tail.read();
     if (chunk !== null && chunk.length > 0) parser.push(chunk);
+    applyModel();
   };
 
   const finish = (
@@ -843,6 +890,7 @@ export const createClaudeTuiSession = (
     ready = true;
     if (readyMaxTimer !== undefined) clearTimeout(readyMaxTimer);
     for (const run of queued.splice(0)) run();
+    applyModel();
   };
 
   /**
@@ -902,6 +950,12 @@ export const createClaudeTuiSession = (
     }
     if (event === "SessionStart") return null;
     if (event === "Stop") {
+      // Claude's prompt takes input again only after ALL Stop hooks finish
+      // (measured: keys typed ~130 ms after ours returned were dropped).
+      setTimeout(() => {
+        awaitingStop = false;
+        applyModel();
+      }, deps.stopSettleMs ?? STOP_SETTLE_MS);
       // Never block the hook (Claude flushes the transcript after it): the
       // tail keeps polling, and the transcript's end_turn normally lands the
       // final item and completes the turn. Stop is the fallback.
@@ -1076,6 +1130,7 @@ export const createClaudeTuiSession = (
         input.prompt,
         written.map((entry) => entry.meta),
       );
+      awaitingStop = true;
       whenReady(() => {
         writeText(`${PASTE_START}${text}${PASTE_END}`);
         setTimeout(() => writeText("\r"), submitDelayMs);
@@ -1189,6 +1244,24 @@ export const createClaudeTuiSession = (
       return true;
     },
     turnActive: () => parser.turnActive(),
+    setModel: (model) => {
+      if (ended)
+        return {
+          ok: false,
+          code: "session_exited",
+          message: "the session has ended",
+        };
+      if (!AGENT_SWITCH_MODEL_PATTERN.test(model))
+        return {
+          ok: false,
+          code: "invalid_model",
+          message: "invalid model id",
+        };
+      // Latest wins; applied when idle (now, or when the running turn ends).
+      pendingModel = model;
+      applyModel();
+      return { ok: true, turnId: "" };
+    },
     close: (reason) => {
       if (ended) return;
       const current = link;

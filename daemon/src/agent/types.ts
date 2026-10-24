@@ -57,6 +57,11 @@ export type TAgentEngineSession = {
   /** True while a turn runs (sends are refused meanwhile). */
   readonly turnActive: () => boolean;
   /**
+   * Switch the model (absent → the engine cannot). Applied when idle, queued
+   * while a turn runs; `session.configured` confirms it.
+   */
+  readonly setModel?: (model: string) => TAgentSendResult;
+  /**
    * End the session. `reason` lands on the `session.exited` the adapter emits
    * once the engine process is gone.
    */
