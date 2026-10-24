@@ -433,16 +433,20 @@ export const findClaudeSessionHost = <
   // 1. The host's own id is authoritative.
   const byHostId = claude.find((host) => host.id === sessionId);
   if (byHostId !== undefined) return byHostId;
-  // 2. A stored vendor id counts only while the TUI is still on it: after a
-  //    `/resume` or `/clear` the live id moves on and the stored one is stale.
-  const byVendor = claude.find((host) => {
-    if (host.vendorSessionId !== sessionId) return false;
-    const live = readLiveId(host.pid);
-    return live === null || live === sessionId;
-  });
-  if (byVendor !== undefined) return byVendor;
-  // 3. Otherwise, whichever host's TUI is on this id right now.
-  return claude.find((host) => readLiveId(host.pid) === sessionId);
+  // 2. A host whose TUI is confirmed on this id right now — preferring one
+  //    that also recorded it. A stored vendor id alone is stale after a
+  //    `/resume` or `/clear` moved the TUI on.
+  const live = claude.map((host) => ({ host, id: readLiveId(host.pid) }));
+  const confirmed = live.filter((entry) => entry.id === sessionId);
+  const confirmedVendor = confirmed.find(
+    (entry) => entry.host.vendorSessionId === sessionId,
+  );
+  if (confirmedVendor !== undefined) return confirmedVendor.host;
+  if (confirmed[0] !== undefined) return confirmed[0].host;
+  // 3. Last resort: a recorded vendor id whose live id can't be read.
+  return live.find(
+    (entry) => entry.id === null && entry.host.vendorSessionId === sessionId,
+  )?.host;
 };
 
 /** Production link: join the live host for this id, else spawn one. */
