@@ -272,6 +272,10 @@ export const runCli = async (argv: readonly string[]): Promise<void> => {
           );
           return process.exit(await runMemoryHookCommand(rest.slice(1)));
         }
+        case "agent": {
+          const { runAgentHookCommand } = await import("./agent-hook-cmd");
+          return process.exit(await runAgentHookCommand(rest.slice(2)));
+        }
       }
       break;
     }

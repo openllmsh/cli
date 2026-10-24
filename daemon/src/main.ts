@@ -33,8 +33,9 @@
 // guards it.
 import "reflect-metadata";
 
-import { AUTH_LOCAL_PATH } from "@openllmsh/protocol";
+import { AGENT_HOOK_LOCAL_PATH, AUTH_LOCAL_PATH } from "@openllmsh/protocol";
 import { isStreamResetError } from "@openllmsh/tunnel";
+import { handleLocalAgentHook } from "./agent/hook-endpoint";
 import type { TLocalAgentSocketData } from "./agent/loopback";
 import {
   AGENT_LOCAL_PATH,
@@ -538,6 +539,9 @@ export const main = async (): Promise<void> => {
         // `/local/agent` — the desktop app's loopback agent sessions (no device
         // grant: loopback peer + Host, Tauri/OpenLLM Origin, local control
         // capability). See `agent/loopback.ts`.
+        if (url.pathname === AGENT_HOOK_LOCAL_PATH) {
+          return handleLocalAgentHook(req, server.requestIP(req)?.address);
+        }
         if (url.pathname === AGENT_LOCAL_PATH) {
           const refusal = localAgentRefusal(
             req,

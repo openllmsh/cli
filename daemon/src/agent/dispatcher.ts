@@ -7,7 +7,9 @@
  * and a later `attach` (from either front door) rejoins it with a replay of
  * the session's recent events followed by `replay_done`. An `attach` to an id
  * the daemon is not running resumes the engine's own persisted session
- * (`--resume`). Detached sessions are reaped after an idle window.
+ * (`--resume`) — or joins the durable terminal session of that id. Detached
+ * sessions are released after an idle window: the daemon stops driving them,
+ * but the engine (a durable session-host PTY) keeps running for the terminal.
  */
 import { existsSync, realpathSync, statSync } from "node:fs";
 import { homedir } from "node:os";
@@ -58,7 +60,7 @@ export type TAgentDispatcher = {
   readonly connect: (consumer: TAgentConsumer) => TAgentConnection;
   /** Live session ids (diagnostics, tests). */
   readonly sessionIds: () => readonly string[];
-  /** Kill every session (daemon shutdown, tests). */
+  /** Release every session (daemon shutdown, tests); engines keep running. */
   readonly closeAll: () => void;
 };
 
@@ -202,6 +204,14 @@ export const createAgentDispatcher = (
     });
   };
 
+  /** Stop driving the engine, leaving it running when the adapter can. */
+  const releaseEngine = (session: TSession): void => {
+    const engineSession = session.engineSession;
+    if (engineSession === null) return;
+    if (engineSession.release !== undefined) engineSession.release();
+    else engineSession.close("closed");
+  };
+
   const scheduleIdle = (session: TSession): void => {
     if (session.idleTimer !== undefined) clearTimeout(session.idleTimer);
     session.idleTimer = undefined;
@@ -213,10 +223,10 @@ export const createAgentDispatcher = (
         scheduleIdle(session);
         return;
       }
-      logInfo("agent", "closing idle detached agent session", {
+      logInfo("agent", "releasing idle detached agent session", {
         id: session.id,
       });
-      session.engineSession?.close("closed");
+      releaseEngine(session);
     }, detachedIdleMs);
     session.idleTimer.unref?.();
   };
@@ -339,6 +349,7 @@ export const createAgentDispatcher = (
         cwd: args.cwd,
         skipPermissions: args.skipPermissions,
         ...(args.title === undefined ? {} : { title: args.title }),
+        observed: () => session.consumers.size > 0,
       },
       (event) => {
         if (!session.exited) publish(session, event);
@@ -624,8 +635,8 @@ export const createAgentDispatcher = (
     },
     sessionIds: () => [...sessions.keys()],
     closeAll: () => {
-      for (const session of sessions.values())
-        session.engineSession?.close("killed");
+      // Daemon shutdown: never kill durable terminal sessions.
+      for (const session of [...sessions.values()]) releaseEngine(session);
     },
   };
 };

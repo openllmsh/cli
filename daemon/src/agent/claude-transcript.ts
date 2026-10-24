@@ -1,13 +1,14 @@
 /**
  * Claude Code's own session transcript (`~/.claude/projects/<slug>/<id>.jsonl`)
- * as agent events — the history a resumed session replays to its consumer.
+ * as agent events — the structured view of a TUI session.
  *
- * Attach to a session the daemon still runs replays the in-memory log. Once
- * the engine has exited (daemon restart, idle reap), `attach` resumes with
- * `--resume <id>`, and Claude's transcript is the only record of the earlier
- * turns: this turns its prompts and assistant text into the same
- * `turn.started{prompt}` / `item.completed` / `turn.completed` events a live
- * turn produces, so the web timeline is rebuilt before new turns stream in.
+ * Claude appends one JSON line per message as the session runs: the user's
+ * prompt, each assistant content block (text / thinking / tool_use, with
+ * `stop_reason`), and `tool_result`s. The tail reads new bytes; the parser
+ * turns complete lines into `turn.*` / `item.*` / usage events. The same
+ * parser replays an existing transcript first (resume, or attaching to a
+ * session started in the terminal), so history and live share one mapping.
+ * Granularity is per message: there are no partial-token deltas.
  */
 import {
   closeSync,
@@ -18,20 +19,39 @@ import {
   readSync,
 } from "node:fs";
 import { join } from "node:path";
-import type { TAgentEvent } from "@openllmsh/protocol";
+import type { TAgentEvent, TAgentItem } from "@openllmsh/protocol";
 import { claudeConfigDir } from "../local-sessions/paths";
 
-/** Transcript bytes read from the end of the file. */
+/** Transcript bytes replayed from the end of an existing file. */
 export const CLAUDE_TRANSCRIPT_TAIL_BYTES = 1024 * 1024;
+/** Bytes read per poll at most (a burst is drained over several polls). */
+const READ_CHUNK_BYTES = 1024 * 1024;
+/** Re-scan the projects tree for a missing transcript at most this often. */
+const SCAN_INTERVAL_MS = 2_000;
 
 const SESSION_ID = /^[0-9a-fA-F-]{8,64}$/;
+
+const claudeProjectsDir = (): string => join(claudeConfigDir(), "projects");
+
+/** Claude's project slug for a cwd (every non-alphanumeric → `-`). */
+export const claudeProjectSlug = (cwd: string): string =>
+  cwd.replace(/[^A-Za-z0-9]/g, "-");
 
 /** `<projects>/<slug>/<id>.jsonl` for the session, or null. */
 export const findClaudeTranscript = (
   sessionId: string,
-  projectsDir: string = join(claudeConfigDir(), "projects"),
+  projectsDir: string = claudeProjectsDir(),
+  cwd?: string,
 ): string | null => {
   if (!SESSION_ID.test(sessionId) || !existsSync(projectsDir)) return null;
+  if (cwd !== undefined) {
+    const direct = join(
+      projectsDir,
+      claudeProjectSlug(cwd),
+      `${sessionId}.jsonl`,
+    );
+    if (existsSync(direct)) return direct;
+  }
   let slugs: string[];
   try {
     slugs = readdirSync(projectsDir);
@@ -45,96 +65,310 @@ export const findClaudeTranscript = (
   return null;
 };
 
-const readTail = (path: string, limit: number): string => {
-  const fd = openSync(path, "r");
-  try {
-    const size = fstatSync(fd).size;
-    const start = Math.max(0, size - limit);
-    const buffer = Buffer.alloc(size - start);
-    let read = 0;
-    while (read < buffer.length) {
-      const n = readSync(fd, buffer, read, buffer.length - read, start + read);
-      if (n === 0) break;
-      read += n;
-    }
-    const text = buffer.subarray(0, read).toString("utf8");
-    if (start === 0) return text;
-    const newline = text.indexOf("\n");
-    return newline === -1 ? "" : text.slice(newline + 1);
-  } finally {
-    closeSync(fd);
-  }
+/** Incremental reader of one transcript file. */
+export type TClaudeTranscriptTail = {
+  /** New text since the last read (complete or partial lines), or null. */
+  readonly read: () => string | null;
 };
 
-type TBlock = { readonly type?: unknown; readonly text?: unknown };
+export const createClaudeTranscriptTail = (
+  sessionId: string,
+  options: {
+    readonly projectsDir?: string;
+    readonly cwd?: string;
+    readonly now?: () => number;
+  } = {},
+): TClaudeTranscriptTail => {
+  const now = options.now ?? Date.now;
+  let path: string | null = null;
+  let offset = -1;
+  let lastScan = Number.NEGATIVE_INFINITY;
+  return {
+    read: () => {
+      if (path === null) {
+        if (now() - lastScan < SCAN_INTERVAL_MS) return null;
+        lastScan = now();
+        path = findClaudeTranscript(
+          sessionId,
+          options.projectsDir ?? claudeProjectsDir(),
+          options.cwd,
+        );
+        if (path === null) return null;
+      }
+      let fd: number;
+      try {
+        fd = openSync(path, "r");
+      } catch {
+        return null;
+      }
+      try {
+        const size = fstatSync(fd).size;
+        let skipPartial = false;
+        if (offset < 0) {
+          offset = Math.max(0, size - CLAUDE_TRANSCRIPT_TAIL_BYTES);
+          skipPartial = offset > 0;
+        }
+        if (size < offset) offset = 0; // truncated / rewritten
+        const length = Math.min(size - offset, READ_CHUNK_BYTES);
+        if (length <= 0) return null;
+        const buffer = Buffer.alloc(length);
+        let read = 0;
+        while (read < length) {
+          const n = readSync(fd, buffer, read, length - read, offset + read);
+          if (n === 0) break;
+          read += n;
+        }
+        // Never split a UTF-8 sequence: stop at the last newline when possible.
+        let usable = read;
+        const lastNewline = buffer.subarray(0, read).lastIndexOf(0x0a);
+        if (lastNewline >= 0) usable = lastNewline + 1;
+        offset += usable;
+        let text = buffer.subarray(0, usable).toString("utf8");
+        if (skipPartial) {
+          const newline = text.indexOf("\n");
+          text = newline === -1 ? "" : text.slice(newline + 1);
+        }
+        return text;
+      } finally {
+        closeSync(fd);
+      }
+    },
+  };
+};
 
-const textOf = (content: unknown): string | null => {
+type TJson = Record<string, unknown>;
+
+const isRecord = (value: unknown): value is TJson =>
+  typeof value === "object" && value !== null && !Array.isArray(value);
+
+const str = (value: unknown): string | undefined =>
+  typeof value === "string" ? value : undefined;
+
+const num = (value: unknown): number =>
+  typeof value === "number" && Number.isFinite(value) && value >= 0
+    ? Math.floor(value)
+    : 0;
+
+const clip = (text: string, max: number): string =>
+  text.length <= max ? text : `${text.slice(0, max - 1)}…`;
+
+/** Flatten a `tool_result` content (string or blocks) to text. */
+export const toolResultText = (content: unknown): string => {
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return "";
+  return content
+    .map((block) => {
+      if (!isRecord(block)) return "";
+      if (block.type === "text") return str(block.text) ?? "";
+      if (block.type === "image") return "[image]";
+      return "";
+    })
+    .filter((part) => part.length > 0)
+    .join("\n");
+};
+
+/** The prompt text of a user line, or null (tool results / wrappers). */
+const promptOf = (content: unknown): string | null => {
   if (typeof content === "string") return content;
   if (!Array.isArray(content)) return null;
-  // A user line made only of tool_result blocks is not a prompt.
-  const texts = (content as TBlock[])
-    .filter((block) => block.type === "text" && typeof block.text === "string")
+  const texts = content
+    .filter(
+      (block): block is TJson =>
+        isRecord(block) &&
+        block.type === "text" &&
+        typeof block.text === "string",
+    )
     .map((block) => block.text as string);
   return texts.length === 0 ? null : texts.join("\n");
 };
 
-/** Agent events for the transcript's prompts and assistant text, in order. */
-export const claudeTranscriptEvents = (raw: string): TAgentEvent[] => {
-  const events: TAgentEvent[] = [];
-  let turn = 0;
-  let open: string | null = null;
-  let item = 0;
-  const closeTurn = (): void => {
-    if (open === null) return;
-    events.push({ type: "turn.completed", turn_id: open });
-    open = null;
+const INTERRUPTED = "[Request interrupted by user";
+
+export type TTranscriptParser = {
+  /** Feed transcript text (any split; partial lines are buffered). */
+  readonly push: (text: string) => void;
+  /** A turn opened by this daemon (its prompt line is then not a new turn). */
+  readonly startTurn: (prompt: string) => string;
+  readonly completeTurn: () => void;
+  readonly abortTurn: (reason: "interrupted" | "failed" | "cancelled") => void;
+  readonly turnActive: () => boolean;
+  readonly turnField: () => { turn_id?: string };
+};
+
+export const createTranscriptParser = (args: {
+  readonly emit: (event: TAgentEvent) => void;
+  readonly toolOutputMax: number;
+}): TTranscriptParser => {
+  const { emit } = args;
+  let buffer = "";
+  let turnCounter = 0;
+  let turn: { id: string; awaitingPromptLine: boolean } | null = null;
+  const tools = new Map<string, { toolName: string; input: unknown }>();
+
+  const turnField = (): { turn_id?: string } =>
+    turn === null ? {} : { turn_id: turn.id };
+
+  const item = (
+    type: "item.started" | "item.completed",
+    itemId: string,
+    value: TAgentItem,
+  ): void => {
+    emit({ type, item_id: itemId, item: value, ...turnField() });
   };
-  for (const line of raw.split("\n")) {
-    if (line.trim() === "") continue;
-    let row: {
-      type?: unknown;
-      isSidechain?: unknown;
-      isMeta?: unknown;
-      message?: { content?: unknown };
-    };
+
+  const openTurn = (
+    prompt: string | undefined,
+    awaitingPromptLine: boolean,
+  ): string => {
+    turnCounter += 1;
+    turn = { id: `t${turnCounter}`, awaitingPromptLine };
+    emit({
+      type: "turn.started",
+      turn_id: turn.id,
+      ...(prompt === undefined || prompt.trim() === "" ? {} : { prompt }),
+    });
+    return turn.id;
+  };
+
+  const completeTurn = (): void => {
+    if (turn === null) return;
+    emit({ type: "turn.completed", turn_id: turn.id });
+    turn = null;
+  };
+
+  const abortTurn = (reason: "interrupted" | "failed" | "cancelled"): void => {
+    if (turn === null) return;
+    emit({ type: "turn.aborted", turn_id: turn.id, reason });
+    turn = null;
+  };
+
+  const onUser = (row: TJson, content: unknown): void => {
+    if (Array.isArray(content)) {
+      for (const block of content) {
+        if (!isRecord(block) || block.type !== "tool_result") continue;
+        const id = str(block.tool_use_id);
+        if (id === undefined) continue;
+        const tool = tools.get(id);
+        tools.delete(id);
+        item("item.completed", id, {
+          kind: "tool_call",
+          tool_name: tool?.toolName ?? "tool",
+          ...(tool === undefined ? {} : { input: tool.input }),
+          status: block.is_error === true ? "failed" : "completed",
+          output: clip(toolResultText(block.content), args.toolOutputMax),
+          ...(block.is_error === true ? { is_error: true } : {}),
+        });
+      }
+    }
+    const prompt = promptOf(content);
+    if (prompt === null || prompt.trim() === "") return;
+    if (prompt.startsWith(INTERRUPTED)) {
+      abortTurn("interrupted");
+      return;
+    }
+    // Slash-command / hook / system-reminder wrappers are not prompts.
+    if (prompt.startsWith("<") || row.isCompactSummary === true) return;
+    if (turn?.awaitingPromptLine === true) {
+      turn.awaitingPromptLine = false;
+      return;
+    }
+    // A new prompt (terminal input, or the next turn of a replayed history)
+    // closes whatever turn is still open.
+    completeTurn();
+    openTurn(prompt, false);
+  };
+
+  const onAssistant = (row: TJson, message: TJson): void => {
+    const content = message.content;
+    const base = str(row.uuid) ?? str(message.id) ?? `m${turnCounter}`;
+    if (Array.isArray(content)) {
+      content.forEach((block, index) => {
+        if (!isRecord(block)) return;
+        const id = `${base}:${index}`;
+        if (block.type === "text") {
+          const text = str(block.text) ?? "";
+          if (text.trim() !== "")
+            item("item.completed", id, { kind: "assistant_message", text });
+        } else if (block.type === "thinking") {
+          const text = str(block.thinking) ?? "";
+          if (text.trim() !== "")
+            item("item.completed", id, { kind: "reasoning", text });
+        } else if (block.type === "tool_use") {
+          const toolId = str(block.id) ?? id;
+          const toolName = str(block.name) ?? "tool";
+          tools.set(toolId, { toolName, input: block.input });
+          item("item.started", toolId, {
+            kind: "tool_call",
+            tool_name: toolName,
+            input: block.input,
+            status: "in_progress",
+          });
+        }
+      });
+    } else if (typeof content === "string" && content.trim() !== "") {
+      item("item.completed", base, {
+        kind: "assistant_message",
+        text: content,
+      });
+    }
+    const usage = message.usage;
+    if (isRecord(usage)) {
+      const cached =
+        num(usage.cache_read_input_tokens) +
+        num(usage.cache_creation_input_tokens);
+      emit({
+        type: "thread.token-usage.updated",
+        usage: {
+          input_tokens: num(usage.input_tokens) + cached,
+          output_tokens: num(usage.output_tokens),
+          ...(cached > 0 ? { cached_input_tokens: cached } : {}),
+        },
+      });
+    }
+    if (message.stop_reason === "end_turn") completeTurn();
+  };
+
+  const onLine = (line: string): void => {
+    let row: unknown;
     try {
       row = JSON.parse(line);
     } catch {
-      continue;
+      return;
     }
-    if (row.isSidechain === true || row.isMeta === true) continue;
-    const text = textOf(row.message?.content);
-    if (text === null || text.trim() === "") continue;
-    if (row.type === "user") {
-      // Slash-command / hook wrappers are bookkeeping, not prompts.
-      if (text.startsWith("<")) continue;
-      closeTurn();
-      turn += 1;
-      open = `h${turn}`;
-      events.push({ type: "turn.started", turn_id: open, prompt: text });
-    } else if (row.type === "assistant" && open !== null) {
-      item += 1;
-      events.push({
-        type: "item.completed",
-        item_id: `h${turn}-i${item}`,
-        turn_id: open,
-        item: { kind: "assistant_message", text },
-      });
-    }
-  }
-  closeTurn();
-  return events;
+    if (!isRecord(row) || row.isSidechain === true || row.isMeta === true)
+      return;
+    const message = row.message;
+    if (!isRecord(message)) return;
+    if (row.type === "user") onUser(row, message.content);
+    else if (row.type === "assistant") onAssistant(row, message);
+  };
+
+  return {
+    push: (text) => {
+      buffer += text;
+      let newline = buffer.indexOf("\n");
+      while (newline >= 0) {
+        const line = buffer.slice(0, newline);
+        buffer = buffer.slice(newline + 1);
+        if (line.trim() !== "") onLine(line);
+        newline = buffer.indexOf("\n");
+      }
+    },
+    startTurn: (prompt) => openTurn(prompt, true),
+    completeTurn,
+    abortTurn,
+    turnActive: () => turn !== null,
+    turnField,
+  };
 };
 
-/** History events of a persisted Claude session; empty when unreadable. */
-export const readClaudeTranscriptEvents = (
-  sessionId: string,
-): TAgentEvent[] => {
-  try {
-    const path = findClaudeTranscript(sessionId);
-    if (path === null) return [];
-    return claudeTranscriptEvents(readTail(path, CLAUDE_TRANSCRIPT_TAIL_BYTES));
-  } catch {
-    return [];
-  }
+/** Events for a whole transcript text (tests, one-shot replays). */
+export const claudeTranscriptEvents = (raw: string): TAgentEvent[] => {
+  const events: TAgentEvent[] = [];
+  const parser = createTranscriptParser({
+    emit: (event) => events.push(event),
+    toolOutputMax: 64 * 1024,
+  });
+  parser.push(raw.endsWith("\n") ? raw : `${raw}\n`);
+  return events;
 };

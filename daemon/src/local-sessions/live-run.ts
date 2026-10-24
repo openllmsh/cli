@@ -116,7 +116,6 @@ const parseLiveJson = (
     openllm_session_id: openllmId,
     vendor_session_id: vendorId,
     title,
-    agent: o.agent === true,
   };
 };
 

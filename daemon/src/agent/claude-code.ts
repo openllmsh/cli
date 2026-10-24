@@ -1,57 +1,50 @@
 /**
- * Claude Code engine adapter for agent sessions.
+ * Claude Code engine adapter for agent sessions: ONE runtime, two views.
  *
- * Launch: the engine starts exactly the way `openllm claude` does — the daemon
- * runs the installed `openllm` CLI (`resolveOpenllmCli`), which resolves the
- * gateway, writes the run-local overlay (settings, `apiKeyHelper`, MCP), maps
- * the model tiers and execs `claude`. Nothing about the launch is duplicated
- * here: the adapter only appends Claude's own headless flags after the client
- * name, which `openllm` forwards verbatim:
+ * The engine is the interactive Claude TUI running under the durable
+ * session-host (`openllm __session-host`), the same PTY host a terminal
+ * `openllm claude` gets. So a web-started session is attachable from the
+ * terminal (`openllm sessions attach`), and a terminal-started session is
+ * attachable from the web: the session id IS the host id IS Claude's session
+ * id (the host pins `--session-id` on a new Claude session).
  *
- *   openllm [-d] claude -p --input-format stream-json
- *     --output-format stream-json --verbose --include-partial-messages
- *     [--permission-prompt-tool stdio] (--session-id <uuid> | --resume <id>)
- *     [--model <gateway model>]
- *
- * A non-TTY stdin makes `openllm claude` launch directly (never the durable
- * PTY host), with inherited stdio — so the pipes below reach `claude` itself.
- *
- * Driving: user turns are written as stream-json `user` lines; Claude's
- * NDJSON output (`system` / `stream_event` / `assistant` / `user` tool
- * results / `result` / `control_request`) is mapped onto the trimmed agent
- * event vocabulary. Permissions: default mode passes
- * `--permission-prompt-tool stdio`, so every approval arrives as a
- * `can_use_tool` control request → `request.opened` (or
- * `user-input.requested` for `AskUserQuestion`) and is answered by a
- * `respond` command. `skip_permissions` maps to `openllm -d` (Claude's
- * `--dangerously-skip-permissions`) and no prompt tool.
+ * The daemon drives it as a hidden OBSERVER consumer of the host's ctl.sock
+ * (never a viewer: no resize, no primacy, never counts as attached for the
+ * host's detach / idle reap):
+ *   - input: prompts are bracketed-pasted into the PTY then submitted with CR,
+ *     exactly like a keystroke; interrupt is Esc; attachments are written to
+ *     the host's 0700 session dir and referenced as `@<path>`;
+ *   - output: structured items come from Claude's own transcript
+ *     (`~/.claude/projects/<slug>/<id>.jsonl`, appended per message), tailed;
+ *   - busy/idle + approvals: Claude hooks (`openllm exec agent hook`) post to
+ *     the daemon loopback (`/local/agent-hook`, local control capability).
+ *     A PermissionRequest waits for a web decision; with no viewer, or after
+ *     {@link AGENT_APPROVAL_WAIT_MS}, it returns NO decision and Claude shows
+ *     its native dialog in the terminal. A timeout never allows.
  */
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import type {
   TAgentEvent,
   TAgentItem,
-  TAgentRequestDecision,
   TAgentRequestKind,
   TAgentRespondCommand,
-  TAgentTokenUsage,
   TAgentUserInputAnswers,
   TAgentUserInputQuestion,
 } from "@openllmsh/protocol";
-import { resolveOpenllmCli } from "../cli-path";
-import { sessionEnv } from "../cli-paths";
-import { mergeSpawnEnv } from "../delegation/spawn";
-import {
-  openllmClientIdOf,
-  pushDeviceCliResumeArgs,
-} from "../local-sessions/types";
+import { SESSION_ID_PATTERN } from "@openllmsh/protocol";
+import { stateDir } from "../env";
 import { logError } from "../logger";
-import { readClaudeTranscriptEvents } from "./claude-transcript";
-import { createStderrTail, spawnAgentEngineProcess } from "./engine-process";
+import { defaultSessionHostClient } from "../session-host-proc";
+import type { TClaudeTranscriptTail } from "./claude-transcript";
+import {
+  createClaudeTranscriptTail,
+  createTranscriptParser,
+} from "./claude-transcript";
 import type {
   TAgentEngineAdapter,
   TAgentEngineEmit,
-  TAgentEngineProcess,
   TAgentEngineSession,
-  TAgentEngineSpawn,
   TAgentEngineStartOptions,
   TAgentSendInput,
   TAgentSendResult,
@@ -59,8 +52,15 @@ import type {
 
 /** Tool output kept on an item (the full result stays in the engine). */
 export const AGENT_TOOL_OUTPUT_MAX_CHARS = 64 * 1024;
-/** Grace between closing stdin and SIGTERM on `close`. */
-const CLOSE_GRACE_MS = 3_000;
+/** How long a PermissionRequest waits for a web decision before the TUI asks. */
+export const AGENT_APPROVAL_WAIT_MS = 90_000;
+/** Max wait for the TUI to settle before the first paste. */
+const READY_MAX_MS = 10_000;
+/** Output-quiet window that marks the TUI ready for input. */
+const READY_QUIET_MS = 400;
+/** Gap between the bracketed paste and the submitting CR. */
+const SUBMIT_DELAY_MS = 80;
+const TRANSCRIPT_POLL_MS = 250;
 
 const DETAIL_MAX = 16 * 1024;
 const SHORT_MAX = 256;
@@ -75,43 +75,6 @@ const isRecord = (value: unknown): value is TJson =>
 
 const str = (value: unknown): string | undefined =>
   typeof value === "string" ? value : undefined;
-
-const num = (value: unknown): number =>
-  typeof value === "number" && Number.isFinite(value) && value >= 0
-    ? Math.floor(value)
-    : 0;
-
-/** The `openllm` client argv for one engine session (bin first). */
-export const buildClaudeAgentArgv = (
-  bin: string,
-  options: TAgentEngineStartOptions,
-): string[] => {
-  const clientId = openllmClientIdOf("claude_code") ?? "claude";
-  const args: string[] = [bin];
-  // `-d` is openllm's flag (before the client name) for the client's own
-  // skip-permissions flag — the same mapping `openllm -d claude` uses.
-  if (options.skipPermissions) args.push("-d");
-  args.push(
-    clientId,
-    "-p",
-    "--input-format",
-    "stream-json",
-    "--output-format",
-    "stream-json",
-    "--verbose",
-    "--include-partial-messages",
-  );
-  if (!options.skipPermissions) {
-    args.push("--permission-prompt-tool", "stdio");
-  }
-  if (options.resume) {
-    pushDeviceCliResumeArgs(args, "claude_code", options.sessionId);
-  } else {
-    args.push("--session-id", options.sessionId);
-  }
-  if (options.model !== undefined) args.push("--model", options.model);
-  return args;
-};
 
 /** What an approval for `toolName` asks permission for. */
 export const requestKindOfTool = (toolName: string): TAgentRequestKind => {
@@ -154,21 +117,6 @@ const requestDetailOf = (toolName: string, input: unknown): string => {
   } catch {
     return "";
   }
-};
-
-/** Flatten a `tool_result` content (string or blocks) to text. */
-const toolResultText = (content: unknown): string => {
-  if (typeof content === "string") return content;
-  if (!Array.isArray(content)) return "";
-  return content
-    .map((block) => {
-      if (!isRecord(block)) return "";
-      if (block.type === "text") return str(block.text) ?? "";
-      if (block.type === "image") return "[image]";
-      return "";
-    })
-    .filter((part) => part.length > 0)
-    .join("\n");
 };
 
 /** `AskUserQuestion` input → protocol questions (ids `q0`, `q1`, …). */
@@ -224,705 +172,609 @@ const claudeAnswersOf = (
   return out;
 };
 
-type TPendingRequest = {
-  readonly kind: "approval" | "user-input";
-  readonly cliRequestId: string;
-  readonly toolName: string;
-  readonly input: unknown;
-  readonly suggestions: unknown;
+/** Protocol answers → the AskUserQuestion input Claude accepts (`answers`). */
+export const claudeAnswersInputOf = (
+  input: unknown,
+  answers: TAgentUserInputAnswers,
+): TJson => ({
+  ...(isRecord(input) ? input : {}),
+  answers: claudeAnswersOf(input, answers),
+});
+
+export { requestDetailOf, toolTitleOf };
+
+// ─── PTY link ────────────────────────────────────────────────────────────
+
+/** The daemon's observer connection to a session-host PTY. */
+export type TPtyLink = {
+  /** The session-host id (its Claude hooks report it as the session). */
+  readonly hostId: string;
+  readonly write: (bytes: Uint8Array) => void;
+  /** End the session (kill the PTY). */
+  readonly kill: () => void;
+  /** Drop the observer; the PTY keeps running. */
+  readonly release: () => void;
+  readonly onOutput: (handler: (bytes: Uint8Array) => void) => void;
+  /** The PTY or the host went away (not fired after `release`). */
+  readonly onExit: (handler: (code: number | null) => void) => void;
 };
 
-type TStreamItem = {
-  readonly itemId: string;
-  readonly kind: "assistant_message" | "reasoning" | "tool_call";
-  text: string;
-  toolName: string;
-  inputJson: string;
+export type TPtyLinkRequest = {
+  readonly sessionId: string;
+  readonly resume: boolean;
+  readonly cwd: string;
+  readonly skipPermissions: boolean;
+  readonly model?: string;
+  readonly title?: string;
 };
 
-type TTurn = {
-  readonly id: string;
-  interruptRequested: boolean;
-};
+/** Attach (or spawn, then attach) the session's host. Null → unavailable. */
+export type TOpenPtyLink = (
+  request: TPtyLinkRequest,
+) => Promise<TPtyLink | null>;
 
-/**
- * Drive one Claude Code engine process: map its stream-json output onto
- * agent events and turn agent commands into stream-json input. Exported for
- * tests, which hand it a fake {@link TAgentEngineProcess}.
- */
-export const createClaudeCodeSession = (
-  child: TAgentEngineProcess,
-  options: TAgentEngineStartOptions,
-  emit: TAgentEngineEmit,
-): TAgentEngineSession => {
-  let turn: TTurn | null = null;
-  let turnCounter = 0;
-  let requestCounter = 0;
-  let controlCounter = 0;
-  let messageCounter = 0;
-  let exited = false;
-  let closeReason: "closed" | "killed" | null = null;
-  let closeTimer: ReturnType<typeof setTimeout> | undefined;
-  let contextWindow: number | undefined;
-  let lastUsage: TAgentTokenUsage | undefined;
-  const stderr = createStderrTail();
+const textEncoder = new TextEncoder();
+const OBSERVER_COLS = 120;
+const OBSERVER_ROWS = 40;
 
-  /** Content blocks of the message currently streaming, by block index. */
-  let blocks = new Map<number, TStreamItem>();
-  let currentMessageId: string | null = null;
-  let messageUsage = { input: 0, cacheRead: 0, cacheCreation: 0, output: 0 };
-  /** Message ids whose blocks arrived as stream events (skip their full copy). */
-  const streamedMessages = new Set<string>();
-  /** Tool calls by `tool_use` id (= item id), for result completion. */
-  const toolItems = new Map<
-    string,
-    { readonly toolName: string; title?: string; input?: unknown }
-  >();
-  const pending = new Map<string, TPendingRequest>();
-
-  const turnField = (): { turn_id?: string } =>
-    turn === null ? {} : { turn_id: turn.id };
-
-  const emitItem = (
-    type: "item.started" | "item.updated" | "item.completed",
-    itemId: string,
-    item: TAgentItem,
-  ): void => {
-    emit({ type, item_id: itemId, item, ...turnField() });
-  };
-
-  const emitUsage = (): void => {
-    if (lastUsage === undefined) return;
-    emit({
-      type: "thread.token-usage.updated",
-      usage: {
-        ...lastUsage,
-        ...(contextWindow === undefined
-          ? {}
-          : { context_window: contextWindow }),
+/** Dial a host's ctl.sock as a structured observer. */
+export const dialObserver = (
+  socketPath: string,
+  sessionId: string,
+): Promise<TPtyLink | null> =>
+  new Promise((resolve) => {
+    let ws: WebSocket;
+    try {
+      ws = new WebSocket(`ws+unix://${socketPath}`);
+    } catch {
+      resolve(null);
+      return;
+    }
+    ws.binaryType = "arraybuffer";
+    const outputHandlers: ((bytes: Uint8Array) => void)[] = [];
+    const exitHandlers: ((code: number | null) => void)[] = [];
+    let opened = false;
+    let released = false;
+    let exitCode: number | null = null;
+    const settleTimer = setTimeout(() => {
+      if (!opened) {
+        try {
+          ws.close();
+        } catch {}
+        resolve(null);
+      }
+    }, 5_000);
+    const link: TPtyLink = {
+      hostId: sessionId,
+      write: (bytes) => {
+        if (ws.readyState === WebSocket.OPEN) ws.send(new Uint8Array(bytes));
       },
-    });
-  };
-
-  const writeControlResponse = (
-    cliRequestId: string,
-    response: TJson,
-  ): void => {
-    child.writeLine(
-      JSON.stringify({
-        type: "control_response",
-        response: { subtype: "success", request_id: cliRequestId, response },
-      }),
-    );
-  };
-
-  const writeControlError = (cliRequestId: string, error: string): void => {
-    child.writeLine(
-      JSON.stringify({
-        type: "control_response",
-        response: { subtype: "error", request_id: cliRequestId, error },
-      }),
-    );
-  };
-
-  const toolItemOf = (
-    itemId: string,
-    status: "in_progress" | "completed" | "failed",
-    extra: { output?: string; is_error?: boolean } = {},
-  ): TAgentItem => {
-    const tool = toolItems.get(itemId);
-    return {
-      kind: "tool_call",
-      tool_name: clip(tool?.toolName ?? "tool", 128) || "tool",
-      ...(tool?.title === undefined ? {} : { title: tool.title }),
-      ...(tool?.input === undefined ? {} : { input: tool.input }),
-      status,
-      ...extra,
+      kill: () => {
+        if (ws.readyState === WebSocket.OPEN)
+          ws.send(
+            JSON.stringify({ t: "ctrl", p: { t: "close", intent: "kill" } }),
+          );
+      },
+      release: () => {
+        released = true;
+        try {
+          ws.close();
+        } catch {}
+      },
+      onOutput: (handler) => {
+        outputHandlers.push(handler);
+      },
+      onExit: (handler) => {
+        exitHandlers.push(handler);
+      },
     };
-  };
-
-  const startToolItem = (
-    itemId: string,
-    toolName: string,
-    input?: unknown,
-  ): void => {
-    const title =
-      input === undefined ? undefined : toolTitleOf(toolName, input);
-    toolItems.set(itemId, {
-      toolName,
-      ...(title === undefined ? {} : { title }),
-      ...(input === undefined ? {} : { input }),
-    });
-    emitItem("item.started", itemId, toolItemOf(itemId, "in_progress"));
-  };
-
-  // ── stream events (partial messages) ─────────────────────────────────
-
-  const onStreamEvent = (event: TJson): void => {
-    const type = str(event.type);
-    if (type === "message_start") {
-      const message = isRecord(event.message) ? event.message : {};
-      messageCounter += 1;
-      currentMessageId = str(message.id) ?? `m${messageCounter}`;
-      streamedMessages.add(currentMessageId);
-      blocks = new Map();
-      const usage = isRecord(message.usage) ? message.usage : {};
-      messageUsage = {
-        input: num(usage.input_tokens),
-        cacheRead: num(usage.cache_read_input_tokens),
-        cacheCreation: num(usage.cache_creation_input_tokens),
-        output: num(usage.output_tokens),
-      };
-      return;
-    }
-    if (type === "content_block_start") {
-      const index = num(event.index);
-      const block = isRecord(event.content_block) ? event.content_block : {};
-      const messageId = currentMessageId ?? `m${messageCounter}`;
-      if (block.type === "text" || block.type === "thinking") {
-        const kind = block.type === "text" ? "assistant_message" : "reasoning";
-        const item: TStreamItem = {
-          itemId: clip(`${messageId}:${index}`, 128),
-          kind,
-          text: "",
-          toolName: "",
-          inputJson: "",
-        };
-        blocks.set(index, item);
-        emitItem("item.started", item.itemId, { kind, text: "" });
-        return;
-      }
-      if (block.type === "tool_use") {
-        const toolUseId = str(block.id);
-        const toolName = str(block.name);
-        if (toolUseId === undefined || toolName === undefined) return;
-        const item: TStreamItem = {
-          itemId: clip(toolUseId, 128),
-          kind: "tool_call",
-          text: "",
-          toolName,
-          inputJson: "",
-        };
-        blocks.set(index, item);
-        startToolItem(item.itemId, toolName);
-      }
-      return;
-    }
-    if (type === "content_block_delta") {
-      const item = blocks.get(num(event.index));
-      const delta = isRecord(event.delta) ? event.delta : {};
-      if (item === undefined) return;
-      if (delta.type === "text_delta" && item.kind === "assistant_message") {
-        const text = str(delta.text) ?? "";
-        item.text += text;
-        if (text.length > 0)
-          emit({
-            type: "content.delta",
-            item_id: item.itemId,
-            stream: "assistant_text",
-            delta: text,
-            ...turnField(),
-          });
-        return;
-      }
-      if (delta.type === "thinking_delta" && item.kind === "reasoning") {
-        const text = str(delta.thinking) ?? "";
-        item.text += text;
-        if (text.length > 0)
-          emit({
-            type: "content.delta",
-            item_id: item.itemId,
-            stream: "reasoning_text",
-            delta: text,
-            ...turnField(),
-          });
-        return;
-      }
-      if (delta.type === "input_json_delta" && item.kind === "tool_call") {
-        item.inputJson += str(delta.partial_json) ?? "";
-      }
-      return;
-    }
-    if (type === "content_block_stop") {
-      const index = num(event.index);
-      const item = blocks.get(index);
-      if (item === undefined) return;
-      blocks.delete(index);
-      if (item.kind === "tool_call") {
-        let input: unknown = {};
-        if (item.inputJson.length > 0) {
-          try {
-            input = JSON.parse(item.inputJson) as unknown;
-          } catch {
-            input = undefined;
-          }
-        }
-        const tool = toolItems.get(item.itemId);
-        if (tool !== undefined && input !== undefined) {
-          tool.input = input;
-          const title = toolTitleOf(item.toolName, input);
-          if (title !== undefined) tool.title = title;
-        }
-        emitItem(
-          "item.updated",
-          item.itemId,
-          toolItemOf(item.itemId, "in_progress"),
-        );
-        return;
-      }
-      emitItem("item.completed", item.itemId, {
-        kind: item.kind,
-        text: item.text,
-      });
-      return;
-    }
-    if (type === "message_delta") {
-      const usage = isRecord(event.usage) ? event.usage : {};
-      if (typeof usage.output_tokens === "number")
-        messageUsage.output = num(usage.output_tokens);
-      if (typeof usage.input_tokens === "number")
-        messageUsage.input = num(usage.input_tokens);
-      if (typeof usage.cache_read_input_tokens === "number")
-        messageUsage.cacheRead = num(usage.cache_read_input_tokens);
-      if (typeof usage.cache_creation_input_tokens === "number")
-        messageUsage.cacheCreation = num(usage.cache_creation_input_tokens);
-      return;
-    }
-    if (type === "message_stop") {
-      const input =
-        messageUsage.input +
-        messageUsage.cacheRead +
-        messageUsage.cacheCreation;
-      lastUsage = {
-        input_tokens: input,
-        output_tokens: messageUsage.output,
-        ...(messageUsage.cacheRead > 0
-          ? { cached_input_tokens: messageUsage.cacheRead }
-          : {}),
-        total_tokens: input + messageUsage.output,
-      };
-      emitUsage();
-    }
-  };
-
-  // ── full messages (fallback when a block was not streamed) ───────────
-
-  const onAssistant = (message: TJson): void => {
-    messageCounter += 1;
-    const messageId = str(message.id) ?? `m${messageCounter}`;
-    const streamed = streamedMessages.has(messageId);
-    const content = Array.isArray(message.content) ? message.content : [];
-    content.forEach((block, index) => {
-      if (!isRecord(block)) return;
-      if (block.type === "tool_use") {
-        const toolUseId = str(block.id);
-        const toolName = str(block.name);
-        if (toolUseId === undefined || toolName === undefined) return;
-        const itemId = clip(toolUseId, 128);
-        if (toolItems.has(itemId)) return;
-        startToolItem(itemId, toolName, block.input);
-        return;
-      }
-      if (streamed) return;
-      if (block.type === "text" || block.type === "thinking") {
-        const kind = block.type === "text" ? "assistant_message" : "reasoning";
-        const text =
-          str(block.type === "text" ? block.text : block.thinking) ?? "";
-        const itemId = clip(`${messageId}:${index}`, 128);
-        emitItem("item.started", itemId, { kind, text: "" });
-        emitItem("item.completed", itemId, { kind, text });
-      }
-    });
-  };
-
-  const onUserLine = (message: TJson): void => {
-    const content = Array.isArray(message.content) ? message.content : [];
-    for (const block of content) {
-      if (!isRecord(block) || block.type !== "tool_result") continue;
-      const toolUseId = str(block.tool_use_id);
-      if (toolUseId === undefined) continue;
-      const itemId = clip(toolUseId, 128);
-      if (!toolItems.has(itemId)) continue;
-      const isError = block.is_error === true;
-      emitItem(
-        "item.completed",
-        itemId,
-        toolItemOf(itemId, isError ? "failed" : "completed", {
-          output: clip(
-            toolResultText(block.content),
-            AGENT_TOOL_OUTPUT_MAX_CHARS,
-          ),
-          ...(isError ? { is_error: true } : {}),
+    ws.onopen = () => {
+      ws.send(
+        JSON.stringify({
+          t: "open",
+          open: {
+            session_id: sessionId,
+            cli: "claude_code",
+            cols: OBSERVER_COLS,
+            rows: OBSERVER_ROWS,
+            mode: "attach",
+            observer: true,
+          },
         }),
       );
-      toolItems.delete(itemId);
+    };
+    ws.onmessage = (event: MessageEvent) => {
+      if (typeof event.data !== "string") {
+        const bytes = new Uint8Array(event.data as ArrayBuffer);
+        for (const handler of outputHandlers) handler(bytes);
+        return;
+      }
+      let message: unknown;
+      try {
+        message = JSON.parse(event.data);
+      } catch {
+        return;
+      }
+      if (!isRecord(message)) return;
+      if (message.t === "exit" && typeof message.code === "number")
+        exitCode = message.code;
+      if (message.t === "ctrl" && isRecord(message.p)) {
+        if (message.p.t === "open_ack" && !opened) {
+          clearTimeout(settleTimer);
+          if (message.p.ok === true) {
+            opened = true;
+            resolve(link);
+          } else {
+            resolve(null);
+          }
+        }
+      }
+    };
+    ws.onclose = () => {
+      clearTimeout(settleTimer);
+      if (!opened) {
+        resolve(null);
+        return;
+      }
+      if (released) return;
+      for (const handler of exitHandlers) handler(exitCode);
+    };
+    ws.onerror = () => {};
+  });
+
+/** Production link: join the live host for this id, else spawn one. */
+const defaultOpenPtyLink: TOpenPtyLink = async (request) => {
+  if (!SESSION_ID_PATTERN.test(request.sessionId)) return null;
+  const hosts = await defaultSessionHostClient.discoverSessionHosts();
+  // A terminal `openllm claude --resume X` runs under its own host id with
+  // Claude session X: match either, so the web never forks a second process.
+  const live = hosts.find(
+    (host) =>
+      host.cli === "claude_code" &&
+      (host.id === request.sessionId ||
+        host.vendorSessionId === request.sessionId),
+  );
+  if (live !== undefined) return dialObserver(live.socketPath, live.id);
+  const socketPath = await defaultSessionHostClient.spawnSessionHostProc({
+    id: request.sessionId,
+    cli: "claude_code",
+    cols: OBSERVER_COLS,
+    rows: OBSERVER_ROWS,
+    cwd: request.cwd,
+    ...(request.title === undefined ? {} : { title: request.title }),
+    ...(request.skipPermissions ? { dangerous: true } : {}),
+    ...(request.resume ? { resume: request.sessionId } : {}),
+    ...(request.model === undefined
+      ? {}
+      : { vendorArgs: ["--model", request.model] }),
+  });
+  return socketPath === null
+    ? null
+    : dialObserver(socketPath, request.sessionId);
+};
+
+// ─── hooks → sessions ──────────────────────────────────────────────────────
+
+/** What a hook asked; the reply is Claude's hook stdout JSON (or none). */
+type THookHandler = (event: string, payload: TJson) => Promise<TJson | null>;
+
+const hookHandlers = new Map<string, THookHandler>();
+
+/**
+ * Route one Claude hook call to its agent session. Null = no decision / no
+ * output (the hook prints nothing and Claude carries on natively).
+ */
+export const handleAgentHook = async (
+  sessionId: string,
+  event: string,
+  payload: TJson,
+): Promise<TJson | null> => {
+  const handler = hookHandlers.get(sessionId);
+  if (handler === undefined) return null;
+  try {
+    return await handler(event, payload);
+  } catch (err) {
+    logError("agent", err);
+    return null;
+  }
+};
+
+// ─── attachments ─────────────────────────────────────────────────────────
+
+/** The per-session attachment dir (inside the host's 0700 session dir). */
+export const agentAttachmentsDir = (sessionId: string): string =>
+  join(stateDir(), "sessions", sessionId, "attachments");
+
+/** A filename safe to place in the attachment dir and to `@`-reference. */
+export const sanitizeAttachmentName = (name: string | undefined): string => {
+  const base = (name ?? "").split(/[\\/]/).pop() ?? "";
+  const cleaned = base
+    .replace(/[^A-Za-z0-9._-]/g, "_")
+    .replace(/^[.]+/, "")
+    .slice(0, 100);
+  return cleaned.length === 0 ? "attachment" : cleaned;
+};
+
+const extensionOf = (mediaType: string): string => {
+  const sub = mediaType.split("/")[1] ?? "";
+  if (sub === "jpeg") return ".jpg";
+  if (sub === "plain") return ".txt";
+  return /^[a-z0-9]{1,8}$/.test(sub) ? `.${sub}` : "";
+};
+
+/** Write attachments; return their absolute paths. */
+export const writeAgentAttachments = (
+  dir: string,
+  attachments: TAgentSendInput["attachments"],
+  counter: { value: number },
+): string[] => {
+  if (attachments.length === 0) return [];
+  mkdirSync(dir, { recursive: true, mode: 0o700 });
+  return attachments.map((attachment) => {
+    counter.value += 1;
+    let name = sanitizeAttachmentName(attachment.name);
+    if (!name.includes(".")) name += extensionOf(attachment.media_type);
+    const path = join(dir, `${counter.value}-${name}`);
+    writeFileSync(path, Buffer.from(attachment.data, "base64"), {
+      mode: 0o600,
+    });
+    return path;
+  });
+};
+
+// ─── the session ─────────────────────────────────────────────────────────
+
+const PASTE_START = "\x1b[200~";
+const PASTE_END = "\x1b[201~";
+const ESC = "\x1b";
+const ANSI = new RegExp(
+  `${ESC}\\[[0-9;?]*[ -/]*[@-~]|${ESC}\\][^\u0007]*\u0007|${ESC}[()][A-Za-z0-9]`,
+  "g",
+);
+const TRUST_PROMPT =
+  /trust\s*the\s*files\s*in\s*this\s*folder|Do\s*you\s*trust/i;
+
+type TPending =
+  | {
+      readonly kind: "approval";
+      readonly toolName: string;
+      readonly input: unknown;
+      readonly resolve: (reply: TJson | null) => void;
     }
+  | {
+      readonly kind: "user-input";
+      readonly input: unknown;
+      readonly resolve: (reply: TJson | null) => void;
+    }
+  | { readonly kind: "trust" };
+
+export type TClaudeTuiDeps = {
+  readonly openLink?: TOpenPtyLink;
+  readonly transcript?: (sessionId: string) => TClaudeTranscriptTail;
+  readonly approvalWaitMs?: number;
+  readonly readyMaxMs?: number;
+  readonly readyQuietMs?: number;
+  readonly submitDelayMs?: number;
+  readonly pollMs?: number;
+  readonly attachmentsDir?: (sessionId: string) => string;
+};
+
+const permissionReply = (decision: TJson): TJson => ({
+  hookSpecificOutput: { hookEventName: "PermissionRequest", decision },
+});
+
+/** Drive one Claude TUI session. Exported for tests (fake link + transcript). */
+export const createClaudeTuiSession = (
+  options: TAgentEngineStartOptions,
+  emit: TAgentEngineEmit,
+  deps: TClaudeTuiDeps = {},
+): TAgentEngineSession => {
+  const approvalWaitMs = deps.approvalWaitMs ?? AGENT_APPROVAL_WAIT_MS;
+  const submitDelayMs = deps.submitDelayMs ?? SUBMIT_DELAY_MS;
+  const attachmentsDir = (deps.attachmentsDir ?? agentAttachmentsDir)(
+    options.sessionId,
+  );
+  const attachmentCounter = { value: 0 };
+  let link: TPtyLink | null = null;
+  let ended = false;
+  let ready = false;
+  let readyTimer: ReturnType<typeof setTimeout> | undefined;
+  let pollTimer: ReturnType<typeof setInterval> | undefined;
+  const queued: (() => void)[] = [];
+  let recentOutput = "";
+  let requestCounter = 0;
+  const pending = new Map<string, TPending>();
+  let trustRequestId: string | null = null;
+
+  const parser = createTranscriptParser({
+    emit,
+    toolOutputMax: AGENT_TOOL_OUTPUT_MAX_CHARS,
+  });
+  const tail =
+    deps.transcript?.(options.sessionId) ??
+    createClaudeTranscriptTail(options.sessionId, { cwd: options.cwd });
+
+  const pump = (): void => {
+    const chunk = tail.read();
+    if (chunk !== null && chunk.length > 0) parser.push(chunk);
   };
 
-  const dropPendingRequests = (): void => {
-    for (const [requestId, request] of pending) {
-      if (request.kind === "approval")
-        emit({
-          type: "request.resolved",
-          request_id: requestId,
-          decision: "cancel",
-        });
-      else
-        emit({
-          type: "user-input.resolved",
-          request_id: requestId,
-          answers: {},
-        });
+  const cleanupAttachments = (): void => {
+    try {
+      rmSync(attachmentsDir, { recursive: true, force: true });
+    } catch {}
+  };
+
+  const finish = (
+    reason: "closed" | "killed" | "completed" | "error",
+    message?: string,
+  ): void => {
+    if (ended) return;
+    ended = true;
+    for (const key of hookKeys) hookHandlers.delete(key);
+    if (readyTimer !== undefined) clearTimeout(readyTimer);
+    if (pollTimer !== undefined) clearInterval(pollTimer);
+    try {
+      pump();
+    } catch {}
+    for (const [id, request] of pending) {
+      if (request.kind !== "trust") request.resolve(null);
+      emit({ type: "request.resolved", request_id: id, decision: "cancel" });
     }
     pending.clear();
-  };
-
-  const onResult = (result: TJson): void => {
-    const modelUsage = isRecord(result.modelUsage) ? result.modelUsage : {};
-    for (const entry of Object.values(modelUsage)) {
-      if (isRecord(entry) && typeof entry.contextWindow === "number") {
-        contextWindow = num(entry.contextWindow);
-        emitUsage();
-        break;
-      }
-    }
-    const active = turn;
-    turn = null;
-    dropPendingRequests();
-    if (active === null) return;
-    const subtype = str(result.subtype) ?? "success";
-    const failed = result.is_error === true || subtype !== "success";
-    if (active.interruptRequested) {
-      emit({ type: "turn.aborted", turn_id: active.id, reason: "interrupted" });
-      return;
-    }
-    if (failed) {
-      const message = str(result.result) ?? subtype;
-      emit({
-        type: "turn.aborted",
-        turn_id: active.id,
-        reason: "failed",
-        message: clip(message, SHORT_MAX),
-      });
-      return;
-    }
-    const stopReason = str(result.stop_reason);
-    emit({
-      type: "turn.completed",
-      turn_id: active.id,
-      ...(stopReason === undefined
-        ? {}
-        : { stop_reason: clip(stopReason, 64) }),
-    });
-  };
-
-  const onControlRequest = (line: TJson): void => {
-    const cliRequestId = str(line.request_id);
-    const request = isRecord(line.request) ? line.request : {};
-    if (cliRequestId === undefined) return;
-    if (request.subtype !== "can_use_tool") {
-      writeControlError(cliRequestId, "unsupported control request");
-      return;
-    }
-    const toolName = str(request.tool_name) ?? "tool";
-    const input = request.input;
-    requestCounter += 1;
-    const requestId = `r${requestCounter}`;
-    if (toolName === "AskUserQuestion") {
-      const questions = askUserQuestionsOf(input);
-      if (questions !== null) {
-        pending.set(requestId, {
-          kind: "user-input",
-          cliRequestId,
-          toolName,
-          input,
-          suggestions: undefined,
-        });
-        emit({
-          type: "user-input.requested",
-          request_id: requestId,
-          questions,
-          ...turnField(),
-        });
-        return;
-      }
-    }
-    pending.set(requestId, {
-      kind: "approval",
-      cliRequestId,
-      toolName,
-      input,
-      suggestions: request.permission_suggestions,
-    });
-    const toolUseId = str(request.tool_use_id);
-    const title = toolTitleOf(toolName, input);
-    emit({
-      type: "request.opened",
-      request_id: requestId,
-      request_kind: requestKindOfTool(toolName),
-      title: clip(
-        title === undefined ? toolName : `${toolName}: ${title}`,
-        SHORT_MAX,
-      ),
-      detail: requestDetailOf(toolName, input),
-      ...(input === undefined ? {} : { input }),
-      ...(toolUseId === undefined ? {} : { item_id: clip(toolUseId, 128) }),
-      ...turnField(),
-    });
-  };
-
-  const onControlCancel = (line: TJson): void => {
-    const cliRequestId = str(line.request_id);
-    for (const [requestId, request] of pending) {
-      if (request.cliRequestId !== cliRequestId) continue;
-      pending.delete(requestId);
-      if (request.kind === "approval")
-        emit({
-          type: "request.resolved",
-          request_id: requestId,
-          decision: "cancel",
-        });
-      else
-        emit({
-          type: "user-input.resolved",
-          request_id: requestId,
-          answers: {},
-        });
-    }
-  };
-
-  const onLine = (raw: string): void => {
-    let line: unknown;
-    try {
-      line = JSON.parse(raw) as unknown;
-    } catch {
-      return;
-    }
-    if (!isRecord(line)) return;
-    // Sub-agent traffic (Task tool) stays inside its parent tool call.
-    if (
-      line.parent_tool_use_id !== undefined &&
-      line.parent_tool_use_id !== null
-    )
-      return;
-    switch (line.type) {
-      case "stream_event":
-        if (isRecord(line.event)) onStreamEvent(line.event);
-        return;
-      case "assistant":
-        if (isRecord(line.message)) onAssistant(line.message);
-        return;
-      case "user":
-        if (isRecord(line.message)) onUserLine(line.message);
-        return;
-      case "result":
-        onResult(line);
-        return;
-      case "control_request":
-        onControlRequest(line);
-        return;
-      case "control_cancel_request":
-        onControlCancel(line);
-        return;
-      default:
-        return;
-    }
-  };
-
-  child.onLine((raw) => {
-    try {
-      onLine(raw);
-    } catch (err) {
-      logError("agent", err);
-    }
-  });
-  child.onStderr((text) => stderr.push(text));
-  child.onExit((code, signal) => {
-    exited = true;
-    if (closeTimer !== undefined) clearTimeout(closeTimer);
-    const active = turn;
-    turn = null;
-    dropPendingRequests();
-    if (active !== null)
-      emit({
-        type: "turn.aborted",
-        turn_id: active.id,
-        reason: closeReason === null ? "failed" : "cancelled",
-      });
-    if (closeReason === null && code !== 0) {
-      const tail = stderr.text();
-      emit({
-        type: "runtime.error",
-        code: "engine_exited",
-        message: clip(
-          tail.length > 0
-            ? tail
-            : `Claude Code exited (${signal ?? `code ${String(code)}`})`,
-          DETAIL_MAX,
-        ),
-        fatal: true,
-      });
-    }
+    parser.abortTurn("cancelled");
+    cleanupAttachments();
     emit({
       type: "session.exited",
       session_id: options.sessionId,
-      reason: closeReason ?? (code === 0 ? "completed" : "error"),
+      reason,
+      ...(message === undefined ? {} : { message }),
     });
-  });
-
-  const userContentOf = (
-    input: TAgentSendInput,
-  ): { blocks: TJson[]; skipped: string[] } => {
-    const blocksOut: TJson[] = [];
-    const skipped: string[] = [];
-    if (input.prompt.length > 0)
-      blocksOut.push({ type: "text", text: input.prompt });
-    for (const attachment of input.attachments) {
-      const mediaType = attachment.media_type.toLowerCase();
-      if (attachment.kind === "image" || mediaType.startsWith("image/")) {
-        blocksOut.push({
-          type: "image",
-          source: {
-            type: "base64",
-            media_type: mediaType,
-            data: attachment.data,
-          },
-        });
-        continue;
-      }
-      if (mediaType === "application/pdf") {
-        blocksOut.push({
-          type: "document",
-          source: {
-            type: "base64",
-            media_type: mediaType,
-            data: attachment.data,
-          },
-        });
-        continue;
-      }
-      if (mediaType.startsWith("text/") || mediaType === "application/json") {
-        const text = Buffer.from(attachment.data, "base64").toString("utf8");
-        const name = attachment.name ?? "attachment";
-        blocksOut.push({
-          type: "text",
-          text: `<file name="${name}">\n${text}\n</file>`,
-        });
-        continue;
-      }
-      skipped.push(attachment.name ?? attachment.media_type);
-    }
-    return { blocks: blocksOut, skipped };
   };
+
+  const markReady = (): void => {
+    if (ready || ended || trustRequestId !== null) return;
+    ready = true;
+    if (readyTimer !== undefined) clearTimeout(readyTimer);
+    for (const run of queued.splice(0)) run();
+  };
+
+  const armReady = (): void => {
+    if (ready) return;
+    if (readyTimer !== undefined) clearTimeout(readyTimer);
+    readyTimer = setTimeout(markReady, deps.readyQuietMs ?? READY_QUIET_MS);
+  };
+
+  const whenReady = (run: () => void): void => {
+    if (ready) run();
+    else queued.push(run);
+  };
+
+  const writeText = (text: string): void => {
+    link?.write(textEncoder.encode(text));
+  };
+
+  const onOutput = (bytes: Uint8Array): void => {
+    armReady();
+    recentOutput = (
+      recentOutput + new TextDecoder().decode(bytes).replace(ANSI, "")
+    ).slice(-4096);
+    if (trustRequestId === null && TRUST_PROMPT.test(recentOutput)) {
+      requestCounter += 1;
+      trustRequestId = `trust${requestCounter}`;
+      recentOutput = "";
+      ready = false; // hold queued prompts until the dialog is answered
+      pending.set(trustRequestId, { kind: "trust" });
+      emit({
+        type: "request.opened",
+        request_id: trustRequestId,
+        request_kind: "other",
+        title: "Trust this folder?",
+        detail: `Claude Code asks whether to trust the files in ${clip(options.cwd, 1024)}.`,
+      });
+    }
+  };
+
+  // Hooks from this session's Claude process (keyed by its host id).
+  const hookKeys = new Set<string>([options.sessionId]);
+  const onHook: THookHandler = async (event, payload) => {
+    pump();
+    if (event === "Stop") {
+      parser.completeTurn();
+      return null;
+    }
+    if (event !== "PermissionRequest") return null;
+    if (options.observed !== undefined && !options.observed()) return null;
+    const toolName = str(payload.tool_name) ?? "tool";
+    const input = payload.tool_input;
+    requestCounter += 1;
+    const requestId = `r${requestCounter}`;
+    const reply = new Promise<TJson | null>((resolve) => {
+      if (toolName === "AskUserQuestion") {
+        const questions = askUserQuestionsOf(input);
+        if (questions === null) {
+          resolve(null);
+          return;
+        }
+        pending.set(requestId, { kind: "user-input", input, resolve });
+        emit({
+          type: "user-input.requested",
+          request_id: requestId,
+          ...parser.turnField(),
+          questions,
+        });
+        return;
+      }
+      pending.set(requestId, { kind: "approval", toolName, input, resolve });
+      const title = toolTitleOf(toolName, input);
+      emit({
+        type: "request.opened",
+        request_id: requestId,
+        ...parser.turnField(),
+        request_kind: requestKindOfTool(toolName),
+        title: title === undefined ? toolName : `${toolName}: ${title}`,
+        detail: requestDetailOf(toolName, input),
+        input,
+      });
+    });
+    const timer = setTimeout(() => {
+      const open = pending.get(requestId);
+      if (open === undefined || open.kind === "trust") return;
+      pending.delete(requestId);
+      // Never auto-allow: hand the decision to Claude's native dialog.
+      open.resolve(null);
+      emit({
+        type: "request.resolved",
+        request_id: requestId,
+        decision: "cancel",
+      });
+    }, approvalWaitMs);
+    timer.unref?.();
+    const result = await reply;
+    clearTimeout(timer);
+    return result;
+  };
+  hookHandlers.set(options.sessionId, onHook);
+
+  const openLink = deps.openLink ?? defaultOpenPtyLink;
+  // History first (resume / attach to a live session), then live.
+  try {
+    pump();
+  } catch (err) {
+    logError("agent", err);
+  }
+  void openLink({
+    sessionId: options.sessionId,
+    resume: options.resume,
+    cwd: options.cwd,
+    skipPermissions: options.skipPermissions,
+    ...(options.model === undefined ? {} : { model: options.model }),
+    ...(options.title === undefined ? {} : { title: options.title }),
+  })
+    .then((opened) => {
+      if (ended) {
+        opened?.release();
+        return;
+      }
+      if (opened === null) {
+        emit({
+          type: "runtime.error",
+          code: "spawn_failed",
+          message: "Claude Code could not be started on this device.",
+          fatal: true,
+        });
+        finish("error");
+        return;
+      }
+      link = opened;
+      hookKeys.add(opened.hostId);
+      hookHandlers.set(opened.hostId, onHook);
+      opened.onOutput(onOutput);
+      opened.onExit(() => finish("completed"));
+      // An already-running TUI (re-attach) may be idle and silent.
+      readyTimer = setTimeout(markReady, deps.readyMaxMs ?? READY_MAX_MS);
+      armReady();
+      pollTimer = setInterval(() => {
+        try {
+          pump();
+        } catch (err) {
+          logError("agent", err);
+        }
+      }, deps.pollMs ?? TRANSCRIPT_POLL_MS);
+      pollTimer.unref?.();
+    })
+    .catch((err: unknown) => {
+      logError("agent", err);
+      finish("error");
+    });
 
   return {
     send: (input): TAgentSendResult => {
-      if (exited || closeReason !== null)
+      if (ended)
         return {
           ok: false,
           code: "session_exited",
           message: "the session has ended",
         };
-      if (turn !== null)
+      if (parser.turnActive())
         return {
           ok: false,
           code: "turn_in_progress",
           message: "a turn is already running; interrupt it or wait",
         };
-      const content = userContentOf(input);
-      if (content.blocks.length === 0)
-        return { ok: false, code: "empty_prompt", message: "nothing to send" };
-      const written = child.writeLine(
-        JSON.stringify({
-          type: "user",
-          message: { role: "user", content: content.blocks },
-          parent_tool_use_id: null,
-          session_id: options.sessionId,
-        }),
-      );
-      if (!written)
+      let paths: string[];
+      try {
+        paths = writeAgentAttachments(
+          attachmentsDir,
+          input.attachments,
+          attachmentCounter,
+        );
+      } catch (err) {
+        logError("agent", err);
         return {
           ok: false,
-          code: "session_exited",
-          message: "the engine is gone",
+          code: "attachment_failed",
+          message: "an attachment could not be saved on this device",
         };
-      turnCounter += 1;
-      turn = { id: `t${turnCounter}`, interruptRequested: false };
-      emit({
-        type: "turn.started",
-        turn_id: turn.id,
-        ...(options.model === undefined ? {} : { model: options.model }),
-        ...(input.prompt.trim() === "" ? {} : { prompt: input.prompt }),
+      }
+      const text = [input.prompt, ...paths.map((path) => `@${path}`)]
+        .filter((part) => part.trim() !== "")
+        .join(input.prompt.includes("\n") ? "\n" : " ");
+      if (text.trim() === "")
+        return { ok: false, code: "empty_prompt", message: "nothing to send" };
+      const turnId = parser.startTurn(input.prompt);
+      whenReady(() => {
+        writeText(`${PASTE_START}${text}${PASTE_END}`);
+        setTimeout(() => writeText("\r"), submitDelayMs);
       });
-      if (content.skipped.length > 0)
-        emit({
-          type: "runtime.warning",
-          code: "attachment_unsupported",
-          message: clip(
-            `Skipped unsupported attachments: ${content.skipped.join(", ")}`,
-            DETAIL_MAX,
-          ),
-        });
-      return { ok: true, turnId: turn.id };
+      return { ok: true, turnId };
     },
     interrupt: () => {
-      if (turn === null || exited) return false;
-      turn.interruptRequested = true;
-      controlCounter += 1;
-      child.writeLine(
-        JSON.stringify({
-          type: "control_request",
-          request_id: `openllm-interrupt-${controlCounter}`,
-          request: { subtype: "interrupt" },
-        }),
-      );
+      if (ended || !parser.turnActive()) return false;
+      writeText(ESC);
+      parser.abortTurn("interrupted");
       return true;
     },
-    respond: (command: TAgentRespondCommand): boolean => {
+    respond: (command: TAgentRespondCommand) => {
       const request = pending.get(command.request_id);
-      if (request === undefined || exited) return false;
-      if (request.kind === "approval") {
-        const decision: TAgentRequestDecision | undefined = command.decision;
-        if (decision === undefined) return false;
-        pending.delete(command.request_id);
-        if (decision === "accept" || decision === "accept_for_session") {
-          writeControlResponse(request.cliRequestId, {
-            behavior: "allow",
-            updatedInput: isRecord(request.input) ? request.input : {},
-            ...(decision === "accept_for_session" &&
-            Array.isArray(request.suggestions)
-              ? { updatedPermissions: request.suggestions }
-              : {}),
-          });
-        } else {
-          writeControlResponse(request.cliRequestId, {
-            behavior: "deny",
-            message:
-              decision === "cancel"
-                ? "The user cancelled this turn."
-                : "The user declined this action.",
-            ...(decision === "cancel" ? { interrupt: true } : {}),
-          });
-          if (decision === "cancel" && turn !== null)
-            turn.interruptRequested = true;
-        }
+      if (request === undefined) return false;
+      pending.delete(command.request_id);
+      if (request.kind === "trust") {
+        trustRequestId = null;
+        const accept =
+          command.decision === "accept" ||
+          command.decision === "accept_for_session";
+        // Option 1 is "Yes, proceed"; Esc declines (and Claude exits).
+        writeText(accept ? "\r" : ESC);
+        armReady();
         emit({
           type: "request.resolved",
           request_id: command.request_id,
-          decision,
+          decision: accept ? "accept" : "decline",
         });
         return true;
       }
-      // user-input (AskUserQuestion)
-      if (command.answers !== undefined) {
-        pending.delete(command.request_id);
-        writeControlResponse(request.cliRequestId, {
-          behavior: "allow",
-          updatedInput: {
-            ...(isRecord(request.input) ? request.input : {}),
-            answers: claudeAnswersOf(request.input, command.answers),
-          },
-        });
+      if (request.kind === "user-input") {
+        if (command.answers === undefined) {
+          request.resolve(
+            permissionReply({
+              behavior: "deny",
+              message: "The user dismissed the question.",
+            }),
+          );
+          emit({
+            type: "user-input.resolved",
+            request_id: command.request_id,
+            answers: {},
+          });
+          return true;
+        }
+        request.resolve(
+          permissionReply({
+            behavior: "allow",
+            updatedInput: claudeAnswersInputOf(request.input, command.answers),
+          }),
+        );
         emit({
           type: "user-input.resolved",
           request_id: command.request_id,
@@ -930,128 +782,56 @@ export const createClaudeCodeSession = (
         });
         return true;
       }
-      if (command.decision === "decline" || command.decision === "cancel") {
-        pending.delete(command.request_id);
-        writeControlResponse(request.cliRequestId, {
-          behavior: "deny",
-          message: "The user declined to answer.",
-          ...(command.decision === "cancel" ? { interrupt: true } : {}),
-        });
-        emit({
-          type: "user-input.resolved",
-          request_id: command.request_id,
-          answers: {},
-        });
-        return true;
+      const decision = command.decision;
+      if (decision === undefined) {
+        pending.set(command.request_id, request);
+        return false;
       }
-      return false;
+      if (decision === "accept" || decision === "accept_for_session") {
+        request.resolve(permissionReply({ behavior: "allow" }));
+      } else {
+        request.resolve(
+          permissionReply({
+            behavior: "deny",
+            message:
+              decision === "cancel"
+                ? "The user cancelled this request."
+                : "The user declined this request.",
+            ...(decision === "cancel" ? { interrupt: true } : {}),
+          }),
+        );
+        if (decision === "cancel") parser.abortTurn("cancelled");
+      }
+      emit({
+        type: "request.resolved",
+        request_id: command.request_id,
+        decision,
+      });
+      return true;
     },
-    turnActive: () => turn !== null,
+    turnActive: () => parser.turnActive(),
     close: (reason) => {
-      if (exited) return;
-      if (closeReason === null) closeReason = reason;
-      if (reason === "killed") {
-        child.kill("SIGKILL");
-        return;
-      }
-      child.endInput();
-      if (closeTimer === undefined) {
-        closeTimer = setTimeout(() => child.kill("SIGTERM"), CLOSE_GRACE_MS);
-        closeTimer.unref?.();
-      }
+      if (ended) return;
+      const current = link;
+      link = null;
+      current?.kill();
+      current?.release();
+      finish(reason);
+    },
+    release: () => {
+      if (ended) return;
+      const current = link;
+      link = null;
+      current?.release();
+      finish("closed");
     },
   };
 };
 
-/** An already-failed session: emits the error + exit, ignores everything. */
-const failedSession = (
-  options: TAgentEngineStartOptions,
-  emit: TAgentEngineEmit,
-  code: string,
-  message: string,
-): TAgentEngineSession => {
-  const events: TAgentEvent[] = [
-    { type: "runtime.error", code, message, fatal: true },
-    { type: "session.exited", session_id: options.sessionId, reason: "error" },
-  ];
-  queueMicrotask(() => {
-    for (const event of events) emit(event);
-  });
-  return {
-    send: () => ({ ok: false, code: "session_exited", message }),
-    interrupt: () => false,
-    respond: () => false,
-    turnActive: () => false,
-    close: () => {},
-  };
-};
-
-export type TClaudeCodeAdapterOptions = {
-  /** Override the child spawner (tests). */
-  readonly spawn?: TAgentEngineSpawn;
-  /** Override the `openllm` CLI lookup (tests). */
-  readonly resolveCli?: () => string | null;
-  /** Override the resumed-session history reader (tests). */
-  readonly readHistory?: (sessionId: string) => readonly TAgentEvent[];
-  /** Override the child env (tests). */
-  readonly env?: (options: TAgentEngineStartOptions) => Record<string, string>;
-};
-
-/**
- * The env an engine runs with — the device-session env (real HOME, daemon
- * TMPDIR) plus the device-session markers `openllm <client>` indexes into
- * `live.json`, so the session shows up in the local session list.
- */
-const defaultEngineEnv = (
-  options: TAgentEngineStartOptions,
-): Record<string, string> =>
-  mergeSpawnEnv(process.env, {
-    ...sessionEnv(),
-    OPENLLM_DEVICE_SESSION_ID: options.sessionId,
-    // live.json marks the run as a headless agent session (listed + resumable,
-    // never offered for PTY attach). Literal = the CLI's AGENT_SESSION_ENV.
-    OPENLLM_AGENT_SESSION: "1",
-    ...(options.title === undefined || options.title.length === 0
-      ? {}
-      : { OPENLLM_DEVICE_TITLE: options.title.slice(0, 80) }),
-  });
-
+/** Mint the Claude Code adapter (interactive TUI under the session host). */
 export const createClaudeCodeAdapter = (
-  adapterOptions: TClaudeCodeAdapterOptions = {},
+  deps: TClaudeTuiDeps = {},
 ): TAgentEngineAdapter => ({
   engine: "claude",
-  start: (options, emit) => {
-    const bin = (adapterOptions.resolveCli ?? resolveOpenllmCli)();
-    if (bin === null)
-      return failedSession(
-        options,
-        emit,
-        "cli_missing",
-        "The OpenLLM CLI is not installed on this device.",
-      );
-    // Resumed (engine had exited): replay Claude's own transcript first so a
-    // re-opened session shows its earlier turns.
-    if (options.resume)
-      for (const event of (
-        adapterOptions.readHistory ?? readClaudeTranscriptEvents
-      )(options.sessionId))
-        emit(event);
-    let child: TAgentEngineProcess;
-    try {
-      child = (adapterOptions.spawn ?? spawnAgentEngineProcess)({
-        argv: buildClaudeAgentArgv(bin, options),
-        cwd: options.cwd,
-        env: (adapterOptions.env ?? defaultEngineEnv)(options),
-      });
-    } catch (err) {
-      logError("agent", err);
-      return failedSession(
-        options,
-        emit,
-        "spawn_failed",
-        "Claude Code could not be started on this device.",
-      );
-    }
-    return createClaudeCodeSession(child, options, emit);
-  },
+  start: (options, emit) => createClaudeTuiSession(options, emit, deps),
 });

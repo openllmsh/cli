@@ -27,6 +27,8 @@ export type TAgentEngineStartOptions = {
   readonly skipPermissions: boolean;
   /** Optional human title (indexed by the local session list). */
   readonly title?: string;
+  /** True while a consumer (web / desktop) is attached to the session. */
+  readonly observed?: () => boolean;
 };
 
 /**
@@ -59,6 +61,12 @@ export type TAgentEngineSession = {
    * once the engine process is gone.
    */
   readonly close: (reason: "closed" | "killed") => void;
+  /**
+   * Stop driving the engine but leave it running (idle reap, daemon
+   * shutdown): a durable terminal session must outlive the daemon's interest.
+   * Emits `session.exited{closed}`. Absent → {@link close} is used.
+   */
+  readonly release?: () => void;
 };
 
 export type TAgentEngineAdapter = {
@@ -69,34 +77,6 @@ export type TAgentEngineAdapter = {
     emit: TAgentEngineEmit,
   ) => TAgentEngineSession;
 };
-
-/**
- * A spawned engine child, line-oriented. Production wraps `Bun.spawn`
- * (`engine-process.ts`); tests inject a fake.
- */
-export type TAgentEngineProcess = {
-  /** Write one NDJSON line (the newline is appended). False once stdin is gone. */
-  readonly writeLine: (line: string) => boolean;
-  /** Close stdin (a graceful stop for stream-json engines). */
-  readonly endInput: () => void;
-  readonly kill: (signal?: NodeJS.Signals) => void;
-  readonly onLine: (handler: (line: string) => void) => void;
-  readonly onStderr: (handler: (text: string) => void) => void;
-  /** Fires once. `code` null when signalled. */
-  readonly onExit: (
-    handler: (code: number | null, signal: string | null) => void,
-  ) => void;
-};
-
-export type TAgentEngineSpawnOptions = {
-  readonly argv: readonly string[];
-  readonly cwd: string;
-  readonly env: Readonly<Record<string, string>>;
-};
-
-export type TAgentEngineSpawn = (
-  options: TAgentEngineSpawnOptions,
-) => TAgentEngineProcess;
 
 /** One consumer of a dispatcher connection (a mux stream or a loopback socket). */
 export type TAgentConsumer = {

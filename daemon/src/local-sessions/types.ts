@@ -147,8 +147,6 @@ export type TLiveRun = {
   readonly openllm_session_id: string | null;
   readonly vendor_session_id: string | null;
   readonly title: string | null;
-  /** A daemon agent-engine run: live, but no PTY to attach. */
-  readonly agent?: boolean;
 };
 
 export type { TLocalCliSession };

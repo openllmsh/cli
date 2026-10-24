@@ -26,6 +26,22 @@
             "type": "command",
             "command": "\"$OPENLLM_BIN\" exec memory extract",
             "timeout": 5
+          },
+          {
+            "type": "command",
+            "command": "\"$OPENLLM_BIN\" exec agent hook Stop",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "PermissionRequest": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"$OPENLLM_BIN\" exec agent hook PermissionRequest",
+            "timeout": 120
           }
         ]
       }

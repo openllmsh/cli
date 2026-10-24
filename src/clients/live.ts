@@ -11,7 +11,7 @@
  * hosts. `live.json` is the index that makes that distinction cheap.
  */
 
-import { existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { TClientId } from "./registry";
 
@@ -20,11 +20,6 @@ export const LIVE_JSON_NAME = "live.json";
 /** Env the device session-host sets so this process records host=device. */
 export const DEVICE_SESSION_ID_ENV = "OPENLLM_DEVICE_SESSION_ID";
 export const DEVICE_SESSION_TITLE_ENV = "OPENLLM_DEVICE_TITLE";
-/**
- * Set by the daemon's agent engine (the web "agent session" path): the run is
- * a headless `-p` stream-json process, live and resumable but not a PTY.
- */
-export const AGENT_SESSION_ENV = "OPENLLM_AGENT_SESSION";
 
 export type TLiveHost = "local" | "device";
 
@@ -39,8 +34,6 @@ export type TLiveJson = {
   readonly vendor_session_id?: string;
   readonly title?: string;
   readonly dangerous?: boolean;
-  /** A daemon agent engine run (headless stream-json; no PTY to attach). */
-  readonly agent?: boolean;
 };
 
 /**
@@ -55,8 +48,8 @@ export const parseVendorSessionIdFromArgs = (
   for (let i = 0; i < args.length; i += 1) {
     const arg = args[i];
     if (arg === undefined) continue;
-    // claude: --session-id <uuid> pins the id of a NEW session (the daemon's
-    // agent engine launches this way), so it is the vendor id too.
+    // claude: --session-id <uuid> pins the id of a NEW session (the session
+    // host pins it to the host id), so it is the vendor id too.
     if (clientId === "claude") {
       if (arg === "--session-id") {
         const next = args[i + 1];
@@ -116,7 +109,6 @@ export const buildLiveJson = (args: {
     args.userArgs,
   );
   const title = process.env[DEVICE_SESSION_TITLE_ENV]?.trim();
-  const agent = process.env[AGENT_SESSION_ENV] === "1";
   return {
     version: 1,
     client: args.clientId,
@@ -132,7 +124,6 @@ export const buildLiveJson = (args: {
       : {}),
     ...(title !== undefined && title.length > 0 ? { title } : {}),
     ...(args.dangerous ? { dangerous: true } : {}),
-    ...(agent ? { agent: true } : {}),
   };
 };
 
@@ -146,58 +137,4 @@ export const writeLiveJson = (runDir: string, live: TLiveJson): void => {
     // Overlay still works without the index; the daemon just won't see this
     // process as live until the next successful write.
   }
-};
-
-const pidAlive = (pid: number): boolean => {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (err) {
-    return (err as { code?: unknown }).code === "EPERM";
-  }
-};
-
-/**
- * Live agent-engine runs of one client under `<runRoot>/<client>/<pid>/`.
- * Only `agent:true` entries with a vendor id and a live pid are returned —
- * interactive terminals are not listed here (they are not daemon-owned).
- */
-export const readLiveAgentRuns = (
-  runRoot: string,
-  clientId: TClientId,
-): TLiveJson[] => {
-  const root = join(runRoot, clientId);
-  if (!existsSync(root)) return [];
-  let names: string[];
-  try {
-    names = readdirSync(root);
-  } catch {
-    return [];
-  }
-  const out: TLiveJson[] = [];
-  for (const name of names) {
-    if (!/^\d+$/.test(name)) continue;
-    let value: unknown;
-    try {
-      value = JSON.parse(
-        readFileSync(join(root, name, LIVE_JSON_NAME), "utf8"),
-      );
-    } catch {
-      continue;
-    }
-    if (value === null || typeof value !== "object") continue;
-    const live = value as Partial<TLiveJson>;
-    if (
-      live.version !== 1 ||
-      live.agent !== true ||
-      typeof live.pid !== "number" ||
-      typeof live.vendor_session_id !== "string" ||
-      live.vendor_session_id.length === 0 ||
-      typeof live.cwd !== "string" ||
-      !pidAlive(live.pid)
-    )
-      continue;
-    out.push(live as TLiveJson);
-  }
-  return out;
 };
