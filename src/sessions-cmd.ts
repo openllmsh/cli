@@ -5,9 +5,13 @@
  * `ctl.sock`), so these commands remain usable while the daemon is stopped.
  */
 
+import { join } from "node:path";
 import { attachBrokerSession } from "./clients/attach";
+import { readLiveAgentRuns } from "./clients/live";
 import type { TDaemonCli } from "./clients/registry";
+import { CLIENTS } from "./clients/registry";
 import { resolveById } from "./clients/session-picker";
+import { openllmDir } from "./env";
 import {
   discoverLiveSessionHosts,
   sessionHostProcessAlive,
@@ -24,6 +28,8 @@ export type TBrokerSessionRow = {
   readonly socket_path?: string;
   readonly pid?: number;
   readonly process_start_time?: string;
+  /** A daemon agent-engine run (web-started): live, resumable, no PTY. */
+  readonly agent?: boolean;
 };
 
 const SESSIONS_USAGE = `usage: openllm sessions [list]
@@ -106,6 +112,28 @@ export const listSessionHosts = (): readonly TBrokerSessionRow[] =>
     process_start_time: session.processStartTime,
   }));
 
+/**
+ * Web-started agent sessions: headless `openllm claude -p` runs the daemon's
+ * agent engine owns. Listed so the terminal sees every session on the machine;
+ * they are not PTYs, so they are never attachable here.
+ */
+export const listAgentRuns = (runRoot: string): readonly TBrokerSessionRow[] =>
+  Object.values(CLIENTS).flatMap((client): TBrokerSessionRow[] => {
+    const cli = client.daemonCli;
+    if (cli === undefined) return [];
+    return readLiveAgentRuns(runRoot, client.id).map((live) => ({
+      id: live.vendor_session_id ?? live.openllm_session_id ?? String(live.pid),
+      cli,
+      title: live.title ?? "",
+      cwd: live.cwd,
+      updated_at_ms: live.started_at_ms,
+      live: true,
+      attachable: false,
+      pid: live.pid,
+      agent: true,
+    }));
+  });
+
 const requireSession = (
   sessions: readonly TBrokerSessionRow[],
   id: string | undefined,
@@ -136,6 +164,12 @@ const attach = async (
   session: TBrokerSessionRow,
   opts: TAttachOpts,
 ): Promise<number> => {
+  if (session.agent === true) {
+    process.stderr.write(
+      `[openllm] ${session.id} is an agent session driven from the web; open it there, or once it ends resume it here with: openllm ${session.cli === "claude_code" ? "claude" : session.cli} --resume ${session.id}\n`,
+    );
+    return 1;
+  }
   if (
     !session.live ||
     !session.attachable ||
@@ -368,14 +402,33 @@ export const runSessionsCommand = async (
     process.stderr.write(SESSIONS_USAGE);
     return 2;
   }
-  const sessions = listSessionHosts();
+  const sessions = [
+    ...listSessionHosts(),
+    ...listAgentRuns(join(openllmDir(), "run")),
+  ];
   if (verb === "list") {
     process.stdout.write(formatSessionRows(sessions));
     return 0;
   }
   const session = requireSession(sessions, args[1]);
   if (session === null) return 1;
-  if (verb === "kill") return kill(session);
+  if (verb === "kill") {
+    if (session.agent === true && session.pid !== undefined) {
+      // Headless agent run: SIGTERM the openllm wrapper; the daemon sees the
+      // engine exit and publishes session.exited to any web viewer.
+      try {
+        process.kill(session.pid, "SIGTERM");
+        process.stdout.write(`[openllm] killed session ${session.id}\n`);
+        return 0;
+      } catch {
+        process.stderr.write(
+          `[openllm] could not kill session ${session.id}\n`,
+        );
+        return 1;
+      }
+    }
+    return kill(session);
+  }
   const opts = parseAttachOpts(args.slice(2));
   if (opts === null) return 2;
   return attach(session, opts);

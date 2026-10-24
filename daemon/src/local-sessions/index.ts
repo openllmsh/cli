@@ -173,6 +173,7 @@ export const readLocalSessions = async (
         ? `openllm:${live.openllm_session_id}`
         : `live:${live.pid}`;
     const attachable =
+      live.agent !== true &&
       live.host === "device" &&
       live.openllm_session_id !== null &&
       live.openllm_session_id.length > 0;

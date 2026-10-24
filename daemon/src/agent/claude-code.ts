@@ -44,6 +44,7 @@ import {
   pushDeviceCliResumeArgs,
 } from "../local-sessions/types";
 import { logError } from "../logger";
+import { readClaudeTranscriptEvents } from "./claude-transcript";
 import { createStderrTail, spawnAgentEngineProcess } from "./engine-process";
 import type {
   TAgentEngineAdapter,
