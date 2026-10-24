@@ -391,24 +391,38 @@ export const dialObserver = (
     ws.onerror = () => {};
   });
 
+/**
+ * True when this live host is the Claude session `sessionId` names. Matches
+ * host id, vendor session id, or the id Claude's TUI is on right now under
+ * that pid — same fallback attach and delete use so a terminal
+ * `openllm claude --resume` host whose meta id differs is still found.
+ */
+export const isClaudeSessionHostFor = (
+  host: {
+    readonly cli: string;
+    readonly id: string;
+    readonly vendorSessionId: string | null;
+    readonly pid: number;
+  },
+  sessionId: string,
+  readLiveId: (pid: number) => string | null = readClaudeSessionIdUnderPid,
+): boolean =>
+  host.cli === "claude_code" &&
+  (host.id === sessionId ||
+    host.vendorSessionId === sessionId ||
+    readLiveId(host.pid) === sessionId);
+
 /** Production link: join the live host for this id, else spawn one. */
 const defaultOpenPtyLink: TOpenPtyLink = async (request) => {
   if (!SESSION_ID_PATTERN.test(request.sessionId)) return null;
   const hosts = await defaultSessionHostClient.discoverSessionHosts();
   // A terminal `openllm claude --resume X` runs under its own host id with
   // Claude session X: match either, so the web never forks a second process.
-  const claudeHosts = hosts.filter((host) => host.cli === "claude_code");
   // A terminal run whose live meta has no (or a stale) Claude id is matched
   // by the id its TUI is on right now (`~/.claude/sessions/<pid>.json`).
-  const live =
-    claudeHosts.find(
-      (host) =>
-        host.id === request.sessionId ||
-        host.vendorSessionId === request.sessionId,
-    ) ??
-    claudeHosts.find(
-      (host) => readClaudeSessionIdUnderPid(host.pid) === request.sessionId,
-    );
+  const live = hosts.find((host) =>
+    isClaudeSessionHostFor(host, request.sessionId),
+  );
   if (live !== undefined) return dialObserver(live.socketPath, live.id, false);
   // Not running and nothing on disk to resume (a web start that never reached
   // Claude, or an id this device never ran): `claude --resume` would exit at
@@ -503,12 +517,10 @@ export const killClaudeSessionHost = async (
         ReturnType<typeof defaultSessionHostClient.discoverSessionHosts>
       >[number]
     | undefined
-  > =>
-    (await defaultSessionHostClient.discoverSessionHosts()).find(
-      (host) =>
-        host.cli === "claude_code" &&
-        (host.id === sessionId || host.vendorSessionId === sessionId),
-    );
+  > => {
+    const hosts = await defaultSessionHostClient.discoverSessionHosts();
+    return hosts.find((host) => isClaudeSessionHostFor(host, sessionId));
+  };
   const live = await find();
   if (live === undefined) return true;
   const link = await dialObserver(live.socketPath, live.id, false);
@@ -1381,6 +1393,12 @@ export const createClaudeTuiSession = (
       if (ended || !parser.turnActive()) return false;
       writeText(ESC);
       parser.abortTurn("interrupted");
+      // Esc abort often skips Claude's Stop hook; clear so a queued `/model`
+      // is not stuck behind awaitingStop forever, then settle like Stop does.
+      awaitingStop = false;
+      setTimeout(() => {
+        if (!ended) applyModel();
+      }, deps.stopSettleMs ?? STOP_SETTLE_MS);
       return true;
     },
     respond: (command: TAgentRespondCommand) => {
