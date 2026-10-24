@@ -32,6 +32,21 @@ const READ_CHUNK_BYTES = 1024 * 1024;
 /** Re-scan the projects tree for a missing transcript at most this often. */
 const SCAN_INTERVAL_MS = 2_000;
 
+/**
+ * End index of the last complete UTF-8 sequence in `buf[0, end)`. Incomplete
+ * trailing bytes (a multi-byte character split by a chunk boundary) are left
+ * out so the next read can consume them with their continuation.
+ */
+const utf8CompleteEnd = (buf: Buffer, end: number): number => {
+  if (end <= 0) return 0;
+  let i = end;
+  while (i > 0 && (buf[i - 1]! & 0xc0) === 0x80) i -= 1;
+  if (i === 0) return 0;
+  const lead = buf[i - 1]!;
+  const need = lead >= 0xf0 ? 4 : lead >= 0xe0 ? 3 : lead >= 0xc0 ? 2 : 1;
+  return i - 1 + need <= end ? end : i - 1;
+};
+
 const SESSION_ID = /^[0-9a-fA-F-]{8,64}$/;
 
 const claudeProjectsDir = (): string => join(claudeConfigDir(), "projects");
@@ -149,10 +164,13 @@ export const createClaudeTranscriptTail = (
           if (n === 0) break;
           read += n;
         }
-        // Never split a UTF-8 sequence: stop at the last newline when possible.
+        // Prefer whole lines; otherwise stop on a complete UTF-8 boundary so a
+        // multi-byte character straddling the chunk is not decoded as �.
         let usable = read;
         const lastNewline = buffer.subarray(0, read).lastIndexOf(0x0a);
         if (lastNewline >= 0) usable = lastNewline + 1;
+        else usable = utf8CompleteEnd(buffer, read);
+        if (usable <= 0) return null;
         offset += usable;
         return buffer.subarray(0, usable).toString("utf8");
       } finally {

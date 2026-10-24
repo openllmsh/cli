@@ -43,6 +43,11 @@ const MAX_DEPTH = 3;
 export const SUBAGENT_REPLAY_MAX_EVENTS = 200;
 /** Largest subagent file tail read in one shot (history / replay). */
 const ONE_SHOT_MAX_BYTES = 4 * 1024 * 1024;
+/**
+ * Largest single JSONL row `readRange` will grow to capture. Beyond this the
+ * row is skipped so a follower can still advance past it.
+ */
+const READ_LINE_MAX_BYTES = 8 * 1024 * 1024;
 
 type TJson = Record<string, unknown>;
 const isRecord = (value: unknown): value is TJson =>
@@ -98,7 +103,12 @@ export const findSubagent = (
   return null;
 };
 
-/** Read `[from, to)` of a file as text, ending on the last whole line. */
+/**
+ * Read `[from, …)` of a file as text, ending on the last whole line. When a
+ * single row is larger than `maxBytes`, the budget grows (up to
+ * {@link READ_LINE_MAX_BYTES}) so the caller can make progress; an even larger
+ * row is skipped up to its terminating newline (or EOF).
+ */
 const readRange = (
   file: string,
   from: number,
@@ -113,22 +123,44 @@ const readRange = (
   try {
     const size = fstatSync(fd).size;
     const start = Math.min(from, size);
-    const length = Math.min(size - start, maxBytes);
-    if (length <= 0) return { text: "", next: start, size };
-    const buffer = Buffer.alloc(length);
-    let read = 0;
-    while (read < length) {
-      const n = readSync(fd, buffer, read, length - read, start + read);
-      if (n === 0) break;
-      read += n;
+    if (start >= size) return { text: "", next: start, size };
+    let budget = Math.max(1, maxBytes);
+    for (;;) {
+      const length = Math.min(size - start, budget);
+      const buffer = Buffer.alloc(length);
+      let read = 0;
+      while (read < length) {
+        const n = readSync(fd, buffer, read, length - read, start + read);
+        if (n === 0) break;
+        read += n;
+      }
+      const lastNewline = buffer.subarray(0, read).lastIndexOf(0x0a);
+      if (lastNewline >= 0) {
+        const usable = lastNewline + 1;
+        return {
+          text: buffer.subarray(0, usable).toString("utf8"),
+          next: start + usable,
+          size,
+        };
+      }
+      // Partial trailing line — wait for more bytes; do not advance.
+      if (start + read >= size) return { text: "", next: start, size };
+      if (budget >= READ_LINE_MAX_BYTES) {
+        // Oversize row: skip until the next newline (or EOF) so offsets move.
+        let skipAt = start + read;
+        const skipBuf = Buffer.alloc(64 * 1024);
+        while (skipAt < size) {
+          const want = Math.min(skipBuf.length, size - skipAt);
+          const n = readSync(fd, skipBuf, 0, want, skipAt);
+          if (n === 0) break;
+          const nl = skipBuf.subarray(0, n).indexOf(0x0a);
+          if (nl >= 0) return { text: "", next: skipAt + nl + 1, size };
+          skipAt += n;
+        }
+        return { text: "", next: skipAt, size };
+      }
+      budget = Math.min(budget * 2, READ_LINE_MAX_BYTES);
     }
-    const lastNewline = buffer.subarray(0, read).lastIndexOf(0x0a);
-    const usable = lastNewline >= 0 ? lastNewline + 1 : 0;
-    return {
-      text: buffer.subarray(0, usable).toString("utf8"),
-      next: start + usable,
-      size,
-    };
   } finally {
     closeSync(fd);
   }
@@ -323,14 +355,20 @@ export const createSubagentFollower = (args: {
     const parser = entry.parser;
     if (parser === null) return;
     for (let chunk = 0; chunk < 64; chunk += 1) {
-      const range = readRange(entry.file, entry.offset, READ_CHUNK_BYTES);
-      if (range.size < entry.offset) {
+      const before = entry.offset;
+      const range = readRange(entry.file, before, READ_CHUNK_BYTES);
+      if (range.size < before) {
         entry.offset = 0;
         continue;
       }
-      if (range.text === "") break;
-      entry.offset = range.next;
-      parser.push(range.text);
+      if (range.next > before) entry.offset = range.next;
+      if (range.text !== "") {
+        parser.push(range.text);
+        continue;
+      }
+      // Empty text: waiting on a partial line, or an oversize row was skipped.
+      if (range.next > before && entry.offset < range.size) continue;
+      break;
     }
     if (!finished && now() - entry.lastScan >= scanMs) {
       entry.lastScan = now();
