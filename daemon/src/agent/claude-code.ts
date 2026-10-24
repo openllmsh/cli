@@ -631,6 +631,24 @@ export type TWrittenAgentAttachment = {
   readonly meta: TAgentAttachmentMeta;
 };
 
+/** Continue attachment names after files retained by a resumed session. */
+const attachmentCounterOf = (dir: string): { value: number } => {
+  let names: string[];
+  try {
+    names = readdirSync(dir);
+  } catch {
+    return { value: 0 };
+  }
+  let value = 0;
+  for (const name of names) {
+    const match = /^(\d+)-/.exec(name);
+    if (match?.[1] === undefined) continue;
+    const prefix = Number(match[1]);
+    if (Number.isSafeInteger(prefix) && prefix > value) value = prefix;
+  }
+  return { value };
+};
+
 /** Write attachments; return their absolute paths + metadata for turn events. */
 export const writeAgentAttachments = (
   dir: string,
@@ -963,7 +981,7 @@ export const createClaudeTuiSession = (
   const attachmentsDir = (deps.attachmentsDir ?? agentAttachmentsDir)(
     options.sessionId,
   );
-  const attachmentCounter = { value: 0 };
+  const attachmentCounter = attachmentCounterOf(attachmentsDir);
   let link: TPtyLink | null = null;
   let ended = false;
   let ready = false;
@@ -986,7 +1004,8 @@ export const createClaudeTuiSession = (
   let drained: TAgentEvent[] | null = null;
   const parser = createTranscriptParser({
     emit: (event) => {
-      if (event.type === "session.configured") modelInFlight = false;
+      if (event.type === "session.configured" && event.model !== undefined)
+        modelInFlight = false;
       if (drained !== null) drained.push(event);
       else emit(event);
     },

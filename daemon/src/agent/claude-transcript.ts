@@ -185,6 +185,10 @@ type TJson = Record<string, unknown>;
 /** Claude's reply to `/model <id>` in the transcript. */
 const MODEL_SET = /^<local-command-stdout>Set model to `([^`\n]{1,256})`/;
 
+/** Claude control wrappers recorded as user rows, never user-authored prompts. */
+const CLAUDE_CONTROL_WRAPPER =
+  /^<(?:command-name|command-message|command-args|local-command-stdout|local-command-stderr|local-command-caveat|system-reminder|user-prompt-submit-hook|bash-input|bash-stdout|bash-stderr)\b/i;
+
 const isRecord = (value: unknown): value is TJson =>
   typeof value === "object" && value !== null && !Array.isArray(value);
 
@@ -565,14 +569,15 @@ export const createTranscriptParser = (
       );
       return;
     }
-    // Slash-command / hook / system-reminder wrappers are not prompts.
-    // Check the trimmed raw form so a leading newline before `<command-…>`
-    // still drops the row; `pasted_content` is unwrapped by normalize.
+    // Known slash-command / hook / system-reminder wrappers are not prompts.
+    // A real prompt may legitimately start with markup, so do not treat every
+    // `<...>` row as a wrapper. `pasted_content` is unwrapped by normalize.
     const trimmedRaw = raw.trim();
-    if (trimmedRaw.startsWith("<") || row.isCompactSummary === true) {
-      // `<pasted_content>` is a real prompt — fall through after normalize.
-      if (!/^<pasted_content\b/i.test(trimmedRaw)) return;
-    }
+    if (
+      row.isCompactSummary === true ||
+      CLAUDE_CONTROL_WRAPPER.test(trimmedRaw)
+    )
+      return;
     const prompt = normalizeUserPromptText(raw);
     if (prompt === "") return;
     if (turn?.awaitingPromptLine === true) {
