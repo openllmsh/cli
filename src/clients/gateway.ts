@@ -137,9 +137,12 @@ export const fetchModelCatalog = async (
   slug: string,
 ): Promise<string | null> => {
   if (gateway.apiKey.length === 0) return null;
+  // Codex catalogs also list `chatgpt/*` models; the launch swaps in the
+  // installed Codex's own metadata for them (`codex-catalog.ts`).
+  const query = slug === "codex" ? "?chatgpt=1" : "";
   try {
     const res = await fetch(
-      `${gateway.cloudOrigin}/api/setup/${slug}/model-catalog`,
+      `${gateway.cloudOrigin}/api/setup/${slug}/model-catalog${query}`,
       {
         headers: { authorization: `Bearer ${gateway.apiKey}` },
         signal: AbortSignal.timeout(CATALOG_TIMEOUT_MS),

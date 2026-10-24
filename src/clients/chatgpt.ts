@@ -32,6 +32,7 @@ import {
 import { basename, join } from "node:path";
 import { CLI_VERSION, cliBinPath, openllmDir, userHome } from "../env";
 import { requireCliApiKey } from "../onboarding";
+import { codexCatalogFor } from "./codex-catalog";
 import { fetchModelCatalog, fetchTier, resolveGateway } from "./gateway";
 import { codexOverrideArgs, mcpArgsJson } from "./launch";
 import {
@@ -497,10 +498,11 @@ export const launchChatgpt = async (): Promise<number> => {
   const gateway = await resolveGateway({
     config: credential.config,
   });
-  const [catalog, tier] = await Promise.all([
+  const [fetched, tier] = await Promise.all([
     fetchModelCatalog(gateway, CLIENTS.chatgpt.catalogSlug ?? "codex"),
     fetchTier(gateway),
   ]);
+  const catalog = codexCatalogFor(fetched, codex);
 
   const dir = chatgptStateDir();
   mkdirSync(dir, { recursive: true, mode: 0o700 });
