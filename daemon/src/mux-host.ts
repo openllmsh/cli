@@ -39,7 +39,7 @@ import {
 } from "./device-access-verify";
 import { daemonApiKeyId } from "./env";
 import { daemonPublicKey, daemonX25519Dh } from "./keypair";
-import { logInfo, logWarn, safeDiagnosticMessage } from "./logger";
+import { logDebug, logInfo, logWarn, safeDiagnosticMessage } from "./logger";
 import { serveMuxRealtime } from "./realtime-handler";
 import { admitMuxTunnel, serveMuxTunnel } from "./tunnel-server";
 
@@ -192,6 +192,15 @@ export const admitStreamKind = (
   kind: string | null,
   context: TStreamGateContext,
 ): boolean => {
+  if (kind === "agent") {
+    // Every agent OPEN, on either rung, so "the browser never opened" and
+    // "the daemon refused" are distinguishable in the log.
+    logDebug("agent", "agent stream open received", {
+      channelId: context.channelId,
+      transport: context.transport,
+      seedGated: context.seedGated,
+    });
+  }
   if (streamKindGateOf(kind) !== "seedgated") return true;
   // Re-checked per OPEN: a channel / RTC session admitted while the device was
   // anchored must not keep serving agent streams after a signed remote
