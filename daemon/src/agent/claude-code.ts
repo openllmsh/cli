@@ -1388,6 +1388,12 @@ export const createClaudeTuiSession = (
       if (request === undefined) return false;
       pending.delete(command.request_id);
       if (request.kind === "trust") {
+        // Match approval: a respond with no decision must not clear the
+        // pending trust or type Esc into Claude (answers-only wire frames).
+        if (command.decision === undefined) {
+          pending.set(command.request_id, request);
+          return false;
+        }
         trustRequestId = null;
         trustAnswered = true;
         const accept =
