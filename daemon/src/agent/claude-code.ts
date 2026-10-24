@@ -1229,7 +1229,7 @@ export const createClaudeTuiSession = (
   // The ONE screen read: Claude's folder-trust dialog. Input stays held (it is
   // asked before SessionStart) until the web answers it.
   const onOutput = (bytes: Uint8Array): void => {
-    if (trustAnswered || ended) return;
+    if (trustAnswered || ended || started || !link?.fresh) return;
     recentScreen = (
       recentScreen +
       new TextDecoder().decode(bytes).replace(ANSI, "").replace(/\s+/g, "")
