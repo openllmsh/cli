@@ -22,17 +22,30 @@
  *     {@link AGENT_APPROVAL_WAIT_MS}, it returns NO decision and Claude shows
  *     its native dialog in the terminal. A timeout never allows.
  */
-import { mkdirSync, rmSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import {
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
+import { basename, isAbsolute, join, resolve, sep } from "node:path";
 import type {
-  TAgentEvent,
-  TAgentItem,
+  TAgentAttachmentMeta,
   TAgentRequestKind,
   TAgentRespondCommand,
   TAgentUserInputAnswers,
   TAgentUserInputQuestion,
 } from "@openllmsh/protocol";
-import { SESSION_ID_PATTERN } from "@openllmsh/protocol";
+import {
+  AGENT_MAX_ATTACHMENT_BASE64_LENGTH,
+  AGENT_MAX_ATTACHMENT_BYTES,
+  AGENT_MAX_LINE_BYTES,
+  SESSION_ID_PATTERN,
+} from "@openllmsh/protocol";
 import { stateDir } from "../env";
 import { logError } from "../logger";
 import { defaultSessionHostClient } from "../session-host-proc";
@@ -40,6 +53,7 @@ import type { TClaudeTranscriptTail } from "./claude-transcript";
 import {
   createClaudeTranscriptTail,
   createTranscriptParser,
+  findClaudeTranscript,
 } from "./claude-transcript";
 import type {
   TAgentEngineAdapter,
@@ -385,6 +399,9 @@ export const handleAgentHook = async (
 export const agentAttachmentsDir = (sessionId: string): string =>
   join(stateDir(), "sessions", sessionId, "attachments");
 
+/** Parent of every per-session attachments dir. */
+export const agentSessionsDir = (): string => join(stateDir(), "sessions");
+
 /** A filename safe to place in the attachment dir and to `@`-reference. */
 export const sanitizeAttachmentName = (name: string | undefined): string => {
   const base = (name ?? "").split(/[\\/]/).pop() ?? "";
@@ -402,24 +419,264 @@ const extensionOf = (mediaType: string): string => {
   return /^[a-z0-9]{1,8}$/.test(sub) ? `.${sub}` : "";
 };
 
-/** Write attachments; return their absolute paths. */
+export type TWrittenAgentAttachment = {
+  readonly path: string;
+  readonly meta: TAgentAttachmentMeta;
+};
+
+/** Write attachments; return their absolute paths + metadata for turn events. */
 export const writeAgentAttachments = (
   dir: string,
   attachments: TAgentSendInput["attachments"],
   counter: { value: number },
-): string[] => {
+): TWrittenAgentAttachment[] => {
   if (attachments.length === 0) return [];
   mkdirSync(dir, { recursive: true, mode: 0o700 });
   return attachments.map((attachment) => {
     counter.value += 1;
     let name = sanitizeAttachmentName(attachment.name);
     if (!name.includes(".")) name += extensionOf(attachment.media_type);
-    const path = join(dir, `${counter.value}-${name}`);
-    writeFileSync(path, Buffer.from(attachment.data, "base64"), {
-      mode: 0o600,
-    });
-    return path;
+    const storedName = `${counter.value}-${name}`;
+    const path = join(dir, storedName);
+    const bytes = Buffer.from(attachment.data, "base64");
+    writeFileSync(path, bytes, { mode: 0o600 });
+    return {
+      path,
+      meta: {
+        name: storedName,
+        mime: attachment.media_type,
+        size: bytes.byteLength,
+      },
+    };
   });
+};
+
+/** Delete one session's attachments dir (history delete / kill path). */
+export const deleteAgentAttachments = (sessionId: string): void => {
+  try {
+    rmSync(agentAttachmentsDir(sessionId), { recursive: true, force: true });
+  } catch {
+    /* already gone */
+  }
+};
+
+/**
+ * True when `name` is a bare basename with no traversal / absolute / separator
+ * characters. The on-disk resolve still double-checks with realpath.
+ */
+export const isSafeAttachmentBasename = (name: string): boolean => {
+  if (name.length === 0 || name.length > 256) return false;
+  if (name === "." || name === "..") return false;
+  if (isAbsolute(name)) return false;
+  if (name.includes("/") || name.includes("\\") || name.includes("\0"))
+    return false;
+  if (name.includes("..")) return false;
+  return basename(name) === name;
+};
+
+export type TResolvedAgentAttachment =
+  | {
+      readonly ok: true;
+      readonly path: string;
+      readonly mime: string;
+      readonly size: number;
+      readonly bytes: Buffer;
+    }
+  | { readonly ok: false; readonly code: string; readonly message: string };
+
+const mimeOfStoredName = (name: string): string => {
+  const lower = name.toLowerCase();
+  if (lower.endsWith(".png")) return "image/png";
+  if (lower.endsWith(".jpg") || lower.endsWith(".jpeg")) return "image/jpeg";
+  if (lower.endsWith(".gif")) return "image/gif";
+  if (lower.endsWith(".webp")) return "image/webp";
+  if (lower.endsWith(".pdf")) return "application/pdf";
+  if (lower.endsWith(".txt") || lower.endsWith(".md")) return "text/plain";
+  return "application/octet-stream";
+};
+
+/**
+ * Resolve `name` inside `sessionId`'s attachments dir. Refuses path separators,
+ * `..`, absolute paths, missing files, oversize files, and symlinks that escape
+ * the dir (realpath must stay under the attachments dir).
+ */
+export const resolveAgentAttachment = (
+  sessionId: string,
+  name: string,
+  options: { readonly attachmentsDir?: string } = {},
+): TResolvedAgentAttachment => {
+  if (!isSafeAttachmentBasename(name)) {
+    return {
+      ok: false,
+      code: "attachment_forbidden",
+      message: "attachment name is not allowed",
+    };
+  }
+  const dir = options.attachmentsDir ?? agentAttachmentsDir(sessionId);
+  let dirReal: string;
+  try {
+    if (!existsSync(dir)) {
+      return {
+        ok: false,
+        code: "attachment_not_found",
+        message: "attachment not found",
+      };
+    }
+    dirReal = realpathSync(dir);
+  } catch {
+    return {
+      ok: false,
+      code: "attachment_not_found",
+      message: "attachment not found",
+    };
+  }
+  const candidate = resolve(dirReal, name);
+  if (!candidate.startsWith(`${dirReal}${sep}`) && candidate !== dirReal) {
+    return {
+      ok: false,
+      code: "attachment_forbidden",
+      message: "attachment name is not allowed",
+    };
+  }
+  try {
+    const stat = lstatSync(candidate);
+    if (stat.isSymbolicLink()) {
+      const target = realpathSync(candidate);
+      if (!target.startsWith(`${dirReal}${sep}`)) {
+        return {
+          ok: false,
+          code: "attachment_forbidden",
+          message: "attachment name is not allowed",
+        };
+      }
+    } else if (!stat.isFile()) {
+      return {
+        ok: false,
+        code: "attachment_not_found",
+        message: "attachment not found",
+      };
+    }
+    if (stat.size > AGENT_MAX_ATTACHMENT_BYTES) {
+      return {
+        ok: false,
+        code: "attachment_too_large",
+        message: "attachment exceeds the size cap",
+      };
+    }
+    const path = realpathSync(candidate);
+    if (!path.startsWith(`${dirReal}${sep}`)) {
+      return {
+        ok: false,
+        code: "attachment_forbidden",
+        message: "attachment name is not allowed",
+      };
+    }
+    const bytes = readFileSync(path);
+    if (bytes.byteLength > AGENT_MAX_ATTACHMENT_BYTES) {
+      return {
+        ok: false,
+        code: "attachment_too_large",
+        message: "attachment exceeds the size cap",
+      };
+    }
+    return {
+      ok: true,
+      path,
+      mime: mimeOfStoredName(name),
+      size: bytes.byteLength,
+      bytes,
+    };
+  } catch {
+    return {
+      ok: false,
+      code: "attachment_not_found",
+      message: "attachment not found",
+    };
+  }
+};
+
+/**
+ * Base64 payload budget per `attachment.data` line: leave headroom under
+ * {@link AGENT_MAX_LINE_BYTES} for JSON framing around the chunk.
+ */
+export const AGENT_ATTACHMENT_CHUNK_BASE64_CHARS = Math.min(
+  AGENT_MAX_ATTACHMENT_BASE64_LENGTH,
+  Math.max(64 * 1024, AGENT_MAX_LINE_BYTES - 512),
+);
+
+export type TAgentAttachmentChunk = {
+  readonly name: string;
+  readonly mime: string;
+  readonly size: number;
+  readonly offset: number;
+  readonly data: string;
+  readonly done: boolean;
+};
+
+/** Split a resolved attachment into NDJSON-safe base64 chunks. */
+export const chunkAgentAttachment = (
+  name: string,
+  mime: string,
+  bytes: Buffer,
+  maxBase64Chars: number = AGENT_ATTACHMENT_CHUNK_BASE64_CHARS,
+): readonly TAgentAttachmentChunk[] => {
+  const size = bytes.byteLength;
+  // 3 raw bytes → 4 base64 chars; keep chunks aligned.
+  const rawPerChunk = Math.max(3, Math.floor(maxBase64Chars / 4) * 3);
+  if (size === 0) {
+    return [{ name, mime, size, offset: 0, data: "", done: true }];
+  }
+  const chunks: TAgentAttachmentChunk[] = [];
+  for (let offset = 0; offset < size; offset += rawPerChunk) {
+    const end = Math.min(size, offset + rawPerChunk);
+    chunks.push({
+      name,
+      mime,
+      size,
+      offset,
+      data: bytes.subarray(offset, end).toString("base64"),
+      done: end >= size,
+    });
+  }
+  return chunks;
+};
+
+/**
+ * Delete attachment dirs whose Claude transcript no longer exists. Live
+ * sessions keep their dirs even if the transcript is briefly missing.
+ */
+export const reapOrphanAgentAttachments = (
+  options: {
+    readonly sessionsDir?: string;
+    readonly liveSessionIds?: ReadonlySet<string>;
+    readonly transcriptExists?: (sessionId: string) => boolean;
+  } = {},
+): readonly string[] => {
+  const root = options.sessionsDir ?? agentSessionsDir();
+  const live = options.liveSessionIds ?? new Set<string>();
+  const transcriptExists =
+    options.transcriptExists ??
+    ((sessionId: string): boolean => findClaudeTranscript(sessionId) !== null);
+  let entries: string[];
+  try {
+    entries = readdirSync(root);
+  } catch {
+    return [];
+  }
+  const deleted: string[] = [];
+  for (const sessionId of entries) {
+    if (live.has(sessionId)) continue;
+    const attachments = join(root, sessionId, "attachments");
+    if (!existsSync(attachments)) continue;
+    if (transcriptExists(sessionId)) continue;
+    try {
+      rmSync(attachments, { recursive: true, force: true });
+      deleted.push(sessionId);
+    } catch {
+      /* best-effort */
+    }
+  }
+  return deleted;
 };
 
 // ─── the session ─────────────────────────────────────────────────────────
@@ -499,12 +756,6 @@ export const createClaudeTuiSession = (
     if (chunk !== null && chunk.length > 0) parser.push(chunk);
   };
 
-  const cleanupAttachments = (): void => {
-    try {
-      rmSync(attachmentsDir, { recursive: true, force: true });
-    } catch {}
-  };
-
   const finish = (
     reason: "closed" | "killed" | "completed" | "error",
     message?: string,
@@ -523,7 +774,9 @@ export const createClaudeTuiSession = (
     }
     pending.clear();
     parser.abortTurn("cancelled");
-    cleanupAttachments();
+    // Attachments stay on disk across end / idle release so replay and
+    // attachment_get still work. History delete (close) and the orphan
+    // reaper remove them.
     emit({
       type: "session.exited",
       session_id: options.sessionId,
@@ -702,9 +955,9 @@ export const createClaudeTuiSession = (
           code: "turn_in_progress",
           message: "a turn is already running; interrupt it or wait",
         };
-      let paths: string[];
+      let written: TWrittenAgentAttachment[];
       try {
-        paths = writeAgentAttachments(
+        written = writeAgentAttachments(
           attachmentsDir,
           input.attachments,
           attachmentCounter,
@@ -717,12 +970,15 @@ export const createClaudeTuiSession = (
           message: "an attachment could not be saved on this device",
         };
       }
-      const text = [input.prompt, ...paths.map((path) => `@${path}`)]
+      const text = [input.prompt, ...written.map((entry) => `@${entry.path}`)]
         .filter((part) => part.trim() !== "")
         .join(input.prompt.includes("\n") ? "\n" : " ");
       if (text.trim() === "")
         return { ok: false, code: "empty_prompt", message: "nothing to send" };
-      const turnId = parser.startTurn(input.prompt);
+      const turnId = parser.startTurn(
+        input.prompt,
+        written.map((entry) => entry.meta),
+      );
       whenReady(() => {
         writeText(`${PASTE_START}${text}${PASTE_END}`);
         setTimeout(() => writeText("\r"), submitDelayMs);
@@ -816,6 +1072,13 @@ export const createClaudeTuiSession = (
       link = null;
       current?.kill();
       current?.release();
+      // History delete / kill: drop the on-device attachment files with the
+      // session. Idle release and natural PTY exit keep them for replay.
+      try {
+        rmSync(attachmentsDir, { recursive: true, force: true });
+      } catch {
+        /* already gone */
+      }
       finish(reason);
     },
     release: () => {

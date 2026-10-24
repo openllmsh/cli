@@ -5,15 +5,21 @@
 import type { TAgentEngine } from "@openllmsh/protocol";
 import { readClaudeHistory } from "../local-sessions/claude";
 import { setAgentStreamHandler } from "../mux-host";
-import { createClaudeCodeAdapter } from "./claude-code";
+import {
+  createClaudeCodeAdapter,
+  reapOrphanAgentAttachments,
+} from "./claude-code";
 import type { TAgentDispatcher } from "./dispatcher";
 import { createAgentDispatcher } from "./dispatcher";
 import { createAgentStreamHandler } from "./mux-front";
 
 let dispatcher: TAgentDispatcher | null = null;
+let attachmentReaper: ReturnType<typeof setInterval> | undefined;
 
 /** History rows scanned to find a resumed session's directory. */
 const RESUME_LOOKUP_LIMIT = 500;
+/** How often to drop attachment dirs whose Claude transcript is gone. */
+export const AGENT_ATTACHMENT_REAP_MS = 15 * 60 * 1000;
 
 const resumeCwdOf = (
   engine: TAgentEngine,
@@ -27,6 +33,16 @@ const resumeCwdOf = (
     );
   } catch {
     return undefined;
+  }
+};
+
+const runAttachmentReaper = (): void => {
+  try {
+    reapOrphanAgentAttachments({
+      liveSessionIds: new Set(dispatcher?.sessionIds() ?? []),
+    });
+  } catch {
+    /* best-effort */
   }
 };
 
@@ -45,6 +61,14 @@ export const startAgentSessions = (): TAgentDispatcher => {
   });
   dispatcher = created;
   setAgentStreamHandler(createAgentStreamHandler(created));
+  if (attachmentReaper === undefined) {
+    runAttachmentReaper();
+    attachmentReaper = setInterval(
+      runAttachmentReaper,
+      AGENT_ATTACHMENT_REAP_MS,
+    );
+    attachmentReaper.unref?.();
+  }
   return created;
 };
 
@@ -53,4 +77,8 @@ export const stopAgentSessions = (): void => {
   setAgentStreamHandler(null);
   dispatcher?.closeAll();
   dispatcher = null;
+  if (attachmentReaper !== undefined) {
+    clearInterval(attachmentReaper);
+    attachmentReaper = undefined;
+  }
 };

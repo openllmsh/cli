@@ -19,7 +19,11 @@ import {
   readSync,
 } from "node:fs";
 import { join } from "node:path";
-import type { TAgentEvent, TAgentItem } from "@openllmsh/protocol";
+import type {
+  TAgentAttachmentMeta,
+  TAgentEvent,
+  TAgentItem,
+} from "@openllmsh/protocol";
 import { claudeConfigDir } from "../local-sessions/paths";
 
 /** Transcript bytes replayed from the end of an existing file. */
@@ -188,7 +192,10 @@ export type TTranscriptParser = {
   /** Feed transcript text (any split; partial lines are buffered). */
   readonly push: (text: string) => void;
   /** A turn opened by this daemon (its prompt line is then not a new turn). */
-  readonly startTurn: (prompt: string) => string;
+  readonly startTurn: (
+    prompt: string,
+    attachments?: readonly TAgentAttachmentMeta[],
+  ) => string;
   readonly completeTurn: () => void;
   readonly abortTurn: (reason: "interrupted" | "failed" | "cancelled") => void;
   readonly turnActive: () => boolean;
@@ -219,6 +226,7 @@ export const createTranscriptParser = (args: {
   const openTurn = (
     prompt: string | undefined,
     awaitingPromptLine: boolean,
+    attachments?: readonly TAgentAttachmentMeta[],
   ): string => {
     turnCounter += 1;
     turn = { id: `t${turnCounter}`, awaitingPromptLine };
@@ -226,6 +234,9 @@ export const createTranscriptParser = (args: {
       type: "turn.started",
       turn_id: turn.id,
       ...(prompt === undefined || prompt.trim() === "" ? {} : { prompt }),
+      ...(attachments !== undefined && attachments.length > 0
+        ? { attachments: [...attachments] }
+        : {}),
     });
     return turn.id;
   };
@@ -354,7 +365,7 @@ export const createTranscriptParser = (args: {
         newline = buffer.indexOf("\n");
       }
     },
-    startTurn: (prompt) => openTurn(prompt, true),
+    startTurn: (prompt, attachments) => openTurn(prompt, true, attachments),
     completeTurn,
     abortTurn,
     turnActive: () => turn !== null,

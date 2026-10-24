@@ -22,7 +22,12 @@ import type {
 } from "@openllmsh/protocol";
 import { AGENT_SESSION_ID_PATTERN, encodeAgentLine } from "@openllmsh/protocol";
 import { logError, logInfo } from "../logger";
-import { AGENT_TOOL_OUTPUT_MAX_CHARS } from "./claude-code";
+import {
+  AGENT_TOOL_OUTPUT_MAX_CHARS,
+  chunkAgentAttachment,
+  deleteAgentAttachments,
+  resolveAgentAttachment,
+} from "./claude-code";
 import type {
   TAgentConnection,
   TAgentConsumer,
@@ -589,11 +594,53 @@ export const createAgentDispatcher = (
               return;
             }
             const engineSession = session.engineSession;
+            // History delete: drop on-device attachments with the session.
+            // (The engine close also removes them; this covers a no-op engine.)
+            deleteAgentAttachments(session.id);
             // The consumer ends once `session.exited` was delivered to it.
             session.exitWatchers.push(endAfterDrain);
             withCommand(session, commandId, () =>
               engineSession.close("closed"),
             );
+            return;
+          }
+          case "attachment_get": {
+            const session = bound;
+            if (session === null) {
+              error(
+                state,
+                null,
+                "no_session",
+                "Start or attach a session first.",
+                commandId,
+              );
+              return;
+            }
+            const resolved = resolveAgentAttachment(session.id, command.name);
+            if (!resolved.ok) {
+              error(state, session, resolved.code, resolved.message, commandId);
+              return;
+            }
+            for (const chunk of chunkAgentAttachment(
+              command.name,
+              resolved.mime,
+              resolved.bytes,
+            )) {
+              reply(
+                state,
+                session,
+                {
+                  type: "attachment.data",
+                  name: chunk.name,
+                  mime: chunk.mime,
+                  size: chunk.size,
+                  offset: chunk.offset,
+                  data: chunk.data,
+                  done: chunk.done,
+                },
+                commandId,
+              );
+            }
             return;
           }
         }
