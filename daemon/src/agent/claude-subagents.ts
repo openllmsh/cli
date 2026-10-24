@@ -55,6 +55,15 @@ export const subagentDirOf = (transcriptPath: string): string =>
 type TSubagentMeta = {
   readonly file: string;
   readonly finished: boolean;
+  /** Launched in the background (`requestShape`): its result is its file's. */
+  readonly background: boolean;
+};
+
+/** The Task / Agent call a subagent file belongs to. */
+export type TSubagentCall = {
+  readonly toolName: string;
+  readonly input: unknown;
+  readonly parentItemId?: string;
 };
 
 /** The subagent file spawned by `toolUseId`, from its meta, or null. */
@@ -80,7 +89,11 @@ export const findSubagent = (
     if (!isRecord(meta) || meta.toolUseId !== toolUseId) continue;
     const file = join(dir, name.replace(/\.meta\.json$/, ".jsonl"));
     if (!existsSync(file)) return null;
-    return { file, finished: meta.finished === true };
+    return {
+      file,
+      finished: meta.finished === true,
+      background: meta.requestShape === "background",
+    };
   }
   return null;
 };
@@ -139,6 +152,8 @@ export const subagentEvents = (args: {
   readonly toolUseId: string;
   readonly turnId: string | undefined;
   readonly toolOutputMax: number;
+  /** The spawning call: a background one completes from the file's end. */
+  readonly call?: TSubagentCall;
   readonly depth?: number;
 }): TSubagentSnapshot => {
   const depth = args.depth ?? 1;
@@ -164,24 +179,32 @@ export const subagentEvents = (args: {
   // Cut into the middle of a line: drop the partial first row.
   if (from > 0) text = text.slice(text.indexOf("\n") + 1);
   const own: TAgentEvent[] = [];
-  const nested: string[] = [];
+  const nested: { id: string; call: TSubagentCall }[] = [];
   const parser = createTranscriptParser({
     emit: (event) => own.push(event),
     toolOutputMax: args.toolOutputMax,
     parentItemId: args.toolUseId,
     turnId: () => args.turnId,
-    onToolUse: (id, name) => {
-      if (SUBAGENT_TOOL_NAMES.has(name)) nested.push(id);
+    onToolUse: (id, name, input) => {
+      if (SUBAGENT_TOOL_NAMES.has(name))
+        nested.push({
+          id,
+          call: { toolName: name, input, parentItemId: args.toolUseId },
+        });
     },
+    ...(found.background && args.call !== undefined
+      ? { backgroundCall: args.call }
+      : {}),
   });
   parser.push(text);
   const out = own.slice(-SUBAGENT_REPLAY_MAX_EVENTS);
   if (depth < MAX_DEPTH) {
-    for (const id of nested) {
+    for (const child of nested) {
       out.push(
         ...subagentEvents({
           ...args,
-          toolUseId: id,
+          toolUseId: child.id,
+          call: child.call,
           depth: depth + 1,
         }).events,
       );
@@ -204,6 +227,7 @@ export type TSubagentFollower = {
     toolUseId: string,
     turnId: string | undefined,
     from?: { readonly file: string; readonly offset: number },
+    call?: TSubagentCall,
   ) => void;
   /** Stop following calls not in `keep` (a replay cut them away). */
   readonly retain: (keep: ReadonlySet<string>) => void;
@@ -217,7 +241,8 @@ type TFollowed = {
   file: string | null;
   offset: number;
   lastScan: number;
-  readonly parser: ReturnType<typeof createTranscriptParser>;
+  readonly call: TSubagentCall | undefined;
+  parser: ReturnType<typeof createTranscriptParser> | null;
 };
 
 /** Live view of the session's subagents, tailing each subagent file. */
@@ -237,6 +262,7 @@ export const createSubagentFollower = (args: {
     toolUseId: string,
     turnId: string | undefined,
     from?: { readonly file: string; readonly offset: number },
+    call?: TSubagentCall,
   ): void => {
     if (followed.has(toolUseId)) return;
     if (followed.size >= MAX_FOLLOWED) {
@@ -249,31 +275,53 @@ export const createSubagentFollower = (args: {
       file: from?.file ?? null,
       offset: from?.offset ?? 0,
       lastScan: Number.NEGATIVE_INFINITY,
-      parser: createTranscriptParser({
-        emit: args.emit,
-        toolOutputMax: args.toolOutputMax,
-        parentItemId: toolUseId,
-        turnId: () => entry.turnId,
-        onToolUse: (id, name) => {
-          if (SUBAGENT_TOOL_NAMES.has(name)) track(id, entry.turnId);
-        },
-      }),
+      call,
+      parser: null,
     };
     followed.set(toolUseId, entry);
+  };
+
+  /** The parser, built once the file (and so its meta) is known. */
+  const parserOf = (
+    entry: TFollowed,
+    background: boolean,
+  ): ReturnType<typeof createTranscriptParser> => {
+    if (entry.parser !== null) return entry.parser;
+    entry.parser = createTranscriptParser({
+      emit: args.emit,
+      toolOutputMax: args.toolOutputMax,
+      parentItemId: entry.toolUseId,
+      turnId: () => entry.turnId,
+      onToolUse: (id, name, input) => {
+        if (SUBAGENT_TOOL_NAMES.has(name))
+          track(id, entry.turnId, undefined, {
+            toolName: name,
+            input,
+            parentItemId: entry.toolUseId,
+          });
+      },
+      ...(background && entry.call !== undefined
+        ? { backgroundCall: entry.call }
+        : {}),
+    });
+    return entry.parser;
   };
 
   const pumpOne = (entry: TFollowed): void => {
     const transcript = args.transcriptPath();
     if (transcript === null) return;
     let finished = false;
-    if (entry.file === null) {
+    if (entry.file === null || entry.parser === null) {
       if (now() - entry.lastScan < scanMs) return;
       entry.lastScan = now();
       const found = findSubagent(subagentDirOf(transcript), entry.toolUseId);
       if (found === null) return;
       entry.file = found.file;
       finished = found.finished;
+      parserOf(entry, found.background);
     }
+    const parser = entry.parser;
+    if (parser === null) return;
     for (let chunk = 0; chunk < 64; chunk += 1) {
       const range = readRange(entry.file, entry.offset, READ_CHUNK_BYTES);
       if (range.size < entry.offset) {
@@ -282,7 +330,7 @@ export const createSubagentFollower = (args: {
       }
       if (range.text === "") break;
       entry.offset = range.next;
-      entry.parser.push(range.text);
+      parser.push(range.text);
     }
     if (!finished && now() - entry.lastScan >= scanMs) {
       entry.lastScan = now();

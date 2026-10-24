@@ -1028,8 +1028,12 @@ export const createClaudeTuiSession = (
         !SUBAGENT_TOOL_NAMES.has(event.item.tool_name)
       )
         continue;
+      const call = {
+        toolName: event.item.tool_name,
+        input: event.item.input,
+      };
       if (path === null) {
-        subagents.track(event.item_id, event.turn_id);
+        subagents.track(event.item_id, event.turn_id, undefined, call);
         continue;
       }
       const snapshot = subagentEvents({
@@ -1037,6 +1041,7 @@ export const createClaudeTuiSession = (
         toolUseId: event.item_id,
         turnId: event.turn_id,
         toolOutputMax: AGENT_TOOL_OUTPUT_MAX_CHARS,
+        call,
       });
       out.push(...snapshot.events);
       if (!snapshot.finished)
@@ -1046,6 +1051,7 @@ export const createClaudeTuiSession = (
           snapshot.file === null
             ? undefined
             : { file: snapshot.file, offset: snapshot.readTo },
+          call,
         );
     }
     return out;

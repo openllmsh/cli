@@ -166,7 +166,12 @@ export const createClaudeHistory = (args: {
       const bytes = readBytes(path, from, to);
       if (bytes === null) return null;
       const events: TAgentEvent[] = [];
-      const tasks: { id: string; turnId: string | undefined }[] = [];
+      const tasks: {
+        id: string;
+        turnId: string | undefined;
+        toolName: string;
+        input: unknown;
+      }[] = [];
       const pageParser = createTranscriptParser({
         emit: (event) => {
           events.push(event);
@@ -176,7 +181,12 @@ export const createClaudeHistory = (args: {
             event.parent_item_id === undefined &&
             SUBAGENT_TOOL_NAMES.has(event.item.tool_name)
           )
-            tasks.push({ id: event.item_id, turnId: event.turn_id });
+            tasks.push({
+              id: event.item_id,
+              turnId: event.turn_id,
+              toolName: event.item.tool_name,
+              input: event.item.input,
+            });
         },
         toolOutputMax: args.toolOutputMax,
         firstTurn: firstTurn - 1,
@@ -192,6 +202,7 @@ export const createClaudeHistory = (args: {
             toolUseId: task.id,
             turnId: task.turnId,
             toolOutputMax: args.toolOutputMax,
+            call: { toolName: task.toolName, input: task.input },
           }).events,
         );
       }

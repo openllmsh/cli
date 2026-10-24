@@ -219,6 +219,50 @@ export const SUBAGENT_TOOL_NAMES: ReadonlySet<string> = new Set([
   "Agent",
 ]);
 
+/** The launch ack Claude writes as a background subagent's tool_result. */
+const ASYNC_LAUNCH_TEXT = /^Async agent launched successfully\b/;
+
+/**
+ * A subagent call's tool_result that is only the background launch ack:
+ * `toolUseResult` says so structurally; the text is the fallback for rows
+ * written without it.
+ */
+const isAsyncLaunchAck = (row: TJson, output: string): boolean => {
+  const meta = row.toolUseResult;
+  if (isRecord(meta) && ("isAsync" in meta || "status" in meta))
+    return meta.isAsync === true || meta.status === "async_launched";
+  return ASYNC_LAUNCH_TEXT.test(output.trimStart());
+};
+
+/** A `<task-notification>` Claude injects when a background task stops. */
+export type TTaskNotification = {
+  readonly toolUseId: string;
+  readonly status: string;
+  readonly summary: string | undefined;
+  readonly result: string | undefined;
+};
+
+const tagOf = (text: string, tag: string): string | undefined => {
+  const match = new RegExp(`<${tag}>([\\s\\S]*?)</${tag}>`).exec(text);
+  const value = match?.[1]?.trim();
+  return value === undefined || value === "" ? undefined : value;
+};
+
+export const parseTaskNotification = (
+  text: string,
+): TTaskNotification | null => {
+  const trimmed = text.trim();
+  if (!trimmed.startsWith("<task-notification>")) return null;
+  const toolUseId = tagOf(trimmed, "tool-use-id");
+  if (toolUseId === undefined) return null;
+  return {
+    toolUseId,
+    status: tagOf(trimmed, "status") ?? "completed",
+    summary: tagOf(trimmed, "summary"),
+    result: tagOf(trimmed, "result"),
+  };
+};
+
 /** A shell result's leading `Exit code N`. */
 const EXIT_CODE = /^Exit code (-?\d+)/;
 /** Tool results Claude writes when the user (or a rule) refused the call. */
@@ -265,7 +309,21 @@ export type TTranscriptParserOptions = {
   /** The turn id a subagent parser stamps on its items. */
   readonly turnId?: () => string | undefined;
   /** Every tool_use seen (the subagent follower tracks Task / Agent calls). */
-  readonly onToolUse?: (toolUseId: string, toolName: string) => void;
+  readonly onToolUse?: (
+    toolUseId: string,
+    toolName: string,
+    input: unknown,
+  ) => void;
+  /**
+   * The background call this subagent file belongs to: the file's final
+   * assistant message (`end_turn`) completes the call with that text.
+   */
+  readonly backgroundCall?: {
+    readonly toolName: string;
+    readonly input: unknown;
+    /** The call's own parent (a subagent nested in a subagent). */
+    readonly parentItemId?: string;
+  };
 };
 
 export const createTranscriptParser = (
@@ -290,6 +348,13 @@ export const createTranscriptParser = (
    */
   const sidechainParent = new Map<string, string>();
   const taskPrompts = new Map<string, string>();
+  /** Background subagent calls whose launch ack was seen, until they finish. */
+  const background = new Map<
+    string,
+    { toolName: string; input: unknown; parent?: string }
+  >();
+  /** A subagent file's latest assistant text (its result on `end_turn`). */
+  let lastText: string | null = null;
 
   const turnField = (): { turn_id?: string } => {
     if (args.turnId !== undefined) {
@@ -300,7 +365,7 @@ export const createTranscriptParser = (
   };
 
   const item = (
-    type: "item.started" | "item.completed",
+    type: "item.started" | "item.updated" | "item.completed",
     itemId: string,
     value: TAgentItem,
     parent: string | undefined,
@@ -396,6 +461,34 @@ export const createTranscriptParser = (
         taskPrompts.delete(id);
         const output = toolResultText(block.content);
         const failed = block.is_error === true;
+        // A background subagent's result is only its launch ack: the call
+        // stays in progress (marked background) until the subagent finishes.
+        if (
+          !failed &&
+          tool !== undefined &&
+          SUBAGENT_TOOL_NAMES.has(tool.toolName) &&
+          isAsyncLaunchAck(row, output)
+        ) {
+          const owner = tool.parent ?? parent;
+          background.set(id, {
+            toolName: tool.toolName,
+            input: tool.input,
+            ...(owner === undefined ? {} : { parent: owner }),
+          });
+          item(
+            "item.updated",
+            id,
+            {
+              kind: "tool_call",
+              tool_name: tool.toolName,
+              input: tool.input,
+              status: "in_progress",
+              background: true,
+            },
+            owner,
+          );
+          continue;
+        }
         const at = timestampOf(row);
         const exit = EXIT_CODE.exec(output);
         const denied = failed && DENIED.test(output);
@@ -430,6 +523,11 @@ export const createTranscriptParser = (
     if (parent !== undefined) return;
     const raw = promptOf(content);
     if (raw === null) return;
+    const notification = parseTaskNotification(raw);
+    if (notification !== null) {
+      onTaskNotification(row, notification);
+      return;
+    }
     if (raw.trimStart().startsWith(INTERRUPTED)) {
       if (turn !== null)
         notice(`${str(row.uuid) ?? turn.id}:interrupted`, "interrupted");
@@ -469,6 +567,43 @@ export const createTranscriptParser = (
     openTurn(prompt, false);
   };
 
+  /** A background task stopped: finish its call, mark the transcript. */
+  const onTaskNotification = (row: TJson, note: TTaskNotification): void => {
+    const call = background.get(note.toolUseId);
+    // Not a subagent this parser saw launch (a shell task, or a call cut
+    // away by a history page): nothing to link the marker to.
+    if (call === undefined) return;
+    background.delete(note.toolUseId);
+    const failed = note.status !== "completed";
+    item(
+      "item.completed",
+      note.toolUseId,
+      {
+        kind: "tool_call",
+        tool_name: call.toolName,
+        input: call.input,
+        status: failed ? "failed" : "completed",
+        background: true,
+        ...(note.result === undefined
+          ? {}
+          : { output: clip(note.result, args.toolOutputMax) }),
+        ...(failed ? { is_error: true } : {}),
+      },
+      call.parent,
+    );
+    item(
+      "item.completed",
+      `${str(row.uuid) ?? note.toolUseId}:subagent-finished`,
+      {
+        kind: "notice",
+        notice: "subagent_finished",
+        ref_item_id: note.toolUseId,
+        ...(failed ? { text: note.status } : {}),
+      },
+      call.parent,
+    );
+  };
+
   const onAssistant = (
     row: TJson,
     message: TJson,
@@ -493,6 +628,7 @@ export const createTranscriptParser = (
         const id = `${base}:${index}`;
         if (block.type === "text") {
           const text = str(block.text) ?? "";
+          if (text.trim() !== "") lastText = text;
           if (text.trim() !== "")
             item(
               "item.completed",
@@ -528,7 +664,7 @@ export const createTranscriptParser = (
             },
             parent,
           );
-          args.onToolUse?.(toolId, toolName);
+          args.onToolUse?.(toolId, toolName, block.input);
         }
       });
     } else if (typeof content === "string" && content.trim() !== "") {
@@ -539,7 +675,34 @@ export const createTranscriptParser = (
         parent,
       );
     }
-    if (parent !== undefined) return;
+    if (parent !== undefined) {
+      // A background subagent's own file ends: its final message is the
+      // call's result (the parent's tool_result was only the launch ack).
+      const call = args.backgroundCall;
+      if (
+        call !== undefined &&
+        args.parentItemId !== undefined &&
+        message.stop_reason === "end_turn" &&
+        lastText !== null
+      )
+        emit({
+          type: "item.completed",
+          item_id: args.parentItemId,
+          item: {
+            kind: "tool_call",
+            tool_name: call.toolName,
+            input: call.input,
+            status: "completed",
+            background: true,
+            output: clip(lastText, args.toolOutputMax),
+          },
+          ...turnField(),
+          ...(call.parentItemId === undefined
+            ? {}
+            : { parent_item_id: call.parentItemId }),
+        });
+      return;
+    }
     const usage = message.usage;
     if (isRecord(usage)) {
       const cached =
