@@ -34,8 +34,9 @@ const resumeCwdOf = (
   if (engine !== "claude") return undefined;
   try {
     return (
-      readClaudeHistory(RESUME_LOOKUP_LIMIT).find((row) => row.id === sessionId)
-        ?.cwd ?? undefined
+      readClaudeHistory(RESUME_LOOKUP_LIMIT, { skipTranscripts: true }).find(
+        (row) => row.id === sessionId,
+      )?.cwd ?? undefined
     );
   } catch {
     return undefined;

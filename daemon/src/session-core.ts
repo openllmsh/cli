@@ -1241,7 +1241,7 @@ export const openSession = (
       // Legacy JSON has no stream object in the consumer set, so it is the sole
       // viewer: authoritatively drive the PTY to its size and replay the
       // emulator's screen (or raw scrollback when no emulator exists).
-      if (!isAttached(existing)) {
+      if (existing.consumers.size === 0) {
         applyCanonicalResize(existing, frame.cols, frame.rows);
         if (existing.emulator !== null) {
           sendOut(existing, serializeScreenBytes(existing.emulator));

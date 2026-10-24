@@ -173,6 +173,8 @@ export const readTranscriptFacts = (
 export type TClaudeHistoryOptions = {
   /** `~/.claude` (tests point it at a fixture tree). */
   readonly configDir?: string;
+  /** Skip transcript title/chain scans when callers only need history metadata. */
+  readonly skipTranscripts?: boolean;
 };
 
 export const readClaudeHistory = (
@@ -238,7 +240,10 @@ export const readClaudeHistory = (
     const collapsedInto = new Map<string, string>();
     for (const [id, agg] of ordered) {
       if (rows.size >= limit * 2 + 16) break;
-      const transcript = transcriptPathOf(projectsDir, id, agg.cwd, slugs);
+      const transcript =
+        options.skipTranscripts === true
+          ? null
+          : transcriptPathOf(projectsDir, id, agg.cwd, slugs);
       const facts =
         transcript === null ? null : readTranscriptFacts(transcript, id);
       const promptTitle = pickPromptTitle(agg.prompts);
