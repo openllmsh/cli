@@ -24,6 +24,7 @@ import type {
   TAgentEvent,
   TAgentItem,
 } from "@openllmsh/protocol";
+import { normalizeUserPromptText } from "@openllmsh/protocol";
 import { claudeConfigDir } from "../local-sessions/paths";
 
 /** Bytes read per poll at most (a burst is drained over several polls). */
@@ -252,10 +253,12 @@ export const createTranscriptParser = (args: {
   ): string => {
     turnCounter += 1;
     turn = { id: `t${turnCounter}`, awaitingPromptLine };
+    const cleaned =
+      prompt === undefined ? undefined : normalizeUserPromptText(prompt);
     emit({
       type: "turn.started",
       turn_id: turn.id,
-      ...(prompt === undefined || prompt.trim() === "" ? {} : { prompt }),
+      ...(cleaned === undefined || cleaned === "" ? {} : { prompt: cleaned }),
       ...(attachments !== undefined && attachments.length > 0
         ? { attachments: [...attachments] }
         : {}),
@@ -293,21 +296,30 @@ export const createTranscriptParser = (args: {
         });
       }
     }
-    const prompt = promptOf(content);
-    if (prompt === null || prompt.trim() === "") return;
-    if (prompt.startsWith(INTERRUPTED)) {
+    const raw = promptOf(content);
+    if (raw === null) return;
+    if (raw.trimStart().startsWith(INTERRUPTED)) {
       abortTurn("interrupted");
       return;
     }
     // `/model` (from the web's set_model or typed in the terminal) answers
     // with "Set model to `<id>`": the session's model, from Claude's record.
-    const switched = MODEL_SET.exec(prompt);
+    // Match before normalize — the wrapper tags are the signal.
+    const switched = MODEL_SET.exec(raw.trim());
     if (switched?.[1] !== undefined) {
       emit({ type: "session.configured", model: switched[1] });
       return;
     }
     // Slash-command / hook / system-reminder wrappers are not prompts.
-    if (prompt.startsWith("<") || row.isCompactSummary === true) return;
+    // Check the trimmed raw form so a leading newline before `<command-…>`
+    // still drops the row; `pasted_content` is unwrapped by normalize.
+    const trimmedRaw = raw.trim();
+    if (trimmedRaw.startsWith("<") || row.isCompactSummary === true) {
+      // `<pasted_content>` is a real prompt — fall through after normalize.
+      if (!/^<pasted_content\b/i.test(trimmedRaw)) return;
+    }
+    const prompt = normalizeUserPromptText(raw);
+    if (prompt === "") return;
     if (turn?.awaitingPromptLine === true) {
       turn.awaitingPromptLine = false;
       return;
