@@ -29,7 +29,6 @@ import { logError, logInfo } from "../logger";
 import {
   AGENT_TOOL_OUTPUT_MAX_CHARS,
   chunkAgentAttachment,
-  deleteAgentAttachments,
   resolveAgentAttachment,
 } from "./claude-code";
 import type {
@@ -62,6 +61,17 @@ export type TAgentDispatcherOptions = {
     engine: TAgentEngine,
     sessionId: string,
   ) => string | undefined;
+  /**
+   * Remove one session from the device after its dispatcher process (if
+   * any) was killed: stop a terminal host, drop attachments, transcript and
+   * history lines. Absent → `delete_session` is refused as unsupported.
+   */
+  readonly deleteSession?: (
+    sessionId: string,
+  ) => Promise<
+    | { readonly ok: true }
+    | { readonly ok: false; readonly code: string; readonly message: string }
+  >;
 };
 
 export type TAgentDispatcher = {
@@ -649,14 +659,59 @@ export const createAgentDispatcher = (
               return;
             }
             const engineSession = session.engineSession;
-            // History delete: drop on-device attachments with the session.
-            // (The engine close also removes them; this covers a no-op engine.)
-            deleteAgentAttachments(session.id);
+            // Stop: kill the process, keep its history (attachments too) so
+            // the row resumes. `delete_session` is the destructive path.
             // The consumer ends once `session.exited` was delivered to it.
             session.exitWatchers.push(endAfterDrain);
             withCommand(session, commandId, () =>
               engineSession.close("closed"),
             );
+            return;
+          }
+          case "delete_session": {
+            const deleteSession = options.deleteSession;
+            if (deleteSession === undefined) {
+              error(
+                state,
+                null,
+                "unsupported",
+                "This device cannot delete sessions.",
+                commandId,
+              );
+              return;
+            }
+            const targetId = command.session_id;
+            const live = sessions.get(targetId);
+            if (live !== undefined && !live.exited) {
+              const engineSession = live.engineSession;
+              if (engineSession !== null) engineSession.close("killed");
+            }
+            if (bound?.id === targetId) bound = null;
+            state.chain = state.chain
+              .then(() => deleteSession(targetId))
+              .then(
+                (result) => {
+                  if (result.ok)
+                    reply(
+                      state,
+                      null,
+                      { type: "session.deleted", session_id: targetId },
+                      commandId,
+                    );
+                  else
+                    error(state, null, result.code, result.message, commandId);
+                },
+                (err: unknown) => {
+                  logError("agent", err);
+                  error(
+                    state,
+                    null,
+                    "internal",
+                    "The session could not be deleted on this device.",
+                    commandId,
+                  );
+                },
+              );
             return;
           }
           case "attachment_get": {

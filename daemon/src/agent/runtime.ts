@@ -7,8 +7,14 @@ import { readClaudeHistory } from "../local-sessions/claude";
 import { setAgentStreamHandler } from "../mux-host";
 import {
   createClaudeCodeAdapter,
+  deleteAgentAttachments,
+  killClaudeSessionHost,
   reapOrphanAgentAttachments,
 } from "./claude-code";
+import {
+  CLAUDE_SESSION_ID_PATTERN,
+  deleteClaudeSessionFiles,
+} from "./delete-session";
 import type { TAgentDispatcher } from "./dispatcher";
 import { createAgentDispatcher } from "./dispatcher";
 import { createAgentStreamHandler } from "./mux-front";
@@ -36,6 +42,33 @@ const resumeCwdOf = (
   }
 };
 
+/** Delete one session's on-device history (after the dispatcher's kill). */
+const deleteSession = async (
+  sessionId: string,
+): Promise<
+  | { readonly ok: true }
+  | { readonly ok: false; readonly code: string; readonly message: string }
+> => {
+  if (!CLAUDE_SESSION_ID_PATTERN.test(sessionId))
+    return {
+      ok: false,
+      code: "invalid_session",
+      message: "Invalid session id.",
+    };
+  // A terminal-started session runs under its own host: stop it first, or
+  // Claude writes the transcript again after we remove it.
+  const stopped = await killClaudeSessionHost(sessionId).catch(() => false);
+  if (!stopped)
+    return {
+      ok: false,
+      code: "stop_failed",
+      message: "The session's process did not stop.",
+    };
+  deleteAgentAttachments(sessionId);
+  const result = deleteClaudeSessionFiles({ sessionId, cwd: null });
+  return result.ok ? { ok: true } : result;
+};
+
 const runAttachmentReaper = (): void => {
   try {
     reapOrphanAgentAttachments({
@@ -58,6 +91,7 @@ export const startAgentSessions = (): TAgentDispatcher => {
   const created = createAgentDispatcher({
     adapters: [createClaudeCodeAdapter()],
     resumeCwdOf,
+    deleteSession,
   });
   dispatcher = created;
   setAgentStreamHandler(createAgentStreamHandler(created));

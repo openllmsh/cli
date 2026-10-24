@@ -411,6 +411,44 @@ const defaultOpenPtyLink: TOpenPtyLink = async (request) => {
     : dialObserver(socketPath, request.sessionId, true);
 };
 
+/**
+ * Kill the session-host running this Claude session (web- or terminal-
+ * started), then wait briefly for it to go away so Claude does not write its
+ * transcript again after a delete. True when nothing is left running.
+ */
+export const killClaudeSessionHost = async (
+  sessionId: string,
+  waitMs = 3_000,
+): Promise<boolean> => {
+  if (!SESSION_ID_PATTERN.test(sessionId)) return false;
+  const find = async (): Promise<
+    | Awaited<
+        ReturnType<typeof defaultSessionHostClient.discoverSessionHosts>
+      >[number]
+    | undefined
+  > =>
+    (await defaultSessionHostClient.discoverSessionHosts()).find(
+      (host) =>
+        host.cli === "claude_code" &&
+        (host.id === sessionId || host.vendorSessionId === sessionId),
+    );
+  const live = await find();
+  if (live === undefined) return true;
+  const link = await dialObserver(live.socketPath, live.id, false);
+  if (link === null) return false;
+  link.kill();
+  const deadline = Date.now() + waitMs;
+  while (Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    if ((await find()) === undefined) {
+      link.release();
+      return true;
+    }
+  }
+  link.release();
+  return false;
+};
+
 // ─── hooks → sessions ──────────────────────────────────────────────────────
 
 /** What a hook asked; the reply is Claude's hook stdout JSON (or none). */
@@ -1275,12 +1313,15 @@ export const createClaudeTuiSession = (
       link = null;
       current?.kill();
       current?.release();
-      // History delete / kill: drop the on-device attachment files with the
-      // session. Idle release and natural PTY exit keep them for replay.
-      try {
-        rmSync(attachmentsDir, { recursive: true, force: true });
-      } catch {
-        /* already gone */
+      // Delete (`killed`) drops the on-device attachment files with the
+      // session. Stop (`closed`), idle release and natural PTY exit keep them
+      // for replay — the history stays resumable.
+      if (reason === "killed") {
+        try {
+          rmSync(attachmentsDir, { recursive: true, force: true });
+        } catch {
+          /* already gone */
+        }
       }
       finish(reason);
     },
