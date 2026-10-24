@@ -17,6 +17,7 @@ import {
   envFilePath,
   envFileValue,
   isDevMode,
+  parseApiKeyId,
   sharedEnvFilePath,
   writeEnvFileVars,
 } from "./env";
@@ -136,20 +137,34 @@ const persistServiceKey = (
   targetPath: string,
   anchor?: string | null,
 ): boolean => {
-  // A pasted key replaces the anchor line too: an anchored paste writes it,
-  // a bare one blanks a stale anchor (its pair secret was bound to the old
-  // key). `undefined` (an inherited key made durable) leaves it alone.
+  // A pasted key may replace the anchor line. An anchored paste writes it.
+  // A bare paste (`null`) blanks an existing anchor only when its key id
+  // differs from the saved OPENLLM_API_KEY id (or either cannot be parsed).
+  // The anchor's pair secret is bound to the id, so re-saving any key with
+  // the same id leaves it. `undefined`
+  // (an inherited key made durable) leaves the anchor alone. The device-access
+  // pin is invalidated only when the anchor line actually changes.
   const vars: Record<string, string> = { OPENLLM_API_KEY: key };
-  if (typeof anchor === "string") vars[DEVICE_ANCHOR_ENV] = anchor;
-  else if (
+  const savedAnchor = envFileValue(targetPath, DEVICE_ANCHOR_ENV)?.trim() ?? "";
+  const savedKey = envFileValue(targetPath, "OPENLLM_API_KEY")?.trim() ?? "";
+  let anchorChanged = false;
+  if (typeof anchor === "string") {
+    if (anchor !== savedAnchor) {
+      vars[DEVICE_ANCHOR_ENV] = anchor;
+      anchorChanged = true;
+    }
+  } else if (
     anchor === null &&
-    (envFileValue(targetPath, DEVICE_ANCHOR_ENV)?.trim() ?? "") !== ""
+    savedAnchor !== "" &&
+    (parseApiKeyId(savedKey) === null ||
+      parseApiKeyId(savedKey) !== parseApiKeyId(key))
   ) {
     vars[DEVICE_ANCHOR_ENV] = "";
+    anchorChanged = true;
   }
   if (!writeEnvFileVars(vars, targetPath)) return false;
   applyPersistedApiKey(key);
-  if (anchor !== undefined) invalidateDeviceAccessPin();
+  if (anchorChanged) invalidateDeviceAccessPin();
   return true;
 };
 

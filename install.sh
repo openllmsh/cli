@@ -580,12 +580,18 @@ write_env_file() {
   fi
   # The device trust anchor is its own line, OPENLLM_DEVICE_ANCHOR, beside the
   # BARE key. A supplied anchor replaces it (re-running install is rotation).
-  # A bare supplied key ALWAYS drops any existing anchor — "sessions off at
-  # install" is simply omitting the suffix. Keyless install keeps the current
-  # line untouched.
+  # A bare supplied key drops an existing anchor only when its public key id
+  # differs from the saved key's id (or either cannot be parsed). The anchor's
+  # pair secret is bound to that id, so a new secret for the same id leaves it.
+  # Keyless install keeps the current line untouched.
+  local supplied_key_id current_key_id
+  supplied_key_id="${SUPPLIED_KEY#sk-llm-}"
+  supplied_key_id="${supplied_key_id%%.*}"
+  current_key_id="${current_key#sk-llm-}"
+  current_key_id="${current_key_id%%.*}"
   if [ -n "$SUPPLIED_ANCHOR" ]; then
     desired_anchor="$SUPPLIED_ANCHOR"
-  elif [ -n "$SUPPLIED_KEY" ]; then
+  elif [ -n "$SUPPLIED_KEY" ] && { ! is_usable_api_key "$current_key" || [ "$supplied_key_id" != "$current_key_id" ]; }; then
     desired_anchor=""
   else
     desired_anchor="$current_anchor"

@@ -28,10 +28,15 @@
 
 import { daemonPort, daemonReachable } from "./clients/gateway";
 import { daemonInvocation } from "./daemon-delegation";
-import { cliConfig, DEVICE_ANCHOR_ENV, envFileHasDeviceAnchor } from "./env";
+import {
+  cliConfig,
+  DEVICE_ANCHOR_ENV,
+  envFileHasDeviceAnchor,
+  sharedFileConfig,
+} from "./env";
 import { defaultTerminal, saveEnvVars } from "./onboarding";
 import type { TCredentialGateTerminal } from "./runtime-contracts";
-import { splitAnchoredApiKey } from "./runtime-contracts";
+import { parseApiKeyId, splitAnchoredApiKey } from "./runtime-contracts";
 
 export const LOGIN_USAGE = `usage: openllm login [sk-llm-...] [--key <sk-llm-...>] [--start] [--json]
 
@@ -235,9 +240,18 @@ export const runLogin = async (
 
   const vars: Record<string, string> = { OPENLLM_API_KEY: trimmed };
   // `openllm daemon anchor` already wrote OPENLLM_DEVICE_ANCHOR beside the
-  // key. A bare login ALWAYS blanks an existing anchor — "sessions off" is
-  // simply omitting the suffix (same rule as install.sh).
-  if (split.anchor === null && envFileHasDeviceAnchor()) {
+  // key. The anchor's pair secret is bound to the key id: a bare login with
+  // the SAME id leaves it (re-saving is not "sessions off"). It blanks only
+  // when either id is absent/invalid or the ids differ — that anchor is stale
+  // (same rule as install.sh and the credential gate).
+  const savedKey = sharedFileConfig().OPENLLM_API_KEY;
+  if (
+    split.anchor === null &&
+    envFileHasDeviceAnchor() &&
+    (savedKey === undefined ||
+      parseApiKeyId(savedKey) === null ||
+      parseApiKeyId(savedKey) !== parseApiKeyId(trimmed))
+  ) {
     vars[DEVICE_ANCHOR_ENV] = "";
   }
   if (!saveEnvVars(vars)) {

@@ -78,6 +78,7 @@ import {
   DEV_CLOUD_ORIGIN,
   DEV_DEFAULT_DAEMON_PORT,
   isOpenllmDevMode,
+  parseApiKeyId,
 } from "../../src/runtime-contracts";
 
 export type TDaemonEnv = {
@@ -87,19 +88,7 @@ export type TDaemonEnv = {
   readonly dashboardOrigin: string;
 };
 
-/**
- * Extract the public id half of a `sk-llm-{id}.{secret}` key. The daemon
- * never imports `@openllm/vault`; this is a shape-only parse (id only —
- * secret is ignored). Returns null on any mismatch.
- */
-export const parseApiKeyId = (raw: string): string | null => {
-  if (!raw.startsWith("sk-llm-")) return null;
-  const rest = raw.slice("sk-llm-".length);
-  const dot = rest.indexOf(".");
-  if (dot <= 0 || dot === rest.length - 1) return null;
-  const id = rest.slice(0, dot);
-  return id.length > 0 ? id : null;
-};
+export { parseApiKeyId } from "../../src/runtime-contracts";
 
 /**
  * This daemon's api key id (the `key_id` grants must target). Null when
