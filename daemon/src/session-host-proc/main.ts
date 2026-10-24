@@ -342,6 +342,7 @@ const parseAttachOpen = (
     cols: value.cols,
     rows: value.rows,
     mode: "attach",
+    ...(value.observer === true ? { observer: true } : {}),
   };
 };
 
