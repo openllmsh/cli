@@ -6,6 +6,10 @@
  *   key without trusting the cloud's copy.
  * - `POST /local/device-control` — pin the account device-control public key
  *   as a LOCAL confirmation (`via: "local"`, an anchored pin, never TOFU).
+ * - `POST /local/device-anchor` — accept the install-time trust anchor for the
+ *   key this daemon runs on (the desktop app's Device sessions toggle). Written
+ *   by the same writer as `openllm daemon anchor` ({@link installDeviceAnchor});
+ *   enables device sessions unless locked. The anchor is never logged.
  *
  * Both use the `/local/agent` admission: loopback peer + loopback Host, an
  * allowed Origin (Tauri / OpenLLM deployment / none), and this boot's local
@@ -13,13 +17,19 @@
  */
 import type {
   TDeviceAccessPinReport,
+  TLocalDeviceAnchorRefusal,
+  TLocalDeviceAnchorResponse,
   TLocalDeviceControlRequest,
   TLocalIdentityResponse,
 } from "@openllmsh/protocol";
 import {
+  DEVICE_ANCHOR_LOCAL_MAX_BODY_BYTES,
+  DEVICE_ANCHOR_LOCAL_PATH,
   DEVICE_CONTROL_LOCAL_MAX_BODY_BYTES,
   DEVICE_CONTROL_LOCAL_PATH,
   IDENTITY_LOCAL_PATH,
+  isOpenllmDeviceAnchorSyntax,
+  LocalDeviceAnchorRequest,
   LocalDeviceControlRequest,
 } from "@openllmsh/protocol";
 import { Schema } from "effect";
@@ -30,10 +40,19 @@ import {
   isEd25519SpkiB64,
   setDeviceAccessPubkey,
 } from "./device-access-verify";
-import { deviceSessionsReport } from "./device-anchor";
+import {
+  deviceSessionsReport,
+  deviceSessionsState,
+  installDeviceAnchor,
+  setDeviceSessionsLocal,
+} from "./device-anchor";
+import { daemonEnv, parseApiKeyId } from "./env";
 import { daemonPublicKey } from "./keypair";
 
 const decodeRequest = Schema.decodeUnknownEither(LocalDeviceControlRequest);
+const decodeAnchorRequest = Schema.decodeUnknownEither(
+  LocalDeviceAnchorRequest,
+);
 
 const json = (status: number, body: unknown): Response =>
   new Response(JSON.stringify(body), {
@@ -58,7 +77,9 @@ export const deviceAccessPinReport = (): TDeviceAccessPinReport | null => {
 };
 
 export const isLocalDeviceControlPath = (pathname: string): boolean =>
-  pathname === IDENTITY_LOCAL_PATH || pathname === DEVICE_CONTROL_LOCAL_PATH;
+  pathname === IDENTITY_LOCAL_PATH ||
+  pathname === DEVICE_CONTROL_LOCAL_PATH ||
+  pathname === DEVICE_ANCHOR_LOCAL_PATH;
 
 const identityResponse = (): Response => {
   const pubkey = daemonPublicKey();
@@ -105,6 +126,69 @@ const pinResponse = async (req: Request): Promise<Response> => {
   });
 };
 
+const anchorRefusal = (
+  status: number,
+  error: TLocalDeviceAnchorRefusal,
+): Response => {
+  const body: TLocalDeviceAnchorResponse = { ok: false, error };
+  return json(status, body);
+};
+
+/**
+ * `POST /local/device-anchor`. Binds the anchor to the key this daemon runs
+ * on: the caller names the key id it derived the anchor for, and anything
+ * else is refused (a pair secret for another key would yield a dpk proof the
+ * browser rejects). Nothing here logs — the body holds the pair secret.
+ */
+const anchorResponse = async (req: Request): Promise<Response> => {
+  const declared = Number(req.headers.get("content-length") ?? "0");
+  if (declared > DEVICE_ANCHOR_LOCAL_MAX_BODY_BYTES) {
+    return anchorRefusal(413, "body_too_large");
+  }
+  const text = await req.text();
+  if (text.length > DEVICE_ANCHOR_LOCAL_MAX_BODY_BYTES) {
+    return anchorRefusal(413, "body_too_large");
+  }
+  let raw: unknown;
+  try {
+    raw = JSON.parse(text);
+  } catch {
+    return anchorRefusal(400, "invalid_body");
+  }
+  const decoded = decodeAnchorRequest(raw);
+  if (decoded._tag === "Left") return anchorRefusal(400, "invalid_body");
+  const { key_id: keyId, anchor } = decoded.right;
+  if (!isOpenllmDeviceAnchorSyntax(anchor)) {
+    return anchorRefusal(400, "malformed_anchor");
+  }
+  const key = daemonEnv().apiKey;
+  if (key === null || parseApiKeyId(key) !== keyId) {
+    return anchorRefusal(409, "key_id_mismatch");
+  }
+  // The same writer as `openllm daemon anchor`: env file + derived pin.
+  const result = installDeviceAnchor(`${key}.${anchor}`);
+  if (!result.ok) {
+    return anchorRefusal(
+      result.reason === "persist_failed" ? 500 : 400,
+      result.reason === "persist_failed"
+        ? "persist_failed"
+        : "malformed_anchor",
+    );
+  }
+  // Anchoring enables device sessions unless the machine locked them, the
+  // same default `openllm login` applies.
+  if (!deviceSessionsState().locked) {
+    if (setDeviceSessionsLocal({ enabled: true }) === null) {
+      return anchorRefusal(500, "persist_failed");
+    }
+  }
+  const body: TLocalDeviceAnchorResponse = {
+    ok: true,
+    device_sessions: deviceSessionsReport(),
+  };
+  return json(200, body);
+};
+
 /**
  * Serve one loopback device-control request. `remoteAddress` is the TCP peer
  * (`server.requestIP(req)?.address`).
@@ -121,7 +205,8 @@ export const handleLocalDeviceControl = async (
       ? identityResponse()
       : json(405, { error: "method_not_allowed" });
   }
-  return req.method === "POST"
-    ? pinResponse(req)
-    : json(405, { error: "method_not_allowed" });
+  if (req.method !== "POST") return json(405, { error: "method_not_allowed" });
+  return pathname === DEVICE_ANCHOR_LOCAL_PATH
+    ? anchorResponse(req)
+    : pinResponse(req);
 };
