@@ -16,7 +16,7 @@ import type {
   TRelayFrame,
 } from "@openllmsh/protocol";
 import { RELAY_PROTOCOL_VERSION, RelayFrame } from "@openllmsh/protocol";
-import { Schema } from "effect";
+import { Result, Schema } from "effect";
 import { WebSocket as ReconnectingWebSocket } from "partysocket";
 import { setAuthSink } from "./auth-events";
 import {
@@ -101,7 +101,7 @@ import type { TStatusPublishTrigger } from "./status-publish-coalesce";
 import { createStatusPublishCoalescer } from "./status-publish-coalesce";
 import { createSupersedeBackoff, isSupersededClose } from "./supersede-backoff";
 
-const decodeFrame = Schema.decodeUnknownEither(RelayFrame);
+const decodeFrame = Schema.decodeUnknownResult(RelayFrame);
 
 /** Full-snapshot stringify — only on a changed watcher tick / actual publish. */
 export const stringifyStatusSnapshot = (status: unknown): string =>
@@ -1383,7 +1383,7 @@ const onMessage = (data: unknown): void => {
     return;
   }
   const r = decodeFrame(json);
-  if (r._tag === "Right") onFrame(r.right);
+  if (Result.isSuccess(r)) onFrame(r.success);
 };
 
 /** partysocket calls this before every (re)connect — fetch a fresh channel so
