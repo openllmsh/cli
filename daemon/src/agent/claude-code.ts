@@ -386,6 +386,13 @@ const defaultOpenPtyLink: TOpenPtyLink = async (request) => {
         host.vendorSessionId === request.sessionId),
   );
   if (live !== undefined) return dialObserver(live.socketPath, live.id, false);
+  // Not running and nothing on disk to resume (a web start that never reached
+  // Claude, or an id this device never ran): `claude --resume` would exit at
+  // once with "No conversation found". Start that id fresh instead (the host
+  // pins `--session-id`), so the attach has a defined outcome.
+  const resumable =
+    request.resume &&
+    findClaudeTranscript(request.sessionId, undefined, request.cwd) !== null;
   const socketPath = await defaultSessionHostClient.spawnSessionHostProc({
     id: request.sessionId,
     cli: "claude_code",
@@ -394,7 +401,7 @@ const defaultOpenPtyLink: TOpenPtyLink = async (request) => {
     cwd: request.cwd,
     ...(request.title === undefined ? {} : { title: request.title }),
     ...(request.skipPermissions ? { dangerous: true } : {}),
-    ...(request.resume ? { resume: request.sessionId } : {}),
+    ...(resumable ? { resume: request.sessionId } : {}),
     ...(request.model === undefined
       ? {}
       : { vendorArgs: ["--model", request.model] }),
