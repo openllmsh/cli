@@ -812,8 +812,11 @@ silent signaling timeouts. Detail lives in
   `device_access_kind` / `_version` / `_rotations`. Pin rules: a pin is
   **anchored** (agent-eligible) only from a local trust root — the install
   anchor (`sk-llm-<key>.<anchor>`, split on the last dot by install.sh /
-  `openllm login` / the credential gate and handed to `openllm daemon anchor`
-  on stdin; `via: anchor`), loopback `POST /local/device-control`
+  `openllm login` / the credential gate and stored as its own
+  `OPENLLM_DEVICE_ANCHOR` line in the runtime env file beside the bare key;
+  the pin is derived from that line at every hydrate, `via: anchor`, and a
+  signed remote rotation cannot move it — re-running install/update is the
+  rotation path), loopback `POST /local/device-control`
   (`via: local`), or a v2 rotation chain
   signed by the current anchored pin (`via: rotation`, anchoring inherited).
   An unpinned daemon still first-use pins bootstrap's key (`via: tofu`), but
@@ -823,8 +826,9 @@ silent signaling timeouts. Detail lives in
   pin with `device_not_anchored` and a switched-off device with
   `device_sessions_disabled` (re-checked on every agent OPEN); RTC degrades
   such an offer, or a dpk-less grant, to a tunnel-only session.
-  `device-anchor.ts` owns the anchor: it keeps it in `state.json` (0600, never
-  `.env`, never logged or sent), publishes `DaemonStatus.device_sessions`
+  `device-anchor.ts` owns the anchor: it lives only in the env file (0600;
+  never in `state.json`, never in `process.env` or a child env, never logged
+  or sent), publishes `DaemonStatus.device_sessions`
   (`anchored`, `enabled`, `locked`, `dpk_proof = HMAC(pair_secret,
   "openllm-dpk-proof-v1" || key_id || pubkey)`) so a browser holding the
   control seed trusts this daemon's X25519 key without a first-use window,

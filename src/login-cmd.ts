@@ -18,9 +18,11 @@
  *
  * A key copied with Manage device → Enable device sessions carries a device
  * trust anchor after it (`sk-llm-<key>.<anchor>`). Login splits it on the last
- * dot: the anchor goes to `openllm daemon anchor` over stdin (pinning the
- * account device-control key locally, never trust-on-first-use) and ONLY the
- * bare `sk-llm-<key>` is saved, exported, or ever used as a bearer. Anchoring
+ * dot: the anchored key goes to `openllm daemon anchor` over stdin, which
+ * writes `OPENLLM_API_KEY=<bare>` and `OPENLLM_DEVICE_ANCHOR=<anchor>` to the
+ * runtime's env file (the daemon derives its pin from that line, never
+ * trust-on-first-use). ONLY the bare `sk-llm-<key>` is exported or ever used
+ * as a bearer; the anchor never enters process.env. Anchoring
  * also enables device sessions unless `--lock-device-sessions` is set.
  *
  * `--lock-device-sessions` makes the daemon refuse a REMOTE enable of device
@@ -29,7 +31,12 @@
 
 import { daemonPort, daemonReachable } from "./clients/gateway";
 import { daemonInvocation } from "./daemon-delegation";
-import { cliConfig } from "./env";
+import {
+  cliConfig,
+  DEVICE_ANCHOR_ENV,
+  envFileHasDeviceAnchor,
+  sharedFileConfig,
+} from "./env";
 import { defaultTerminal, saveEnvVars } from "./onboarding";
 import type { TCredentialGateTerminal } from "./runtime-contracts";
 import { splitAnchoredApiKey } from "./runtime-contracts";
@@ -42,8 +49,8 @@ With no key argument, the key is read from piped stdin, or prompted for
 it up. Get a key under Keys after signing in.
 
 A key from Manage device with Enable device sessions ends in a device
-trust anchor (sk-llm-KEY.ANCHOR). It is kept on this machine only; the
-bare key is what gets saved. Anchoring enables device sessions unless
+trust anchor (sk-llm-KEY.ANCHOR). It is kept on this machine only, as
+a separate line of the env file; the bare key is the bearer. Anchoring enables device sessions unless
 --lock-device-sessions is set.
 
   --lock-device-sessions
@@ -273,6 +280,16 @@ export const runLogin = async (
   }
 
   const vars: Record<string, string> = { OPENLLM_API_KEY: trimmed };
+  // `openllm daemon anchor` already wrote OPENLLM_DEVICE_ANCHOR beside the
+  // key. A bare login to a DIFFERENT key blanks the old anchor: its pair
+  // secret is bound to the old key id.
+  if (
+    split.anchor === null &&
+    envFileHasDeviceAnchor() &&
+    sharedFileConfig().OPENLLM_API_KEY?.trim() !== trimmed
+  ) {
+    vars[DEVICE_ANCHOR_ENV] = "";
+  }
   if (!saveEnvVars(vars)) {
     io.terminal.write("[openllm] Could not save the API key.\n");
     return 1;

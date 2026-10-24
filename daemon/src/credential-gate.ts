@@ -8,9 +8,11 @@ import {
   isUsableOpenllmApiKey,
   splitAnchoredApiKey,
 } from "@openllmsh/protocol";
-import { installDeviceAnchor } from "./device-anchor";
+import { decodeDeviceAnchor } from "@openllmsh/tunnel";
+import { invalidateDeviceAccessPin } from "./device-access-verify";
 import {
   applyPersistedApiKey,
+  DEVICE_ANCHOR_ENV,
   daemonEnv,
   envFilePath,
   envFileValue,
@@ -129,9 +131,25 @@ const defaultTerminal: TCredentialGateTerminal = {
   },
 };
 
-const persistServiceKey = (key: string, targetPath: string): boolean => {
-  if (!writeEnvFileVars({ OPENLLM_API_KEY: key }, targetPath)) return false;
+const persistServiceKey = (
+  key: string,
+  targetPath: string,
+  anchor?: string | null,
+): boolean => {
+  // A pasted key replaces the anchor line too: an anchored paste writes it,
+  // a bare one blanks a stale anchor (its pair secret was bound to the old
+  // key). `undefined` (an inherited key made durable) leaves it alone.
+  const vars: Record<string, string> = { OPENLLM_API_KEY: key };
+  if (typeof anchor === "string") vars[DEVICE_ANCHOR_ENV] = anchor;
+  else if (
+    anchor === null &&
+    (envFileValue(targetPath, DEVICE_ANCHOR_ENV)?.trim() ?? "") !== ""
+  ) {
+    vars[DEVICE_ANCHOR_ENV] = "";
+  }
+  if (!writeEnvFileVars(vars, targetPath)) return false;
   applyPersistedApiKey(key);
+  if (anchor !== undefined) invalidateDeviceAccessPin();
   return true;
 };
 
@@ -199,18 +217,17 @@ export const requireServiceApiKey = (
       terminal.write("The API key format is invalid. Please try again.\n");
       continue;
     }
-    // A key from "Set up device sessions" carries a device trust anchor: pin
-    // it locally; only the bare key is ever saved.
+    // A key from "Set up device sessions" carries a device trust anchor: it
+    // is saved as its own OPENLLM_DEVICE_ANCHOR line beside the bare key.
     if (split.anchor !== null) {
-      const anchored = installDeviceAnchor(`${split.key}.${split.anchor}`);
-      if (!anchored.ok) {
-        return {
-          ok: false,
-          message: "[openllm] Could not save the device trust anchor.\n",
-        };
+      const decoded = decodeDeviceAnchor(split.anchor);
+      if (decoded === null) {
+        terminal.write("The API key format is invalid. Please try again.\n");
+        continue;
       }
+      decoded.pairSecret.fill(0);
     }
-    if (!persistServiceKey(split.key, targetPath)) {
+    if (!persistServiceKey(split.key, targetPath, split.anchor)) {
       return { ok: false, message: "[openllm] Could not save the API key.\n" };
     }
     terminal.write(`Saved to ${targetPath}.\n`);

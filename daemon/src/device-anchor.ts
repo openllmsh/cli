@@ -3,10 +3,14 @@
  * (`@openllmsh/tunnel` `device-anchor.ts` owns the wire formats).
  *
  * - {@link installDeviceAnchor} — split `sk-llm-<id>.<secret>.<anchor>` on
- *   the last dot, pin the anchor's control key as an ANCHORED pin
- *   (`via: "anchor"`) and keep the anchor in `state.json` (0600). Called by
- *   `openllm daemon anchor` (install.sh, `openllm login`). The anchor is never
- *   written to `.env`, logged, or sent anywhere.
+ *   the last dot and write `OPENLLM_API_KEY=<bare>` plus
+ *   `OPENLLM_DEVICE_ANCHOR=<anchor>` to the runtime's env file (0600; `.env`,
+ *   or `.dev.env` in dev). Called by `openllm daemon anchor` (install.sh,
+ *   `openllm login`). Nothing about the anchor goes to `state.json`: the pin
+ *   (`via: "anchor"`) is DERIVED from the env file at every hydrate — see
+ *   `device-access-verify.ts`. The anchor never enters `process.env`, a child
+ *   env, a vendor config, a log, or the network. Re-running install/update
+ *   with a new anchor is the rotation path.
  * - {@link deviceDpkProof} — `HMAC-SHA256(pair_secret, label || key_id ||
  *   dpk)`, published in `DaemonStatus.device_sessions.dpk_proof` so any
  *   browser holding the control seed can trust this daemon's X25519 key.
@@ -32,11 +36,20 @@ import {
 import {
   deviceKeyFingerprint,
   getDeviceAccessPin,
+  invalidateDeviceAccessPin,
   isAgentEligiblePin,
-  setDeviceAccessPubkey,
   verifyDeviceGrantNode,
 } from "./device-access-verify";
-import { daemonApiKeyId, parseApiKeyId } from "./env";
+import {
+  applyPersistedApiKey,
+  DEVICE_ANCHOR_ENV,
+  daemonApiKeyId,
+  deviceAnchorFromEnvFile,
+  envFilePath,
+  envFileValue,
+  parseApiKeyId,
+  writeEnvFileVars,
+} from "./env";
 import { daemonPublicKey } from "./keypair";
 import type { TDeviceSessionsState } from "./state-file";
 import { mutateState, readState } from "./state-file";
@@ -65,9 +78,9 @@ export const deviceSessionsState = (): TDeviceSessionsState =>
   readState().deviceSessions ?? DEFAULT_SESSIONS;
 
 /**
- * Accept an anchored key. Pins the anchor's control key as a LOCAL root (it
- * replaces any pin — the user just pasted it) and stores the anchor bound to
- * its key id. Returns the bare key for the caller to save in `.env`.
+ * Accept an anchored key: write the bare key and the anchor as two lines of
+ * the runtime env file, then re-read the pin (derived from that file) to
+ * confirm it is the anchor's control key. Returns the bare key.
  */
 export const installDeviceAnchor = (
   anchoredKey: string,
@@ -80,22 +93,19 @@ export const installDeviceAnchor = (
   if (anchor === null || keyId === null) {
     return { ok: false, reason: "malformed" };
   }
-  const pinned = setDeviceAccessPubkey(anchor.controlPubkey, {
-    force: true,
-    localVia: "anchor",
-    kind: "control",
-    log: false,
-  });
   anchor.pairSecret.fill(0);
-  if (!pinned.ok) return { ok: false, reason: "persist_failed" };
-  const anchorText = split.anchor;
-  mutateState((s) => ({ ...s, deviceAnchor: { anchor: anchorText, keyId } }));
-  const back = readState();
   if (
-    back.deviceAnchor?.anchor !== anchorText ||
-    back.deviceAccessPubkey !== anchor.controlPubkey ||
-    back.deviceAccessPinAnchored !== true
+    !writeEnvFileVars(
+      { OPENLLM_API_KEY: split.key, [DEVICE_ANCHOR_ENV]: split.anchor },
+      envFilePath(),
+    )
   ) {
+    return { ok: false, reason: "persist_failed" };
+  }
+  applyPersistedApiKey(split.key);
+  invalidateDeviceAccessPin();
+  const pin = getDeviceAccessPin();
+  if (pin?.pubkey !== anchor.controlPubkey || pin.via !== "anchor") {
     return { ok: false, reason: "persist_failed" };
   }
   return {
@@ -121,18 +131,21 @@ export const computeDpkProofNode = (
   );
 
 /**
- * This daemon's dpk proof, or null when there is no anchor for the key it
- * runs on (a key swap without a fresh anchor leaves the device unproven).
+ * This daemon's dpk proof from the env file's anchor, or null when there is
+ * none. The pair secret is bound to the key id it was minted for, so a key
+ * swap without a fresh anchor yields a proof the browser rejects; install,
+ * login and the credential gate drop the anchor line when the key changes.
  */
 export const deviceDpkProof = (
   keyId: string | null = daemonApiKeyId(),
   dpk: string = daemonPublicKey(),
 ): string | null => {
-  const record = readState().deviceAnchor;
-  if (record === undefined || keyId === null || record.keyId !== keyId) {
-    return null;
-  }
-  const anchor = decodeDeviceAnchor(record.anchor);
+  const raw = deviceAnchorFromEnvFile();
+  if (raw === null || keyId === null) return null;
+  // The anchor is paired with the key on the line next to it.
+  const fileKey = envFileValue(envFilePath(), "OPENLLM_API_KEY");
+  if (fileKey === null || parseApiKeyId(fileKey.trim()) !== keyId) return null;
+  const anchor = decodeDeviceAnchor(raw);
   if (anchor === null) return null;
   try {
     return computeDpkProofNode(anchor.pairSecret, keyId, dpk);

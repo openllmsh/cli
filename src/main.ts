@@ -21,6 +21,10 @@ import { basename } from "node:path";
 import { printSelfVersion } from "./cli-version";
 import { daemonArgs } from "./daemon-argv";
 
+// The device trust anchor lives only in the env FILE; never let an exported
+// copy reach a child of either half (inline: `env.ts` is not imported here).
+delete process.env.OPENLLM_DEVICE_ANCHOR;
+
 const argv = process.argv.slice(2);
 const first = argv[0];
 

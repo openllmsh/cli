@@ -152,6 +152,26 @@ export const isDevMode = (): boolean => isOpenllmDevMode();
  * `OPENLLM_DAEMON_DEV` (mode), `OPENLLM_DAEMON_ENV_FILE` (path override), and
  * `OPENLLM_DAEMON_STATE_DIR` (state root).
  */
+/**
+ * The env-file line that holds the install-time device trust anchor
+ * (`OPENLLM_DEVICE_ANCHOR=<86 base64url chars>`), written beside the BARE
+ * `OPENLLM_API_KEY` by install.sh / `openllm login` / `openllm daemon anchor`.
+ * It is read from the runtime's env file only ({@link deviceAnchorFromEnvFile})
+ * and never enters `process.env`, so no child process, vendor config or log
+ * can pick it up. Must match `packages/cli/src/env.ts` (parity-tested).
+ */
+export const DEVICE_ANCHOR_ENV = "OPENLLM_DEVICE_ANCHOR";
+
+/**
+ * Drop an inherited `OPENLLM_DEVICE_ANCHOR` from `process.env` (systemd's
+ * `EnvironmentFile=` injects every line of the env file before exec, and a
+ * user may export it). Called on every env load, so it is gone before any
+ * child is spawned.
+ */
+export const scrubDeviceAnchorFromProcessEnv = (): void => {
+  delete process.env[DEVICE_ANCHOR_ENV];
+};
+
 const LOAD_ENV_FILE_NO_OVERRIDE_KEYS = new Set([
   "OPENLLM_DAEMON_DEV",
   "OPENLLM_DAEMON_ENV_FILE",
@@ -164,6 +184,9 @@ const LOAD_ENV_FILE_NO_OVERRIDE_KEYS = new Set([
  */
 function shouldWriteEnvVar(key: string, devMode: boolean): boolean {
   if (LOAD_ENV_FILE_NO_OVERRIDE_KEYS.has(key)) return false;
+  // The device trust anchor stays in the FILE: anything in process.env is
+  // inherited by every child (vendor CLIs, mcp, hooks, sandboxed tools).
+  if (key === DEVICE_ANCHOR_ENV) return false;
   if (!devMode) return process.env[key] === undefined;
   return true;
 }
@@ -286,6 +309,7 @@ const callerPortValue = (): string | undefined => {
  * when the file is missing. Synchronous (boot-time, before anything reads env).
  */
 export const loadEnvFile = (): void => {
+  scrubDeviceAnchorFromProcessEnv();
   const callerPort = callerPortValue();
   if (callerPort === undefined) delete process.env.OPENLLM_DAEMON_PORT;
   else process.env.OPENLLM_DAEMON_PORT = callerPort;
@@ -665,6 +689,18 @@ export const envFileValue = (
   } catch {
     return null;
   }
+};
+
+/**
+ * The device trust anchor from THIS runtime's env file (`.env`, or `.dev.env`
+ * in dev — {@link envFilePath}), or null when absent or blank. Read fresh on
+ * every call so an anchor written by another process (install.sh, `openllm
+ * login`) is seen on the next boot or bootstrap tick. Shape is validated by
+ * the caller (`decodeDeviceAnchor`).
+ */
+export const deviceAnchorFromEnvFile = (): string | null => {
+  const value = envFileValue(envFilePath(), DEVICE_ANCHOR_ENV)?.trim() ?? "";
+  return value.length > 0 ? value : null;
 };
 
 export const hasApiKey = (): boolean => daemonEnv().apiKey !== null;

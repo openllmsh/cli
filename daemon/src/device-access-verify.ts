@@ -10,8 +10,13 @@
  *
  * Pin rules ({@link TDeviceAccessVerify.setDeviceAccessPubkey}). A pin is
  * ANCHORED (agent-eligible) only when it comes from a local trust root:
- * - the install-time anchor (`sk-llm-<id>.<secret>.<anchor>`, split off by
- *   install.sh / `openllm login` — `via: "anchor"`, see `device-anchor.ts`);
+ * - the install-time anchor (`OPENLLM_DEVICE_ANCHOR` in the runtime's env
+ *   file, beside the bare key — `via: "anchor"`, see `device-anchor.ts`). It
+ *   is DERIVED on every hydrate (boot, and each bootstrap tick after
+ *   {@link invalidateDeviceAccessPin}), never stored in `state.json`, and it
+ *   wins over any persisted pin. A remote rotation cannot move it: the
+ *   rotation path for an anchored device is re-running install/update with
+ *   the new anchor;
  * - a local confirmation of an exact key (the desktop app over loopback, tests
  *   — `{ force: true }`) — `via: "local"`;
  * - a v2 rotation chain signed by the CURRENTLY pinned control key, starting
@@ -32,10 +37,12 @@ import {
   buildDeviceGrantMessage,
   DEVICE_CONTROL_ROTATION_CHAIN_MAX,
   DEVICE_GRANT_TS_WINDOW_MS,
+  decodeDeviceAnchor,
   decodeDeviceControlRotation,
   decodeDeviceGrant,
   formatKeyFingerprint,
 } from "@openllmsh/tunnel";
+import { deviceAnchorFromEnvFile } from "./env";
 import { daemonPublicKey } from "./keypair";
 import { logWarn, safeDiagnosticMessage } from "./logger";
 import type { TDeviceAccessPinVia } from "./state-file";
@@ -184,6 +191,22 @@ export type TDeviceAccessVerifyDeps = {
    * `openllm device enable|disable` reaches a running daemon).
    */
   readonly deviceSessionsEnabled?: () => boolean;
+  /**
+   * The control pubkey of the install anchor, or null when there is none.
+   * Defaults to {@link envAnchorControlPubkey} (the runtime env file's
+   * `OPENLLM_DEVICE_ANCHOR`).
+   */
+  readonly anchorControlPubkey?: () => string | null;
+};
+
+/** The control pubkey inside the env file's device anchor, or null. */
+export const envAnchorControlPubkey = (): string | null => {
+  const raw = deviceAnchorFromEnvFile();
+  if (raw === null) return null;
+  const anchor = decodeDeviceAnchor(raw);
+  if (anchor === null) return null;
+  anchor.pairSecret.fill(0);
+  return anchor.controlPubkey;
 };
 
 export type TDeviceAccessVerify = {
@@ -290,6 +313,7 @@ export const createDeviceAccessVerify = (
   const ownPublicKey = deps.ownPublicKey ?? ((): string => daemonPublicKey());
   const sessionsEnabled =
     deps.deviceSessionsEnabled ?? persistedDeviceSessionsEnabled;
+  const anchorPubkey = deps.anchorControlPubkey ?? envAnchorControlPubkey;
   /** Nonce LRU — expire after the grant ts window; hard-cap above. */
   const nonceOrder: string[] = [];
   const nonceSeen = new Map<string, number>();
@@ -297,12 +321,27 @@ export const createDeviceAccessVerify = (
   let pinned: TDeviceAccessPin | null | undefined;
   /** The on-disk pubkey this instance last read or wrote (CAS for persist). */
   let diskPubkey: string | null | undefined;
+  /** True while {@link pinned} came from the env-file anchor (not state.json). */
+  let pinFromEnvAnchor = false;
 
   const hydrate = (): TDeviceAccessPin | null => {
     if (pinned !== undefined) return pinned;
     const state = readState();
     const pubkey = state.deviceAccessPubkey;
     diskPubkey = pubkey ?? null;
+    // The env-file anchor is a local trust root and wins over state.json.
+    const fromAnchor = anchorPubkey();
+    pinFromEnvAnchor = fromAnchor !== null;
+    if (fromAnchor !== null) {
+      pinned = {
+        pubkey: fromAnchor,
+        kind: "control",
+        version: null,
+        via: "anchor",
+        anchored: true,
+      };
+      return pinned;
+    }
     pinned =
       typeof pubkey === "string"
         ? {
@@ -415,6 +454,7 @@ export const createDeviceAccessVerify = (
           anchored: true,
         };
         pinned = next;
+        pinFromEnvAnchor = false;
         if (persist) persistPin(next, true);
         return { ok: true, changed: true };
       }
@@ -448,6 +488,10 @@ export const createDeviceAccessVerify = (
         via: "tofu",
         anchored: false,
       };
+    } else if (pinFromEnvAnchor) {
+      // An env-file anchor is moved only by re-running install/update.
+      rotationAttempted = (options?.rotations?.length ?? 0) > 0;
+      next = undefined;
     } else if (prevPin.kind === "control" && options?.rotations !== undefined) {
       rotationAttempted = options.rotations.length > 0;
       const walked = walkDeviceControlRotations(
@@ -486,6 +530,8 @@ export const createDeviceAccessVerify = (
     }
 
     pinned = next;
+
+    pinFromEnvAnchor = false;
     // Prior-pin grants must not replay against the new pin.
     clearDeviceGrantNonces();
     if (persist) persistPin(next, local);

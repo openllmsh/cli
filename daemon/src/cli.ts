@@ -79,10 +79,10 @@ const DEVICE_USAGE =
 
 /**
  * `openllm daemon anchor` — read `sk-llm-<id>.<secret>.<anchor>` from stdin
- * (never argv, so it stays out of `ps`), pin the anchor's control key as an
- * anchored pin, keep the anchor in `state.json`, and print ONLY the bare key
- * on stdout for the caller to store in `.env`. Exit 2 on a malformed or
- * anchor-less key, 1 when the state write did not stick.
+ * (never argv, so it stays out of `ps`), write `OPENLLM_API_KEY=<bare>` and
+ * `OPENLLM_DEVICE_ANCHOR=<anchor>` to the runtime's env file (0600), confirm
+ * the derived pin, and print ONLY the bare key on stdout. Exit 2 on a
+ * malformed or anchor-less key, 1 when the env-file write did not stick.
  */
 const runAnchor = async (args: readonly string[]): Promise<number> => {
   if (args.length > 0) {
