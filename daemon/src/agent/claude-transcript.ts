@@ -905,6 +905,24 @@ export const createTranscriptParser = (
         return;
       }
     }
+    // A message delivered mid-turn (Claude's queue, or the web's Send now) is
+    // recorded as a `queued_command` attachment, not a user row: the model
+    // takes it up now, so it opens the next turn the way a prompt does.
+    if (
+      row.type === "attachment" &&
+      args.parentItemId === undefined &&
+      row.isSidechain !== true &&
+      isRecord(row.attachment) &&
+      row.attachment.type === "queued_command" &&
+      row.attachment.isMeta !== true
+    ) {
+      const raw = promptOf(row.attachment.prompt);
+      const prompt = raw === null ? "" : normalizeUserPromptText(raw);
+      if (prompt === "") return;
+      completeTurn();
+      openTurn(prompt, false);
+      return;
+    }
     const message = row.message;
     if (!isRecord(message)) return;
     let parent = args.parentItemId;

@@ -1420,6 +1420,10 @@ export const createClaudeTuiSession = (
       // tail keeps polling, and the transcript's end_turn normally lands the
       // final item and completes the turn. Stop is the fallback.
       if (parser.turnActive() && stopTimer === undefined) {
+        // Only the turn this Stop ended: by the grace deadline a queued
+        // prompt may already have opened the next one, and closing that
+        // hid its progress and its Stop button.
+        const stoppedTurn = parser.turnField().turn_id;
         stopTimer = setTimeout(() => {
           stopTimer = undefined;
           if (ended) return;
@@ -1428,7 +1432,7 @@ export const createClaudeTuiSession = (
           } catch (err) {
             logError("agent", err);
           }
-          parser.completeTurn();
+          if (parser.turnField().turn_id === stoppedTurn) parser.completeTurn();
         }, deps.stopGraceMs ?? STOP_GRACE_MS);
         stopTimer.unref?.();
       }
