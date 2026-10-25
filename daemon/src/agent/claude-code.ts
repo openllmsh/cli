@@ -1139,6 +1139,11 @@ export const createClaudeTuiSession = (
   /** A `/model` typed and not yet confirmed by the transcript. */
   let modelInFlight = false;
   /**
+   * `/model` is being typed and confirmed (its paste, Enter and the dialog's
+   * fallback Enter). A queued prompt pasted then would land in the same input.
+   */
+  let modelTyping = false;
+  /**
    * A web turn is running until Claude's Stop hook: the transcript's end_turn
    * lands while Stop hooks still run, and keys typed then are lost.
    */
@@ -1188,12 +1193,19 @@ export const createClaudeTuiSession = (
     pendingModel = null;
     // Claude's own slash command, typed like any prompt (PTY input only).
     modelInFlight = true;
+    modelTyping = true;
     writeText(`${PASTE_START}/model ${model}${PASTE_END}`);
     setTimeout(() => {
       if (!ended) writeText("\r");
     }, submitDelayMs);
     setTimeout(() => {
-      if (!ended && modelInFlight) writeText("\r");
+      if (ended) return;
+      if (modelInFlight) writeText("\r");
+      // The confirm window is over: queued prompts may go out after it.
+      setTimeout(() => {
+        modelTyping = false;
+        if (!ended) flushQueue();
+      }, submitDelayMs);
     }, deps.modelConfirmMs ?? MODEL_CONFIRM_MS);
   };
 
@@ -1548,7 +1560,16 @@ export const createClaudeTuiSession = (
       pendingLinkOpens.delete(options.sessionId);
   });
 
-  const startTurn = (input: TAgentSendInput): TAgentSendResult => {
+  /** Save a prompt's attachments and build the text to paste for it. */
+  const preparePrompt = (
+    input: TAgentSendInput,
+  ):
+    | {
+        readonly ok: true;
+        readonly text: string;
+        readonly written: TWrittenAgentAttachment[];
+      }
+    | Extract<TAgentSendResult, { readonly ok: false }> => {
     let written: TWrittenAgentAttachment[];
     try {
       written = writeAgentAttachments(
@@ -1571,6 +1592,12 @@ export const createClaudeTuiSession = (
     );
     if (text.trim() === "")
       return { ok: false, code: "empty_prompt", message: "nothing to send" };
+    return { ok: true, text, written };
+  };
+  const startTurn = (input: TAgentSendInput): TAgentSendResult => {
+    const prepared = preparePrompt(input);
+    if (!prepared.ok) return prepared;
+    const { text, written } = prepared;
     const turnId = parser.startTurn(
       input.prompt,
       written.map((entry) => entry.meta),
@@ -1614,7 +1641,7 @@ export const createClaudeTuiSession = (
   };
   /** The next queued prompt opens its turn once the session is idle again. */
   const flushQueue = (): void => {
-    if (ended || parser.turnActive() || awaitingStop) return;
+    if (ended || parser.turnActive() || awaitingStop || modelTyping) return;
     const next = promptQueue.shift();
     if (next === undefined) return;
     emitQueue();
@@ -1674,24 +1701,15 @@ export const createClaudeTuiSession = (
       emitQueue();
       whenReady(() => {
         for (const input of batch) {
-          let written: TWrittenAgentAttachment[];
-          try {
-            written = writeAgentAttachments(
-              attachmentsDir,
-              input.attachments,
-              attachmentCounter,
-            );
-          } catch (err) {
-            logError("agent", err);
-            written = [];
+          const prepared = preparePrompt(input);
+          if (!prepared.ok) {
+            emit({
+              type: "runtime.warning",
+              message: `A queued message wasn't sent: ${prepared.message}`,
+            });
+            continue;
           }
-          const text = pasteSafeText(
-            [input.prompt, ...written.map((entry) => `@${entry.path}`)]
-              .filter((part) => part.trim() !== "")
-              .join(input.prompt.includes("\n") ? "\n" : " "),
-          );
-          if (text.trim() === "") continue;
-          writeText(`${PASTE_START}${text}${PASTE_END}`);
+          writeText(`${PASTE_START}${prepared.text}${PASTE_END}`);
           writeText(QUEUE_SUBMIT);
         }
         setTimeout(() => {
