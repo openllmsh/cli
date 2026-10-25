@@ -559,6 +559,10 @@ export const killClaudeSessionHost = async (
   waitMs = 3_000,
 ): Promise<boolean> => {
   if (!SESSION_ID_PATTERN.test(sessionId)) return false;
+  // An open still spawning this session's host is not discoverable yet:
+  // wait for it (a closed session kills what it opened), or the host would
+  // start after the delete and write the transcript back.
+  await settleClaudeSessionOpen(sessionId);
   const find = async (): Promise<
     | Awaited<
         ReturnType<typeof defaultSessionHostClient.discoverSessionHosts>
@@ -583,6 +587,19 @@ export const killClaudeSessionHost = async (
   }
   link.release();
   return false;
+};
+
+/** Link opens in flight, per session id (a spawn takes a while to publish). */
+const pendingLinkOpens = new Map<string, Promise<void>>();
+
+/**
+ * Resolves once no link open is pending for `sessionId`. An open that a
+ * close / delete overtook has by then killed the host it started.
+ */
+export const settleClaudeSessionOpen = async (
+  sessionId: string,
+): Promise<void> => {
+  await pendingLinkOpens.get(sessionId);
 };
 
 // ─── hooks → sessions ──────────────────────────────────────────────────────
@@ -996,6 +1013,11 @@ export const createClaudeTuiSession = (
   const attachmentCounter = attachmentCounterOf(attachmentsDir);
   let link: TPtyLink | null = null;
   let ended = false;
+  /**
+   * How the session ended, for a link that opens after it did: close /
+   * delete kill the host it spawned or joined; release leaves it running.
+   */
+  let endIntent: "kill" | "release" = "release";
   let ready = false;
   /** Claude reported `SessionStart` (or any hook): the TUI is up. */
   let started = false;
@@ -1392,7 +1414,7 @@ export const createClaudeTuiSession = (
   } catch (err) {
     logError("agent", err);
   }
-  void openLink({
+  const opening = openLink({
     sessionId: options.sessionId,
     resume: options.resume,
     cwd: options.cwd,
@@ -1402,6 +1424,9 @@ export const createClaudeTuiSession = (
   })
     .then((opened) => {
       if (ended) {
+        // Closed / deleted while the host was still starting: nothing had a
+        // link to kill then, so kill it now rather than orphan a running TUI.
+        if (endIntent === "kill") opened?.kill();
         opened?.release();
         return;
       }
@@ -1450,6 +1475,11 @@ export const createClaudeTuiSession = (
       logError("agent", err);
       finish("error");
     });
+  pendingLinkOpens.set(options.sessionId, opening);
+  void opening.finally(() => {
+    if (pendingLinkOpens.get(options.sessionId) === opening)
+      pendingLinkOpens.delete(options.sessionId);
+  });
 
   return {
     send: (input): TAgentSendResult => {
@@ -1665,6 +1695,7 @@ export const createClaudeTuiSession = (
     },
     close: (reason) => {
       if (ended) return;
+      endIntent = "kill";
       const current = link;
       link = null;
       current?.kill();

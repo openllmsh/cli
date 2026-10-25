@@ -61,6 +61,14 @@ type TSpawnSessionHostProcFn = (
   args: TSpawnSessionHostProc,
 ) => Promise<string | null>;
 
+/** A detached host process just launched (only its kill is needed). */
+export type TSpawnedHostProcess = { readonly kill: () => void };
+
+/** Launch the detached host process; throws when it cannot start. */
+export type TSpawnHostProcess = (
+  argv: readonly string[],
+) => TSpawnedHostProcess;
+
 export type TSessionHostClientDeps = {
   readonly discoveryTimeoutMs?: number;
   readonly processIdentityTimeoutMs?: number;
@@ -68,6 +76,8 @@ export type TSessionHostClientDeps = {
   readonly spawnSocketTimeoutMs?: number;
   readonly readProcessIdentity?: TProcessIdentityReader;
   readonly spawnSessionHostProc?: TSpawnSessionHostProcFn;
+  /** The detached launch itself (tests); defaults to `Bun.spawn`. */
+  readonly spawnHostProcess?: TSpawnHostProcess;
 };
 
 export type TSessionHostClient = {
@@ -214,6 +224,15 @@ const daemonBinary = (): readonly string[] => {
   return daemonSelfInvocation();
 };
 
+const spawnHostProcessDefault: TSpawnHostProcess = (argv) => {
+  const proc = Bun.spawn([...argv], {
+    detached: true,
+    stdio: ["ignore", "ignore", "ignore"],
+  });
+  proc.unref();
+  return proc;
+};
+
 const buildSessionHostClient = (
   deps: TSessionHostClientDeps = {},
 ): TSessionHostClient => {
@@ -227,6 +246,7 @@ const buildSessionHostClient = (
   const processIdentityReader =
     deps.readProcessIdentity ?? defaultProcessIdentity;
   const spawnOverride = deps.spawnSessionHostProc;
+  const spawnHostProcess = deps.spawnHostProcess ?? spawnHostProcessDefault;
 
   type TProbeWaiter = {
     granted: boolean;
@@ -462,16 +482,23 @@ const buildSessionHostClient = (
       "--rows",
       String(args.rows),
     ];
+    let proc: TSpawnedHostProcess;
     try {
-      const proc = Bun.spawn([...daemonBinary(), ...argv], {
-        detached: true,
-        stdio: ["ignore", "ignore", "ignore"],
-      });
-      proc.unref();
+      proc = spawnHostProcess([...daemonBinary(), ...argv]);
     } catch {
       return null;
     }
-    return waitForSessionHostSocket(args.id);
+    const socketPath = await waitForSessionHostSocket(args.id);
+    if (socketPath === null) {
+      // Never published in time: the caller reports the spawn as failed, so
+      // stop the detached host rather than leave an unowned TUI running.
+      try {
+        proc.kill();
+      } catch {
+        // Already gone.
+      }
+    }
+    return socketPath;
   };
 
   /** Spawn a detached sibling session host and wait for its private control socket. */
