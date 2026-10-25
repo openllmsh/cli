@@ -958,6 +958,30 @@ export const reapOrphanAgentAttachments = (
 const PASTE_START = "\x1b[200~";
 const PASTE_END = "\x1b[201~";
 const ESC = "\x1b";
+/** Not a C0 control (tab and newline aside), DEL, or a C1 control. */
+const isPasteSafe = (code: number): boolean =>
+  code === 0x09 ||
+  code === 0x0a ||
+  (code >= 0x20 && code < 0x7f) ||
+  code > 0x9f;
+
+/**
+ * Prompt text safe to bracketed-paste into the TUI. A web prompt is typed into
+ * a terminal: an ESC in it could end the paste (`ESC[201~`) and turn the rest
+ * into keystrokes (`ESC[Z` toggles the permission mode, CR submits). Only tab
+ * and newline survive among the controls; CR / CRLF become newlines.
+ */
+export const pasteSafeText = (text: string): string => {
+  const normalized = text.replace(/\r\n?/g, "\n");
+  let out = "";
+  let start = 0;
+  for (let i = 0; i < normalized.length; i += 1) {
+    if (isPasteSafe(normalized.charCodeAt(i))) continue;
+    out += normalized.slice(start, i);
+    start = i + 1;
+  }
+  return out + normalized.slice(start);
+};
 const ANSI = new RegExp(
   `${ESC}\\[[0-9;?]*[ -/]*[@-~]|${ESC}\\][^\u0007]*\u0007|${ESC}[()][A-Za-z0-9]`,
   "g",
@@ -1530,9 +1554,11 @@ export const createClaudeTuiSession = (
           message: "an attachment could not be saved on this device",
         };
       }
-      const text = [input.prompt, ...written.map((entry) => `@${entry.path}`)]
-        .filter((part) => part.trim() !== "")
-        .join(input.prompt.includes("\n") ? "\n" : " ");
+      const text = pasteSafeText(
+        [input.prompt, ...written.map((entry) => `@${entry.path}`)]
+          .filter((part) => part.trim() !== "")
+          .join(input.prompt.includes("\n") ? "\n" : " "),
+      );
       if (text.trim() === "")
         return { ok: false, code: "empty_prompt", message: "nothing to send" };
       const turnId = parser.startTurn(

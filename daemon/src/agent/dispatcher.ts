@@ -22,6 +22,7 @@ import type {
 } from "@openllmsh/protocol";
 import {
   AGENT_SESSION_ID_PATTERN,
+  AGENT_SWITCH_MODEL_PATTERN,
   encodeAgentLine,
   parseAgentEvent,
   SESSION_ID_PATTERN,
@@ -498,6 +499,22 @@ export const createAgentDispatcher = (
                 null,
                 "invalid_cwd",
                 "cwd must be an existing absolute directory.",
+                commandId,
+              );
+              return;
+            }
+            // The model becomes the engine's `--model` argument: hold it to
+            // the same ids `set_model` accepts (no leading `-`, no spaces or
+            // control characters).
+            if (
+              command.model !== undefined &&
+              !AGENT_SWITCH_MODEL_PATTERN.test(command.model)
+            ) {
+              error(
+                state,
+                null,
+                "invalid_model",
+                "invalid model id",
                 commandId,
               );
               return;
