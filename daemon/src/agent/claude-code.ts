@@ -1419,7 +1419,10 @@ export const createClaudeTuiSession = (
       // Never block the hook (Claude flushes the transcript after it): the
       // tail keeps polling, and the transcript's end_turn normally lands the
       // final item and completes the turn. Stop is the fallback.
-      if (parser.turnActive() && stopTimer === undefined) {
+      if (parser.turnActive()) {
+        // One fallback per stopped turn: a newer Stop re-arms it for its own
+        // turn (the older timer would skip it, as its id no longer matches).
+        if (stopTimer !== undefined) clearTimeout(stopTimer);
         // Only the turn this Stop ended: by the grace deadline a queued
         // prompt may already have opened the next one, and closing that
         // hid its progress and its Stop button.
