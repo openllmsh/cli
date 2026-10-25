@@ -24,7 +24,11 @@ import type {
   TAgentEvent,
   TAgentItem,
 } from "@openllmsh/protocol";
-import { normalizeUserPromptText } from "@openllmsh/protocol";
+import {
+  AGENT_DETAIL_TEXT_MAX_LENGTH,
+  AGENT_TOOL_NAME_MAX_LENGTH,
+  normalizeUserPromptText,
+} from "@openllmsh/protocol";
 import { claudeConfigDir } from "../local-sessions/paths";
 
 /** Bytes read per poll at most (a burst is drained over several polls). */
@@ -214,6 +218,16 @@ const num = (value: unknown): number =>
 
 const clip = (text: string, max: number): string =>
   text.length <= max ? text : `${text.slice(0, max - 1)}…`;
+
+/**
+ * A tool name as the schema accepts it (1..{@link AGENT_TOOL_NAME_MAX_LENGTH}):
+ * an MCP tool's name can run longer, and an event with an over-long or empty
+ * one would fail to decode and be dropped by every consumer.
+ */
+export const toolNameOf = (value: unknown): string => {
+  const name = typeof value === "string" ? value.trim() : "";
+  return name === "" ? "tool" : clip(name, AGENT_TOOL_NAME_MAX_LENGTH);
+};
 
 /** Flatten a `tool_result` content (string or blocks) to text. */
 export const toolResultText = (content: unknown): string => {
@@ -442,7 +456,9 @@ export const createTranscriptParser = (
       {
         kind: "notice",
         notice: kind,
-        ...(text === undefined ? {} : { text: clip(text, 16 * 1024) }),
+        ...(text === undefined
+          ? {}
+          : { text: clip(text, AGENT_DETAIL_TEXT_MAX_LENGTH) }),
       },
       args.parentItemId,
     );
@@ -736,7 +752,7 @@ export const createTranscriptParser = (
             item("item.completed", id, { kind: "reasoning", text }, parent);
         } else if (block.type === "tool_use") {
           const toolId = str(block.id) ?? id;
-          const toolName = str(block.name) ?? "tool";
+          const toolName = toolNameOf(block.name);
           tools.set(toolId, {
             toolName,
             input: block.input,

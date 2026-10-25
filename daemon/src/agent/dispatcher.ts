@@ -23,6 +23,7 @@ import type {
 import {
   AGENT_SESSION_ID_PATTERN,
   encodeAgentLine,
+  parseAgentEvent,
   SESSION_ID_PATTERN,
 } from "@openllmsh/protocol";
 import { logError, logInfo } from "../logger";
@@ -133,10 +134,53 @@ const shrinkItem = (item: TAgentItem): TAgentItem => {
 };
 
 /**
+ * A `runtime.warning` standing in for an event that cannot be delivered. It
+ * keeps the event's framing (session, seq, time, command id), so a command
+ * waiting on that event is still answered.
+ */
+const undeliverable = (
+  event: TAgentEvent,
+  code: string,
+  message: string,
+): TAgentEvent => ({
+  type: "runtime.warning",
+  code,
+  message,
+  ...(event.session_id === undefined ? {} : { session_id: event.session_id }),
+  ...(event.seq === undefined ? {} : { seq: event.seq }),
+  ...(event.at === undefined ? {} : { at: event.at }),
+  ...(event.command_id === undefined ? {} : { command_id: event.command_id }),
+});
+
+/**
  * The event, or a truncated copy that fits {@link encodeAgentLine}'s bound,
- * or a `runtime.warning` standing in for it when nothing fits.
+ * or a `runtime.warning` standing in for it when nothing fits — or when it
+ * would not decode on the consumer (which drops such an event silently: an
+ * approval would just never show).
  */
 export const fitAgentEvent = (event: TAgentEvent): TAgentEvent => {
+  const fitted = fitAgentEventSize(event);
+  if (fitted === null)
+    return undeliverable(
+      event,
+      "event_too_large",
+      `An ${event.type} event was too large to deliver.`,
+    );
+  if (parseAgentEvent(fitted) === null) {
+    logInfo("agent", "dropping an agent event the protocol rejects", {
+      type: event.type,
+    });
+    return undeliverable(
+      event,
+      "invalid_event",
+      `An ${event.type} event did not match the agent protocol.`,
+    );
+  }
+  return fitted;
+};
+
+/** The event, or a truncated copy within the line bound, or null. */
+const fitAgentEventSize = (event: TAgentEvent): TAgentEvent | null => {
   if (encodeAgentLine(event) !== null) return event;
   let shrunk: TAgentEvent = event;
   if (
@@ -151,15 +195,7 @@ export const fitAgentEvent = (event: TAgentEvent): TAgentEvent => {
     const { input: _input, ...rest } = event;
     shrunk = rest;
   }
-  if (encodeAgentLine(shrunk) !== null) return shrunk;
-  return {
-    type: "runtime.warning",
-    code: "event_too_large",
-    message: `An ${event.type} event was too large to deliver.`,
-    ...(event.session_id === undefined ? {} : { session_id: event.session_id }),
-    ...(event.seq === undefined ? {} : { seq: event.seq }),
-    ...(event.at === undefined ? {} : { at: event.at }),
-  };
+  return encodeAgentLine(shrunk) === null ? null : shrunk;
 };
 
 /**

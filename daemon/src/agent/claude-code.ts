@@ -51,9 +51,11 @@ import type {
   TAgentUserInputQuestion,
 } from "@openllmsh/protocol";
 import {
+  AGENT_DETAIL_TEXT_MAX_LENGTH,
   AGENT_MAX_ATTACHMENT_BASE64_LENGTH,
   AGENT_MAX_ATTACHMENT_BYTES,
   AGENT_MAX_LINE_BYTES,
+  AGENT_SHORT_TEXT_MAX_LENGTH,
   AGENT_SWITCH_MODEL_PATTERN,
   SESSION_ID_PATTERN,
 } from "@openllmsh/protocol";
@@ -74,6 +76,7 @@ import {
   findClaudeTranscript,
   LOCAL_COMMAND_STOP_REASON,
   SUBAGENT_TOOL_NAMES,
+  toolNameOf,
 } from "./claude-transcript";
 import { historyCursorOf, latestReplayWindow } from "./history-window";
 import type {
@@ -134,8 +137,8 @@ const REPLAY_MAX_EVENTS = 1_500;
 const DRAIN_MAX_CHUNKS = 512;
 const TRANSCRIPT_POLL_MS = 250;
 
-const DETAIL_MAX = 16 * 1024;
-const SHORT_MAX = 256;
+const DETAIL_MAX = AGENT_DETAIL_TEXT_MAX_LENGTH;
+const SHORT_MAX = AGENT_SHORT_TEXT_MAX_LENGTH;
 
 const clip = (text: string, max: number): string =>
   text.length <= max ? text : `${text.slice(0, max - 1)}…`;
@@ -252,6 +255,15 @@ export const claudeAnswersInputOf = (
   ...(isRecord(input) ? input : {}),
   answers: claudeAnswersOf(input, answers),
 });
+
+/** An approval's title: the tool and what it acts on, within the schema cap. */
+export const requestTitleOf = (toolName: string, input: unknown): string => {
+  const title = toolTitleOf(toolName, input);
+  return clip(
+    title === undefined ? toolName : `${toolName}: ${title}`,
+    SHORT_MAX,
+  );
+};
 
 export { requestDetailOf, toolTitleOf };
 
@@ -1365,7 +1377,7 @@ export const createClaudeTuiSession = (
     }
     if (event !== "PermissionRequest") return null;
     if (options.observed !== undefined && !options.observed()) return null;
-    const toolName = str(payload.tool_name) ?? "tool";
+    const toolName = toolNameOf(payload.tool_name);
     const input = payload.tool_input;
     requestCounter += 1;
     const requestId = `r${requestCounter}`;
@@ -1386,13 +1398,12 @@ export const createClaudeTuiSession = (
         return;
       }
       pending.set(requestId, { kind: "approval", toolName, input, resolve });
-      const title = toolTitleOf(toolName, input);
       emit({
         type: "request.opened",
         request_id: requestId,
         ...parser.turnField(),
         request_kind: requestKindOfTool(toolName),
-        title: title === undefined ? toolName : `${toolName}: ${title}`,
+        title: requestTitleOf(toolName, input),
         detail: requestDetailOf(toolName, input),
         input,
       });
