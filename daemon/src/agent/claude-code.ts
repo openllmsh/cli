@@ -1605,7 +1605,11 @@ export const createClaudeTuiSession = (
   const emitQueue = (): void => {
     emit({
       type: "queue.updated",
-      prompts: promptQueue.map((input) => input.prompt),
+      // Clipped: the strip shows one line each, and the whole queue rides
+      // every event (and the replay log), so full prompts would not fit.
+      prompts: promptQueue.map((input) =>
+        input.prompt.slice(0, AGENT_SHORT_TEXT_MAX_LENGTH),
+      ),
     });
   };
   /** The next queued prompt opens its turn once the session is idle again. */
@@ -1657,7 +1661,9 @@ export const createClaudeTuiSession = (
     },
     sendNow: (): boolean => {
       if (ended || promptQueue.length === 0) return false;
-      if (!parser.turnActive() && !awaitingStop) {
+      // No turn running: the normal flush, which waits out the Stop settle
+      // (keys typed while Stop hooks run are dropped).
+      if (!parser.turnActive()) {
         flushQueue();
         return true;
       }
