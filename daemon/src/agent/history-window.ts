@@ -13,7 +13,9 @@ import {
 } from "@openllmsh/protocol";
 
 /** Attach replays at most this many of the latest turns… */
-export const AGENT_REPLAY_WINDOW_TURNS = 30;
+// A few screens: enough to see where the conversation is; scrolling up pages
+// in the rest (`history_get`).
+export const AGENT_REPLAY_WINDOW_TURNS = 5;
 /** …and this many events… */
 export const AGENT_REPLAY_WINDOW_EVENTS = 1_000;
 /** …and this many encoded bytes, whichever comes first (turn boundary). */
