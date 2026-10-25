@@ -33,6 +33,7 @@ import {
   serveStream,
 } from "@openllmsh/tunnel/streams";
 import {
+  AGENT_PIN_REFUSALS,
   agentSessionRefusal,
   enforceSeedGate,
   getDeviceAccessPubkey,
@@ -779,25 +780,57 @@ export const serveMuxOnStream = createMuxOnStream({
  * channel; the open is never refused for it. Shared by fresh opens AND
  * rebinds.
  */
-const seedGateOf = (frame: {
-  readonly channel_id: string;
-  readonly grant?: string;
-  readonly consumer?: "browser" | "daemon";
-}): boolean => {
-  if (frame.consumer === "daemon") return false;
-  const gate = enforceSeedGate(frame.grant, {
+/**
+ * Strict-gate refusals that still leave a valid grant usable for the
+ * tunnel/realtime kinds — the same set the RTC offer gate degrades on
+ * (`rtc-host.ts`). They fail before the grant's nonce is spent.
+ */
+const MUX_TUNNEL_ONLY_REASONS: ReadonlySet<string> = new Set([
+  "dpk_missing",
+  ...AGENT_PIN_REFUSALS,
+]);
+
+/** `ok` = agent-eligible; `tunnel_only` = valid grant, agent refused. */
+type TSeedGateOutcome = "ok" | "tunnel_only" | "reject";
+
+/**
+ * The strict (agent-eligible) gate. With `allowTunnelOnly`, a grant refused
+ * only for a tunnel-only reason is re-checked without the agent requirements;
+ * that second check spends the grant's nonce, so only a rebind asks for it.
+ */
+const seedGateOutcomeOf = (
+  frame: {
+    readonly channel_id: string;
+    readonly grant?: string;
+    readonly consumer?: "browser" | "daemon";
+  },
+  allowTunnelOnly: boolean,
+): TSeedGateOutcome => {
+  if (frame.consumer === "daemon") return "reject";
+  const expect = {
     keyId: daemonApiKeyId(),
     cid: frame.channel_id,
     aud: daemonPublicKey(),
-    requireDpk: true,
-  });
-  if (gate.mode !== "reject") return true;
+  };
+  const gate = enforceSeedGate(frame.grant, { ...expect, requireDpk: true });
+  if (gate.mode !== "reject") return "ok";
   logInfo("mux-host", "channel_open not seed-gated (agent refused)", {
     channelId: frame.channel_id,
     reason: gate.reason,
   });
-  return false;
+  if (!allowTunnelOnly || !MUX_TUNNEL_ONLY_REASONS.has(gate.reason)) {
+    return "reject";
+  }
+  return enforceSeedGate(frame.grant, expect).mode === "ok"
+    ? "tunnel_only"
+    : "reject";
 };
+
+const seedGateOf = (frame: {
+  readonly channel_id: string;
+  readonly grant?: string;
+  readonly consumer?: "browser" | "daemon";
+}): boolean => seedGateOutcomeOf(frame, false) === "ok";
 
 /** Accept the relay-authorized channel. `mux2` allows several concurrent. */
 export const acceptChannel = (frame: {
@@ -856,8 +889,13 @@ export const acceptChannel = (frame: {
     // re-ack so the peer's open settles. The rebind re-evaluates the seed gate.
     // A grant-less consumer must not inherit a gated channel's live agent
     // streams: refuse the downgrade, leave the incumbent alone.
-    const gated = seedGateOf(frame);
-    if (existing.seedGated && !gated) {
+    // Losing the local device anchor turns agent sessions off but does not
+    // invalidate a control-signed browser grant for the tunnel/realtime kinds,
+    // so a tunnel-only refusal still authorizes this rebind. The channel is
+    // then left un-gated below, which keeps agent streams refused.
+    const outcome = seedGateOutcomeOf(frame, existing.seedGated);
+    const gated = outcome === "ok";
+    if (existing.seedGated && outcome === "reject") {
       send({
         type: "channel_open_ack",
         channel_id: frame.channel_id,
