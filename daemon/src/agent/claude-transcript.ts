@@ -716,6 +716,12 @@ export const createTranscriptParser = (
     parent: string | undefined,
   ): void => {
     const content = message.content;
+    // The main agent speaking with no turn open is a turn the transcript
+    // never announced: Claude woke itself (a background subagent finished, a
+    // task notification) after its last end_turn. Open one, or its work runs
+    // with no running state — and no Stop button — in the web.
+    if (parent === undefined && turn === null && row.isApiErrorMessage !== true)
+      openTurn(undefined, false);
     const base = str(row.uuid) ?? str(message.id) ?? `m${turnCounter}`;
     if (parent === undefined && turn !== null) {
       turn.modelRun = true;
