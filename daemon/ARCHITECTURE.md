@@ -938,7 +938,11 @@ adapter (`claude-code`, …) emits the same event stream to a unified UI rendere
 by the client. The engine runs with its normal permission model (approvals
 surfaced as events; skip-permissions is a per-session opt-in), not an extra
 sandbox layer. Attach via `--resume <id>` where the engine supports resume;
-spawn and attach both go through the same engine adapter. See the
+spawn and attach both go through the same engine adapter. Attachments a `send`
+carries are written to the session's own `~/.openllm/agent-attachments/<id>/`
+(0700, files 0600), never inside the host's `sessions/<id>/` registry dir (the
+host removes that on exit and refuses to start over an existing one);
+`delete_session` removes them with the transcript. See the
 [agent sessions plan](../../docs/plan/2026-10-23-agent-sessions-replace-remote-pty.md).
 
 ## Localhost surfaces and provider auth

@@ -15,7 +15,9 @@
  * turn state never come from the screen.
  *   - input: prompts are bracketed-pasted into the PTY then submitted with CR,
  *     exactly like a keystroke; interrupt is Esc; attachments are written to
- *     the host's 0700 session dir and referenced as `@<path>`;
+ *     the session's own 0700 `agent-attachments/<id>/` dir (outside the
+ *     host's registry dir, which the host removes on exit) and referenced
+ *     as `@<path>`;
  *   - output: structured items come from Claude's own transcript
  *     (`~/.claude/projects/<slug>/<id>.jsonl`, appended per message), tailed;
  *   - readiness, busy/idle + approvals: Claude hooks (`openllm exec agent
@@ -630,12 +632,18 @@ export const handleAgentHook = async (
 
 // ─── attachments ─────────────────────────────────────────────────────────
 
-/** The per-session attachment dir (inside the host's 0700 session dir). */
-export const agentAttachmentsDir = (sessionId: string): string =>
-  join(stateDir(), "sessions", sessionId, "attachments");
+/**
+ * Parent of every per-session attachments dir. Deliberately NOT the
+ * session-host registry (`sessions/<id>/`): a host removes its dir when it
+ * exits, discovery deletes any dir there without a `meta.json`, and a host
+ * refuses to start when its dir already exists.
+ */
+export const agentAttachmentsRoot = (): string =>
+  join(stateDir(), "agent-attachments");
 
-/** Parent of every per-session attachments dir. */
-export const agentSessionsDir = (): string => join(stateDir(), "sessions");
+/** One session's attachments dir (0700, files 0600). */
+export const agentAttachmentsDir = (sessionId: string): string =>
+  join(agentAttachmentsRoot(), sessionId);
 
 /** A filename safe to place in the attachment dir and to `@`-reference. */
 export const sanitizeAttachmentName = (name: string | undefined): string => {
@@ -706,6 +714,7 @@ export const writeAgentAttachments = (
 
 /** Delete one session's attachments dir (history delete / kill path). */
 export const deleteAgentAttachments = (sessionId: string): void => {
+  if (!SESSION_ID_PATTERN.test(sessionId)) return;
   try {
     rmSync(agentAttachmentsDir(sessionId), { recursive: true, force: true });
   } catch {
@@ -900,12 +909,12 @@ export const chunkAgentAttachment = (
  */
 export const reapOrphanAgentAttachments = (
   options: {
-    readonly sessionsDir?: string;
+    readonly attachmentsRoot?: string;
     readonly liveSessionIds?: ReadonlySet<string>;
     readonly transcriptExists?: (sessionId: string) => boolean;
   } = {},
 ): readonly string[] => {
-  const root = options.sessionsDir ?? agentSessionsDir();
+  const root = options.attachmentsRoot ?? agentAttachmentsRoot();
   const live = options.liveSessionIds ?? new Set<string>();
   const transcriptExists =
     options.transcriptExists ??
@@ -918,8 +927,8 @@ export const reapOrphanAgentAttachments = (
   }
   const deleted: string[] = [];
   for (const sessionId of entries) {
-    if (live.has(sessionId)) continue;
-    const attachments = join(root, sessionId, "attachments");
+    if (live.has(sessionId) || !SESSION_ID_PATTERN.test(sessionId)) continue;
+    const attachments = join(root, sessionId);
     if (!existsSync(attachments)) continue;
     if (transcriptExists(sessionId)) continue;
     try {
