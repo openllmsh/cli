@@ -247,8 +247,15 @@ export const readClaudeHistory = (
       const facts =
         transcript === null ? null : readTranscriptFacts(transcript, id);
       const promptTitle = pickPromptTitle(agg.prompts);
-      // Only slash commands and nothing on disk: not a conversation.
-      if (facts === null && promptTitle === null) continue;
+      // Only slash commands and nothing on disk: not a conversation. A
+      // metadata-only scan deliberately skips the disk check, though: resume
+      // needs the cwd even when a transcript supplied the only usable title.
+      if (
+        facts === null &&
+        promptTitle === null &&
+        options.skipTranscripts !== true
+      )
+        continue;
       const title =
         facts?.title !== null && facts?.title !== undefined
           ? truncate(facts.title)
