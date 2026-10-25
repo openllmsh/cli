@@ -33,6 +33,7 @@
  * along a signed rotation chain or a local root.
  */
 import { createHash, createPublicKey, verify as nodeVerify } from "node:crypto";
+import type { TDeviceGrantUse } from "@openllmsh/tunnel";
 import {
   buildDeviceControlRotationMessage,
   buildDeviceGrantMessage,
@@ -71,7 +72,7 @@ export type TSetDeviceAccessPubkeyResult =
   | { readonly ok: true; readonly changed: boolean }
   | {
       readonly ok: false;
-      readonly reason: "tofu_mismatch" | "bad_rotation";
+      readonly reason: "tofu_mismatch" | "bad_rotation" | "anchor_mismatch";
     };
 
 /** The pinned key plus how it got there. */
@@ -142,6 +143,21 @@ export type TSetDeviceAccessPubkeyOptions = {
 };
 
 export type TCheckDeviceGrantExpect = {
+  /**
+   * The purpose this check admits. A grant that names another `use` is
+   * refused (`use_mismatch`), and a `dpk` grant that names none is refused
+   * (`use_missing`): the relay sees every `channel_open` grant in plaintext,
+   * so one must never pass as an RTC offer's or a Noise handshake's grant.
+   */
+  readonly use: TDeviceGrantUse;
+  /**
+   * The channel binding a `use` that has one must carry: the offer's sealed
+   * DTLS fingerprint (`rtc`) or the initiator's Noise static key (`noise`).
+   * A grant whose `bind` differs, or that carries one where none is
+   * expected, is refused (`bind_mismatch`). Legacy grants (no `use`) carry
+   * no binding and are never agent-eligible.
+   */
+  readonly bind?: string;
   readonly keyId: string;
   readonly cid: string;
   /**
@@ -168,6 +184,10 @@ export type TEnforceSeedGateResult =
   | { readonly mode: "ok" };
 
 export type TEnforceSeedGateExpect = {
+  /** See {@link TCheckDeviceGrantExpect.use}. */
+  readonly use: TDeviceGrantUse;
+  /** See {@link TCheckDeviceGrantExpect.bind}. */
+  readonly bind?: string;
   readonly keyId: string | null;
   readonly cid: string;
   readonly aud: string;
@@ -426,6 +446,25 @@ export const createDeviceAccessVerify = (
     // desktop app over loopback, tests).
     const local = options?.force === true;
     const localVia: TDeviceAccessPinVia = options?.localVia ?? "local";
+    // The env-file anchor is the one local trust root while it is present:
+    // a local confirmation naming any other key (the loopback
+    // `/local/device-control`) would be a second source of truth that
+    // outranks the anchor until the next hydrate.
+    const envAnchor = local ? anchorPubkey() : null;
+    if (envAnchor !== null && pubkey !== envAnchor) {
+      if (log) {
+        logWarn(
+          "device-access",
+          safeDiagnosticMessage`device_access_pubkey pin rejected`,
+          {
+            previous: prevPin === null ? "null" : prevPin.kind,
+            next: pubkey === null ? "null" : "control",
+            reason: "anchor_mismatch",
+          },
+        );
+      }
+      return { ok: false, reason: "anchor_mismatch" };
+    }
 
     if (prev === pubkey) {
       // A local confirmation of the key already pinned anchors it. The cloud
@@ -543,8 +582,12 @@ export const createDeviceAccessVerify = (
     // alone is not enough (desktop disable blanks the env line). The retired
     // `device_sessions_disabled` code stays in the closed vocabulary for older
     // peers decoding a nack, but this daemon never emits it.
-    if (anchorPubkey() === null) return "device_not_anchored";
-    if (!isAgentEligiblePin(hydrate())) return "device_not_anchored";
+    const anchored = anchorPubkey();
+    if (anchored === null) return "device_not_anchored";
+    const pin = hydrate();
+    if (!isAgentEligiblePin(pin)) return "device_not_anchored";
+    // Grants verify against the live pin, so it must BE the anchor's key.
+    if (pin?.pubkey !== anchored) return "device_not_anchored";
     return null;
   };
 
@@ -649,6 +692,23 @@ export const createDeviceAccessVerify = (
     } else if (envelope.dpk !== ownPublicKey()) {
       return { ok: false, reason: "dpk_mismatch" };
     }
+    // Purpose and channel binding. Every `dpk` grant names its use; a legacy
+    // (use-less) grant has no `dpk`, so `requireDpk` already refused it.
+    if (envelope.use === undefined) {
+      if (envelope.dpk !== undefined) {
+        return { ok: false, reason: "use_missing" };
+      }
+      if (envelope.bind !== undefined) {
+        return { ok: false, reason: "bind_mismatch" };
+      }
+    } else {
+      if (envelope.use !== expect.use) {
+        return { ok: false, reason: "use_mismatch" };
+      }
+      if (envelope.bind !== expect.bind) {
+        return { ok: false, reason: "bind_mismatch" };
+      }
+    }
     // Nonce check AFTER identity checks so a wrong-key/cid grant cannot
     // burn a legitimate nonce the browser may still retry with. Only
     // remember the nonce once the signature also verifies.
@@ -664,6 +724,8 @@ export const createDeviceAccessVerify = (
       cid: envelope.cid,
       aud: envelope.aud,
       ...(envelope.dpk === undefined ? {} : { dpk: envelope.dpk }),
+      ...(envelope.use === undefined ? {} : { use: envelope.use }),
+      ...(envelope.bind === undefined ? {} : { bind: envelope.bind }),
     });
     if (!verifyDeviceGrantNode(pin.pubkey, msg, envelope.sig)) {
       return { ok: false, reason: "bad_sig" };
@@ -708,6 +770,8 @@ export const createDeviceAccessVerify = (
       return { mode: "reject", reason: "missing_grant" };
     }
     const checked = checkDeviceGrant(grant, {
+      use: expect.use,
+      ...(expect.bind === undefined ? {} : { bind: expect.bind }),
       keyId: expect.keyId,
       cid: expect.cid,
       aud: expect.aud,

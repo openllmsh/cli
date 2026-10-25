@@ -782,14 +782,19 @@ silent signaling timeouts. Detail lives in
   fleet) is never seed-gated and admits only `tunnel` + `realtime` (`agent`
   resets `unauthorized`). A gated relay-mux `agent` OPEN runs Noise_IK as
   responder (`serveSecureAgentStream`) with a second fresh grant as the
-  message-1 payload before the agent handler sees the stream.
+  message-1 payload before the agent handler sees the stream. That grant must
+  be `use: "noise"` bound to the initiator's Noise static key; the
+  `channel_open` grant is `use: "channel"`, so one the relay withholds can
+  never stand in for it.
 - `rtc-host.ts` is the werift RTC answerer for browser or fleet-peer offers:
   same-user `rtc_offer` / `rtc_answer` / `rtc_ice` / `rtc_nack` traverse the
   relay, then the mux runs over the data channel (signaling-only relay;
   payload-cap negotiation; kill-switch / failure-cache fallthrough to mux).
   RTC applies the same per-kind admit table as the relay mux
-  (`admitStreamKind`): a browser offer whose grant has our `dpk` is
-  seed-gated (DTLS already E2E — no Noise layer); a `consumer:"daemon"`
+  (`admitStreamKind`): a browser offer whose grant has our `dpk` and is
+  `use: "rtc"` bound to the offer's sealed DTLS fingerprint is seed-gated
+  (DTLS already E2E — no Noise layer); a grant of another use (a harvested
+  `channel_open` grant) rejects the offer; a `consumer:"daemon"`
   offer is never seed-gated so `agent` is refused; a grant with no `dpk`
   fails `dpk_missing` before the nonce is spent (retry admits tunnel-only).
 - `rtc-client.ts` is the fleet WebRTC offerer for daemon→daemon tunnels.
@@ -925,7 +930,8 @@ the browser or via a loopback endpoint from the desktop app (no grant required o
 loopback). An agent stream is served **only** with a browser grant carrying this
 daemon's `dpk` (from a device-control-signed attestation — the daemon itself
 seals nothing), plus either Noise_IK on the relay
-mux (second fresh grant as message-1 payload; prologue
+mux (second fresh grant, `use: "noise"` bound to the initiator's static key, as
+the message-1 payload; prologue
 `openllm-agent-secure-v1|<channel_id>|<stream_id>` from `@openllmsh/tunnel`) or a
 gated DTLS session on RTC. Every other path resets `unauthorized`. Each engine
 adapter (`claude-code`, …) emits the same event stream to a unified UI rendered

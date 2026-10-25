@@ -134,10 +134,20 @@ const RTC_TUNNEL_ONLY_REASONS: ReadonlySet<string> = new Set([
 export const rtcOfferSeedGate = (
   consumer: "browser" | "daemon" | undefined,
   grant: string | undefined,
-  offer: { readonly cid: string; readonly offerVersion: number },
+  offer: {
+    readonly cid: string;
+    readonly offerVersion: number;
+    /** The offer's sealed browser DTLS fingerprint (`inner.fb`). */
+    readonly fingerprint: string;
+  },
 ): TRtcOfferGate => {
   if (consumer === "daemon") return { mode: "ok", seedGated: false };
+  // An `rtc` grant bound to the sealed fingerprint: sealing to our public key
+  // authenticates nothing, so without the binding a relay could wrap a
+  // harvested grant in an offer carrying its own DTLS fingerprint.
   const expect = {
+    use: "rtc" as const,
+    bind: offer.fingerprint,
     keyId: daemonApiKeyId(),
     cid: offer.cid,
     aud: daemonPublicKey(),
@@ -471,7 +481,7 @@ export const createRtcHost = (): TRtcHost => {
     const gate = rtcOfferSeedGate(
       frame.consumer,
       "grant" in inner ? inner.grant : undefined,
-      { cid: frame.channel_id, offerVersion: inner.v },
+      { cid: frame.channel_id, offerVersion: inner.v, fingerprint: inner.fb },
     );
     if (gate.mode === "reject") {
       logWarn("rtc-host", safeDiagnosticMessage`seedgate rejected`, {

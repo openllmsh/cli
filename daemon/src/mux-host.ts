@@ -15,6 +15,7 @@ import {
   encodeChannelEnvelopeWithTag,
 } from "@openllmsh/tunnel/channel-envelope";
 import { decodeJsonPayload, encodeJsonPayload } from "@openllmsh/tunnel/codec";
+import { noiseGrantBinding } from "@openllmsh/tunnel/device-grant";
 import type { TDuplex, TMuxChannel, TMuxStream } from "@openllmsh/tunnel/mux";
 import { createChannel } from "@openllmsh/tunnel/mux";
 import type {
@@ -243,14 +244,14 @@ const strictUtf8 = new TextDecoder("utf-8", { fatal: true });
  * Noise `authorize` for a relay-mux agent stream. Admits only when the
  * channel is STILL seed-gated (a browser `channel_open` grant with our `dpk`)
  * AND the message-1 payload is a fresh device grant — its own nonce, the same
- * `cid`, `aud` and `dpk` = this daemon's key. The second grant is what a
- * compromised relay cannot produce: it sees the `channel_open` grant (whose
- * nonce is already spent) and knows our public key, so without it the relay
- * could open its own agent stream on a browser's gated channel.
+ * `cid`, `aud` and `dpk` = this daemon's key, signed for use `noise` and bound
+ * to the initiator's Noise static key. The relay sees every `channel_open`
+ * grant in plaintext (and can withhold one before its nonce is spent), so
+ * only the use + binding stop it replaying one here as its own initiator.
  */
 const authorizeAgentHandshake =
   (channelId: string, isGated: () => boolean) =>
-  ({ payload }: TSecureAuthorizeContext): Uint8Array | null => {
+  ({ payload, remoteStatic }: TSecureAuthorizeContext): Uint8Array | null => {
     if (!isGated()) {
       logInfo("mux-host", "agent handshake refused: channel not seed-gated", {
         channelId,
@@ -263,7 +264,12 @@ const authorizeAgentHandshake =
     } catch {
       return null;
     }
+    // A `noise` grant bound to the initiator's static key: the relay sees the
+    // `channel_open` grant in plaintext, and a harvested grant of any other
+    // use, or one bound to another initiator, is refused.
     const gate = enforceSeedGate(grant, {
+      use: "noise",
+      bind: noiseGrantBinding(remoteStatic),
       keyId: daemonApiKeyId(),
       cid: channelId,
       aud: daemonPublicKey(),
@@ -786,6 +792,7 @@ const seedGateOf = (frame: {
 }): boolean => {
   if (frame.consumer === "daemon") return false;
   const gate = enforceSeedGate(frame.grant, {
+    use: "channel",
     keyId: daemonApiKeyId(),
     cid: frame.channel_id,
     aud: daemonPublicKey(),
