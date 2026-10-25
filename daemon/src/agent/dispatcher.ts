@@ -655,6 +655,39 @@ export const createAgentDispatcher = (
               error(state, session, result.code, result.message, commandId);
             return;
           }
+          case "send_now": {
+            const session = bound;
+            if (session === null || session.engineSession === null) {
+              error(
+                state,
+                null,
+                "no_session",
+                "Start or attach a session first.",
+                commandId,
+              );
+              return;
+            }
+            const sendNow = session.engineSession.sendNow;
+            if (sendNow === undefined) {
+              error(
+                state,
+                session,
+                "unsupported",
+                "This engine cannot send queued messages now.",
+                commandId,
+              );
+              return;
+            }
+            if (!withCommand(session, commandId, () => sendNow()))
+              error(
+                state,
+                session,
+                "nothing_queued",
+                "No message is queued.",
+                commandId,
+              );
+            return;
+          }
           case "set_model": {
             const session = bound;
             if (session === null || session.engineSession === null) {

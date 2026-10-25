@@ -44,17 +44,24 @@ export type TAgentSendInput = {
 
 export type TAgentSendResult =
   | { readonly ok: true; readonly turnId: string }
+  /** Held behind the running turn; it goes out as that turn ends. */
+  | { readonly ok: true; readonly queued: true }
   | { readonly ok: false; readonly code: string; readonly message: string };
 
 /** A running engine session. Every method is safe after exit (no-op / false). */
 export type TAgentEngineSession = {
   /** Start a turn with one user message. */
   readonly send: (input: TAgentSendInput) => TAgentSendResult;
+  /**
+   * Deliver the queued prompts now, mid-turn (absent → the engine cannot).
+   * False when nothing is queued.
+   */
+  readonly sendNow?: () => boolean;
   /** Interrupt the active turn; false when no turn is active. */
   readonly interrupt: () => boolean;
   /** Answer a pending approval / user-input request; false when unknown. */
   readonly respond: (command: TAgentRespondCommand) => boolean;
-  /** True while a turn runs (sends are refused meanwhile). */
+  /** True while a turn runs (sends are queued meanwhile). */
   readonly turnActive: () => boolean;
   /**
    * Switch the model (absent → the engine cannot). Applied when idle, queued

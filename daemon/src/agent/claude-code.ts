@@ -55,6 +55,7 @@ import {
   AGENT_MAX_ATTACHMENT_BASE64_LENGTH,
   AGENT_MAX_ATTACHMENT_BYTES,
   AGENT_MAX_LINE_BYTES,
+  AGENT_MAX_QUEUED_PROMPTS,
   AGENT_SHORT_TEXT_MAX_LENGTH,
   AGENT_SWITCH_MODEL_PATTERN,
   SESSION_ID_PATTERN,
@@ -997,6 +998,14 @@ const TRUST_PROMPT = /trustthefilesinthisfolder|doyoutrust|itrustthisfolder/i;
 const TRUST_CURSOR_ON_NO = /❯(?:\d+\.)?No\b/;
 const DOWN_ARROW = "\x1b[B";
 /**
+ * Claude Code's `chat:queueSubmit` (ctrl+x enter) and `chat:sendNow`
+ * (ctrl+x ctrl+s, the byte-safe alias of ctrl+enter): queue what's in the
+ * input behind the running turn, then hand the queue to the model now.
+ * Plain Enter would interrupt instead under Claude's responsive mode.
+ */
+const QUEUE_SUBMIT = "\x18\r";
+const SEND_NOW = "\x18\x13";
+/**
  * The dialog takes keys only once its input handler is mounted, a beat after
  * the text paints. An instant web answer typed earlier is lost (measured:
  * keys sent with no delay left the dialog up), so answer no sooner than this
@@ -1091,6 +1100,15 @@ export const createClaudeTuiSession = (
       )
         // No Stop hook follows a local command: the prompt is idle again.
         settleAfterTurn();
+      else if (
+        (event.type === "turn.completed" || event.type === "turn.aborted") &&
+        promptQueue.length > 0
+      )
+        // The transcript can close the turn after the Stop hook settled;
+        // try the queue again once it has.
+        setTimeout(() => {
+          if (!ended) flushQueue();
+        }, deps.stopSettleMs ?? STOP_SETTLE_MS);
       if (drained !== null) drained.push(event);
       else emit(event);
     },
@@ -1125,6 +1143,8 @@ export const createClaudeTuiSession = (
    * lands while Stop hooks still run, and keys typed then are lost.
    */
   let awaitingStop = false;
+  /** Prompts sent mid-turn, oldest first (`send` → `flushQueue`). */
+  const promptQueue: TAgentSendInput[] = [];
   /** The turn this daemon opened last (its prompt was typed by `send`). */
   let sentTurnId: string | null = null;
   /**
@@ -1137,7 +1157,9 @@ export const createClaudeTuiSession = (
   const settleAfterTurn = (): void => {
     awaitingStop = false;
     setTimeout(() => {
-      if (!ended) applyModel();
+      if (ended) return;
+      applyModel();
+      flushQueue();
     }, deps.stopSettleMs ?? STOP_SETTLE_MS);
   };
   /**
@@ -1380,6 +1402,7 @@ export const createClaudeTuiSession = (
       setTimeout(() => {
         awaitingStop = false;
         applyModel();
+        flushQueue();
       }, deps.stopSettleMs ?? STOP_SETTLE_MS);
       // Never block the hook (Claude flushes the transcript after it): the
       // tail keeps polling, and the transcript's end_turn normally lands the
@@ -1525,6 +1548,80 @@ export const createClaudeTuiSession = (
       pendingLinkOpens.delete(options.sessionId);
   });
 
+  const startTurn = (input: TAgentSendInput): TAgentSendResult => {
+    let written: TWrittenAgentAttachment[];
+    try {
+      written = writeAgentAttachments(
+        attachmentsDir,
+        input.attachments,
+        attachmentCounter,
+      );
+    } catch (err) {
+      logError("agent", err);
+      return {
+        ok: false,
+        code: "attachment_failed",
+        message: "an attachment could not be saved on this device",
+      };
+    }
+    const text = pasteSafeText(
+      [input.prompt, ...written.map((entry) => `@${entry.path}`)]
+        .filter((part) => part.trim() !== "")
+        .join(input.prompt.includes("\n") ? "\n" : " "),
+    );
+    if (text.trim() === "")
+      return { ok: false, code: "empty_prompt", message: "nothing to send" };
+    const turnId = parser.startTurn(
+      input.prompt,
+      written.map((entry) => entry.meta),
+    );
+    sentTurnId = turnId;
+    awaitingStop = true;
+    const localCommand = parser.quietLocalCommand();
+    whenReady(() => {
+      writeText(`${PASTE_START}${text}${PASTE_END}`);
+      setTimeout(() => writeText("\r"), submitDelayMs);
+      if (!localCommand) return;
+      const settle = setTimeout(
+        () => {
+          if (ended || parser.turnField().turn_id !== turnId) return;
+          try {
+            pump();
+          } catch (err) {
+            logError("agent", err);
+          }
+          if (
+            parser.turnField().turn_id === turnId &&
+            parser.quietLocalCommand()
+          )
+            parser.completeTurn(LOCAL_COMMAND_STOP_REASON);
+        },
+        submitDelayMs + (deps.localCommandSettleMs ?? LOCAL_COMMAND_SETTLE_MS),
+      );
+      settle.unref?.();
+    });
+    return { ok: true, turnId };
+  };
+  const emitQueue = (): void => {
+    emit({
+      type: "queue.updated",
+      prompts: promptQueue.map((input) => input.prompt),
+    });
+  };
+  /** The next queued prompt opens its turn once the session is idle again. */
+  const flushQueue = (): void => {
+    if (ended || parser.turnActive() || awaitingStop) return;
+    const next = promptQueue.shift();
+    if (next === undefined) return;
+    emitQueue();
+    const result = startTurn(next);
+    if (!result.ok)
+      emit({
+        type: "runtime.warning",
+        message: `A queued message wasn't sent: ${result.message}`,
+      });
+  };
+
   return {
     send: (input): TAgentSendResult => {
       if (ended)
@@ -1533,65 +1630,69 @@ export const createClaudeTuiSession = (
           code: "session_exited",
           message: "the session has ended",
         };
-      if (parser.turnActive())
-        return {
-          ok: false,
-          code: "turn_in_progress",
-          message: "a turn is already running; interrupt it or wait",
-        };
-      let written: TWrittenAgentAttachment[];
-      try {
-        written = writeAgentAttachments(
-          attachmentsDir,
-          input.attachments,
-          attachmentCounter,
-        );
-      } catch (err) {
-        logError("agent", err);
-        return {
-          ok: false,
-          code: "attachment_failed",
-          message: "an attachment could not be saved on this device",
-        };
+      // Mid-turn (or before the Stop hooks settle): hold it here and send it
+      // as the turn ends, like Claude's own queue — but daemon-side, so the
+      // turn it opens is ours to track and every viewer sees the queue.
+      if (parser.turnActive() || awaitingStop || promptQueue.length > 0) {
+        if (
+          input.prompt.trim() === "" &&
+          (input.attachments?.length ?? 0) === 0
+        )
+          return {
+            ok: false,
+            code: "empty_prompt",
+            message: "nothing to send",
+          };
+        if (promptQueue.length >= AGENT_MAX_QUEUED_PROMPTS)
+          return {
+            ok: false,
+            code: "queue_full",
+            message: "too many messages are already queued",
+          };
+        promptQueue.push(input);
+        emitQueue();
+        return { ok: true, queued: true };
       }
-      const text = pasteSafeText(
-        [input.prompt, ...written.map((entry) => `@${entry.path}`)]
-          .filter((part) => part.trim() !== "")
-          .join(input.prompt.includes("\n") ? "\n" : " "),
-      );
-      if (text.trim() === "")
-        return { ok: false, code: "empty_prompt", message: "nothing to send" };
-      const turnId = parser.startTurn(
-        input.prompt,
-        written.map((entry) => entry.meta),
-      );
-      sentTurnId = turnId;
-      awaitingStop = true;
-      const localCommand = parser.quietLocalCommand();
+      return startTurn(input);
+    },
+    sendNow: (): boolean => {
+      if (ended || promptQueue.length === 0) return false;
+      if (!parser.turnActive() && !awaitingStop) {
+        flushQueue();
+        return true;
+      }
+      // Into Claude's own queue, then its send-now: the transcript records
+      // them as the next prompt, which closes the running turn's tracking
+      // and opens theirs (the parser's terminal-prompt path).
+      const batch = promptQueue.splice(0);
+      emitQueue();
       whenReady(() => {
-        writeText(`${PASTE_START}${text}${PASTE_END}`);
-        setTimeout(() => writeText("\r"), submitDelayMs);
-        if (!localCommand) return;
-        const settle = setTimeout(
-          () => {
-            if (ended || parser.turnField().turn_id !== turnId) return;
-            try {
-              pump();
-            } catch (err) {
-              logError("agent", err);
-            }
-            if (
-              parser.turnField().turn_id === turnId &&
-              parser.quietLocalCommand()
-            )
-              parser.completeTurn(LOCAL_COMMAND_STOP_REASON);
-          },
-          submitDelayMs +
-            (deps.localCommandSettleMs ?? LOCAL_COMMAND_SETTLE_MS),
-        );
-        settle.unref?.();
+        for (const input of batch) {
+          let written: TWrittenAgentAttachment[];
+          try {
+            written = writeAgentAttachments(
+              attachmentsDir,
+              input.attachments,
+              attachmentCounter,
+            );
+          } catch (err) {
+            logError("agent", err);
+            written = [];
+          }
+          const text = pasteSafeText(
+            [input.prompt, ...written.map((entry) => `@${entry.path}`)]
+              .filter((part) => part.trim() !== "")
+              .join(input.prompt.includes("\n") ? "\n" : " "),
+          );
+          if (text.trim() === "") continue;
+          writeText(`${PASTE_START}${text}${PASTE_END}`);
+          writeText(QUEUE_SUBMIT);
+        }
+        setTimeout(() => {
+          if (!ended) writeText(SEND_NOW);
+        }, submitDelayMs);
       });
-      return { ok: true, turnId };
+      return true;
     },
     interrupt: () => {
       if (ended || !parser.turnActive()) return false;
@@ -1609,7 +1710,9 @@ export const createClaudeTuiSession = (
       // is not stuck behind awaitingStop forever, then settle like Stop does.
       awaitingStop = false;
       setTimeout(() => {
-        if (!ended) applyModel();
+        if (ended) return;
+        applyModel();
+        flushQueue();
       }, deps.stopSettleMs ?? STOP_SETTLE_MS);
       return true;
     },
