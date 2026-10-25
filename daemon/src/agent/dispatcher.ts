@@ -107,6 +107,8 @@ type TSession = {
   seq: number;
   exited: boolean;
   idleTimer: ReturnType<typeof setTimeout> | undefined;
+  /** When the session last published an event (idle reap of a busy turn). */
+  lastActivityAt: number;
   /** Command id stamped on events the engine emits while it handles one. */
   activeCommandId: string | undefined;
   /** Run once `session.exited` was published. */
@@ -240,22 +242,33 @@ export const createAgentDispatcher = (
     else engineSession.close("closed");
   };
 
-  const scheduleIdle = (session: TSession): void => {
+  const scheduleIdle = (
+    session: TSession,
+    delayMs: number = detachedIdleMs,
+  ): void => {
     if (session.idleTimer !== undefined) clearTimeout(session.idleTimer);
     session.idleTimer = undefined;
     if (session.exited || session.consumers.size > 0) return;
     session.idleTimer = setTimeout(() => {
       session.idleTimer = undefined;
       if (session.consumers.size > 0 || session.exited) return;
-      if (session.engineSession?.turnActive() === true) {
-        scheduleIdle(session);
+      // A running turn keeps its session while it shows signs of life. One
+      // that went silent for a whole window (wedged: no end ever came) is
+      // released like any idle session, so it cannot hold a session slot
+      // until restart; the engine keeps running for a later attach.
+      const quietMs = now() - session.lastActivityAt;
+      if (
+        session.engineSession?.turnActive() === true &&
+        quietMs < detachedIdleMs
+      ) {
+        scheduleIdle(session, Math.max(1, detachedIdleMs - quietMs));
         return;
       }
       logInfo("agent", "releasing idle detached agent session", {
         id: session.id,
       });
       releaseEngine(session);
-    }, detachedIdleMs);
+    }, delayMs);
     session.idleTimer.unref?.();
   };
 
@@ -266,6 +279,7 @@ export const createAgentDispatcher = (
     commandId?: string,
   ): void => {
     session.seq += 1;
+    session.lastActivityAt = now();
     const id = commandId ?? session.activeCommandId;
     const stamped: TAgentEvent = {
       ...event,
@@ -353,6 +367,7 @@ export const createAgentDispatcher = (
       seq: 0,
       exited: false,
       idleTimer: undefined,
+      lastActivityAt: now(),
       activeCommandId: undefined,
       exitWatchers: [],
     };
