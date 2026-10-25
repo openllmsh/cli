@@ -12,7 +12,10 @@
  * an already-configured key is replaced, which is how a key gets rotated.
  *
  * A daemon already running reads its key at start, so login restarts it; one
- * that isn't running is left alone unless `--start`. The desktop app pairs
+ * that isn't running is left alone unless `--start`. In dev mode
+ * (`OPENLLM_DAEMON_DEV=1`) neither: the dev daemon is `bun dev`'s, which
+ * restarts it when `.dev.env` changes, and `restart` / `start` would act on
+ * the production service instead. The desktop app pairs
  * through this command (`--start --json`, key on stdin), and `--json` reports
  * the outcome on stdout for callers that parse it.
  *
@@ -36,7 +39,11 @@ import {
 } from "./env";
 import { defaultTerminal, saveEnvVars } from "./onboarding";
 import type { TCredentialGateTerminal } from "./runtime-contracts";
-import { parseApiKeyId, splitAnchoredApiKey } from "./runtime-contracts";
+import {
+  isOpenllmDevMode,
+  parseApiKeyId,
+  splitAnchoredApiKey,
+} from "./runtime-contracts";
 
 export const LOGIN_USAGE = `usage: openllm login [sk-llm-...] [--key <sk-llm-...>] [--start] [--json]
 
@@ -267,11 +274,18 @@ export const runLogin = async (
   }
   process.env.OPENLLM_API_KEY = trimmed;
 
-  const command = (await io.daemonRunning())
-    ? "restart"
-    : parsed.start
-      ? "start"
-      : null;
+  const running = await io.daemonRunning();
+  if (isOpenllmDevMode()) {
+    if (!parsed.json && running) {
+      io.terminal.write("bun dev restarts its daemon with the new key.\n");
+    }
+    if (parsed.json) {
+      const daemon: TLoginDaemonOutcome = running ? "restarted" : "not_running";
+      io.writeStdout(`${JSON.stringify({ saved: true, daemon })}\n`);
+    }
+    return 0;
+  }
+  const command = running ? "restart" : parsed.start ? "start" : null;
   if (command !== null && (await io.runDaemon(command, parsed.json)) !== 0) {
     io.terminal.write(
       `[openllm] The key is saved, but ${command === "restart" ? "restarting" : "starting"} the daemon failed. Run \`openllm ${command}\`.\n`,

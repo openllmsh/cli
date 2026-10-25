@@ -15,7 +15,9 @@
  * turn state never come from the screen.
  *   - input: prompts are bracketed-pasted into the PTY then submitted with CR,
  *     exactly like a keystroke; interrupt is Esc; attachments are written to
- *     the host's 0700 session dir and referenced as `@<path>`;
+ *     the session's own 0700 `agent-attachments/<id>/` dir (outside the
+ *     host's registry dir, which the host removes on exit) and referenced
+ *     as `@<path>`;
  *   - output: structured items come from Claude's own transcript
  *     (`~/.claude/projects/<slug>/<id>.jsonl`, appended per message), tailed;
  *   - readiness, busy/idle + approvals: Claude hooks (`openllm exec agent
@@ -49,9 +51,11 @@ import type {
   TAgentUserInputQuestion,
 } from "@openllmsh/protocol";
 import {
+  AGENT_DETAIL_TEXT_MAX_LENGTH,
   AGENT_MAX_ATTACHMENT_BASE64_LENGTH,
   AGENT_MAX_ATTACHMENT_BYTES,
   AGENT_MAX_LINE_BYTES,
+  AGENT_SHORT_TEXT_MAX_LENGTH,
   AGENT_SWITCH_MODEL_PATTERN,
   SESSION_ID_PATTERN,
 } from "@openllmsh/protocol";
@@ -70,7 +74,9 @@ import {
   createClaudeTranscriptTail,
   createTranscriptParser,
   findClaudeTranscript,
+  LOCAL_COMMAND_STOP_REASON,
   SUBAGENT_TOOL_NAMES,
+  toolNameOf,
 } from "./claude-transcript";
 import { historyCursorOf, latestReplayWindow } from "./history-window";
 import type {
@@ -109,6 +115,16 @@ const STOP_GRACE_MS = 3_000;
  */
 const MODEL_CONFIRM_MS = 1_500;
 const STOP_SETTLE_MS = 500;
+/**
+ * A slash command typed from the web that the model never sees (`/help`,
+ * `/cost`) runs no Stop hook, and some write nothing at all. With no sign of
+ * the model running for it by then (an expanded prompt, an assistant row),
+ * its turn is complete.
+ */
+const LOCAL_COMMAND_SETTLE_MS = 3_000;
+/** Why a replayed turn the resumed TUI is not continuing was closed. */
+const REPLAY_OPEN_TURN_MESSAGE =
+  "The session stopped before this turn finished.";
 /** Gap between the bracketed paste and the submitting CR. */
 const SUBMIT_DELAY_MS = 80;
 /**
@@ -121,8 +137,8 @@ const REPLAY_MAX_EVENTS = 1_500;
 const DRAIN_MAX_CHUNKS = 512;
 const TRANSCRIPT_POLL_MS = 250;
 
-const DETAIL_MAX = 16 * 1024;
-const SHORT_MAX = 256;
+const DETAIL_MAX = AGENT_DETAIL_TEXT_MAX_LENGTH;
+const SHORT_MAX = AGENT_SHORT_TEXT_MAX_LENGTH;
 
 const clip = (text: string, max: number): string =>
   text.length <= max ? text : `${text.slice(0, max - 1)}…`;
@@ -239,6 +255,15 @@ export const claudeAnswersInputOf = (
   ...(isRecord(input) ? input : {}),
   answers: claudeAnswersOf(input, answers),
 });
+
+/** An approval's title: the tool and what it acts on, within the schema cap. */
+export const requestTitleOf = (toolName: string, input: unknown): string => {
+  const title = toolTitleOf(toolName, input);
+  return clip(
+    title === undefined ? toolName : `${toolName}: ${title}`,
+    SHORT_MAX,
+  );
+};
 
 export { requestDetailOf, toolTitleOf };
 
@@ -548,6 +573,10 @@ export const killClaudeSessionHost = async (
   waitMs = 3_000,
 ): Promise<boolean> => {
   if (!SESSION_ID_PATTERN.test(sessionId)) return false;
+  // An open still spawning this session's host is not discoverable yet:
+  // wait for it (a closed session kills what it opened), or the host would
+  // start after the delete and write the transcript back.
+  await settleClaudeSessionOpen(sessionId);
   const find = async (): Promise<
     | Awaited<
         ReturnType<typeof defaultSessionHostClient.discoverSessionHosts>
@@ -572,6 +601,19 @@ export const killClaudeSessionHost = async (
   }
   link.release();
   return false;
+};
+
+/** Link opens in flight, per session id (a spawn takes a while to publish). */
+const pendingLinkOpens = new Map<string, Promise<void>>();
+
+/**
+ * Resolves once no link open is pending for `sessionId`. An open that a
+ * close / delete overtook has by then killed the host it started.
+ */
+export const settleClaudeSessionOpen = async (
+  sessionId: string,
+): Promise<void> => {
+  await pendingLinkOpens.get(sessionId);
 };
 
 // ─── hooks → sessions ──────────────────────────────────────────────────────
@@ -602,12 +644,18 @@ export const handleAgentHook = async (
 
 // ─── attachments ─────────────────────────────────────────────────────────
 
-/** The per-session attachment dir (inside the host's 0700 session dir). */
-export const agentAttachmentsDir = (sessionId: string): string =>
-  join(stateDir(), "sessions", sessionId, "attachments");
+/**
+ * Parent of every per-session attachments dir. Deliberately NOT the
+ * session-host registry (`sessions/<id>/`): a host removes its dir when it
+ * exits, discovery deletes any dir there without a `meta.json`, and a host
+ * refuses to start when its dir already exists.
+ */
+export const agentAttachmentsRoot = (): string =>
+  join(stateDir(), "agent-attachments");
 
-/** Parent of every per-session attachments dir. */
-export const agentSessionsDir = (): string => join(stateDir(), "sessions");
+/** One session's attachments dir (0700, files 0600). */
+export const agentAttachmentsDir = (sessionId: string): string =>
+  join(agentAttachmentsRoot(), sessionId);
 
 /** A filename safe to place in the attachment dir and to `@`-reference. */
 export const sanitizeAttachmentName = (name: string | undefined): string => {
@@ -678,6 +726,7 @@ export const writeAgentAttachments = (
 
 /** Delete one session's attachments dir (history delete / kill path). */
 export const deleteAgentAttachments = (sessionId: string): void => {
+  if (!SESSION_ID_PATTERN.test(sessionId)) return;
   try {
     rmSync(agentAttachmentsDir(sessionId), { recursive: true, force: true });
   } catch {
@@ -872,12 +921,12 @@ export const chunkAgentAttachment = (
  */
 export const reapOrphanAgentAttachments = (
   options: {
-    readonly sessionsDir?: string;
+    readonly attachmentsRoot?: string;
     readonly liveSessionIds?: ReadonlySet<string>;
     readonly transcriptExists?: (sessionId: string) => boolean;
   } = {},
 ): readonly string[] => {
-  const root = options.sessionsDir ?? agentSessionsDir();
+  const root = options.attachmentsRoot ?? agentAttachmentsRoot();
   const live = options.liveSessionIds ?? new Set<string>();
   const transcriptExists =
     options.transcriptExists ??
@@ -890,8 +939,8 @@ export const reapOrphanAgentAttachments = (
   }
   const deleted: string[] = [];
   for (const sessionId of entries) {
-    if (live.has(sessionId)) continue;
-    const attachments = join(root, sessionId, "attachments");
+    if (live.has(sessionId) || !SESSION_ID_PATTERN.test(sessionId)) continue;
+    const attachments = join(root, sessionId);
     if (!existsSync(attachments)) continue;
     if (transcriptExists(sessionId)) continue;
     try {
@@ -909,6 +958,30 @@ export const reapOrphanAgentAttachments = (
 const PASTE_START = "\x1b[200~";
 const PASTE_END = "\x1b[201~";
 const ESC = "\x1b";
+/** Not a C0 control (tab and newline aside), DEL, or a C1 control. */
+const isPasteSafe = (code: number): boolean =>
+  code === 0x09 ||
+  code === 0x0a ||
+  (code >= 0x20 && code < 0x7f) ||
+  code > 0x9f;
+
+/**
+ * Prompt text safe to bracketed-paste into the TUI. A web prompt is typed into
+ * a terminal: an ESC in it could end the paste (`ESC[201~`) and turn the rest
+ * into keystrokes (`ESC[Z` toggles the permission mode, CR submits). Only tab
+ * and newline survive among the controls; CR / CRLF become newlines.
+ */
+export const pasteSafeText = (text: string): string => {
+  const normalized = text.replace(/\r\n?/g, "\n");
+  let out = "";
+  let start = 0;
+  for (let i = 0; i < normalized.length; i += 1) {
+    if (isPasteSafe(normalized.charCodeAt(i))) continue;
+    out += normalized.slice(start, i);
+    start = i + 1;
+  }
+  return out + normalized.slice(start);
+};
 const ANSI = new RegExp(
   `${ESC}\\[[0-9;?]*[ -/]*[@-~]|${ESC}\\][^\u0007]*\u0007|${ESC}[()][A-Za-z0-9]`,
   "g",
@@ -962,6 +1035,7 @@ export type TClaudeTuiDeps = {
   readonly stopGraceMs?: number;
   readonly stopSettleMs?: number;
   readonly modelConfirmMs?: number;
+  readonly localCommandSettleMs?: number;
   readonly trustAnswerDelayMs?: number;
   readonly attachmentsDir?: (sessionId: string) => string;
 };
@@ -984,6 +1058,11 @@ export const createClaudeTuiSession = (
   const attachmentCounter = attachmentCounterOf(attachmentsDir);
   let link: TPtyLink | null = null;
   let ended = false;
+  /**
+   * How the session ended, for a link that opens after it did: close /
+   * delete kill the host it spawned or joined; release leaves it running.
+   */
+  let endIntent: "kill" | "release" = "release";
   let ready = false;
   /** Claude reported `SessionStart` (or any hook): the TUI is up. */
   let started = false;
@@ -1006,6 +1085,12 @@ export const createClaudeTuiSession = (
     emit: (event) => {
       if (event.type === "session.configured" && event.model !== undefined)
         modelInFlight = false;
+      if (
+        event.type === "turn.completed" &&
+        event.stop_reason === LOCAL_COMMAND_STOP_REASON
+      )
+        // No Stop hook follows a local command: the prompt is idle again.
+        settleAfterTurn();
       if (drained !== null) drained.push(event);
       else emit(event);
     },
@@ -1040,6 +1125,34 @@ export const createClaudeTuiSession = (
    * lands while Stop hooks still run, and keys typed then are lost.
    */
   let awaitingStop = false;
+  /** The turn this daemon opened last (its prompt was typed by `send`). */
+  let sentTurnId: string | null = null;
+  /**
+   * The open turn a resume / attach replay ended on (the transcript stops
+   * mid-turn: Stop, kill or crash). Settled once the link says whether a
+   * running TUI is continuing it.
+   */
+  let replayedOpenTurn: string | null = null;
+  /** The prompt takes input again after a turn ended without a Stop hook. */
+  const settleAfterTurn = (): void => {
+    awaitingStop = false;
+    setTimeout(() => {
+      if (!ended) applyModel();
+    }, deps.stopSettleMs ?? STOP_SETTLE_MS);
+  };
+  /**
+   * A freshly spawned TUI (`claude --resume`) does not continue the turn its
+   * transcript ended on, so nothing would ever close it and every `send`
+   * would answer `turn_in_progress`: close it. A TUI that was already running
+   * may really be mid-turn; its Stop / end_turn closes it.
+   */
+  const settleReplayedTurn = (): void => {
+    if (replayedOpenTurn === null || link === null) return;
+    const turnId = replayedOpenTurn;
+    replayedOpenTurn = null;
+    if (!link.fresh || parser.turnField().turn_id !== turnId) return;
+    parser.abortTurn("interrupted", REPLAY_OPEN_TURN_MESSAGE);
+  };
   const applyModel = (): void => {
     if (
       pendingModel === null ||
@@ -1154,6 +1267,11 @@ export const createClaudeTuiSession = (
             : { before_cursor: historyCursorOf(window.firstTurnId) }),
         });
         for (const event of withSubagents(window.events)) emit(event);
+        const open = parser.turnField().turn_id;
+        if (parser.turnActive() && open !== undefined && open !== sentTurnId) {
+          replayedOpenTurn = open;
+          settleReplayedTurn();
+        }
       } else {
         for (const event of withSubagents(replayWindow(events))) emit(event);
       }
@@ -1283,7 +1401,7 @@ export const createClaudeTuiSession = (
     }
     if (event !== "PermissionRequest") return null;
     if (options.observed !== undefined && !options.observed()) return null;
-    const toolName = str(payload.tool_name) ?? "tool";
+    const toolName = toolNameOf(payload.tool_name);
     const input = payload.tool_input;
     requestCounter += 1;
     const requestId = `r${requestCounter}`;
@@ -1304,13 +1422,12 @@ export const createClaudeTuiSession = (
         return;
       }
       pending.set(requestId, { kind: "approval", toolName, input, resolve });
-      const title = toolTitleOf(toolName, input);
       emit({
         type: "request.opened",
         request_id: requestId,
         ...parser.turnField(),
         request_kind: requestKindOfTool(toolName),
-        title: title === undefined ? toolName : `${toolName}: ${title}`,
+        title: requestTitleOf(toolName, input),
         detail: requestDetailOf(toolName, input),
         input,
       });
@@ -1341,7 +1458,7 @@ export const createClaudeTuiSession = (
   } catch (err) {
     logError("agent", err);
   }
-  void openLink({
+  const opening = openLink({
     sessionId: options.sessionId,
     resume: options.resume,
     cwd: options.cwd,
@@ -1351,6 +1468,9 @@ export const createClaudeTuiSession = (
   })
     .then((opened) => {
       if (ended) {
+        // Closed / deleted while the host was still starting: nothing had a
+        // link to kill then, so kill it now rather than orphan a running TUI.
+        if (endIntent === "kill") opened?.kill();
         opened?.release();
         return;
       }
@@ -1369,6 +1489,7 @@ export const createClaudeTuiSession = (
       hookHandlers.set(opened.hostId, onHook);
       opened.onOutput(onOutput);
       opened.onExit(() => finish("completed"));
+      settleReplayedTurn();
       maybeReady();
       if (!ready && readyTimer === undefined) {
         readyMaxTimer = setTimeout(() => {
@@ -1398,6 +1519,11 @@ export const createClaudeTuiSession = (
       logError("agent", err);
       finish("error");
     });
+  pendingLinkOpens.set(options.sessionId, opening);
+  void opening.finally(() => {
+    if (pendingLinkOpens.get(options.sessionId) === opening)
+      pendingLinkOpens.delete(options.sessionId);
+  });
 
   return {
     send: (input): TAgentSendResult => {
@@ -1428,19 +1554,42 @@ export const createClaudeTuiSession = (
           message: "an attachment could not be saved on this device",
         };
       }
-      const text = [input.prompt, ...written.map((entry) => `@${entry.path}`)]
-        .filter((part) => part.trim() !== "")
-        .join(input.prompt.includes("\n") ? "\n" : " ");
+      const text = pasteSafeText(
+        [input.prompt, ...written.map((entry) => `@${entry.path}`)]
+          .filter((part) => part.trim() !== "")
+          .join(input.prompt.includes("\n") ? "\n" : " "),
+      );
       if (text.trim() === "")
         return { ok: false, code: "empty_prompt", message: "nothing to send" };
       const turnId = parser.startTurn(
         input.prompt,
         written.map((entry) => entry.meta),
       );
+      sentTurnId = turnId;
       awaitingStop = true;
+      const localCommand = parser.quietLocalCommand();
       whenReady(() => {
         writeText(`${PASTE_START}${text}${PASTE_END}`);
         setTimeout(() => writeText("\r"), submitDelayMs);
+        if (!localCommand) return;
+        const settle = setTimeout(
+          () => {
+            if (ended || parser.turnField().turn_id !== turnId) return;
+            try {
+              pump();
+            } catch (err) {
+              logError("agent", err);
+            }
+            if (
+              parser.turnField().turn_id === turnId &&
+              parser.quietLocalCommand()
+            )
+              parser.completeTurn(LOCAL_COMMAND_STOP_REASON);
+          },
+          submitDelayMs +
+            (deps.localCommandSettleMs ?? LOCAL_COMMAND_SETTLE_MS),
+        );
+        settle.unref?.();
       });
       return { ok: true, turnId };
     },
@@ -1592,6 +1741,7 @@ export const createClaudeTuiSession = (
     },
     close: (reason) => {
       if (ended) return;
+      endIntent = "kill";
       const current = link;
       link = null;
       current?.kill();

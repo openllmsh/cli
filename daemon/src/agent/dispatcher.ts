@@ -22,7 +22,9 @@ import type {
 } from "@openllmsh/protocol";
 import {
   AGENT_SESSION_ID_PATTERN,
+  AGENT_SWITCH_MODEL_PATTERN,
   encodeAgentLine,
+  parseAgentEvent,
   SESSION_ID_PATTERN,
 } from "@openllmsh/protocol";
 import { logError, logInfo } from "../logger";
@@ -37,6 +39,7 @@ import {
   historyCursorOf,
   latestReplayWindow,
   logHistoryPage,
+  shrinkAgentItem,
   turnIdOfCursor,
 } from "./history-window";
 import type {
@@ -107,6 +110,8 @@ type TSession = {
   seq: number;
   exited: boolean;
   idleTimer: ReturnType<typeof setTimeout> | undefined;
+  /** When the session last published an event (idle reap of a busy turn). */
+  lastActivityAt: number;
   /** Command id stamped on events the engine emits while it handles one. */
   activeCommandId: string | undefined;
   /** Run once `session.exited` was published. */
@@ -117,24 +122,61 @@ const clip = (text: string, max: number): string =>
   text.length <= max ? text : `${text.slice(0, max - 1)}…`;
 
 /** Shrink an event's bulky fields so it fits one NDJSON line. */
-const shrinkItem = (item: TAgentItem): TAgentItem => {
-  if (item.kind === "notice") return item;
-  if (item.kind !== "tool_call")
-    return { ...item, text: clip(item.text, 512 * 1024) };
-  const { input: _input, ...rest } = item;
-  return {
-    ...rest,
-    ...(rest.output === undefined
-      ? {}
-      : { output: clip(rest.output, AGENT_TOOL_OUTPUT_MAX_CHARS / 4) }),
-  };
-};
+const shrinkItem = (item: TAgentItem): TAgentItem =>
+  shrinkAgentItem(item, {
+    text: 512 * 1024,
+    output: AGENT_TOOL_OUTPUT_MAX_CHARS / 4,
+    input: 0,
+  });
+
+/**
+ * A `runtime.warning` standing in for an event that cannot be delivered. It
+ * keeps the event's framing (session, seq, time, command id), so a command
+ * waiting on that event is still answered.
+ */
+const undeliverable = (
+  event: TAgentEvent,
+  code: string,
+  message: string,
+): TAgentEvent => ({
+  type: "runtime.warning",
+  code,
+  message,
+  ...(event.session_id === undefined ? {} : { session_id: event.session_id }),
+  ...(event.seq === undefined ? {} : { seq: event.seq }),
+  ...(event.at === undefined ? {} : { at: event.at }),
+  ...(event.command_id === undefined ? {} : { command_id: event.command_id }),
+});
 
 /**
  * The event, or a truncated copy that fits {@link encodeAgentLine}'s bound,
- * or a `runtime.warning` standing in for it when nothing fits.
+ * or a `runtime.warning` standing in for it when nothing fits — or when it
+ * would not decode on the consumer (which drops such an event silently: an
+ * approval would just never show).
  */
 export const fitAgentEvent = (event: TAgentEvent): TAgentEvent => {
+  const fitted = fitAgentEventSize(event);
+  if (fitted === null)
+    return undeliverable(
+      event,
+      "event_too_large",
+      `An ${event.type} event was too large to deliver.`,
+    );
+  if (parseAgentEvent(fitted) === null) {
+    logInfo("agent", "dropping an agent event the protocol rejects", {
+      type: event.type,
+    });
+    return undeliverable(
+      event,
+      "invalid_event",
+      `An ${event.type} event did not match the agent protocol.`,
+    );
+  }
+  return fitted;
+};
+
+/** The event, or a truncated copy within the line bound, or null. */
+const fitAgentEventSize = (event: TAgentEvent): TAgentEvent | null => {
   if (encodeAgentLine(event) !== null) return event;
   let shrunk: TAgentEvent = event;
   if (
@@ -149,15 +191,7 @@ export const fitAgentEvent = (event: TAgentEvent): TAgentEvent => {
     const { input: _input, ...rest } = event;
     shrunk = rest;
   }
-  if (encodeAgentLine(shrunk) !== null) return shrunk;
-  return {
-    type: "runtime.warning",
-    code: "event_too_large",
-    message: `An ${event.type} event was too large to deliver.`,
-    ...(event.session_id === undefined ? {} : { session_id: event.session_id }),
-    ...(event.seq === undefined ? {} : { seq: event.seq }),
-    ...(event.at === undefined ? {} : { at: event.at }),
-  };
+  return encodeAgentLine(shrunk) === null ? null : shrunk;
 };
 
 /**
@@ -240,22 +274,33 @@ export const createAgentDispatcher = (
     else engineSession.close("closed");
   };
 
-  const scheduleIdle = (session: TSession): void => {
+  const scheduleIdle = (
+    session: TSession,
+    delayMs: number = detachedIdleMs,
+  ): void => {
     if (session.idleTimer !== undefined) clearTimeout(session.idleTimer);
     session.idleTimer = undefined;
     if (session.exited || session.consumers.size > 0) return;
     session.idleTimer = setTimeout(() => {
       session.idleTimer = undefined;
       if (session.consumers.size > 0 || session.exited) return;
-      if (session.engineSession?.turnActive() === true) {
-        scheduleIdle(session);
+      // A running turn keeps its session while it shows signs of life. One
+      // that went silent for a whole window (wedged: no end ever came) is
+      // released like any idle session, so it cannot hold a session slot
+      // until restart; the engine keeps running for a later attach.
+      const quietMs = now() - session.lastActivityAt;
+      if (
+        session.engineSession?.turnActive() === true &&
+        quietMs < detachedIdleMs
+      ) {
+        scheduleIdle(session, Math.max(1, detachedIdleMs - quietMs));
         return;
       }
       logInfo("agent", "releasing idle detached agent session", {
         id: session.id,
       });
       releaseEngine(session);
-    }, detachedIdleMs);
+    }, delayMs);
     session.idleTimer.unref?.();
   };
 
@@ -266,6 +311,7 @@ export const createAgentDispatcher = (
     commandId?: string,
   ): void => {
     session.seq += 1;
+    session.lastActivityAt = now();
     const id = commandId ?? session.activeCommandId;
     const stamped: TAgentEvent = {
       ...event,
@@ -353,6 +399,7 @@ export const createAgentDispatcher = (
       seq: 0,
       exited: false,
       idleTimer: undefined,
+      lastActivityAt: now(),
       activeCommandId: undefined,
       exitWatchers: [],
     };
@@ -452,6 +499,22 @@ export const createAgentDispatcher = (
                 null,
                 "invalid_cwd",
                 "cwd must be an existing absolute directory.",
+                commandId,
+              );
+              return;
+            }
+            // The model becomes the engine's `--model` argument: hold it to
+            // the same ids `set_model` accepts (no leading `-`, no spaces or
+            // control characters).
+            if (
+              command.model !== undefined &&
+              !AGENT_SWITCH_MODEL_PATTERN.test(command.model)
+            ) {
+              error(
+                state,
+                null,
+                "invalid_model",
+                "invalid model id",
                 commandId,
               );
               return;
@@ -779,22 +842,38 @@ export const createAgentDispatcher = (
               firstTurnId: page.firstTurnId,
               hasMore: page.hasMore,
             });
-            reply(
-              state,
-              session,
-              {
-                type: "history.page",
-                has_more: bounded.hasMore,
-                ...(bounded.firstTurnId === null
-                  ? {}
-                  : { before_cursor: historyCursorOf(bounded.firstTurnId) }),
-                events: bounded.events.map((event) => ({
-                  ...fitAgentEvent(event),
-                  session_id: session.id,
-                })),
-              },
-              commandId,
-            );
+            const pageEvent: TAgentEvent = {
+              type: "history.page",
+              has_more: bounded.hasMore,
+              ...(bounded.firstTurnId === null
+                ? {}
+                : { before_cursor: historyCursorOf(bounded.firstTurnId) }),
+              events: bounded.events.map((event) => ({
+                ...fitAgentEvent(event),
+                session_id: session.id,
+              })),
+            };
+            // A page that still cannot travel as one line must answer the
+            // command anyway: the consumer stops paging on this error rather
+            // than wait forever for a page that was swapped for a warning.
+            if (
+              encodeAgentLine({
+                ...pageEvent,
+                session_id: session.id,
+                at: now(),
+                ...(commandId === undefined ? {} : { command_id: commandId }),
+              }) === null
+            ) {
+              error(
+                state,
+                session,
+                "history_page_too_large",
+                "This part of the session's history is too large to load.",
+                commandId,
+              );
+              return;
+            }
+            reply(state, session, pageEvent, commandId);
             return;
           }
           case "attachment_get": {

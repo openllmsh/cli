@@ -24,7 +24,11 @@ import type {
   TAgentEvent,
   TAgentItem,
 } from "@openllmsh/protocol";
-import { normalizeUserPromptText } from "@openllmsh/protocol";
+import {
+  AGENT_DETAIL_TEXT_MAX_LENGTH,
+  AGENT_TOOL_NAME_MAX_LENGTH,
+  normalizeUserPromptText,
+} from "@openllmsh/protocol";
 import { claudeConfigDir } from "../local-sessions/paths";
 
 /** Bytes read per poll at most (a burst is drained over several polls). */
@@ -185,6 +189,18 @@ type TJson = Record<string, unknown>;
 /** Claude's reply to `/model <id>` in the transcript. */
 const MODEL_SET = /^<local-command-stdout>Set model to `([^`\n]{1,256})`/;
 
+/** The output row a local slash command (`/cost`, `/model x`) writes when done. */
+const LOCAL_COMMAND_OUTPUT = /^<local-command-(?:stdout|stderr)\b/i;
+
+/**
+ * Slash commands that run long without writing a row until they finish
+ * (`/compact` summarises the conversation first): never completed on quiet.
+ */
+const SLOW_LOCAL_COMMANDS: ReadonlySet<string> = new Set(["/compact"]);
+
+/** `turn.completed.stop_reason` of a turn a local slash command answered. */
+export const LOCAL_COMMAND_STOP_REASON = "local_command";
+
 /** Claude control wrappers recorded as user rows, never user-authored prompts. */
 const CLAUDE_CONTROL_WRAPPER =
   /^<(?:command-name|command-message|command-args|local-command-stdout|local-command-stderr|local-command-caveat|system-reminder|user-prompt-submit-hook|bash-input|bash-stdout|bash-stderr)\b/i;
@@ -202,6 +218,16 @@ const num = (value: unknown): number =>
 
 const clip = (text: string, max: number): string =>
   text.length <= max ? text : `${text.slice(0, max - 1)}…`;
+
+/**
+ * A tool name as the schema accepts it (1..{@link AGENT_TOOL_NAME_MAX_LENGTH}):
+ * an MCP tool's name can run longer, and an event with an over-long or empty
+ * one would fail to decode and be dropped by every consumer.
+ */
+export const toolNameOf = (value: unknown): string => {
+  const name = typeof value === "string" ? value.trim() : "";
+  return name === "" ? "tool" : clip(name, AGENT_TOOL_NAME_MAX_LENGTH);
+};
 
 /** Flatten a `tool_result` content (string or blocks) to text. */
 export const toolResultText = (content: unknown): string => {
@@ -306,9 +332,18 @@ export type TTranscriptParser = {
     prompt: string,
     attachments?: readonly TAgentAttachmentMeta[],
   ) => string;
-  readonly completeTurn: () => void;
-  readonly abortTurn: (reason: "interrupted" | "failed" | "cancelled") => void;
+  readonly completeTurn: (stopReason?: string) => void;
+  readonly abortTurn: (
+    reason: "interrupted" | "failed" | "cancelled",
+    message?: string,
+  ) => void;
   readonly turnActive: () => boolean;
+  /**
+   * True while the open turn is a slash command sent by this daemon that has
+   * shown no sign of running the model (no prompt expansion, no assistant
+   * row): a local command that may finish without writing anything.
+   */
+  readonly quietLocalCommand: () => boolean;
   readonly turnField: () => { turn_id?: string };
   /** Turns opened so far (the ordinal of the latest `t<n>`). */
   readonly turnCount: () => number;
@@ -354,7 +389,16 @@ export const createTranscriptParser = (
   const { emit } = args;
   let buffer = "";
   let turnCounter = args.firstTurn ?? 0;
-  let turn: { id: string; awaitingPromptLine: boolean } | null = null;
+  let turn: {
+    id: string;
+    awaitingPromptLine: boolean;
+    /** The daemon typed a slash command (`/cost`, `/model x`, `/init`). */
+    readonly command: string | null;
+    /** The model runs for it (a prompt or an expanded command was recorded). */
+    modelRun: boolean;
+    /** An assistant row answered in this turn. */
+    answered: boolean;
+  } | null = null;
   const tools = new Map<
     string,
     { toolName: string; input: unknown; at: number | null; parent?: string }
@@ -412,7 +456,9 @@ export const createTranscriptParser = (
       {
         kind: "notice",
         notice: kind,
-        ...(text === undefined ? {} : { text: clip(text, 16 * 1024) }),
+        ...(text === undefined
+          ? {}
+          : { text: clip(text, AGENT_DETAIL_TEXT_MAX_LENGTH) }),
       },
       args.parentItemId,
     );
@@ -424,7 +470,19 @@ export const createTranscriptParser = (
     attachments?: readonly TAgentAttachmentMeta[],
   ): string => {
     turnCounter += 1;
-    turn = { id: `t${turnCounter}`, awaitingPromptLine };
+    // Only a prompt this daemon typed can be a slash command: Claude records
+    // a terminal one as wrapper rows, which never open a turn.
+    const command =
+      awaitingPromptLine && prompt !== undefined
+        ? (/^\/[^\s/]+(?=\s|$)/.exec(prompt.trimStart())?.[0] ?? null)
+        : null;
+    turn = {
+      id: `t${turnCounter}`,
+      awaitingPromptLine,
+      command,
+      modelRun: false,
+      answered: false,
+    };
     turnUsage = null;
     const cleaned =
       prompt === undefined ? undefined : normalizeUserPromptText(prompt);
@@ -439,12 +497,13 @@ export const createTranscriptParser = (
     return turn.id;
   };
 
-  const completeTurn = (): void => {
+  const completeTurn = (stopReason?: string): void => {
     if (turn === null) return;
     const usage = turnUsage;
     emit({
       type: "turn.completed",
       turn_id: turn.id,
+      ...(stopReason === undefined ? {} : { stop_reason: stopReason }),
       ...(usage === null
         ? {}
         : {
@@ -461,9 +520,17 @@ export const createTranscriptParser = (
     turnUsage = null;
   };
 
-  const abortTurn = (reason: "interrupted" | "failed" | "cancelled"): void => {
+  const abortTurn = (
+    reason: "interrupted" | "failed" | "cancelled",
+    message?: string,
+  ): void => {
     if (turn === null) return;
-    emit({ type: "turn.aborted", turn_id: turn.id, reason });
+    emit({
+      type: "turn.aborted",
+      turn_id: turn.id,
+      reason,
+      ...(message === undefined ? {} : { message: clip(message, 256) }),
+    });
     turn = null;
     turnUsage = null;
   };
@@ -567,12 +634,17 @@ export const createTranscriptParser = (
         "model_changed",
         switched[1],
       );
+      onLocalCommandDone();
       return;
     }
     // Known slash-command / hook / system-reminder wrappers are not prompts.
     // A real prompt may legitimately start with markup, so do not treat every
     // `<...>` row as a wrapper. `pasted_content` is unwrapped by normalize.
     const trimmedRaw = raw.trim();
+    if (LOCAL_COMMAND_OUTPUT.test(trimmedRaw)) {
+      onLocalCommandDone();
+      return;
+    }
     if (
       row.isCompactSummary === true ||
       CLAUDE_CONTROL_WRAPPER.test(trimmedRaw)
@@ -581,13 +653,24 @@ export const createTranscriptParser = (
     const prompt = normalizeUserPromptText(raw);
     if (prompt === "") return;
     if (turn?.awaitingPromptLine === true) {
+      // Recorded as a prompt: the model answers it (a `/path` too).
       turn.awaitingPromptLine = false;
+      turn.modelRun = true;
       return;
     }
     // A new prompt (terminal input, or the next turn of a replayed history)
     // closes whatever turn is still open.
     completeTurn();
     openTurn(prompt, false);
+  };
+
+  /**
+   * A local slash command wrote its output: the turn it opened is over (no
+   * Stop hook runs for a command the model never saw).
+   */
+  const onLocalCommandDone = (): void => {
+    if (turn === null || turn.command === null || turn.answered) return;
+    completeTurn(LOCAL_COMMAND_STOP_REASON);
   };
 
   /** A background task stopped: finish its call, mark the transcript. */
@@ -634,6 +717,10 @@ export const createTranscriptParser = (
   ): void => {
     const content = message.content;
     const base = str(row.uuid) ?? str(message.id) ?? `m${turnCounter}`;
+    if (parent === undefined && turn !== null) {
+      turn.modelRun = true;
+      turn.answered = true;
+    }
     // An API failure Claude records as an assistant message is an error
     // marker, not the model's speech.
     if (row.isApiErrorMessage === true) {
@@ -665,7 +752,7 @@ export const createTranscriptParser = (
             item("item.completed", id, { kind: "reasoning", text }, parent);
         } else if (block.type === "tool_use") {
           const toolId = str(block.id) ?? id;
-          const toolName = str(block.name) ?? "tool";
+          const toolName = toolNameOf(block.name);
           tools.set(toolId, {
             toolName,
             input: block.input,
@@ -781,8 +868,21 @@ export const createTranscriptParser = (
     } catch {
       return;
     }
-    if (!isRecord(row) || row.isMeta === true) return;
+    if (!isRecord(row)) return;
+    if (row.isMeta === true) {
+      // A prompt-type slash command (`/init`, a skill) expands into a meta
+      // prompt row: the model runs for it, and its Stop ends the turn.
+      if (row.type === "user" && turn !== null && turn.command !== null)
+        turn.modelRun = true;
+      return;
+    }
     if (args.parentItemId === undefined) {
+      // A local command's output can also be a system row
+      // (`/context`, a forked skill's launch).
+      if (row.type === "system" && row.subtype === "local_command") {
+        onLocalCommandDone();
+        return;
+      }
       // Claude names the conversation with an `ai-title` row (rewritten as
       // it learns more): the title every viewer shows for this session.
       if (row.type === "ai-title" && typeof row.aiTitle === "string") {
@@ -833,6 +933,11 @@ export const createTranscriptParser = (
     completeTurn,
     abortTurn,
     turnActive: () => turn !== null,
+    quietLocalCommand: () =>
+      turn !== null &&
+      turn.command !== null &&
+      !turn.modelRun &&
+      !SLOW_LOCAL_COMMANDS.has(turn.command),
     turnField,
     turnCount: () => turnCounter,
   };
