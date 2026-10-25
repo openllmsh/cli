@@ -1641,16 +1641,19 @@ export const createClaudeTuiSession = (
   };
   /** The next queued prompt opens its turn once the session is idle again. */
   const flushQueue = (): void => {
-    if (ended || parser.turnActive() || awaitingStop || modelTyping) return;
-    const next = promptQueue.shift();
-    if (next === undefined) return;
-    emitQueue();
-    const result = startTurn(next);
-    if (!result.ok)
+    // Past any prompt that can't be sent, or the rest would wait forever:
+    // nothing else re-triggers a flush while no turn runs.
+    while (!(ended || parser.turnActive() || awaitingStop || modelTyping)) {
+      const next = promptQueue.shift();
+      if (next === undefined) return;
+      emitQueue();
+      const result = startTurn(next);
+      if (result.ok) return;
       emit({
         type: "runtime.warning",
         message: `A queued message wasn't sent: ${result.message}`,
       });
+    }
   };
 
   return {
@@ -1664,7 +1667,12 @@ export const createClaudeTuiSession = (
       // Mid-turn (or before the Stop hooks settle): hold it here and send it
       // as the turn ends, like Claude's own queue — but daemon-side, so the
       // turn it opens is ours to track and every viewer sees the queue.
-      if (parser.turnActive() || awaitingStop || promptQueue.length > 0) {
+      if (
+        parser.turnActive() ||
+        awaitingStop ||
+        modelTyping ||
+        promptQueue.length > 0
+      ) {
         if (
           input.prompt.trim() === "" &&
           (input.attachments?.length ?? 0) === 0
