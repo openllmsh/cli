@@ -38,6 +38,7 @@ import {
   historyCursorOf,
   latestReplayWindow,
   logHistoryPage,
+  shrinkAgentItem,
   turnIdOfCursor,
 } from "./history-window";
 import type {
@@ -120,18 +121,12 @@ const clip = (text: string, max: number): string =>
   text.length <= max ? text : `${text.slice(0, max - 1)}…`;
 
 /** Shrink an event's bulky fields so it fits one NDJSON line. */
-const shrinkItem = (item: TAgentItem): TAgentItem => {
-  if (item.kind === "notice") return item;
-  if (item.kind !== "tool_call")
-    return { ...item, text: clip(item.text, 512 * 1024) };
-  const { input: _input, ...rest } = item;
-  return {
-    ...rest,
-    ...(rest.output === undefined
-      ? {}
-      : { output: clip(rest.output, AGENT_TOOL_OUTPUT_MAX_CHARS / 4) }),
-  };
-};
+const shrinkItem = (item: TAgentItem): TAgentItem =>
+  shrinkAgentItem(item, {
+    text: 512 * 1024,
+    output: AGENT_TOOL_OUTPUT_MAX_CHARS / 4,
+    input: 0,
+  });
 
 /**
  * A `runtime.warning` standing in for an event that cannot be delivered. It
@@ -830,22 +825,38 @@ export const createAgentDispatcher = (
               firstTurnId: page.firstTurnId,
               hasMore: page.hasMore,
             });
-            reply(
-              state,
-              session,
-              {
-                type: "history.page",
-                has_more: bounded.hasMore,
-                ...(bounded.firstTurnId === null
-                  ? {}
-                  : { before_cursor: historyCursorOf(bounded.firstTurnId) }),
-                events: bounded.events.map((event) => ({
-                  ...fitAgentEvent(event),
-                  session_id: session.id,
-                })),
-              },
-              commandId,
-            );
+            const pageEvent: TAgentEvent = {
+              type: "history.page",
+              has_more: bounded.hasMore,
+              ...(bounded.firstTurnId === null
+                ? {}
+                : { before_cursor: historyCursorOf(bounded.firstTurnId) }),
+              events: bounded.events.map((event) => ({
+                ...fitAgentEvent(event),
+                session_id: session.id,
+              })),
+            };
+            // A page that still cannot travel as one line must answer the
+            // command anyway: the consumer stops paging on this error rather
+            // than wait forever for a page that was swapped for a warning.
+            if (
+              encodeAgentLine({
+                ...pageEvent,
+                session_id: session.id,
+                at: now(),
+                ...(commandId === undefined ? {} : { command_id: commandId }),
+              }) === null
+            ) {
+              error(
+                state,
+                session,
+                "history_page_too_large",
+                "This part of the session's history is too large to load.",
+                commandId,
+              );
+              return;
+            }
+            reply(state, session, pageEvent, commandId);
             return;
           }
           case "attachment_get": {

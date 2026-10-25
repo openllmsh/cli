@@ -6,7 +6,7 @@
  * Turn ids are the keyset: they are minted by the engine's transcript parser,
  * so a cursor survives a re-attach, a daemon restart and a resume.
  */
-import type { TAgentEvent } from "@openllmsh/protocol";
+import type { TAgentEvent, TAgentItem } from "@openllmsh/protocol";
 import {
   AGENT_HISTORY_MAX_PAGE_EVENTS,
   encodeAgentLine,
@@ -139,9 +139,98 @@ export const logHistoryPage = (
   };
 };
 
+const clip = (text: string, max: number): string =>
+  text.length <= max ? text : `${text.slice(0, max - 1)}…`;
+
+/** Caps for an item's bulky fields when an event has to shrink. */
+export type TItemShrinkLimits = {
+  /** Assistant / reasoning / notice text. */
+  readonly text: number;
+  /** Tool output. */
+  readonly output: number;
+  /** A tool input whose JSON is longer than this is dropped. */
+  readonly input: number;
+};
+
+/** The item with its bulky fields cut to `limits`. */
+export const shrinkAgentItem = (
+  item: TAgentItem,
+  limits: TItemShrinkLimits,
+): TAgentItem => {
+  if (item.kind === "notice")
+    return item.text === undefined
+      ? item
+      : { ...item, text: clip(item.text, limits.text) };
+  if (item.kind !== "tool_call")
+    return { ...item, text: clip(item.text, limits.text) };
+  const { input, ...rest } = item;
+  let inputChars = Number.POSITIVE_INFINITY;
+  try {
+    inputChars = JSON.stringify(input)?.length ?? 0;
+  } catch {
+    // Unserializable: dropped.
+  }
+  return {
+    ...rest,
+    ...(input === undefined || inputChars > limits.input ? {} : { input }),
+    ...(rest.output === undefined
+      ? {}
+      : { output: clip(rest.output, limits.output) }),
+  };
+};
+
+/** The event with its item / delta cut to `limits` (others unchanged). */
+const shrinkPageEvent = (
+  event: TAgentEvent,
+  limits: TItemShrinkLimits,
+): TAgentEvent => {
+  if (
+    event.type === "item.started" ||
+    event.type === "item.updated" ||
+    event.type === "item.completed"
+  )
+    return { ...event, item: shrinkAgentItem(event.item, limits) };
+  if (event.type === "content.delta")
+    return { ...event, delta: clip(event.delta, limits.text) };
+  return event;
+};
+
+/**
+ * Ever smaller caps a page's items are cut to until the page fits its byte
+ * bound: the newest turn is always kept whole as turns go, so one turn with
+ * large tool outputs would otherwise not fit the frame at all.
+ */
+const PAGE_SHRINK_LEVELS: readonly TItemShrinkLimits[] = [
+  { text: 512 * 1024, output: 16 * 1024, input: 64 * 1024 },
+  { text: 64 * 1024, output: 2 * 1024, input: 4 * 1024 },
+  { text: 8 * 1024, output: 256, input: 0 },
+];
+
+const pageBytes = (events: readonly TAgentEvent[]): number => {
+  let bytes = 0;
+  for (const event of events) bytes += encodedBytes(event);
+  return bytes;
+};
+
+/**
+ * The page's events within {@link HISTORY_PAGE_MAX_BYTES}: as they are, or
+ * with item outputs / texts truncated. The last attempt when nothing fits
+ * (the caller answers with an error rather than an undeliverable page).
+ */
+const fitPageBytes = (events: TAgentEvent[]): TAgentEvent[] => {
+  if (pageBytes(events) <= HISTORY_PAGE_MAX_BYTES) return events;
+  let shrunk = events;
+  for (const limits of PAGE_SHRINK_LEVELS) {
+    shrunk = events.map((event) => shrinkPageEvent(event, limits));
+    if (pageBytes(shrunk) <= HISTORY_PAGE_MAX_BYTES) return shrunk;
+  }
+  return shrunk;
+};
+
 /**
  * Trim a history page (oldest first) to the page bounds, dropping whole
- * OLDEST turns so the page stays adjacent to the cursor it answers.
+ * OLDEST turns so the page stays adjacent to the cursor it answers, then
+ * truncating item outputs / texts when the newest turn alone is too large.
  */
 export const boundHistoryPage = (page: TReplayWindow): TReplayWindow => {
   let bytes = 0;
@@ -172,7 +261,7 @@ export const boundHistoryPage = (page: TReplayWindow): TReplayWindow => {
   }
   const kept = events.slice(start).slice(-AGENT_HISTORY_MAX_PAGE_EVENTS);
   return {
-    events: kept,
+    events: fitPageBytes(kept),
     firstTurnId,
     hasMore: page.hasMore || start > 0,
   };
