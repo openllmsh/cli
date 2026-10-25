@@ -58,6 +58,8 @@ import {
   AGENT_MAX_QUEUED_PROMPTS,
   AGENT_SHORT_TEXT_MAX_LENGTH,
   AGENT_SWITCH_MODEL_PATTERN,
+  MEDIA_TYPES,
+  MIME_BY_MEDIA_EXT,
   SESSION_ID_PATTERN,
 } from "@openllmsh/protocol";
 import { stateDir } from "../env";
@@ -669,9 +671,11 @@ export const sanitizeAttachmentName = (name: string | undefined): string => {
 };
 
 const extensionOf = (mediaType: string): string => {
+  if (Object.hasOwn(MEDIA_TYPES, mediaType)) {
+    const ext = MEDIA_TYPES[mediaType]?.ext;
+    if (ext !== undefined) return `.${ext}`;
+  }
   const sub = mediaType.split("/")[1] ?? "";
-  if (sub === "jpeg") return ".jpg";
-  if (sub === "plain") return ".txt";
   return /^[a-z0-9]{1,8}$/.test(sub) ? `.${sub}` : "";
 };
 
@@ -759,15 +763,13 @@ export type TResolvedAgentAttachment =
     }
   | { readonly ok: false; readonly code: string; readonly message: string };
 
+/** Stored-name extension → MIME, for serving an attachment back. */
 const mimeOfStoredName = (name: string): string => {
-  const lower = name.toLowerCase();
-  if (lower.endsWith(".png")) return "image/png";
-  if (lower.endsWith(".jpg") || lower.endsWith(".jpeg")) return "image/jpeg";
-  if (lower.endsWith(".gif")) return "image/gif";
-  if (lower.endsWith(".webp")) return "image/webp";
-  if (lower.endsWith(".pdf")) return "application/pdf";
-  if (lower.endsWith(".txt") || lower.endsWith(".md")) return "text/plain";
-  return "application/octet-stream";
+  const ext = name.toLowerCase().split(".").pop() ?? "";
+  if (ext === "jpeg") return "image/jpeg";
+  return Object.hasOwn(MIME_BY_MEDIA_EXT, ext)
+    ? (MIME_BY_MEDIA_EXT[ext] ?? "application/octet-stream")
+    : "application/octet-stream";
 };
 
 /**
