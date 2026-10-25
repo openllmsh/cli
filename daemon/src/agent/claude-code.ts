@@ -70,6 +70,7 @@ import {
   createClaudeTranscriptTail,
   createTranscriptParser,
   findClaudeTranscript,
+  LOCAL_COMMAND_STOP_REASON,
   SUBAGENT_TOOL_NAMES,
 } from "./claude-transcript";
 import { historyCursorOf, latestReplayWindow } from "./history-window";
@@ -109,6 +110,16 @@ const STOP_GRACE_MS = 3_000;
  */
 const MODEL_CONFIRM_MS = 1_500;
 const STOP_SETTLE_MS = 500;
+/**
+ * A slash command typed from the web that the model never sees (`/help`,
+ * `/cost`) runs no Stop hook, and some write nothing at all. With no sign of
+ * the model running for it by then (an expanded prompt, an assistant row),
+ * its turn is complete.
+ */
+const LOCAL_COMMAND_SETTLE_MS = 3_000;
+/** Why a replayed turn the resumed TUI is not continuing was closed. */
+const REPLAY_OPEN_TURN_MESSAGE =
+  "The session stopped before this turn finished.";
 /** Gap between the bracketed paste and the submitting CR. */
 const SUBMIT_DELAY_MS = 80;
 /**
@@ -962,6 +973,7 @@ export type TClaudeTuiDeps = {
   readonly stopGraceMs?: number;
   readonly stopSettleMs?: number;
   readonly modelConfirmMs?: number;
+  readonly localCommandSettleMs?: number;
   readonly trustAnswerDelayMs?: number;
   readonly attachmentsDir?: (sessionId: string) => string;
 };
@@ -1006,6 +1018,12 @@ export const createClaudeTuiSession = (
     emit: (event) => {
       if (event.type === "session.configured" && event.model !== undefined)
         modelInFlight = false;
+      if (
+        event.type === "turn.completed" &&
+        event.stop_reason === LOCAL_COMMAND_STOP_REASON
+      )
+        // No Stop hook follows a local command: the prompt is idle again.
+        settleAfterTurn();
       if (drained !== null) drained.push(event);
       else emit(event);
     },
@@ -1040,6 +1058,34 @@ export const createClaudeTuiSession = (
    * lands while Stop hooks still run, and keys typed then are lost.
    */
   let awaitingStop = false;
+  /** The turn this daemon opened last (its prompt was typed by `send`). */
+  let sentTurnId: string | null = null;
+  /**
+   * The open turn a resume / attach replay ended on (the transcript stops
+   * mid-turn: Stop, kill or crash). Settled once the link says whether a
+   * running TUI is continuing it.
+   */
+  let replayedOpenTurn: string | null = null;
+  /** The prompt takes input again after a turn ended without a Stop hook. */
+  const settleAfterTurn = (): void => {
+    awaitingStop = false;
+    setTimeout(() => {
+      if (!ended) applyModel();
+    }, deps.stopSettleMs ?? STOP_SETTLE_MS);
+  };
+  /**
+   * A freshly spawned TUI (`claude --resume`) does not continue the turn its
+   * transcript ended on, so nothing would ever close it and every `send`
+   * would answer `turn_in_progress`: close it. A TUI that was already running
+   * may really be mid-turn; its Stop / end_turn closes it.
+   */
+  const settleReplayedTurn = (): void => {
+    if (replayedOpenTurn === null || link === null) return;
+    const turnId = replayedOpenTurn;
+    replayedOpenTurn = null;
+    if (!link.fresh || parser.turnField().turn_id !== turnId) return;
+    parser.abortTurn("interrupted", REPLAY_OPEN_TURN_MESSAGE);
+  };
   const applyModel = (): void => {
     if (
       pendingModel === null ||
@@ -1154,6 +1200,11 @@ export const createClaudeTuiSession = (
             : { before_cursor: historyCursorOf(window.firstTurnId) }),
         });
         for (const event of withSubagents(window.events)) emit(event);
+        const open = parser.turnField().turn_id;
+        if (parser.turnActive() && open !== undefined && open !== sentTurnId) {
+          replayedOpenTurn = open;
+          settleReplayedTurn();
+        }
       } else {
         for (const event of withSubagents(replayWindow(events))) emit(event);
       }
@@ -1369,6 +1420,7 @@ export const createClaudeTuiSession = (
       hookHandlers.set(opened.hostId, onHook);
       opened.onOutput(onOutput);
       opened.onExit(() => finish("completed"));
+      settleReplayedTurn();
       maybeReady();
       if (!ready && readyTimer === undefined) {
         readyMaxTimer = setTimeout(() => {
@@ -1437,10 +1489,31 @@ export const createClaudeTuiSession = (
         input.prompt,
         written.map((entry) => entry.meta),
       );
+      sentTurnId = turnId;
       awaitingStop = true;
+      const localCommand = parser.quietLocalCommand();
       whenReady(() => {
         writeText(`${PASTE_START}${text}${PASTE_END}`);
         setTimeout(() => writeText("\r"), submitDelayMs);
+        if (!localCommand) return;
+        const settle = setTimeout(
+          () => {
+            if (ended || parser.turnField().turn_id !== turnId) return;
+            try {
+              pump();
+            } catch (err) {
+              logError("agent", err);
+            }
+            if (
+              parser.turnField().turn_id === turnId &&
+              parser.quietLocalCommand()
+            )
+              parser.completeTurn(LOCAL_COMMAND_STOP_REASON);
+          },
+          submitDelayMs +
+            (deps.localCommandSettleMs ?? LOCAL_COMMAND_SETTLE_MS),
+        );
+        settle.unref?.();
       });
       return { ok: true, turnId };
     },
