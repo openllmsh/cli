@@ -93,6 +93,12 @@ export const startAgentSessions = (): TAgentDispatcher => {
     adapters: [createClaudeCodeAdapter()],
     resumeCwdOf,
     deleteSession,
+    onSessionsChanged: () => {
+      // Lazy: control-channel imports the agent runtime.
+      void import("../control-channel")
+        .then((mod) => mod.pushSessionsChanged())
+        .catch(() => {});
+    },
   });
   dispatcher = created;
   setAgentStreamHandler(createAgentStreamHandler(created));

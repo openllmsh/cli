@@ -60,6 +60,11 @@ export const AGENT_CONSUMER_MAX_QUEUED = 4_096;
 
 export type TAgentDispatcherOptions = {
   readonly adapters: readonly TAgentEngineAdapter[];
+  /**
+   * A session started or exited. The running set reaches the dashboard in
+   * the published status, which otherwise waits for the watcher tick (~30s).
+   */
+  readonly onSessionsChanged?: () => void;
   /** Overrides (tests). */
   readonly now?: () => number;
   readonly detachedIdleMs?: number;
@@ -330,6 +335,7 @@ export const createAgentDispatcher = (
       sessions.delete(session.id);
       if (session.idleTimer !== undefined) clearTimeout(session.idleTimer);
       for (const watcher of session.exitWatchers.splice(0)) watcher();
+      options.onSessionsChanged?.();
     }
   };
 
@@ -431,6 +437,7 @@ export const createAgentDispatcher = (
         if (!session.exited) publish(session, event);
       },
     );
+    options.onSessionsChanged?.();
     logInfo("agent", "agent session started", {
       id: session.id,
       engine: args.engine,

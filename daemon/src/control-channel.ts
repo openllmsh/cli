@@ -786,6 +786,19 @@ export const pushStatusIfChanged = async (
   }
 };
 
+/**
+ * An agent session started or exited: publish the running set now, without
+ * the provider probes (nothing auth-related changed). Settles briefly first
+ * so the session host's own register/unregister is in the snapshot.
+ */
+const SESSIONS_CHANGED_SETTLE_MS = 300;
+export const pushSessionsChanged = (): void => {
+  setTimeout(() => {
+    watcherSkipProviderProbes = true;
+    void pushStatusIfChanged("watcher").catch(() => {});
+  }, SESSIONS_CHANGED_SETTLE_MS).unref?.();
+};
+
 const startWatcher = (): void => {
   if (watchTimer !== null) return;
   watchTimer = setInterval(() => {
