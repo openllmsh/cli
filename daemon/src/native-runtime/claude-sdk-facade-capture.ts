@@ -56,7 +56,6 @@ import type {
   TClaudeSdkFacadeParams,
 } from "./claude-sdk-facade";
 import {
-  awaitClaudeSdkFacadeChildReady,
   logSdkFacadePhaseTiming,
   planClaudeSdkFacadeTurn,
   replayClaudeSdkFacadeHistory,
@@ -223,15 +222,6 @@ const runClaudeSdkFacadeCaptureCore = async (
   // Dispatch may reject before historical replay finishes. Observe it now;
   // later awaits still see the original rejection and preserve ownership.
   void dispatchPromise.catch(() => undefined);
-
-  // Spawn-ready BEFORE writing history: ack budgets must not race cold start.
-  const ready = await awaitClaudeSdkFacadeChildReady(reader);
-  if (!ready.ok) {
-    kill();
-    loopback.stop();
-    session.dispose();
-    return { kind: "declined", reason: ready.reason };
-  }
 
   const replay = await replayClaudeSdkFacadeHistory({
     stdin,
