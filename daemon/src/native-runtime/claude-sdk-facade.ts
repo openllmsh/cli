@@ -295,6 +295,45 @@ export type TClaudeSdkFacadeReplayResult =
   | { readonly ok: false; readonly reason: string };
 
 /**
+ * Wait until the spawned facade child emits its first stdout line (typically
+ * `system`/`init`) before history frames are written. The per-frame ack budget
+ * must not race cold process start — a slow-starting CLI would otherwise be
+ * misreported as "no replay acknowledgment" when it simply had not begun
+ * reading stdin yet. Uses {@link PRE_COMMIT_TIMEOUT_MS} (not the ack
+ * `precommitMs`) so spawn-ready and ack budgets stay independent.
+ */
+export const awaitClaudeSdkFacadeChildReady = async (
+  reader: ReadableStreamDefaultReader<string>,
+  timeoutMs: number = PRE_COMMIT_TIMEOUT_MS,
+): Promise<TClaudeSdkFacadeReplayResult> => {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const raced = await Promise.race([
+      reader.read(),
+      new Promise<"timeout">((resolve) => {
+        timer = setTimeout(() => resolve("timeout"), timeoutMs);
+      }),
+    ]);
+    if (raced === "timeout") {
+      return {
+        ok: false,
+        reason:
+          "sdk-facade: native runtime produced no output before deadline — native runtime may be hung",
+      };
+    }
+    if (raced.done) {
+      return {
+        ok: false,
+        reason: "sdk-facade: native runtime exited before ready",
+      };
+    }
+    return { ok: true };
+  } finally {
+    clearTimeout(timer);
+  }
+};
+
+/**
  * Write every frame, waiting for a zero-turn acknowledgment after each
  * `shouldQuery: false` one (Hermes §3.B). Refuses — rather than guessing —
  * the moment an ack is missing/non-zero-turn/erroring: history replay is
@@ -883,9 +922,9 @@ const runClaudeSdkFacadeCore = async (
     stopMcpServer = server.stop;
   }
 
-  let proc: ReturnType<typeof Bun.spawn>;
+  let supervised: ReturnType<typeof spawnClaudeFacadeCli>;
   try {
-    proc = spawnClaudeFacadeCli({
+    supervised = spawnClaudeFacadeCli({
       bin: params.bin,
       providerModelId: params.providerModelId,
       systemText: plan.systemText,
@@ -899,15 +938,12 @@ const runClaudeSdkFacadeCore = async (
       reason: `spawn failed: ${error instanceof Error ? error.message : String(error)}`,
     };
   }
+  const proc = supervised.subprocess;
 
   const kill = (): void => {
     params.signal.removeEventListener("abort", kill);
     stopMcpServer?.();
-    try {
-      proc.kill("SIGTERM");
-    } catch {
-      // already exited
-    }
+    void supervised.terminate();
   };
   if (params.signal.aborted) {
     kill();
@@ -919,6 +955,18 @@ const runClaudeSdkFacadeCore = async (
   const reader = ndjsonLines(
     proc.stdout as ReadableStream<Uint8Array>,
   ).getReader();
+
+  // Spawn-ready BEFORE writing history: ack budgets must not race cold start.
+  const ready = await awaitClaudeSdkFacadeChildReady(reader);
+  if (!ready.ok) {
+    kill();
+    logError(
+      "native-runtime",
+      safeDiagnosticMessage`sdk-facade hop declined before history replay`,
+      { reason: ready.reason },
+    );
+    return { kind: "declined", reason: ready.reason };
+  }
 
   const replay = await replayClaudeSdkFacadeHistory({
     stdin,

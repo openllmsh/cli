@@ -56,6 +56,7 @@ import type {
   TClaudeSdkFacadeParams,
 } from "./claude-sdk-facade";
 import {
+  awaitClaudeSdkFacadeChildReady,
   logSdkFacadePhaseTiming,
   planClaudeSdkFacadeTurn,
   replayClaudeSdkFacadeHistory,
@@ -81,12 +82,10 @@ export type TClaudeSdkFacadeCaptureParams = TClaudeSdkFacadeParams & {
   readonly maxBodyBytes?: number;
 };
 
-const killProc = (proc: ReturnType<typeof Bun.spawn>): void => {
-  try {
-    proc.kill("SIGTERM");
-  } catch {
-    // already exited
-  }
+const killProc = (child: {
+  readonly terminate: () => Promise<unknown>;
+}): void => {
+  void child.terminate();
 };
 
 /** Thin timing wrapper around {@link runClaudeSdkFacadeCaptureCore} — reuses
@@ -153,9 +152,9 @@ const runClaudeSdkFacadeCaptureCore = async (
   const cleaned = cleanNativeSpawnEnv(params.env);
   const spawnEnv = withClaudeCaptureBaseUrl(cleaned, loopback.baseUrl);
 
-  let proc: ReturnType<typeof Bun.spawn>;
+  let supervised: ReturnType<typeof spawnClaudeFacadeCli>;
   try {
-    proc = spawnClaudeFacadeCli({
+    supervised = spawnClaudeFacadeCli({
       bin: params.bin,
       providerModelId: params.providerModelId,
       systemText: plan.systemText,
@@ -171,11 +170,12 @@ const runClaudeSdkFacadeCaptureCore = async (
       reason: `spawn failed: ${error instanceof Error ? error.message : String(error)}`,
     };
   }
+  const proc = supervised.subprocess;
 
   const kill = (): void => {
     params.signal.removeEventListener("abort", kill);
     stopMcpServer?.();
-    killProc(proc);
+    killProc(supervised);
   };
   if (params.signal.aborted) {
     kill();
@@ -223,6 +223,15 @@ const runClaudeSdkFacadeCaptureCore = async (
   // Dispatch may reject before historical replay finishes. Observe it now;
   // later awaits still see the original rejection and preserve ownership.
   void dispatchPromise.catch(() => undefined);
+
+  // Spawn-ready BEFORE writing history: ack budgets must not race cold start.
+  const ready = await awaitClaudeSdkFacadeChildReady(reader);
+  if (!ready.ok) {
+    kill();
+    loopback.stop();
+    session.dispose();
+    return { kind: "declined", reason: ready.reason };
+  }
 
   const replay = await replayClaudeSdkFacadeHistory({
     stdin,

@@ -1758,7 +1758,24 @@ export const runCodexCapturedTextTurn = async (
     if (captureOwnership === "none" && session.dispatchStarted()) {
       captureOwnership = session.upstreamAccepted() ? "accepted" : "uncertain";
     }
-    const base = error instanceof Error ? error.message : String(error);
+    // Prefer a known native terminal over a generic capture timeout. The
+    // capture wait is raced against turn/completed; under scheduling delay
+    // the budget can fire first even though the builder already failed with
+    // zero captures — surfacing that terminal is the whole point of the race
+    // (do not swallow a real client failure as "capture timed out after Nms").
+    let base = error instanceof Error ? error.message : String(error);
+    if (
+      /^capture timed out after\b/.test(base) &&
+      turnTerminal !== null &&
+      receiver.capturedCount() === 0 &&
+      !session.dispatchStarted()
+    ) {
+      const detail =
+        turnTerminal.error !== null && turnTerminal.error.length > 0
+          ? `${turnTerminal.status}: ${turnTerminal.error}`
+          : turnTerminal.status;
+      base = `codex turn ended before capture (${detail})`;
+    }
     disposeAll();
     return decline(base);
   }

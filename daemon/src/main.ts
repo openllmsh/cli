@@ -656,6 +656,15 @@ export const main = async (): Promise<void> => {
     return;
   }
 
+  // Ready signal at BIND time — `/whoami` and `/status` already answer. The
+  // install-time launcher and test harnesses gate on this line; it used to
+  // print only after agent/control/reconcile, which under load made "listening"
+  // mean "past post-bind work" rather than "port is bound".
+  process.stdout.write(
+    `openllmd v${DAEMON_VERSION}${isDevMode() ? " (dev)" : ""} listening on http://127.0.0.1:${port}\n`,
+  );
+  logInfo("boot", `openllmd v${DAEMON_VERSION} listening on :${port}`);
+
   {
     const doctor = await loadDoctor();
     doctor.initDoctorCursorAtTail();
@@ -725,12 +734,6 @@ export const main = async (): Promise<void> => {
   setTimeout(() => {
     markHealthyBoot();
   }, 3_000);
-
-  // Single line to stdout so the install-time launcher can confirm boot.
-  process.stdout.write(
-    `openllmd v${DAEMON_VERSION}${isDevMode() ? " (dev)" : ""} listening on http://127.0.0.1:${port}\n`,
-  );
-  logInfo("boot", `openllmd v${DAEMON_VERSION} listening on :${port}`);
 };
 
 /**
