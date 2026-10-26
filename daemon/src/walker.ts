@@ -234,7 +234,11 @@ import { tokensFromResponse, ZERO_TOKENS } from "./native-runtime/types";
 import { runWithAccount } from "./op-context";
 import { clearPlanCache } from "./plan-cache";
 import { isClaudeCodeOriginator, resolveHopExecution } from "./sub-method";
-import { currentTeamGrantToken } from "./team-request-context";
+import {
+  currentTeamGrantFieldsOf,
+  currentTeamGrantToken,
+} from "./team-request-context";
+import { teamUsageCharge } from "./team-usage";
 import type { TTunnelToPeer } from "./tunnel-client";
 import { tunnelToPeer } from "./tunnel-client";
 import {
@@ -795,6 +799,22 @@ export const report = (
       : {}),
   };
   void recordRequest(recordedRow, origin);
+  // Local team cap: charge actual tokens only on success. Failed/aborted
+  // hops never touch the counter (admit is a soft check).
+  const teamFields = currentTeamGrantFieldsOf();
+  if (
+    recordedRow.status === "success" &&
+    teamFields !== null &&
+    teamFields.cap_tokens !== undefined
+  ) {
+    const actual = Math.max(
+      0,
+      Math.floor(recordedRow.tokens_in) + Math.floor(recordedRow.tokens_out),
+    );
+    if (actual > 0) {
+      teamUsageCharge(teamFields.share_id, actual, teamFields.cap_tokens);
+    }
+  }
   if (
     recordedRow.status !== "success" ||
     !isOAuthSlug(recordedRow.provider) ||

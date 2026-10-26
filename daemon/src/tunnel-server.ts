@@ -238,7 +238,7 @@ export const createMuxTunnelServer =
           });
           throw new StreamResetError("unauthorized", `team_${decision.reason}`);
         }
-        const response = await withTeamGrant(teamToken, () =>
+        const response = await withTeamGrant(teamToken, decision.grant, () =>
           dispatch(tunneledRequest(open, buffered, signal)),
         );
         return {

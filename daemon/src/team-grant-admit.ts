@@ -14,7 +14,7 @@ import { verifyTeamGrant } from "@openllmsh/tunnel";
 import { teamGrantPubkey } from "./config";
 import { daemonApiKeyId } from "./env";
 import { teamShareable } from "./team-shareable";
-import { teamUsageReserve } from "./team-usage";
+import { teamUsageCanCharge } from "./team-usage";
 
 export type TTeamGrantAdmitDeps = {
   readonly now?: () => number;
@@ -22,7 +22,8 @@ export type TTeamGrantAdmitDeps = {
   readonly keyId?: () => string | null;
   readonly teamServeEnabled?: () => boolean;
   readonly shareable?: (provider: string) => boolean;
-  readonly reserve?: (
+  /** Soft capacity check — must not permanently increment. */
+  readonly canCharge?: (
     shareId: string,
     tokens: number,
     capTokens: number,
@@ -110,7 +111,7 @@ export const createTeamGrantAdmit = (
   const keyId = deps.keyId ?? daemonApiKeyId;
   const enabled = deps.teamServeEnabled ?? teamServeEnabled;
   const shareable = deps.shareable ?? teamShareable;
-  const reserve = deps.reserve ?? teamUsageReserve;
+  const canCharge = deps.canCharge ?? teamUsageCanCharge;
   const verify = deps.verify ?? verifyTeamGrant;
 
   return {
@@ -134,8 +135,9 @@ export const createTeamGrantAdmit = (
       if (!shareable(providerOfModel(grant.model))) {
         return { ok: false, reason: "not_shareable" };
       }
+      // Soft check only — charge actual tokens on successful completion.
       if (grant.cap_tokens !== undefined && reserveTokens > 0) {
-        if (!reserve(grant.share_id, reserveTokens, grant.cap_tokens)) {
+        if (!canCharge(grant.share_id, reserveTokens, grant.cap_tokens)) {
           return { ok: false, reason: "over_cap" };
         }
       }

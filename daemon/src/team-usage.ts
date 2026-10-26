@@ -3,6 +3,10 @@
  * reserves against `team_usage_counters`; this is the contributor daemon's
  * second line when a grant carries `cap_tokens`. Persisted under the daemon
  * state dir (same atomic JSON pattern as usage-cache).
+ *
+ * Charge only on successful completion (actual tokens). Admit-time checks
+ * are soft (`canCharge`) and never permanently increment — failed/aborted
+ * hops leave the counter untouched.
  */
 
 import {
@@ -24,16 +28,23 @@ export type TTeamUsageTracker = {
   /** Tokens already counted for `shareId` in the calendar month of `now`. */
   readonly used: (shareId: string) => number;
   /**
-   * Reserve `tokens` against the share's monthly total. Returns false when
-   * `used + tokens > capTokens` (refuses the request). Persists on success.
+   * Soft check: true when `used + tokens <= capTokens`. Does not persist —
+   * concurrent admits may slightly overshoot; origin is authoritative.
    */
-  readonly reserve: (
+  readonly canCharge: (
     shareId: string,
     tokens: number,
     capTokens: number,
   ) => boolean;
-  /** Test seam: replace in-memory+disk state. */
-  readonly _resetForTests: () => void;
+  /**
+   * Persist `used += tokens` after a successful hop. Returns false when the
+   * write would exceed `capTokens` (refuses to record over-cap usage).
+   */
+  readonly charge: (
+    shareId: string,
+    tokens: number,
+    capTokens: number,
+  ) => boolean;
 };
 
 type TTeamUsageFile = {
@@ -110,10 +121,23 @@ export const createTeamUsageTracker = (
       const key = periodKey(shareId, now());
       return load().periods[key] ?? 0;
     },
-    reserve(shareId: string, tokens: number, capTokens: number): boolean {
+    canCharge(shareId: string, tokens: number, capTokens: number): boolean {
       if (
         !Number.isFinite(tokens) ||
         tokens < 0 ||
+        !Number.isFinite(capTokens) ||
+        capTokens <= 0
+      ) {
+        return false;
+      }
+      const key = periodKey(shareId, now());
+      const used = load().periods[key] ?? 0;
+      return used + tokens <= capTokens;
+    },
+    charge(shareId: string, tokens: number, capTokens: number): boolean {
+      if (
+        !Number.isFinite(tokens) ||
+        tokens <= 0 ||
         !Number.isFinite(capTokens) ||
         capTokens <= 0
       ) {
@@ -130,28 +154,23 @@ export const createTeamUsageTracker = (
       writeFileAtomic(pathOf(), next);
       return true;
     },
-    _resetForTests(): void {
-      cache = { periods: {} };
-      try {
-        rmSync(pathOf(), { force: true });
-      } catch {
-        // ignore
-      }
-    },
   };
 };
 
 const defaultTracker = createTeamUsageTracker();
 
-/** Process-wide tracker (production). Tests should prefer {@link createTeamUsageTracker}. */
+/** Process-wide tracker (production). Tests should inject via {@link createTeamUsageTracker}. */
 export const teamUsageUsed = (shareId: string): number =>
   defaultTracker.used(shareId);
 
-export const teamUsageReserve = (
+export const teamUsageCanCharge = (
   shareId: string,
   tokens: number,
   capTokens: number,
-): boolean => defaultTracker.reserve(shareId, tokens, capTokens);
+): boolean => defaultTracker.canCharge(shareId, tokens, capTokens);
 
-export const resetTeamUsageForTests = (): void =>
-  defaultTracker._resetForTests();
+export const teamUsageCharge = (
+  shareId: string,
+  tokens: number,
+  capTokens: number,
+): boolean => defaultTracker.charge(shareId, tokens, capTokens);
