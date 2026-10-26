@@ -269,6 +269,8 @@ export const SUBAGENT_TOOL_NAMES: ReadonlySet<string> = new Set([
 
 /** The launch ack Claude writes as a background subagent's tool_result. */
 const ASYNC_LAUNCH_TEXT = /^Async agent launched successfully\b/;
+/** The task id a launch ack names; its notifications carry it as task-id. */
+const LAUNCH_AGENT_ID = /\bagentId:\s*([A-Za-z0-9_-]+)/;
 
 /**
  * A subagent call's tool_result that is only the background launch ack:
@@ -284,7 +286,11 @@ const isAsyncLaunchAck = (row: TJson, output: string): boolean => {
 
 /** A `<task-notification>` Claude injects when a background task stops. */
 export type TTaskNotification = {
-  readonly toolUseId: string;
+  /** The call that (re)started it. Absent on some notifications, and the
+   *  resume call (SendMessage), not the launch, when an agent was resumed. */
+  readonly toolUseId: string | undefined;
+  /** The task's own id — the `agentId` its launch ack named. */
+  readonly taskId: string | undefined;
   readonly status: string;
   readonly summary: string | undefined;
   readonly result: string | undefined;
@@ -302,9 +308,11 @@ export const parseTaskNotification = (
   const trimmed = text.trim();
   if (!trimmed.startsWith("<task-notification>")) return null;
   const toolUseId = tagOf(trimmed, "tool-use-id");
-  if (toolUseId === undefined) return null;
+  const taskId = tagOf(trimmed, "task-id");
+  if (toolUseId === undefined && taskId === undefined) return null;
   return {
     toolUseId,
+    taskId,
     status: tagOf(trimmed, "status") ?? "completed",
     summary: tagOf(trimmed, "summary"),
     result: tagOf(trimmed, "result"),
@@ -419,6 +427,8 @@ export const createTranscriptParser = (
     string,
     { toolName: string; input: unknown; parent?: string }
   >();
+  /** Task id (the launch ack's agentId) → its background call. */
+  const backgroundByTask = new Map<string, string>();
   /** A subagent file's latest assistant text (its result on `end_turn`). */
   let lastText: string | null = null;
 
@@ -559,6 +569,8 @@ export const createTranscriptParser = (
           isAsyncLaunchAck(row, output)
         ) {
           const owner = tool.parent ?? parent;
+          const taskId = LAUNCH_AGENT_ID.exec(output)?.[1];
+          if (taskId !== undefined) backgroundByTask.set(taskId, id);
           background.set(id, {
             toolName: tool.toolName,
             input: tool.input,
@@ -675,15 +687,24 @@ export const createTranscriptParser = (
 
   /** A background task stopped: finish its call, mark the transcript. */
   const onTaskNotification = (row: TJson, note: TTaskNotification): void => {
-    const call = background.get(note.toolUseId);
+    // By the call id; else by task id — a notification may carry no
+    // tool-use-id, or the id of the SendMessage that resumed the agent.
+    const callId =
+      note.toolUseId !== undefined && background.has(note.toolUseId)
+        ? note.toolUseId
+        : note.taskId === undefined
+          ? undefined
+          : backgroundByTask.get(note.taskId);
+    const call = callId === undefined ? undefined : background.get(callId);
     // Not a subagent this parser saw launch (a shell task, or a call cut
     // away by a history page): nothing to link the marker to.
-    if (call === undefined) return;
-    background.delete(note.toolUseId);
+    if (callId === undefined || call === undefined) return;
+    background.delete(callId);
+    if (note.taskId !== undefined) backgroundByTask.delete(note.taskId);
     const failed = note.status !== "completed";
     item(
       "item.completed",
-      note.toolUseId,
+      callId,
       {
         kind: "tool_call",
         tool_name: call.toolName,
@@ -699,11 +720,11 @@ export const createTranscriptParser = (
     );
     item(
       "item.completed",
-      `${str(row.uuid) ?? note.toolUseId}:subagent-finished`,
+      `${str(row.uuid) ?? callId}:subagent-finished`,
       {
         kind: "notice",
         notice: "subagent_finished",
-        ref_item_id: note.toolUseId,
+        ref_item_id: callId,
         ...(failed ? { text: note.status } : {}),
       },
       call.parent,
@@ -923,6 +944,14 @@ export const createTranscriptParser = (
       row.attachment.isMeta !== true
     ) {
       const raw = promptOf(row.attachment.prompt);
+      // A background task finishing mid-turn is queued the same way: it
+      // finishes its subagent call, it is not a prompt (taking it for one
+      // left the subagent "running" forever and opened a phantom turn).
+      const notification = raw === null ? null : parseTaskNotification(raw);
+      if (notification !== null) {
+        onTaskNotification(row, notification);
+        return;
+      }
       const prompt = raw === null ? "" : normalizeUserPromptText(raw);
       if (prompt === "") return;
       completeTurn();
