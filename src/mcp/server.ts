@@ -9,7 +9,7 @@ import type { CallToolResult } from "@modelcontextprotocol/server";
 import { fromJsonSchema, McpServer } from "@modelcontextprotocol/server";
 import { serveStdio } from "@modelcontextprotocol/server/stdio";
 import { fetchTier } from "../clients/gateway";
-import { fetchMarketplaceServers } from "../clients/marketplace";
+import { fetchMarketplaceLaunch } from "../clients/marketplace";
 import type { TMcpGroup } from "../commands";
 import { mcpGroupsForTier } from "../commands";
 import { CLI_VERSION } from "../env";
@@ -39,6 +39,9 @@ import type { TToolResult } from "./types";
 export type { TMcpGroup } from "../commands";
 export { MCP_ONLY_GROUPS as MCP_GROUPS } from "../commands";
 
+/** Catalog id for the first-party memory builtin. */
+export const OPENLLM_MEMORY_BUILTIN_ID = "openllm-memory";
+
 const isMemoryTool = (name: string): boolean =>
   memoryToolDefs.some((tool) => tool.name === name);
 
@@ -48,13 +51,19 @@ export const createMcpServer = ({
   tier,
   config,
   upstreams = [],
+  builtins = [],
 }: {
   requested: readonly TMcpGroup[];
   tier: Parameters<typeof mcpGroupsForTier>[1];
   config: { baseUrl: string; apiKey: string };
   upstreams?: readonly TUpstream[];
+  /** Enabled first-party builtins from `/api/marketplace/launch`. */
+  builtins?: readonly string[];
 }): McpServer => {
   const groups = mcpGroupsForTier(requested, tier);
+  const memoryEnabled =
+    groups.includes("openllm-memory") &&
+    builtins.includes(OPENLLM_MEMORY_BUILTIN_ID);
   const memoryConfig = {
     name: "openllm",
     version: CLI_VERSION,
@@ -70,7 +79,7 @@ export const createMcpServer = ({
     ...(groups.includes("openllm")
       ? [...openllmTools, ...localAuthToolDefs]
       : []),
-    ...(groups.includes("openllm-memory") ? memoryToolDefs : []),
+    ...(memoryEnabled ? memoryToolDefs : []),
   ];
   const server = new McpServer(
     { name: "openllm", version: CLI_VERSION },
@@ -87,7 +96,7 @@ export const createMcpServer = ({
         inputSchema: fromJsonSchema<Record<string, unknown>>(inputSchema),
       },
       async (args): Promise<TToolResult> => {
-        if (groups.includes("openllm-memory") && isMemoryTool(name)) {
+        if (memoryEnabled && isMemoryTool(name)) {
           return handleMemoryTool(name, args, memoryConfig);
         }
         if (groups.includes("openllm") && isLocalAuthTool(name))
@@ -201,16 +210,28 @@ export const runMcpServer = async (
   // waits briefly so one-shot `tools/list` clients still see marketplace
   // tools when the handshake is fast.
   const tierPromise = fetchTier(gateway);
-  const marketplacePromise: Promise<readonly TUpstream[]> = requested.includes(
+  type TLaunchConnected = {
+    readonly upstreams: readonly TUpstream[];
+    readonly builtins: readonly string[];
+  };
+  const marketplacePromise: Promise<TLaunchConnected> = requested.includes(
     "openllm",
   )
-    ? fetchMarketplaceServers(gateway).then(connectUpstreams)
-    : Promise.resolve([]);
+    ? fetchMarketplaceLaunch(gateway).then(async (launch) => ({
+        upstreams: await connectUpstreams(launch.servers),
+        builtins: launch.builtins,
+      }))
+    : Promise.resolve({
+        upstreams: [] as readonly TUpstream[],
+        builtins: [] as readonly string[],
+      });
   let upstreams: readonly TUpstream[] = [];
+  let builtins: readonly string[] = [];
   let marketplaceSettled = false;
   const marketplaceTask = marketplacePromise.then(
     (connected) => {
-      upstreams = connected;
+      upstreams = connected.upstreams;
+      builtins = connected.builtins;
       marketplaceSettled = true;
       return connected;
     },
@@ -219,7 +240,10 @@ export const runMcpServer = async (
       console.warn(
         `[MCP] marketplace: ${err instanceof Error ? err.message : String(err)}`,
       );
-      return [] as const;
+      return {
+        upstreams: [] as readonly TUpstream[],
+        builtins: [] as readonly string[],
+      };
     },
   );
   const closeUpstreams = (): void => {
@@ -244,20 +268,24 @@ export const runMcpServer = async (
     // Snapshot which upstreams the constructor already registered so a late
     // attach does not double-register when the wait budget covered them.
     const includedAtCreate = upstreams;
+    const builtinsAtCreate = builtins;
     const server = createMcpServer({
       requested,
       tier,
       config,
       upstreams: includedAtCreate,
+      builtins: builtinsAtCreate,
     });
     if (includedAtCreate.length > 0) attachedLate = true;
-    // Marketplace finished after the wait budget: attach and notify.
+    // Marketplace finished after the wait budget: attach remotes and notify
+    // tools/list_changed. Builtin memory tools are fixed at create time from
+    // the launch snapshot (next MCP start picks up a toggle that landed late).
     if (!marketplaceSettled) {
       void marketplaceTask.then((connected) => {
-        if (attachedLate || connected.length === 0) return;
+        if (attachedLate || connected.upstreams.length === 0) return;
         attachedLate = true;
         if (mcpGroupsForTier(requested, tier).includes("openllm")) {
-          attachMarketplaceUpstreams(server, connected);
+          attachMarketplaceUpstreams(server, connected.upstreams);
         }
       });
     }

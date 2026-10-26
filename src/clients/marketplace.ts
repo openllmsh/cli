@@ -18,6 +18,12 @@ export type TMarketplaceLaunchServer = {
   readonly blocked_tools?: readonly string[];
 };
 
+export type TMarketplaceLaunch = {
+  readonly servers: readonly TMarketplaceLaunchServer[];
+  /** Enabled first-party builtins (e.g. `"openllm-memory"`). */
+  readonly builtins: readonly string[];
+};
+
 const isStringRecord = (v: unknown): v is Record<string, string> =>
   v !== null &&
   typeof v === "object" &&
@@ -49,30 +55,49 @@ const LAUNCH_TIMEOUT_MS = 5_000;
 /** Reserved ids — an integration can never shadow the built-in server. */
 const RESERVED = new Set(["openllm"]);
 
+const EMPTY_LAUNCH: TMarketplaceLaunch = { servers: [], builtins: [] };
+
 /**
- * The user's enabled marketplace integrations as ready upstream MCP servers,
- * dialled by `openllm mcp` and re-exported through its single entry
- * (`GET /api/marketplace/launch`). The gateway decrypts BYOK secrets with the
- * key's request-scoped DEK, the same way it decrypts provider keys. Fails
- * open to none: a slow or older gateway must never block the MCP server.
+ * The user's enabled marketplace integrations as ready upstream MCP servers
+ * plus first-party builtins (`GET /api/marketplace/launch`). The gateway
+ * decrypts BYOK secrets with the key's request-scoped DEK, the same way it
+ * decrypts provider keys. Fails open to none: a slow or older gateway must
+ * never block the MCP server. Older gateways that omit `builtins` leave it
+ * empty — the CLI then skips builtin tool groups.
  */
-export const fetchMarketplaceServers = async (
+export const fetchMarketplaceLaunch = async (
   gateway: TGateway,
-): Promise<readonly TMarketplaceLaunchServer[]> => {
-  if (gateway.apiKey.length === 0) return [];
+): Promise<TMarketplaceLaunch> => {
+  if (gateway.apiKey.length === 0) return EMPTY_LAUNCH;
   try {
     const res = await fetch(`${gateway.cloudOrigin}/api/marketplace/launch`, {
       headers: { authorization: `Bearer ${gateway.apiKey}` },
       signal: AbortSignal.timeout(LAUNCH_TIMEOUT_MS),
     });
-    if (!res.ok) return [];
-    const body = (await res.json()) as { servers?: unknown };
-    if (!Array.isArray(body.servers)) return [];
-    // Drop anything malformed rather than failing the launch.
-    return body.servers
-      .filter(isLaunchServer)
-      .filter((s) => !RESERVED.has(s.id));
+    if (!res.ok) return EMPTY_LAUNCH;
+    const body = (await res.json()) as {
+      servers?: unknown;
+      builtins?: unknown;
+    };
+    const servers = Array.isArray(body.servers)
+      ? body.servers.filter(isLaunchServer).filter((s) => !RESERVED.has(s.id))
+      : [];
+    const builtins = Array.isArray(body.builtins)
+      ? body.builtins.filter(
+          (id): id is string =>
+            typeof id === "string" &&
+            /^[a-z][a-z0-9-]{1,47}$/.test(id) &&
+            !RESERVED.has(id),
+        )
+      : [];
+    return { servers, builtins };
   } catch {
-    return [];
+    return EMPTY_LAUNCH;
   }
 };
+
+/** Convenience: only the remote MCP servers from {@link fetchMarketplaceLaunch}. */
+export const fetchMarketplaceServers = async (
+  gateway: TGateway,
+): Promise<readonly TMarketplaceLaunchServer[]> =>
+  (await fetchMarketplaceLaunch(gateway)).servers;

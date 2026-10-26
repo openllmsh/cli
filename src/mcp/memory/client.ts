@@ -1,9 +1,10 @@
 /**
- * Thin client over the gateway's /api/plugins/memory/* endpoints.
+ * Thin client over the gateway's OpenLLM Memory endpoints.
  *
- * Embedding, ref-overlay scoping, and collection bootstrap all live server-side
- * now — this client just forwards save/forget/search/match calls with the
- * caller's API key.
+ * Prefers `/api/integrations/memory/*` and falls back to the legacy
+ * `/api/plugins/memory/*` alias so older gateways and installed CLIs
+ * keep working. Embedding and scoping live server-side — this client
+ * just forwards save/forget/search/match with the caller's API key.
  */
 
 import type { TProjectRef } from "../../memory-hooks/project-ref";
@@ -66,9 +67,14 @@ export interface SearchOptions {
 
 // ── Client ────────────────────────────────────────────────────────────────
 
+const MEMORY_ROOT_PRIMARY = "/api/integrations/memory";
+const MEMORY_ROOT_LEGACY = "/api/plugins/memory";
+
 export class MemoryClient {
   private baseUrl: string;
   private apiKey: string;
+  /** Cached after the first successful response — prefers the new root. */
+  private root: string | null = null;
 
   constructor(
     config: PluginConfig,
@@ -78,29 +84,84 @@ export class MemoryClient {
     this.apiKey = config.gatewayApiKey;
   }
 
-  private async request<T>(
+  private async requestOnce(
     method: string,
     path: string,
-    body?: unknown,
-  ): Promise<T> {
+    body: unknown | undefined,
+  ): Promise<Response> {
     const headers: Record<string, string> = {
       Authorization: `Bearer ${this.apiKey}`,
     };
     if (body !== undefined) headers["Content-Type"] = "application/json";
-
-    // Bounded so a wedged gateway can't hang a save/recall tool call forever.
-    const res = await (this.options.fetch ?? fetch)(`${this.baseUrl}${path}`, {
+    return (this.options.fetch ?? fetch)(`${this.baseUrl}${path}`, {
       method,
       headers,
       body: body !== undefined ? JSON.stringify(body) : undefined,
       signal: AbortSignal.timeout(this.options.timeoutMs ?? 60_000),
     });
-    if (!res.ok) {
-      const text = await res.text().catch(() => "");
-      throw new Error(`${method} ${path} → ${res.status}: ${text}`);
+  }
+
+  private async request<T>(
+    method: string,
+    action: string,
+    body?: unknown,
+  ): Promise<T> {
+    const roots =
+      this.root !== null
+        ? [this.root]
+        : [MEMORY_ROOT_PRIMARY, MEMORY_ROOT_LEGACY];
+    let lastStatus = 0;
+    let lastText = "";
+    let lastPath = "";
+    for (const root of roots) {
+      const path = `${root}/${action}`;
+      lastPath = path;
+      const res = await this.requestOnce(method, path, body);
+      if (res.ok) {
+        this.root = root;
+        if (res.status === 204) return undefined as unknown as T;
+        return (await res.json()) as T;
+      }
+      lastStatus = res.status;
+      lastText = await res.text().catch(() => "");
+      // Only fall through to the legacy alias on a missing new route.
+      if (res.status !== 404 || root === MEMORY_ROOT_LEGACY) break;
     }
-    if (res.status === 204) return undefined as unknown as T;
-    return (await res.json()) as T;
+    throw new Error(`${method} ${lastPath} → ${lastStatus}: ${lastText}`);
+  }
+
+  /**
+   * Cheap personal enablement probe. Hooks call this (cached) before any
+   * recall/extract network work.
+   *
+   * - `200` with `enabled` → that value
+   * - `404` on both roots → treat as enabled (older gateway without the probe)
+   * - other failures throw (caller fail-opens to skip)
+   */
+  async isEnabled(): Promise<boolean> {
+    const roots =
+      this.root !== null
+        ? [this.root]
+        : [MEMORY_ROOT_PRIMARY, MEMORY_ROOT_LEGACY];
+    let sawOnly404 = true;
+    for (const root of roots) {
+      const path = `${root}/enabled`;
+      const res = await this.requestOnce("GET", path, undefined);
+      if (res.ok) {
+        this.root = root;
+        const body = (await res.json()) as { enabled?: unknown };
+        // Only an explicit `false` disables. Missing/unknown fields (and
+        // older mocks that return an empty JSON body) stay enabled.
+        return body.enabled !== false;
+      }
+      if (res.status !== 404) {
+        sawOnly404 = false;
+        const text = await res.text().catch(() => "");
+        throw new Error(`GET ${path} → ${res.status}: ${text}`);
+      }
+    }
+    if (sawOnly404) return true;
+    return false;
   }
 
   /**
@@ -128,15 +189,12 @@ export class MemoryClient {
     if (opts.teams && opts.teams.length > 0) body.teams = opts.teams;
     if (opts.project_ref) body.project_ref = opts.project_ref;
     if (opts.metadata) body.metadata = opts.metadata;
-    return this.request("POST", "/api/plugins/memory/save", body);
+    return this.request("POST", "save", body);
   }
 
   /** List the distinct project slugs the caller can read. */
   async listProjects(): Promise<string[]> {
-    const res = await this.request<{ projects: string[] }>(
-      "GET",
-      "/api/plugins/memory/projects",
-    );
+    const res = await this.request<{ projects: string[] }>("GET", "projects");
     return Array.isArray(res?.projects) ? res.projects : [];
   }
 
@@ -146,7 +204,7 @@ export class MemoryClient {
     opts: SaveOptions = {},
   ): Promise<{ deleted: number }> {
     if (!content.trim()) throw new Error("content is required");
-    return this.request("POST", "/api/plugins/memory/forget", {
+    return this.request("POST", "forget", {
       content,
       ...(opts.project ? { project: opts.project } : {}),
     });
@@ -178,11 +236,9 @@ export class MemoryClient {
         message: `No matching memory found (exact + semantic search at similarity >= ${SIM_THRESHOLD}).`,
       };
     }
-    const byId = await this.request<{ deleted: number }>(
-      "POST",
-      "/api/plugins/memory/forget",
-      { id: hit.id },
-    );
+    const byId = await this.request<{ deleted: number }>("POST", "forget", {
+      id: hit.id,
+    });
     if (byId.deleted === 0) {
       return {
         success: false,
@@ -223,7 +279,7 @@ export class MemoryClient {
         author_user_id?: string | null;
         source?: string | null;
       }>;
-    }>("POST", "/api/plugins/memory/search", body);
+    }>("POST", "search", body);
     const results: Memory[] = res.results.map((r) => ({
       id: r.id,
       memory: r.content,
@@ -240,11 +296,9 @@ export class MemoryClient {
 
   /** Deterministic team ↔ project match for automatic bucketing. */
   async match(project_ref: TProjectRef): Promise<{ teams: MatchedTeam[] }> {
-    const res = await this.request<{ teams: MatchedTeam[] }>(
-      "POST",
-      "/api/plugins/memory/match",
-      { project_ref },
-    );
+    const res = await this.request<{ teams: MatchedTeam[] }>("POST", "match", {
+      project_ref,
+    });
     return {
       teams: Array.isArray(res?.teams) ? res.teams : [],
     };
@@ -252,6 +306,6 @@ export class MemoryClient {
 
   /** Identity lookup — which email/role/teams is this MCP bound to? */
   async whoami(): Promise<WhoamiResult> {
-    return this.request<WhoamiResult>("GET", "/api/plugins/memory/whoami");
+    return this.request<WhoamiResult>("GET", "whoami");
   }
 }

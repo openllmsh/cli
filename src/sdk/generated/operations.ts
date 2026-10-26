@@ -962,6 +962,35 @@ export const API_OPERATIONS: readonly TApiOperation[] = [
     "hasBody": false
   },
   {
+    "id": "teams.listIntegrations",
+    "method": "get",
+    "path": "/teams/{id}/integrations",
+    "summary": "",
+    "tags": [
+      "teams"
+    ],
+    "pathParams": [
+      "id"
+    ],
+    "queryParams": [],
+    "hasBody": false
+  },
+  {
+    "id": "teams.setIntegration",
+    "method": "put",
+    "path": "/teams/{id}/integrations/{integrationId}",
+    "summary": "",
+    "tags": [
+      "teams"
+    ],
+    "pathParams": [
+      "id",
+      "integrationId"
+    ],
+    "queryParams": [],
+    "hasBody": true
+  },
+  {
     "id": "teams.createInvite",
     "method": "post",
     "path": "/teams/{id}/invites",

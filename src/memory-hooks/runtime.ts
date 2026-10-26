@@ -16,6 +16,7 @@ import type { SaveOptions } from "../mcp/memory/client";
 import { MemoryClient } from "../mcp/memory/client";
 import { callOperation } from "../sdk/client";
 import { API_OPERATIONS } from "../sdk/generated/operations";
+import { isPersonalMemoryEnabledCached } from "./enabled";
 import { memoryEnv, RECALL_MARKER } from "./env";
 import type { TProjectRef } from "./project-ref";
 import { buildProjectRef } from "./project-ref";
@@ -227,6 +228,8 @@ export const runMemoryRecall = async (
     return null;
   const config = cliConfig();
   if (!config.apiKey || !config.gatewayUrl) return null;
+  // One cheap cached check — fail-open = skip (never block the prompt).
+  if (!(await isPersonalMemoryEnabledCached(config))) return null;
   let state: MemoryHookState;
   try {
     state = new MemoryHookState(config.gatewayUrl, config.apiKey, "recall");
@@ -413,6 +416,8 @@ export const runMemoryExtraction = async (input: unknown): Promise<void> => {
   if (typeof transcript !== "string" || !transcript) return;
   const config = cliConfig();
   if (!config.apiKey || !config.gatewayUrl) return;
+  // One cheap cached check — fail-open = skip (never block extract).
+  if (!(await isPersonalMemoryEnabledCached(config))) return;
   let state: MemoryHookState;
   let session: ReturnType<MemoryHookState["session"]>;
   let size: number;
