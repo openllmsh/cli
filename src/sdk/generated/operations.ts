@@ -894,6 +894,184 @@ export const API_OPERATIONS: readonly TApiOperation[] = [
     "hasBody": false
   },
   {
+    "id": "teams.list",
+    "method": "get",
+    "path": "/teams",
+    "summary": "",
+    "tags": [
+      "teams"
+    ],
+    "pathParams": [],
+    "queryParams": [],
+    "hasBody": false
+  },
+  {
+    "id": "teams.create",
+    "method": "post",
+    "path": "/teams",
+    "summary": "",
+    "tags": [
+      "teams"
+    ],
+    "pathParams": [],
+    "queryParams": [],
+    "hasBody": true
+  },
+  {
+    "id": "teams.delete",
+    "method": "delete",
+    "path": "/teams/{id}",
+    "summary": "",
+    "tags": [
+      "teams"
+    ],
+    "pathParams": [
+      "id"
+    ],
+    "queryParams": [],
+    "hasBody": false
+  },
+  {
+    "id": "teams.get",
+    "method": "get",
+    "path": "/teams/{id}",
+    "summary": "",
+    "tags": [
+      "teams"
+    ],
+    "pathParams": [
+      "id"
+    ],
+    "queryParams": [],
+    "hasBody": false
+  },
+  {
+    "id": "teams.createInvite",
+    "method": "post",
+    "path": "/teams/{id}/invites",
+    "summary": "",
+    "tags": [
+      "teams"
+    ],
+    "pathParams": [
+      "id"
+    ],
+    "queryParams": [],
+    "hasBody": true
+  },
+  {
+    "id": "teams.revokeInvite",
+    "method": "delete",
+    "path": "/teams/{id}/invites/{inviteId}",
+    "summary": "",
+    "tags": [
+      "teams"
+    ],
+    "pathParams": [
+      "id",
+      "inviteId"
+    ],
+    "queryParams": [],
+    "hasBody": false
+  },
+  {
+    "id": "teams.leave",
+    "method": "post",
+    "path": "/teams/{id}/leave",
+    "summary": "",
+    "tags": [
+      "teams"
+    ],
+    "pathParams": [
+      "id"
+    ],
+    "queryParams": [],
+    "hasBody": false
+  },
+  {
+    "id": "teams.removeMember",
+    "method": "delete",
+    "path": "/teams/{id}/members/{userId}",
+    "summary": "",
+    "tags": [
+      "teams"
+    ],
+    "pathParams": [
+      "id",
+      "userId"
+    ],
+    "queryParams": [],
+    "hasBody": false
+  },
+  {
+    "id": "teams.upsertShare",
+    "method": "post",
+    "path": "/teams/{id}/shares",
+    "summary": "",
+    "tags": [
+      "teams"
+    ],
+    "pathParams": [
+      "id"
+    ],
+    "queryParams": [],
+    "hasBody": true
+  },
+  {
+    "id": "teams.deleteShare",
+    "method": "delete",
+    "path": "/teams/{id}/shares/{shareId}",
+    "summary": "",
+    "tags": [
+      "teams"
+    ],
+    "pathParams": [
+      "id",
+      "shareId"
+    ],
+    "queryParams": [],
+    "hasBody": false
+  },
+  {
+    "id": "teams.patchShare",
+    "method": "patch",
+    "path": "/teams/{id}/shares/{shareId}",
+    "summary": "",
+    "tags": [
+      "teams"
+    ],
+    "pathParams": [
+      "id",
+      "shareId"
+    ],
+    "queryParams": [],
+    "hasBody": true
+  },
+  {
+    "id": "teams.previewInvite",
+    "method": "post",
+    "path": "/teams/invites/preview",
+    "summary": "",
+    "tags": [
+      "teams"
+    ],
+    "pathParams": [],
+    "queryParams": [],
+    "hasBody": true
+  },
+  {
+    "id": "teams.join",
+    "method": "post",
+    "path": "/teams/join",
+    "summary": "",
+    "tags": [
+      "teams"
+    ],
+    "pathParams": [],
+    "queryParams": [],
+    "hasBody": true
+  },
+  {
     "id": "user.deleteAccount",
     "method": "delete",
     "path": "/user",
