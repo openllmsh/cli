@@ -14746,6 +14746,16 @@
                           "type": "null"
                         }
                       ]
+                    },
+                    "has_avatar": {
+                      "anyOf": [
+                        {
+                          "type": "boolean"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
                     }
                   },
                   "required": [
