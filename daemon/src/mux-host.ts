@@ -193,6 +193,27 @@ export type TStreamGateContext = {
   readonly teamGranted?: boolean;
 };
 
+/** Pull `headers.team_grant` from a decoded mux stream OPEN payload. */
+export const teamGrantFromStreamOpen = (decoded: unknown): string | null => {
+  if (
+    decoded === null ||
+    typeof decoded !== "object" ||
+    Array.isArray(decoded)
+  ) {
+    return null;
+  }
+  const headers = (decoded as { headers?: unknown }).headers;
+  if (
+    headers === null ||
+    typeof headers !== "object" ||
+    Array.isArray(headers)
+  ) {
+    return null;
+  }
+  const token = (headers as { team_grant?: unknown }).team_grant;
+  return typeof token === "string" && token.length > 0 ? token : null;
+};
+
 /**
  * Apply {@link STREAM_KIND_GATES} to one OPEN. Returns false after RESETting
  * the stream `unauthorized` when the kind is `seedgated` and the channel is
@@ -384,6 +405,12 @@ type TRelayChannel = {
   seedGated: boolean;
   /** True when this channel was admitted with a verified `team_grant`. */
   teamGranted: boolean;
+  /**
+   * Wire token the channel was admitted with. Tunnel OPENs on a team channel
+   * must carry the same `headers.team_grant` (defence in depth — origin always
+   * sets it; a grant-less OPEN must not fall through to same-user dispatch).
+   */
+  teamGrantToken: string | null;
   /** The mux's durable inbound callback, installed exactly once at construction. */
   muxSink: ((bytes: Uint8Array | null) => void) | null;
   /** The relay binding currently allowed to deliver to {@link muxSink}. */
@@ -683,7 +710,8 @@ const registerChannel = (
       ? {
           onStream: (stream, open) => {
             if (record !== null) touchChannel(record);
-            const kind = streamOpenKindOf(decodeJsonPayload(open));
+            const decodedOpen = decodeJsonPayload(open);
+            const kind = streamOpenKindOf(decodedOpen);
             const isGated = (): boolean =>
               record !== null &&
               record.consumer === "browser" &&
@@ -697,6 +725,35 @@ const registerChannel = (
               })
             ) {
               return;
+            }
+            // Team channels: every tunnel OPEN must carry the same grant the
+            // channel was admitted with. A grant-less OPEN would skip
+            // createMuxTunnelServer's model/cap checks and dispatch as
+            // same-user traffic.
+            if (record?.teamGranted === true && kind === "tunnel") {
+              const openGrant = teamGrantFromStreamOpen(decodedOpen);
+              if (
+                openGrant === null ||
+                record.teamGrantToken === null ||
+                openGrant !== record.teamGrantToken
+              ) {
+                logWarn(
+                  "mux-host",
+                  safeDiagnosticMessage`stream open refused: team tunnel missing or mismatched grant`,
+                  {
+                    channelId,
+                    transport: "relay",
+                    hasOpenGrant: openGrant !== null,
+                  },
+                );
+                stream.reset(
+                  encodeJsonPayload({
+                    code: "unauthorized",
+                    reason: "team_grant_required",
+                  }),
+                );
+                return;
+              }
             }
             const handler = streamHandler ?? serveMuxOnStream;
             if (kind === "agent") {
@@ -731,6 +788,7 @@ const registerChannel = (
     consumer: side === "daemon" ? "browser" : null,
     seedGated: false,
     teamGranted: false,
+    teamGrantToken: null,
     muxSink,
     sink: null,
     lastActivityAt: Date.now(),
@@ -975,6 +1033,7 @@ const acceptChannelAsync = async (frame: {
     }
     existing.seedGated = gated;
     existing.teamGranted = teamGranted;
+    existing.teamGrantToken = teamGranted ? (frame.team_grant ?? null) : null;
     existing.consumer = frame.consumer ?? "browser";
     bindSink(existing);
     touchChannel(existing);
@@ -992,6 +1051,7 @@ const acceptChannelAsync = async (frame: {
   const record = registerChannel(frame.channel_id, null, "daemon");
   record.seedGated = seedGated;
   record.teamGranted = teamGranted;
+  record.teamGrantToken = teamGranted ? (frame.team_grant ?? null) : null;
   record.consumer = frame.consumer ?? "browser";
   logInfo("mux-host", "channel_open accepted", {
     channelId: frame.channel_id,
