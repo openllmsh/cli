@@ -535,7 +535,13 @@ class TFacadeToolCallTracker {
   }
 }
 
-const runFacadeDecode = (args: {
+/**
+ * Decode a facade NDJSON stream into a native run result. Production callers
+ * go through {@link runClaudeSdkFacade}; tests that only assert decode /
+ * `error_max_turns` boundary behaviour feed scripted lines here and skip the
+ * fixture spawn.
+ */
+export const runFacadeDecode = (args: {
   readonly reader: ReadableStreamDefaultReader<string>;
   readonly providerModelId: string;
   readonly toolNameMap: ReadonlyMap<string, string>;
@@ -544,15 +550,18 @@ const runFacadeDecode = (args: {
   /** Resolves to the child's real exit code — required to confirm the
    *  `error_max_turns` boundary below the same way Hermes's reference does
    *  (`p.returncode == 1`). Every production caller passes it; bounded by
-   *  {@link EXIT_CODE_WAIT_MS} so a process that somehow never settles can
-   *  never hang the boundary check. */
+   *  {@link EXIT_CODE_WAIT_MS} (or {@link exitCodeWaitMs}) so a process that
+   *  somehow never settles can never hang the boundary check. */
   readonly exitCode: Promise<number>;
+  /** Override the exit-code race budget (tests pass a tiny value). */
+  readonly exitCodeWaitMs?: number;
 }): Promise<TNativeRunResult> => {
   let emittedContent = false;
   let terminalSucceeded = false;
   const toolTracker = new TFacadeToolCallTracker(args.toolNameMap);
   const nativeMessages: unknown[] = [];
   let pendingTerminal: TChatCompletionChunk | null = null;
+  const exitCodeWaitMs = args.exitCodeWaitMs ?? EXIT_CODE_WAIT_MS;
 
   const successfulTerminal = (): TChatCompletionChunk | "end" => {
     terminalSucceeded = true;
@@ -567,7 +576,7 @@ const runFacadeDecode = (args: {
       return await Promise.race([
         args.exitCode,
         new Promise<"timeout">((resolve) => {
-          timer = setTimeout(() => resolve("timeout"), EXIT_CODE_WAIT_MS);
+          timer = setTimeout(() => resolve("timeout"), exitCodeWaitMs);
         }),
       ]);
     } finally {
