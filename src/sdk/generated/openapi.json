@@ -25820,13 +25820,10 @@
                             "type": "string"
                           },
                           "kind": {
-                            "anyOf": [
-                              {
-                                "type": "string",
-                                "enum": [
-                                  "device_model"
-                                ]
-                              }
+                            "type": "string",
+                            "enum": [
+                              "device_model",
+                              "credential"
                             ]
                           },
                           "contributed_by": {
@@ -25994,6 +25991,47 @@
                           },
                           "created_at": {
                             "type": "string"
+                          },
+                          "has_payload": {
+                            "anyOf": [
+                              {
+                                "type": "boolean"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "payload_stale": {
+                            "anyOf": [
+                              {
+                                "type": "boolean"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "key_version": {
+                            "anyOf": [
+                              {
+                                "type": "number"
+                              },
+                              {
+                                "type": "string",
+                                "enum": [
+                                  "Infinity",
+                                  "-Infinity",
+                                  "NaN"
+                                ]
+                              },
+                              {
+                                "type": "null"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
                           }
                         },
                         "required": [
@@ -29328,13 +29366,10 @@
                       "type": "string"
                     },
                     "kind": {
-                      "anyOf": [
-                        {
-                          "type": "string",
-                          "enum": [
-                            "device_model"
-                          ]
-                        }
+                      "type": "string",
+                      "enum": [
+                        "device_model",
+                        "credential"
                       ]
                     },
                     "contributed_by": {
@@ -29502,6 +29537,47 @@
                     },
                     "created_at": {
                       "type": "string"
+                    },
+                    "has_payload": {
+                      "anyOf": [
+                        {
+                          "type": "boolean"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "payload_stale": {
+                      "anyOf": [
+                        {
+                          "type": "boolean"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "key_version": {
+                      "anyOf": [
+                        {
+                          "type": "number"
+                        },
+                        {
+                          "type": "string",
+                          "enum": [
+                            "Infinity",
+                            "-Infinity",
+                            "NaN"
+                          ]
+                        },
+                        {
+                          "type": "null"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
                     }
                   },
                   "required": [
@@ -29816,13 +29892,10 @@
                 "type": "object",
                 "properties": {
                   "kind": {
-                    "anyOf": [
-                      {
-                        "type": "string",
-                        "enum": [
-                          "device_model"
-                        ]
-                      }
+                    "type": "string",
+                    "enum": [
+                      "device_model",
+                      "credential"
                     ]
                   },
                   "provider": {
@@ -29981,6 +30054,62 @@
                     "anyOf": [
                       {
                         "type": "string"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "payload_inner": {
+                    "anyOf": [
+                      {
+                        "type": "string"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "key_version": {
+                    "anyOf": [
+                      {
+                        "type": "number"
+                      },
+                      {
+                        "type": "string",
+                        "enum": [
+                          "Infinity",
+                          "-Infinity",
+                          "NaN"
+                        ]
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "source_updated_at": {
+                    "anyOf": [
+                      {
+                        "type": "string"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "source_vault_version": {
+                    "anyOf": [
+                      {
+                        "type": "number"
+                      },
+                      {
+                        "type": "string",
+                        "enum": [
+                          "Infinity",
+                          "-Infinity",
+                          "NaN"
+                        ]
                       },
                       {
                         "type": "null"
@@ -33050,6 +33179,34 @@
                     },
                     "nonce": {
                       "type": "string"
+                    },
+                    "updated_at": {
+                      "anyOf": [
+                        {
+                          "type": "string"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "vault_version": {
+                      "anyOf": [
+                        {
+                          "type": "number"
+                        },
+                        {
+                          "type": "string",
+                          "enum": [
+                            "Infinity",
+                            "-Infinity",
+                            "NaN"
+                          ]
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
                     }
                   },
                   "required": [
