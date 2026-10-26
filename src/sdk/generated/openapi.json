@@ -26754,10 +26754,9 @@
                   "type": "object",
                   "properties": {
                     "invite_id": {
-                      "type": "string"
-                    },
-                    "secret": {
-                      "type": "string"
+                      "type": "string",
+                      "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|[fF]{8}-[fF]{4}-[fF]{4}-[fF]{4}-[fF]{12})$",
+                      "format": "uuid"
                     },
                     "link_path": {
                       "type": "string"
@@ -26783,7 +26782,6 @@
                   },
                   "required": [
                     "invite_id",
-                    "secret",
                     "link_path",
                     "expires_at",
                     "max_uses"
@@ -27089,9 +27087,11 @@
                 "type": "object",
                 "properties": {
                   "invite_id": {
-                    "type": "string"
+                    "type": "string",
+                    "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|[fF]{8}-[fF]{4}-[fF]{4}-[fF]{4}-[fF]{12})$",
+                    "format": "uuid"
                   },
-                  "secret": {
+                  "auth": {
                     "type": "string"
                   },
                   "wrapped_team_key": {
@@ -27151,7 +27151,7 @@
                 },
                 "required": [
                   "invite_id",
-                  "secret",
+                  "auth",
                   "wrapped_team_key",
                   "key_version"
                 ],
@@ -27850,15 +27850,17 @@
                 "type": "object",
                 "properties": {
                   "invite_id": {
-                    "type": "string"
+                    "type": "string",
+                    "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|[fF]{8}-[fF]{4}-[fF]{4}-[fF]{4}-[fF]{12})$",
+                    "format": "uuid"
                   },
-                  "secret": {
+                  "auth": {
                     "type": "string"
                   }
                 },
                 "required": [
                   "invite_id",
-                  "secret"
+                  "auth"
                 ],
                 "additionalProperties": false
               }
@@ -28209,9 +28211,11 @@
                 "type": "object",
                 "properties": {
                   "invite_id": {
-                    "type": "string"
+                    "type": "string",
+                    "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|[fF]{8}-[fF]{4}-[fF]{4}-[fF]{4}-[fF]{12})$",
+                    "format": "uuid"
                   },
-                  "secret": {
+                  "auth": {
                     "type": "string"
                   },
                   "sealed_team_key": {
@@ -28235,7 +28239,7 @@
                 },
                 "required": [
                   "invite_id",
-                  "secret",
+                  "auth",
                   "sealed_team_key",
                   "sealed_key_version"
                 ],
