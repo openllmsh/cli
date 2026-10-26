@@ -234,6 +234,7 @@ import { tokensFromResponse, ZERO_TOKENS } from "./native-runtime/types";
 import { runWithAccount } from "./op-context";
 import { clearPlanCache } from "./plan-cache";
 import { isClaudeCodeOriginator, resolveHopExecution } from "./sub-method";
+import { currentTeamGrantToken } from "./team-request-context";
 import type { TTunnelToPeer } from "./tunnel-client";
 import { tunnelToPeer } from "./tunnel-client";
 import {
@@ -779,6 +780,7 @@ export const report = (
   origin: string | null,
   accountHash?: string,
 ): void => {
+  const teamGrant = currentTeamGrantToken();
   const recordedRow: TDaemonRecordRequest = {
     ...row,
     idempotency_key: row.idempotency_key ?? randomUUID(),
@@ -787,6 +789,9 @@ export const report = (
     // attempt — success and failure — carries `account_hash`.
     ...(row.account_hash === undefined && accountHash !== undefined
       ? { account_hash: accountHash }
+      : {}),
+    ...(row.team_grant === undefined && teamGrant !== null
+      ? { team_grant: teamGrant }
       : {}),
   };
   void recordRequest(recordedRow, origin);

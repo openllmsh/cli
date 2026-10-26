@@ -42,6 +42,7 @@ import {
   estimateTeamReserveTokens,
   modelFromRequestBody,
 } from "./team-grant-admit";
+import { withTeamGrant } from "./team-request-context";
 
 /** Max concurrently-served tunnels — beyond it, mux opens are nacked
  *  `tunnel_busy`. Concurrent tunnels behave like concurrent loopback
@@ -237,6 +238,15 @@ export const createMuxTunnelServer =
           });
           throw new StreamResetError("unauthorized", `team_${decision.reason}`);
         }
+        const response = await withTeamGrant(teamToken, () =>
+          dispatch(tunneledRequest(open, buffered, signal)),
+        );
+        return {
+          status: response.status,
+          headers: tunnelResponseHeadersFromHttp(response.headers),
+          body: response.body,
+          onComplete: complete,
+        };
       }
       const response =
         dispatchBody instanceof Uint8Array
