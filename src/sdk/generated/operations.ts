@@ -1004,6 +1004,49 @@ export const API_OPERATIONS: readonly TApiOperation[] = [
     "hasBody": false
   },
   {
+    "id": "teams.setMemberRole",
+    "method": "patch",
+    "path": "/teams/{id}/members/{userId}",
+    "summary": "",
+    "tags": [
+      "teams"
+    ],
+    "pathParams": [
+      "id",
+      "userId"
+    ],
+    "queryParams": [],
+    "hasBody": true
+  },
+  {
+    "id": "teams.getPolicy",
+    "method": "get",
+    "path": "/teams/{id}/policy",
+    "summary": "",
+    "tags": [
+      "teams"
+    ],
+    "pathParams": [
+      "id"
+    ],
+    "queryParams": [],
+    "hasBody": false
+  },
+  {
+    "id": "teams.updatePolicy",
+    "method": "put",
+    "path": "/teams/{id}/policy",
+    "summary": "",
+    "tags": [
+      "teams"
+    ],
+    "pathParams": [
+      "id"
+    ],
+    "queryParams": [],
+    "hasBody": true
+  },
+  {
     "id": "teams.upsertShare",
     "method": "post",
     "path": "/teams/{id}/shares",
@@ -1046,6 +1089,20 @@ export const API_OPERATIONS: readonly TApiOperation[] = [
     ],
     "queryParams": [],
     "hasBody": true
+  },
+  {
+    "id": "teams.getUsage",
+    "method": "get",
+    "path": "/teams/{id}/usage",
+    "summary": "",
+    "tags": [
+      "teams"
+    ],
+    "pathParams": [
+      "id"
+    ],
+    "queryParams": [],
+    "hasBody": false
   },
   {
     "id": "teams.previewInvite",
