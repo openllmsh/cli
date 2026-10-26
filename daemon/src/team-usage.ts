@@ -37,8 +37,9 @@ export type TTeamUsageTracker = {
     capTokens: number,
   ) => boolean;
   /**
-   * Persist `used += tokens` after a successful hop. Returns false when the
-   * write would exceed `capTokens` (refuses to record over-cap usage).
+   * Persist `used += tokens` after a successful hop. Always records actual
+   * usage (including overshoot); returns false when the new total exceeds
+   * `capTokens` so callers can report the overshoot.
    */
   readonly charge: (
     shareId: string,
@@ -146,13 +147,12 @@ export const createTeamUsageTracker = (
       const key = periodKey(shareId, now());
       const state = load();
       const used = state.periods[key] ?? 0;
-      if (used + tokens > capTokens) return false;
       const next: TTeamUsageFile = {
         periods: { ...state.periods, [key]: used + tokens },
       };
       cache = next;
       writeFileAtomic(pathOf(), next);
-      return true;
+      return used + tokens <= capTokens;
     },
   };
 };
