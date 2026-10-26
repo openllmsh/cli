@@ -811,8 +811,12 @@ silent signaling timeouts. Detail lives in
   `headers.team_grant` (→ `x-openllm-team-grant`): verified against bootstrap
   `team_grant_pubkey` for model / local `cap_tokens` / `teamShareable` /
   `OPENLLM_TEAM_SERVE` kill switch before dispatch. Same-user traffic omits
-  the grant and is unchanged. The daemon also advertises `team_serve` on
-  mux caps, bootstrap caps, and `control_caps` when the kill switch is on.
+  the grant and is unchanged. Cross-user safety for grant-less opens is the
+  relay's job (trusted-host decision, 2026-10-26) — without a verified team
+  grant the relay never opens a foreign mux channel, so the daemon never
+  sees a grant-less cross-user request. The daemon also advertises
+  `team_serve` on mux caps, bootstrap caps, and `control_caps` when the kill
+  switch is on.
 - `device-access-verify.ts` verifies device grants signed by the account
   **device-control key** (phrase-derived in the browser, never from the DEK —
   so the cloud cannot sign) with node:crypto: ts window + nonce map + optional

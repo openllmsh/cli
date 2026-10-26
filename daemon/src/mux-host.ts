@@ -186,6 +186,11 @@ export type TStreamGateContext = {
    * daemon's key (`dpk`). Always false for a `consumer:"daemon"` peer.
    */
   readonly seedGated: boolean;
+  /**
+   * Channel was admitted via an origin-signed `team_grant`. Team channels
+   * may open ONLY the `tunnel` stream kind — realtime/agent/others reset.
+   */
+  readonly teamGranted?: boolean;
 };
 
 /**
@@ -207,6 +212,24 @@ export const admitStreamKind = (
       transport: context.transport,
       seedGated: context.seedGated,
     });
+  }
+  // Team-grant channels are inference-only: refuse realtime/agent/session/
+  // unknown kinds with a clear reason so a cross-user peer cannot widen
+  // the blast radius past the granted model hop.
+  if (context.teamGranted === true && kind !== "tunnel") {
+    logWarn(
+      "mux-host",
+      safeDiagnosticMessage`stream open refused: team channel allows tunnel only`,
+      {
+        channelId: context.channelId,
+        transport: context.transport,
+        kind: kind ?? "unknown",
+      },
+    );
+    stream.reset(
+      encodeJsonPayload({ code: "unauthorized", reason: "team_tunnel_only" }),
+    );
+    return false;
   }
   if (streamKindGateOf(kind) !== "seedgated") return true;
   // Re-checked per OPEN: a channel / RTC session admitted while the device was
@@ -359,6 +382,8 @@ type TRelayChannel = {
    * stream kinds require it is {@link STREAM_KIND_GATES}.
    */
   seedGated: boolean;
+  /** True when this channel was admitted with a verified `team_grant`. */
+  teamGranted: boolean;
   /** The mux's durable inbound callback, installed exactly once at construction. */
   muxSink: ((bytes: Uint8Array | null) => void) | null;
   /** The relay binding currently allowed to deliver to {@link muxSink}. */
@@ -668,6 +693,7 @@ const registerChannel = (
                 transport: "relay",
                 channelId,
                 seedGated: isGated(),
+                teamGranted: record?.teamGranted === true,
               })
             ) {
               return;
@@ -704,6 +730,7 @@ const registerChannel = (
     keyId,
     consumer: side === "daemon" ? "browser" : null,
     seedGated: false,
+    teamGranted: false,
     muxSink,
     sink: null,
     lastActivityAt: Date.now(),
@@ -885,7 +912,9 @@ const acceptChannelAsync = async (frame: {
   }
   // Team cross-user opens carry team_grant (relay already verified). Re-check
   // here: kill switch, pubkey, device binding. Model/cap run per request.
-  if (frame.team_grant !== undefined && frame.team_grant.length > 0) {
+  const teamGranted =
+    frame.team_grant !== undefined && frame.team_grant.length > 0;
+  if (teamGranted && frame.team_grant !== undefined) {
     const decision = await admitTeamGrantOnChannel(frame.team_grant);
     if (!decision.ok) {
       logWarn("mux-host", "channel_open team grant refused", {
@@ -945,6 +974,7 @@ const acceptChannelAsync = async (frame: {
       return;
     }
     existing.seedGated = gated;
+    existing.teamGranted = teamGranted;
     existing.consumer = frame.consumer ?? "browser";
     bindSink(existing);
     touchChannel(existing);
@@ -961,6 +991,7 @@ const acceptChannelAsync = async (frame: {
   const seedGated = seedGateOf(frame);
   const record = registerChannel(frame.channel_id, null, "daemon");
   record.seedGated = seedGated;
+  record.teamGranted = teamGranted;
   record.consumer = frame.consumer ?? "browser";
   logInfo("mux-host", "channel_open accepted", {
     channelId: frame.channel_id,
