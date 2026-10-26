@@ -25624,6 +25624,16 @@
                           },
                           "joined_at": {
                             "type": "string"
+                          },
+                          "email": {
+                            "anyOf": [
+                              {
+                                "type": "string"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
                           }
                         },
                         "required": [
@@ -25656,9 +25666,6 @@
                             ]
                           },
                           "contributed_by": {
-                            "type": "string"
-                          },
-                          "device_key_id": {
                             "type": "string"
                           },
                           "provider": {
@@ -25830,7 +25837,6 @@
                           "team_id",
                           "kind",
                           "contributed_by",
-                          "device_key_id",
                           "provider",
                           "constraints",
                           "enabled",
@@ -29093,9 +29099,6 @@
                     "contributed_by": {
                       "type": "string"
                     },
-                    "device_key_id": {
-                      "type": "string"
-                    },
                     "provider": {
                       "type": "string"
                     },
@@ -29265,7 +29268,6 @@
                     "team_id",
                     "kind",
                     "contributed_by",
-                    "device_key_id",
                     "provider",
                     "constraints",
                     "enabled",
@@ -29582,9 +29584,6 @@
                       }
                     ]
                   },
-                  "device_key_id": {
-                    "type": "string"
-                  },
                   "provider": {
                     "type": "string"
                   },
@@ -29750,7 +29749,6 @@
                 },
                 "required": [
                   "kind",
-                  "device_key_id",
                   "provider",
                   "constraints"
                 ],
