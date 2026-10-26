@@ -24858,6 +24858,52 @@
                           },
                           "created_at": {
                             "type": "string"
+                          },
+                          "key_version": {
+                            "anyOf": [
+                              {
+                                "type": "number"
+                              },
+                              {
+                                "type": "string",
+                                "enum": [
+                                  "Infinity",
+                                  "-Infinity",
+                                  "NaN"
+                                ]
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "sealed_team_key": {
+                            "anyOf": [
+                              {
+                                "type": "string"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "sealed_key_version": {
+                            "anyOf": [
+                              {
+                                "type": "number"
+                              },
+                              {
+                                "type": "string",
+                                "enum": [
+                                  "Infinity",
+                                  "-Infinity",
+                                  "NaN"
+                                ]
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
                           }
                         },
                         "required": [
@@ -24866,7 +24912,10 @@
                           "name",
                           "role",
                           "permissions",
-                          "created_at"
+                          "created_at",
+                          "key_version",
+                          "sealed_team_key",
+                          "sealed_key_version"
                         ],
                         "additionalProperties": false
                       }
@@ -25218,6 +25267,52 @@
                     },
                     "created_at": {
                       "type": "string"
+                    },
+                    "key_version": {
+                      "anyOf": [
+                        {
+                          "type": "number"
+                        },
+                        {
+                          "type": "string",
+                          "enum": [
+                            "Infinity",
+                            "-Infinity",
+                            "NaN"
+                          ]
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "sealed_team_key": {
+                      "anyOf": [
+                        {
+                          "type": "string"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "sealed_key_version": {
+                      "anyOf": [
+                        {
+                          "type": "number"
+                        },
+                        {
+                          "type": "string",
+                          "enum": [
+                            "Infinity",
+                            "-Infinity",
+                            "NaN"
+                          ]
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
                     }
                   },
                   "required": [
@@ -25226,7 +25321,10 @@
                     "name",
                     "role",
                     "permissions",
-                    "created_at"
+                    "created_at",
+                    "key_version",
+                    "sealed_team_key",
+                    "sealed_key_version"
                   ],
                   "additionalProperties": false
                 }
@@ -25533,11 +25631,31 @@
                   },
                   "name": {
                     "type": "string"
+                  },
+                  "sealed_team_key": {
+                    "type": "string"
+                  },
+                  "sealed_key_version": {
+                    "anyOf": [
+                      {
+                        "type": "number"
+                      },
+                      {
+                        "type": "string",
+                        "enum": [
+                          "Infinity",
+                          "-Infinity",
+                          "NaN"
+                        ]
+                      }
+                    ]
                   }
                 },
                 "required": [
                   "slug",
-                  "name"
+                  "name",
+                  "sealed_team_key",
+                  "sealed_key_version"
                 ],
                 "additionalProperties": false
               }
@@ -25605,6 +25723,52 @@
                     },
                     "created_at": {
                       "type": "string"
+                    },
+                    "key_version": {
+                      "anyOf": [
+                        {
+                          "type": "number"
+                        },
+                        {
+                          "type": "string",
+                          "enum": [
+                            "Infinity",
+                            "-Infinity",
+                            "NaN"
+                          ]
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "sealed_team_key": {
+                      "anyOf": [
+                        {
+                          "type": "string"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "sealed_key_version": {
+                      "anyOf": [
+                        {
+                          "type": "number"
+                        },
+                        {
+                          "type": "string",
+                          "enum": [
+                            "Infinity",
+                            "-Infinity",
+                            "NaN"
+                          ]
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
                     },
                     "members": {
                       "type": "array",
@@ -25928,6 +26092,9 @@
                     "role",
                     "permissions",
                     "created_at",
+                    "key_version",
+                    "sealed_team_key",
+                    "sealed_key_version",
                     "members",
                     "shares",
                     "invites"
@@ -26921,6 +27088,30 @@
               "schema": {
                 "type": "object",
                 "properties": {
+                  "invite_id": {
+                    "type": "string"
+                  },
+                  "secret": {
+                    "type": "string"
+                  },
+                  "wrapped_team_key": {
+                    "type": "string"
+                  },
+                  "key_version": {
+                    "anyOf": [
+                      {
+                        "type": "number"
+                      },
+                      {
+                        "type": "string",
+                        "enum": [
+                          "Infinity",
+                          "-Infinity",
+                          "NaN"
+                        ]
+                      }
+                    ]
+                  },
                   "expires_in_seconds": {
                     "anyOf": [
                       {
@@ -26958,6 +27149,12 @@
                     ]
                   }
                 },
+                "required": [
+                  "invite_id",
+                  "secret",
+                  "wrapped_team_key",
+                  "key_version"
+                ],
                 "additionalProperties": false
               }
             }
@@ -27327,10 +27524,30 @@
                   "properties": {
                     "team_name": {
                       "type": "string"
+                    },
+                    "wrapped_team_key": {
+                      "type": "string"
+                    },
+                    "key_version": {
+                      "anyOf": [
+                        {
+                          "type": "number"
+                        },
+                        {
+                          "type": "string",
+                          "enum": [
+                            "Infinity",
+                            "-Infinity",
+                            "NaN"
+                          ]
+                        }
+                      ]
                     }
                   },
                   "required": [
-                    "team_name"
+                    "team_name",
+                    "wrapped_team_key",
+                    "key_version"
                   ],
                   "additionalProperties": false
                 }
@@ -27996,11 +28213,31 @@
                   },
                   "secret": {
                     "type": "string"
+                  },
+                  "sealed_team_key": {
+                    "type": "string"
+                  },
+                  "sealed_key_version": {
+                    "anyOf": [
+                      {
+                        "type": "number"
+                      },
+                      {
+                        "type": "string",
+                        "enum": [
+                          "Infinity",
+                          "-Infinity",
+                          "NaN"
+                        ]
+                      }
+                    ]
                   }
                 },
                 "required": [
                   "invite_id",
-                  "secret"
+                  "secret",
+                  "sealed_team_key",
+                  "sealed_key_version"
                 ],
                 "additionalProperties": false
               }
@@ -57818,6 +58055,32 @@
                                 "type": "null"
                               }
                             ]
+                          },
+                          "team_id": {
+                            "anyOf": [
+                              {
+                                "type": "string"
+                              },
+                              {
+                                "type": "null"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "team_name": {
+                            "anyOf": [
+                              {
+                                "type": "string"
+                              },
+                              {
+                                "type": "null"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
                           }
                         },
                         "required": [
@@ -58338,6 +58601,32 @@
                             "anyOf": [
                               {
                                 "type": "boolean"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "team_id": {
+                            "anyOf": [
+                              {
+                                "type": "string"
+                              },
+                              {
+                                "type": "null"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "team_name": {
+                            "anyOf": [
+                              {
+                                "type": "string"
+                              },
+                              {
+                                "type": "null"
                               },
                               {
                                 "type": "null"
