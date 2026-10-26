@@ -495,6 +495,18 @@ export const API_OPERATIONS: readonly TApiOperation[] = [
     "hasBody": true
   },
   {
+    "id": "pluginsMemory.match",
+    "method": "post",
+    "path": "/plugins/memory/match",
+    "summary": "",
+    "tags": [
+      "pluginsMemory"
+    ],
+    "pathParams": [],
+    "queryParams": [],
+    "hasBody": true
+  },
+  {
     "id": "pluginsMemory.projects",
     "method": "get",
     "path": "/plugins/memory/projects",
@@ -550,6 +562,10 @@ export const API_OPERATIONS: readonly TApiOperation[] = [
       },
       {
         "name": "project",
+        "required": false
+      },
+      {
+        "name": "team",
         "required": false
       },
       {
@@ -989,6 +1005,20 @@ export const API_OPERATIONS: readonly TApiOperation[] = [
     "hasBody": false
   },
   {
+    "id": "teams.listMatchedProjects",
+    "method": "get",
+    "path": "/teams/{id}/matched-projects",
+    "summary": "",
+    "tags": [
+      "teams"
+    ],
+    "pathParams": [
+      "id"
+    ],
+    "queryParams": [],
+    "hasBody": false
+  },
+  {
     "id": "teams.removeMember",
     "method": "delete",
     "path": "/teams/{id}/members/{userId}",
@@ -1014,6 +1044,20 @@ export const API_OPERATIONS: readonly TApiOperation[] = [
     "pathParams": [
       "id",
       "userId"
+    ],
+    "queryParams": [],
+    "hasBody": true
+  },
+  {
+    "id": "teams.setProjectExclusion",
+    "method": "post",
+    "path": "/teams/{id}/project-exclusions",
+    "summary": "",
+    "tags": [
+      "teams"
+    ],
+    "pathParams": [
+      "id"
     ],
     "queryParams": [],
     "hasBody": true

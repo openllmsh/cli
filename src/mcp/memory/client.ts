@@ -2,10 +2,11 @@
  * Thin client over the gateway's /api/plugins/memory/* endpoints.
  *
  * Embedding, ref-overlay scoping, and collection bootstrap all live server-side
- * now — this client just forwards save/forget/search calls with the caller's
- * API key.
+ * now — this client just forwards save/forget/search/match calls with the
+ * caller's API key.
  */
 
+import type { TProjectRef } from "../../memory-hooks/project-ref";
 import type { THttpClientOptions } from "../../sdk/client";
 import type { PluginConfig } from "./config";
 
@@ -17,6 +18,10 @@ export interface Memory {
   similarity: number;
   project?: string;
   createdAt?: string;
+  team_id?: string | null;
+  team_name?: string | null;
+  author_user_id?: string | null;
+  source?: string | null;
 }
 
 export interface SearchResult {
@@ -31,6 +36,12 @@ export interface WhoamiResult {
   teams: Array<{ id: string; name: string }>;
 }
 
+export interface MatchedTeam {
+  id: string;
+  slug: string;
+  name: string;
+}
+
 export interface SaveOptions {
   /** Single project slug — merged with `projects` server-side. */
   project?: string;
@@ -40,11 +51,17 @@ export interface SaveOptions {
   team?: string;
   /** Multiple team ids — chunk is shared with every listed team. */
   teams?: string[];
+  /** Project identity for automatic team matching. */
+  project_ref?: TProjectRef;
+  /** Opaque metadata (e.g. `{ source: "hook" | "tool" }`). */
+  metadata?: Record<string, unknown>;
 }
 
 export interface SearchOptions {
   project?: string;
   projects?: string[];
+  /** Restricts team-row search to matcher hits for this project. */
+  project_ref?: TProjectRef;
 }
 
 // ── Client ────────────────────────────────────────────────────────────────
@@ -109,6 +126,8 @@ export class MemoryClient {
       body.projects = opts.projects;
     if (opts.team) body.team = opts.team;
     if (opts.teams && opts.teams.length > 0) body.teams = opts.teams;
+    if (opts.project_ref) body.project_ref = opts.project_ref;
+    if (opts.metadata) body.metadata = opts.metadata;
     return this.request("POST", "/api/plugins/memory/save", body);
   }
 
@@ -191,6 +210,7 @@ export class MemoryClient {
     } else if (opts.project) {
       body.project = opts.project;
     }
+    if (opts.project_ref) body.project_ref = opts.project_ref;
     const res = await this.request<{
       results: Array<{
         id: string;
@@ -198,6 +218,10 @@ export class MemoryClient {
         similarity: number;
         project?: string;
         createdAt: string | null;
+        team_id?: string | null;
+        team_name?: string | null;
+        author_user_id?: string | null;
+        source?: string | null;
       }>;
     }>("POST", "/api/plugins/memory/search", body);
     const results: Memory[] = res.results.map((r) => ({
@@ -206,8 +230,24 @@ export class MemoryClient {
       similarity: r.similarity,
       project: r.project,
       createdAt: r.createdAt ?? undefined,
+      team_id: r.team_id,
+      team_name: r.team_name,
+      author_user_id: r.author_user_id,
+      source: r.source,
     }));
     return { results, total: results.length, timing: Date.now() - start };
+  }
+
+  /** Deterministic team ↔ project match for automatic bucketing. */
+  async match(project_ref: TProjectRef): Promise<{ teams: MatchedTeam[] }> {
+    const res = await this.request<{ teams: MatchedTeam[] }>(
+      "POST",
+      "/api/plugins/memory/match",
+      { project_ref },
+    );
+    return {
+      teams: Array.isArray(res?.teams) ? res.teams : [],
+    };
   }
 
   /** Identity lookup — which email/role/teams is this MCP bound to? */

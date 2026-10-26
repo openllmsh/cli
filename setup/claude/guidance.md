@@ -5,6 +5,8 @@
   are for remembering things across conversations. If the user asks to bring
   existing memory files into OpenLLM, run `openllm exec memory import [path]`
   (reads only; `--dry-run` previews).
+- Personal is the default. Team memories are captured automatically from
+  matched team repos — do not try to target arbitrary teams.
 - Projects are auto-scoped from the working directory; pass an explicit
   `project` only when discussing a different repo than the cwd.
 - PROACTIVELY save when the user has CONCLUDED something: a stated preference or

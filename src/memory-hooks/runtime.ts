@@ -17,6 +17,8 @@ import { MemoryClient } from "../mcp/memory/client";
 import { callOperation } from "../sdk/client";
 import { API_OPERATIONS } from "../sdk/generated/operations";
 import { memoryEnv, RECALL_MARKER } from "./env";
+import type { TProjectRef } from "./project-ref";
+import { buildProjectRef } from "./project-ref";
 import { MEMORY_EXTRACTION_PROMPT } from "./prompt";
 import { MemoryHookState, numeric } from "./state";
 import { memoryProject, recentTurns } from "./transcript";
@@ -41,8 +43,10 @@ export type TMemoryHookOutput = {
     additionalContext: string;
   };
 };
-type TCandidate = { content: string; destinations?: unknown };
+type TMemoryScope = "personal" | "project";
+type TCandidate = { content: string; scope: TMemoryScope };
 type TExtraction = { save: TCandidate[]; forget: TCandidate[] };
+type TMatchedTeam = { id: string; name: string; slug?: string };
 
 const cloudClient = (config: TCliConfig, timeoutMs: number): MemoryClient => {
   return new MemoryClient(
@@ -241,10 +245,9 @@ export const runMemoryRecall = async (
       numeric(memoryEnv("RECALL_MAX_PROMPT"), 1000, 16, 1000),
     );
     prompt = prompt.slice(0, maxChars);
-    const project = memoryProject(
-      typeof event.cwd === "string" ? event.cwd : process.cwd(),
-      memoryEnv("RECALL_PROJECT"),
-    );
+    const cwd = typeof event.cwd === "string" ? event.cwd : process.cwd();
+    const project = memoryProject(cwd, memoryEnv("RECALL_PROJECT"));
+    const projectRef = buildProjectRef(cwd, project);
     const cacheEnabled = (memoryEnv("RECALL_CACHE") ?? "1") === "1";
     let cachePath: string | null = null;
     if (cacheEnabled) {
@@ -278,6 +281,7 @@ export const runMemoryRecall = async (
     );
     const found = await client.search(prompt, limit, {
       projects: project === "default" ? [project] : [project, "default"],
+      project_ref: projectRef,
     });
     const hits = found.results
       .filter(
@@ -301,7 +305,8 @@ export const runMemoryRecall = async (
         const text = memory.memory.trim();
         const content =
           text.length > 500 ? `${text.slice(0, 500).trimEnd()}…` : text;
-        return `- (${Math.round(memory.similarity * 100)}% · ${memory.project || project}) ${content}`;
+        const bucket = recallBucketLabel(memory, project);
+        return `- (${Math.round(memory.similarity * 100)}% · ${bucket}) ${content}`;
       }),
     ];
     const context = lines.join("\n");
@@ -313,6 +318,20 @@ export const runMemoryRecall = async (
     return outputOf(state);
   }
 };
+
+const recallBucketLabel = (
+  memory: { project?: string; team_name?: string | null },
+  fallbackProject: string,
+): string => {
+  const project = memory.project || fallbackProject;
+  const teamName =
+    typeof memory.team_name === "string" ? memory.team_name.trim() : "";
+  if (teamName) return `team ${teamName} · ${project}`;
+  return project;
+};
+
+const scopeOf = (value: unknown): TMemoryScope =>
+  value === "personal" ? "personal" : "project";
 
 const extractionOf = (body: unknown): TExtraction => {
   const choices = recordOf(body)?.choices;
@@ -335,7 +354,19 @@ const extractionOf = (body: unknown): TExtraction => {
       stage: "parse",
       code: "invalid_model_output",
     });
-  const candidates = (value: unknown): TCandidate[] => {
+  const forgetCandidates = (value: unknown): TCandidate[] => {
+    if (!Array.isArray(value))
+      throw new MemoryHookFailure({
+        stage: "parse",
+        code: "invalid_model_output",
+      });
+    return value.flatMap((item): TCandidate[] => {
+      const candidate = recordOf(item);
+      if (!candidate || typeof candidate.content !== "string") return [];
+      return [{ content: candidate.content.trim(), scope: "project" }];
+    });
+  };
+  const saveCandidates = (value: unknown): TCandidate[] => {
     if (!Array.isArray(value))
       throw new MemoryHookFailure({
         stage: "parse",
@@ -347,42 +378,23 @@ const extractionOf = (body: unknown): TExtraction => {
       return [
         {
           content: candidate.content.trim(),
-          destinations: candidate.destinations,
+          scope: scopeOf(candidate.scope),
         },
       ];
     });
   };
   return {
-    save: candidates("save" in object ? object.save : []),
-    forget: candidates("forget" in object ? object.forget : []),
+    save: saveCandidates("save" in object ? object.save : []),
+    forget: forgetCandidates("forget" in object ? object.forget : []),
   };
 };
 
-const destinationsOf = (
-  value: unknown,
-  project: string,
-  knownTeams: Set<string>,
-): SaveOptions => {
-  const projects = new Set<string>();
-  const teams = new Set<string>();
-  if (Array.isArray(value))
-    for (const item of value) {
-      const destination = recordOf(item);
-      const name =
-        typeof destination?.project === "string"
-          ? destination.project.trim().toLowerCase()
-          : "";
-      const team =
-        typeof destination?.team === "string" ? destination.team.trim() : "";
-      if (name) projects.add(name);
-      if (team && knownTeams.has(team)) teams.add(team);
-    }
-  if (!projects.size) projects.add(project);
-  return {
-    projects: [...projects],
-    ...(teams.size ? { teams: [...teams] } : {}),
-  };
-};
+const hookSaveOptions = (
+  opts: SaveOptions & { project_ref: TProjectRef },
+): SaveOptions => ({
+  ...opts,
+  metadata: { ...(opts.metadata ?? {}), source: "hook" },
+});
 
 /** Called in the detached compiled CLI worker. No provider discovery/auth: the
  * launcher passes its already-resolved inference origin; storage stays cloud.
@@ -440,10 +452,9 @@ export const runMemoryExtraction = async (input: unknown): Promise<void> => {
           Math.max(30_000, Math.min(300_000, interval)))
     )
       return;
-    const project = memoryProject(
-      typeof event.cwd === "string" ? event.cwd : process.cwd(),
-      memoryEnv("AUTO_PROJECT"),
-    );
+    const cwd = typeof event.cwd === "string" ? event.cwd : process.cwd();
+    const project = memoryProject(cwd, memoryEnv("AUTO_PROJECT"));
+    const projectRef = buildProjectRef(cwd, project);
     const maxTurns = Math.trunc(
       numeric(memoryEnv("AUTO_MAX_TURNS"), 12, 2, 40),
     );
@@ -467,11 +478,14 @@ export const runMemoryExtraction = async (input: unknown): Promise<void> => {
     // completed. The final stamp below records completion-time cooldown.
     stamp(false);
     const client = cloudClient(config, 3000);
-    // Optional routing context: preserve original project-only fallback on failure.
-    const teams = await invoke(state, "whoami", () => client.whoami())
-      .then((who) =>
-        Array.isArray(who.teams)
-          ? who.teams.filter(
+    // Matched teams are informational for the model and used for project-scope
+    // fan-out. Fail open to "no teams" so extraction still runs personally.
+    const matchedTeams: TMatchedTeam[] = await invoke(state, "match", () =>
+      client.match(projectRef),
+    )
+      .then((result) =>
+        Array.isArray(result.teams)
+          ? result.teams.filter(
               (team) =>
                 typeof team.id === "string" && typeof team.name === "string",
             )
@@ -492,7 +506,7 @@ export const runMemoryExtraction = async (input: unknown): Promise<void> => {
         .join(" ")
     ).slice(0, 800);
     const existing = await invoke(state, "context", () =>
-      client.search(seedQuery, 20, { project }),
+      client.search(seedQuery, 20, { project, project_ref: projectRef }),
     )
       .then((result) =>
         result.results.filter(
@@ -507,7 +521,10 @@ export const runMemoryExtraction = async (input: unknown): Promise<void> => {
         ...knownProjects.filter((name) => typeof name === "string" && name),
       ]),
     ].slice(0, 30);
-    const userBlock = `CURRENT PROJECT: ${project}\nKNOWN PROJECTS (prefer these slugs): ${known.join(", ")}\n\nUSER'S TEAMS (use only these team ids when routing to a team):\n${teams.length ? teams.map((team) => `- id=${team.id}  name=${team.name}`).join("\n") : "(none — user is not in any team; do NOT emit team destinations)"}\n\nEXISTING MEMORIES FOR THIS PROJECT:\n${
+    const teamBelonging = matchedTeams.length
+      ? matchedTeams.map((team) => team.name).join(", ")
+      : "(none — team sharing disabled for this project)";
+    const userBlock = `CURRENT PROJECT: ${project}\nKNOWN PROJECTS (prefer these slugs): ${known.join(", ")}\nTHIS PROJECT BELONGS TO TEAM(S): ${teamBelonging}\n\nEXISTING MEMORIES FOR THIS PROJECT:\n${
       existing.length
         ? existing
             .slice(0, 20)
@@ -564,17 +581,17 @@ export const runMemoryExtraction = async (input: unknown): Promise<void> => {
         errors++;
       }
     }
-    const knownTeams = new Set(teams.map((team) => team.id));
+    const matchedTeamIds = matchedTeams.map((team) => team.id);
     const dedupe = numeric(memoryEnv("AUTO_DEDUPE_SIM"), 0.85, 0, 1);
     for (const item of extraction.save) {
       if (item.content.length < 12 || item.content.length > 4000) continue;
-      const destinations = destinationsOf(
-        item.destinations,
-        project,
-        knownTeams,
-      );
+      const personalProjects =
+        item.scope === "personal" ? ["default"] : [project];
       const matches = await invoke(state, "dedupe", () =>
-        client.search(item.content, 3, { projects: destinations.projects }),
+        client.search(item.content, 3, {
+          projects: personalProjects,
+          project_ref: projectRef,
+        }),
       ).catch(() => null);
       if (
         matches?.results.some(
@@ -587,12 +604,35 @@ export const runMemoryExtraction = async (input: unknown): Promise<void> => {
       }
       try {
         await invoke(state, "save", async () => {
-          const result = await mutations.save(item.content, destinations);
-          if (result.status !== "saved")
+          // Personal prefs never fan out to teams. Project facts always get a
+          // personal project row first; matched teams are a second write.
+          const personal = await mutations.save(
+            item.content,
+            hookSaveOptions({
+              projects: personalProjects,
+              project_ref: projectRef,
+            }),
+          );
+          if (personal.status !== "saved")
             throw new MemoryHookFailure({
               stage: "save",
               code: "invalid_response",
             });
+          if (item.scope === "project" && matchedTeamIds.length > 0) {
+            const shared = await mutations.save(
+              item.content,
+              hookSaveOptions({
+                projects: [project],
+                teams: matchedTeamIds,
+                project_ref: projectRef,
+              }),
+            );
+            if (shared.status !== "saved")
+              throw new MemoryHookFailure({
+                stage: "save",
+                code: "invalid_response",
+              });
+          }
         });
         saved++;
       } catch {

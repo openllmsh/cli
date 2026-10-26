@@ -30746,6 +30746,797 @@
         }
       }
     },
+    "/teams/{id}/matched-projects": {
+      "get": {
+        "tags": [
+          "teams"
+        ],
+        "operationId": "teams.listMatchedProjects",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "schema": {
+              "type": "string"
+            },
+            "required": true
+          }
+        ],
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "projects": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "kind": {
+                            "type": "string",
+                            "enum": [
+                              "remote",
+                              "slug"
+                            ]
+                          },
+                          "remote_owner": {
+                            "anyOf": [
+                              {
+                                "type": "string"
+                              },
+                              {
+                                "type": "null"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "remote_repo": {
+                            "anyOf": [
+                              {
+                                "type": "string"
+                              },
+                              {
+                                "type": "null"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "project_slug": {
+                            "anyOf": [
+                              {
+                                "type": "string"
+                              },
+                              {
+                                "type": "null"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "observer_count": {
+                            "anyOf": [
+                              {
+                                "type": "number"
+                              },
+                              {
+                                "type": "string",
+                                "enum": [
+                                  "Infinity",
+                                  "-Infinity",
+                                  "NaN"
+                                ]
+                              }
+                            ]
+                          },
+                          "excluded": {
+                            "type": "boolean"
+                          }
+                        },
+                        "required": [
+                          "kind",
+                          "observer_count",
+                          "excluded"
+                        ],
+                        "additionalProperties": false
+                      }
+                    }
+                  },
+                  "required": [
+                    "projects"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "object",
+                      "properties": {
+                        "message": {
+                          "type": "string"
+                        },
+                        "type": {
+                          "anyOf": [
+                            {
+                              "type": "string"
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "code": {
+                          "anyOf": [
+                            {
+                              "type": "string"
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        }
+                      },
+                      "required": [
+                        "message"
+                      ],
+                      "additionalProperties": false
+                    }
+                  },
+                  "required": [
+                    "error"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "object",
+                      "properties": {
+                        "message": {
+                          "type": "string"
+                        },
+                        "type": {
+                          "anyOf": [
+                            {
+                              "type": "string"
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "code": {
+                          "anyOf": [
+                            {
+                              "type": "string"
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        }
+                      },
+                      "required": [
+                        "message"
+                      ],
+                      "additionalProperties": false
+                    }
+                  },
+                  "required": [
+                    "error"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "object",
+                      "properties": {
+                        "message": {
+                          "type": "string"
+                        },
+                        "type": {
+                          "anyOf": [
+                            {
+                              "type": "string"
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "code": {
+                          "anyOf": [
+                            {
+                              "type": "string"
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        }
+                      },
+                      "required": [
+                        "message"
+                      ],
+                      "additionalProperties": false
+                    }
+                  },
+                  "required": [
+                    "error"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "object",
+                      "properties": {
+                        "message": {
+                          "type": "string"
+                        },
+                        "type": {
+                          "anyOf": [
+                            {
+                              "type": "string"
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "code": {
+                          "anyOf": [
+                            {
+                              "type": "string"
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        }
+                      },
+                      "required": [
+                        "message"
+                      ],
+                      "additionalProperties": false
+                    }
+                  },
+                  "required": [
+                    "error"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "object",
+                      "properties": {
+                        "message": {
+                          "type": "string"
+                        },
+                        "type": {
+                          "anyOf": [
+                            {
+                              "type": "string"
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "code": {
+                          "anyOf": [
+                            {
+                              "type": "string"
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        }
+                      },
+                      "required": [
+                        "message"
+                      ],
+                      "additionalProperties": false
+                    }
+                  },
+                  "required": [
+                    "error"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "object",
+                      "properties": {
+                        "message": {
+                          "type": "string"
+                        },
+                        "type": {
+                          "anyOf": [
+                            {
+                              "type": "string"
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "code": {
+                          "anyOf": [
+                            {
+                              "type": "string"
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        }
+                      },
+                      "required": [
+                        "message"
+                      ],
+                      "additionalProperties": false
+                    }
+                  },
+                  "required": [
+                    "error"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/teams/{id}/project-exclusions": {
+      "post": {
+        "tags": [
+          "teams"
+        ],
+        "operationId": "teams.setProjectExclusion",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "schema": {
+              "type": "string"
+            },
+            "required": true
+          }
+        ],
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "ok": {
+                      "anyOf": [
+                        {
+                          "type": "boolean",
+                          "enum": [
+                            true
+                          ]
+                        }
+                      ]
+                    }
+                  },
+                  "required": [
+                    "ok"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "object",
+                      "properties": {
+                        "message": {
+                          "type": "string"
+                        },
+                        "type": {
+                          "anyOf": [
+                            {
+                              "type": "string"
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "code": {
+                          "anyOf": [
+                            {
+                              "type": "string"
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        }
+                      },
+                      "required": [
+                        "message"
+                      ],
+                      "additionalProperties": false
+                    }
+                  },
+                  "required": [
+                    "error"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "object",
+                      "properties": {
+                        "message": {
+                          "type": "string"
+                        },
+                        "type": {
+                          "anyOf": [
+                            {
+                              "type": "string"
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "code": {
+                          "anyOf": [
+                            {
+                              "type": "string"
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        }
+                      },
+                      "required": [
+                        "message"
+                      ],
+                      "additionalProperties": false
+                    }
+                  },
+                  "required": [
+                    "error"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "object",
+                      "properties": {
+                        "message": {
+                          "type": "string"
+                        },
+                        "type": {
+                          "anyOf": [
+                            {
+                              "type": "string"
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "code": {
+                          "anyOf": [
+                            {
+                              "type": "string"
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        }
+                      },
+                      "required": [
+                        "message"
+                      ],
+                      "additionalProperties": false
+                    }
+                  },
+                  "required": [
+                    "error"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "object",
+                      "properties": {
+                        "message": {
+                          "type": "string"
+                        },
+                        "type": {
+                          "anyOf": [
+                            {
+                              "type": "string"
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "code": {
+                          "anyOf": [
+                            {
+                              "type": "string"
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        }
+                      },
+                      "required": [
+                        "message"
+                      ],
+                      "additionalProperties": false
+                    }
+                  },
+                  "required": [
+                    "error"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "object",
+                      "properties": {
+                        "message": {
+                          "type": "string"
+                        },
+                        "type": {
+                          "anyOf": [
+                            {
+                              "type": "string"
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "code": {
+                          "anyOf": [
+                            {
+                              "type": "string"
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        }
+                      },
+                      "required": [
+                        "message"
+                      ],
+                      "additionalProperties": false
+                    }
+                  },
+                  "required": [
+                    "error"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "object",
+                      "properties": {
+                        "message": {
+                          "type": "string"
+                        },
+                        "type": {
+                          "anyOf": [
+                            {
+                              "type": "string"
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "code": {
+                          "anyOf": [
+                            {
+                              "type": "string"
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        }
+                      },
+                      "required": [
+                        "message"
+                      ],
+                      "additionalProperties": false
+                    }
+                  },
+                  "required": [
+                    "error"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "remote_owner": {
+                    "anyOf": [
+                      {
+                        "type": "string"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "remote_repo": {
+                    "anyOf": [
+                      {
+                        "type": "string"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "project_slug": {
+                    "anyOf": [
+                      {
+                        "type": "string"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "clear": {
+                    "anyOf": [
+                      {
+                        "type": "boolean"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  }
+                },
+                "additionalProperties": false
+              }
+            }
+          },
+          "required": true
+        }
+      }
+    },
     "/credentials": {
       "get": {
         "tags": [
@@ -57604,6 +58395,45 @@
                       }
                     ]
                   },
+                  "project_ref": {
+                    "anyOf": [
+                      {
+                        "type": "object",
+                        "properties": {
+                          "slug": {
+                            "type": "string"
+                          },
+                          "remote_owner": {
+                            "anyOf": [
+                              {
+                                "type": "string"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "remote_repo": {
+                            "anyOf": [
+                              {
+                                "type": "string"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          }
+                        },
+                        "required": [
+                          "slug"
+                        ],
+                        "additionalProperties": false
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
                   "id": {
                     "anyOf": [
                       {
@@ -58036,6 +58866,32 @@
                               }
                             ]
                           },
+                          "source": {
+                            "anyOf": [
+                              {
+                                "type": "string"
+                              },
+                              {
+                                "type": "null"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "author_user_id": {
+                            "anyOf": [
+                              {
+                                "type": "string"
+                              },
+                              {
+                                "type": "null"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
                           "nonce": {
                             "anyOf": [
                               {
@@ -58393,6 +59249,45 @@
                         "type": "null"
                       }
                     ]
+                  },
+                  "project_ref": {
+                    "anyOf": [
+                      {
+                        "type": "object",
+                        "properties": {
+                          "slug": {
+                            "type": "string"
+                          },
+                          "remote_owner": {
+                            "anyOf": [
+                              {
+                                "type": "string"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "remote_repo": {
+                            "anyOf": [
+                              {
+                                "type": "string"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          }
+                        },
+                        "required": [
+                          "slug"
+                        ],
+                        "additionalProperties": false
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
                   }
                 },
                 "required": [
@@ -58445,6 +59340,21 @@
           },
           {
             "name": "project",
+            "in": "query",
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "required": false
+          },
+          {
+            "name": "team",
             "in": "query",
             "schema": {
               "anyOf": [
@@ -58575,6 +59485,19 @@
                             ]
                           },
                           "source": {
+                            "anyOf": [
+                              {
+                                "type": "string"
+                              },
+                              {
+                                "type": "null"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "author_user_id": {
                             "anyOf": [
                               {
                                 "type": "string"
@@ -59467,6 +60390,345 @@
               }
             }
           }
+        }
+      }
+    },
+    "/plugins/memory/match": {
+      "post": {
+        "tags": [
+          "pluginsMemory"
+        ],
+        "operationId": "pluginsMemory.match",
+        "parameters": [],
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "teams": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "id": {
+                            "type": "string"
+                          },
+                          "slug": {
+                            "type": "string"
+                          },
+                          "name": {
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "id",
+                          "slug",
+                          "name"
+                        ],
+                        "additionalProperties": false
+                      }
+                    }
+                  },
+                  "required": [
+                    "teams"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "object",
+                      "properties": {
+                        "message": {
+                          "type": "string"
+                        },
+                        "type": {
+                          "anyOf": [
+                            {
+                              "type": "string"
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "code": {
+                          "anyOf": [
+                            {
+                              "type": "string"
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        }
+                      },
+                      "required": [
+                        "message"
+                      ],
+                      "additionalProperties": false
+                    }
+                  },
+                  "required": [
+                    "error"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "object",
+                      "properties": {
+                        "message": {
+                          "type": "string"
+                        },
+                        "type": {
+                          "anyOf": [
+                            {
+                              "type": "string"
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "code": {
+                          "anyOf": [
+                            {
+                              "type": "string"
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        }
+                      },
+                      "required": [
+                        "message"
+                      ],
+                      "additionalProperties": false
+                    }
+                  },
+                  "required": [
+                    "error"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "object",
+                      "properties": {
+                        "message": {
+                          "type": "string"
+                        },
+                        "type": {
+                          "anyOf": [
+                            {
+                              "type": "string"
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "code": {
+                          "anyOf": [
+                            {
+                              "type": "string"
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        }
+                      },
+                      "required": [
+                        "message"
+                      ],
+                      "additionalProperties": false
+                    }
+                  },
+                  "required": [
+                    "error"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "object",
+                      "properties": {
+                        "message": {
+                          "type": "string"
+                        },
+                        "type": {
+                          "anyOf": [
+                            {
+                              "type": "string"
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "code": {
+                          "anyOf": [
+                            {
+                              "type": "string"
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        }
+                      },
+                      "required": [
+                        "message"
+                      ],
+                      "additionalProperties": false
+                    }
+                  },
+                  "required": [
+                    "error"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "object",
+                      "properties": {
+                        "message": {
+                          "type": "string"
+                        },
+                        "type": {
+                          "anyOf": [
+                            {
+                              "type": "string"
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "code": {
+                          "anyOf": [
+                            {
+                              "type": "string"
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        }
+                      },
+                      "required": [
+                        "message"
+                      ],
+                      "additionalProperties": false
+                    }
+                  },
+                  "required": [
+                    "error"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "project_ref": {
+                    "type": "object",
+                    "properties": {
+                      "slug": {
+                        "type": "string"
+                      },
+                      "remote_owner": {
+                        "anyOf": [
+                          {
+                            "type": "string"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
+                      "remote_repo": {
+                        "anyOf": [
+                          {
+                            "type": "string"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      }
+                    },
+                    "required": [
+                      "slug"
+                    ],
+                    "additionalProperties": false
+                  }
+                },
+                "required": [
+                  "project_ref"
+                ],
+                "additionalProperties": false
+              }
+            }
+          },
+          "required": true
         }
       }
     }

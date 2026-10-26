@@ -5,6 +5,8 @@
  * behavior is unchanged, only the server ownership moved.
  */
 
+import { buildProjectRef } from "../../memory-hooks/project-ref";
+import { memoryProject } from "../../memory-hooks/transcript";
 import type { TToolResult } from "../types";
 import { MemoryClient } from "./client";
 import type { PluginConfig } from "./config";
@@ -14,21 +16,21 @@ const MAX_QUERY_LENGTH = 1_000;
 const MAX_PROJECT_LENGTH = 64;
 
 const memoryDescription =
-  "Cross-session memory for this user. " +
+  "Cross-session memory for this user. Personal is the default; team sharing is automatic for repos that match a team the user belongs to — do NOT try to target arbitrary teams. " +
   "PROACTIVELY call with action='save' when the user reveals: a preference or working-style rule, a fact about themselves or their team, feedback that should shape future behavior (corrections AND confirmations of non-obvious choices), an external reference (Linear project, Slack channel, dashboard, runbook), or a project goal/deadline/constraint not derivable from code. Saving is cheap; missing a save means the next session starts blind. " +
   "Use action='forget' when a memory is outdated or the user asks to remove it (exact `(project, content)` hash first, then semantic similarity >= 0.85 within the same project). " +
-  "Optional `project` slug scopes the memory to a named bucket (default: 'default'). " +
-  "For fan-out, pass `destinations: [{project?, team?}, ...]` — each entry writes the same content to one bucket (project slug and/or a team id you belong to). Use this when a fact is relevant to both your `default` bucket and a team, or to multiple projects at once. Call `whoAmI` to discover the team ids you can target.";
+  "Optional `project` slug scopes the memory to a named personal bucket (default: 'default'). " +
+  "For personal multi-project fan-out, pass `destinations: [{project}, ...]` — each entry writes the same content to one personal project slug. Call `whoAmI` for identity (email/role/teams); teams listed there are informational only.";
 
 const recallDescription =
   "Cross-session recall for this user. " +
   "Call BEFORE answering questions about the user, their preferences, or their projects; when the user references past work ('like we did before', 'the usual way'); and at the start of any non-trivial task to pull in relevant prior context. " +
-  "Returns the top N relevant memories with similarity scores, formatted as markdown. " +
+  "Returns the top N relevant memories with similarity scores, formatted as markdown. Team-matched project memories are included automatically. " +
   "Note: a `UserPromptSubmit` hook auto-injects relevant memories on every prompt — if you already see a '[memory] Relevant saved memories (auto-recalled):' block in context, only re-query with a different angle. " +
   "Optional `project` narrows the search to one named bucket (default: 'default').";
 
 const whoAmIDescription =
-  "Identify which gateway account this MCP server is bound to. Returns email, role, and team memberships. Useful for debugging MCP configuration.";
+  "Identify which gateway account this MCP server is bound to. Returns email, role, and team memberships (informational — do not try to target teams by id when saving; team sharing is automatic for matched project repos). Useful for debugging MCP configuration.";
 
 export const memoryToolDefs = [
   {
@@ -57,7 +59,7 @@ export const memoryToolDefs = [
         destinations: {
           type: "array",
           description:
-            "Optional fan-out targets. Each entry picks a project slug (defaults to 'default' if omitted) and/or a team id the caller is a member of. The same content is written once per destination — use this for facts that span personal + team contexts, or multiple projects.",
+            "Optional personal fan-out targets. Each entry picks a project slug (defaults to 'default' if omitted). The same content is written once per destination — use this for facts that span multiple personal projects. Team sharing is automatic via project matching; do not try to target teams here.",
           items: {
             type: "object",
             properties: {
@@ -66,11 +68,6 @@ export const memoryToolDefs = [
                 maxLength: MAX_PROJECT_LENGTH,
                 description:
                   "Project slug for this destination. Optional; defaults to 'default'.",
-              },
-              team: {
-                type: "string",
-                description:
-                  "Team id the caller belongs to. Look up via the `whoAmI` tool.",
               },
             },
           },
@@ -127,13 +124,16 @@ const clientFor = (() => {
   };
 })();
 
+const projectRefFor = (projectSlug: string) =>
+  buildProjectRef(process.cwd(), projectSlug);
+
 const handleMemory = async (
   client: MemoryClient,
   args: {
     content: string;
     action?: "save" | "forget";
     project?: string;
-    destinations?: Array<{ project?: string; team?: string }>;
+    destinations?: Array<{ project?: string }>;
   },
 ): Promise<TToolResult> => {
   const action = args.action ?? "save";
@@ -156,10 +156,9 @@ const handleMemory = async (
   }
 
   if (action === "save") {
-    // Collapse `destinations: [{project?, team?}, ...]` into the canonical
-    // (projects[], teams[]) shape the gateway accepts. The chunk lives once.
+    // Collapse `destinations: [{project}, ...]` into projects[]. Team ids are
+    // never accepted from the agent — matching is automatic via project_ref.
     const projectSet = new Set<string>();
-    const teamSet = new Set<string>();
     const hasDestinations = Array.isArray(args.destinations);
     // `project` is documented as ignored when `destinations` is provided.
     if (
@@ -175,15 +174,23 @@ const handleMemory = async (
         if (typeof d.project === "string" && d.project.trim()) {
           projectSet.add(d.project.trim());
         }
-        if (typeof d.team === "string" && d.team.trim()) {
-          teamSet.add(d.team.trim());
-        }
       }
     }
+    const primarySlug =
+      projectSet.size > 0
+        ? ([...projectSet][0] ?? memoryProject(process.cwd()))
+        : typeof args.project === "string" && args.project.trim()
+          ? args.project.trim()
+          : memoryProject(process.cwd());
+    const project_ref = projectRefFor(primarySlug);
     try {
+      // Personal save with project_ref so the server can record observations
+      // and gate any future explicit team targets. Automatic team fan-out for
+      // project facts is the extract hook's job (scope=project → matched teams).
       const res = await client.save(args.content, {
         projects: projectSet.size > 0 ? Array.from(projectSet) : undefined,
-        teams: teamSet.size > 0 ? Array.from(teamSet) : undefined,
+        project_ref,
+        metadata: { source: "tool" },
       });
       const projTag = res.projects.join(",");
       const teamTag = res.teams.length ? ` · teams=${res.teams.join(",")}` : "";
@@ -241,8 +248,13 @@ const handleRecall = async (
     };
   }
   const limit = Math.max(1, Math.min(50, Math.floor(args.limit ?? 10)));
+  const projectSlug =
+    typeof args.project === "string" && args.project.trim()
+      ? args.project.trim()
+      : memoryProject(process.cwd());
   const res = await client.search(args.query, limit, {
     project: args.project,
+    project_ref: projectRefFor(projectSlug),
   });
   if (res.results.length === 0) {
     return {
@@ -259,7 +271,17 @@ const handleRecall = async (
   ];
   res.results.forEach((m, i) => {
     const pct = Math.round(m.similarity * 100);
-    const projectTag = m.project ? ` · project=${m.project}` : "";
+    const teamName =
+      typeof m.team_name === "string" && m.team_name.trim()
+        ? m.team_name.trim()
+        : "";
+    const projectTag = m.project
+      ? teamName
+        ? ` · team ${teamName} · project=${m.project}`
+        : ` · project=${m.project}`
+      : teamName
+        ? ` · team ${teamName}`
+        : "";
     parts.push(`\n### ${i + 1}. ${pct}% match${projectTag}`);
     parts.push(m.memory);
   });
