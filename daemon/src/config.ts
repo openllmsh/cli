@@ -31,7 +31,10 @@ import {
   NoApiKeyError,
   publishIdentity,
 } from "./cloud-client";
-import { setDeviceAccessPubkey } from "./device-access-verify";
+import {
+  invalidateDeviceAccessPin,
+  setDeviceAccessPubkey,
+} from "./device-access-verify";
 import { daemonApiKeyId } from "./env";
 import { loadIdentityKey } from "./keypair";
 import { withoutCommandReplayContext } from "./op-context";
@@ -127,11 +130,29 @@ export const refreshBootstrap = (): Promise<boolean> =>
       // plans so a stale chain never outlives the config that produced it.
       clearPlanCache();
       // Pin the seed-gated device-access verifier when the cloud includes it.
-      // Explicit null clears a previous pin (key un-provisioned / wiped).
-      // Absent (older cloud) leaves the last-known pin alone so a rolling
-      // deploy cannot silently drop enforcement.
+      // A cloud-sent null never clears an existing pin (only a local
+      // confirmation can). Absent (older cloud) leaves the last-known pin
+      // alone so a rolling deploy cannot silently drop enforcement.
+      // `kind` / `version` / `rotations` carry the device-control semantics
+      // (first-use label, signed rotation chain) — see
+      // `device-access-verify.ts`. The cloud can never ANCHOR a pin: only the
+      // install anchor / loopback do. Re-read the pin
+      // from disk first, so an anchor written by `openllm daemon anchor` /
+      // `openllm login` (another process) is seen within one tick. The daemon
+      // never receives DEK material.
+      invalidateDeviceAccessPin();
       if (snapshot.device_access_pubkey !== undefined) {
-        setDeviceAccessPubkey(snapshot.device_access_pubkey);
+        setDeviceAccessPubkey(snapshot.device_access_pubkey, {
+          ...(snapshot.device_access_kind === undefined
+            ? {}
+            : { kind: snapshot.device_access_kind }),
+          ...(snapshot.device_access_version === undefined
+            ? {}
+            : { version: snapshot.device_access_version }),
+          ...(snapshot.device_access_rotations === undefined
+            ? {}
+            : { rotations: snapshot.device_access_rotations }),
+        });
       }
       // Best-effort: publish the durable X25519 pin on every successful
       // bootstrap so cold dashboards / fleet peers pin via the cloud path

@@ -48,6 +48,18 @@ export const parseVendorSessionIdFromArgs = (
   for (let i = 0; i < args.length; i += 1) {
     const arg = args[i];
     if (arg === undefined) continue;
+    // claude: --session-id <uuid> pins the id of a NEW session (the session
+    // host pins it to the host id), so it is the vendor id too.
+    if (clientId === "claude") {
+      if (arg === "--session-id") {
+        const next = args[i + 1];
+        if (next !== undefined && !next.startsWith("-")) return next;
+      }
+      if (arg.startsWith("--session-id=")) {
+        const id = arg.slice("--session-id=".length);
+        if (id.length > 0) return id;
+      }
+    }
     // claude / grok: --resume <id> | --resume=<id> | -r <id>
     if (clientId === "claude" || clientId === "grok") {
       if (arg === "--resume" || arg === "-r") {

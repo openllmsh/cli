@@ -978,7 +978,7 @@ export const openMuseBridgeCaptureHandle = (opts: {
 };
 
 const ChatGptStreamEventSchema: Schema.Schema<TChatGptStreamEvent> =
-  Schema.Record({ key: Schema.String, value: Schema.Unknown });
+  Schema.Record(Schema.String, Schema.Unknown);
 
 /**
  * Decode the daemon-owned Meta `/responses` upstream via existing

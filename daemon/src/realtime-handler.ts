@@ -37,7 +37,7 @@ import {
   pumpRealtimeEvents,
   sendRealtimeEvent,
 } from "@openllmsh/tunnel/streams";
-import { Either, Schema } from "effect";
+import { Result, Schema } from "effect";
 import { daemonEnv } from "./env";
 import type { TRealtimeSessionHandle } from "./realtime-session";
 import { openRealtimeSession } from "./realtime-session";
@@ -103,7 +103,7 @@ export const authorizeLocalRealtimeRequest = (req: Request): boolean => {
   return req.headers.get("authorization") === `Bearer ${configured}`;
 };
 
-const decodeRealtimeOpen = Schema.decodeUnknownEither(
+const decodeRealtimeOpen = Schema.decodeUnknownResult(
   RealtimeStreamOpenPayload,
 );
 
@@ -123,7 +123,7 @@ export const parseLocalRealtimeOpen = (
     voice: url.searchParams.get("voice") ?? undefined,
   };
   const result = decodeRealtimeOpen(candidate);
-  return Either.isRight(result) ? result.right : null;
+  return Result.isSuccess(result) ? result.success : null;
 };
 
 export type TLocalRealtimeSocketData = {

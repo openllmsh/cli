@@ -200,12 +200,12 @@ export const runClaudeNative = async (
   // and break auth. The load-bearing prep is the SCRUBBED env below —
   // `cleanNativeSpawnEnv` drops `ANTHROPIC_*`/`CLAUDE_CODE_*` auth vars that
   // would otherwise override the subscription credential.
-  let proc: ReturnType<typeof Bun.spawn>;
+  let supervised: ReturnType<typeof spawnClaudeCli>;
   try {
     // The bridge reads claude's isolated login-keychain credential to serve the
     // request; securityd denies a Seatbelt-confined caller, so it runs
     // unconfined on macOS (confined on Linux) — `sandbox/policy.ts`.
-    proc = spawnClaudeCli({
+    supervised = spawnClaudeCli({
       bin: params.bin,
       providerModelId: params.providerModelId,
       systemText: params.systemText,
@@ -219,13 +219,10 @@ export const runClaudeNative = async (
       reason: `spawn failed: ${error instanceof Error ? error.message : String(error)}`,
     };
   }
+  const proc = supervised.subprocess;
 
   const kill = (): void => {
-    try {
-      proc.kill("SIGTERM");
-    } catch {
-      // already exited
-    }
+    void supervised.terminate();
   };
   if (params.signal.aborted) {
     kill();

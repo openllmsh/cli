@@ -243,6 +243,28 @@ export const identityKeyPersisted = (): boolean => loadIdentityKey().persisted;
 /** This daemon's public key (SPKI DER, base64) — in-memory even if not persisted. */
 export const daemonPublicKey = (): string => loadIdentityKey().publicKeyB64;
 
+/**
+ * X25519(this daemon's private key, `remoteRaw`) — the static DH the Noise_IK
+ * responder needs for agent streams on the relay mux (`mux-host.ts`). The
+ * private key never leaves this module. Throws on a malformed peer key.
+ */
+export const daemonX25519Dh = (remoteRaw: Uint8Array): Uint8Array => {
+  if (remoteRaw.byteLength !== 32) {
+    throw new RangeError("X25519 public key must be 32 bytes");
+  }
+  const publicKey = createPublicKey({
+    key: {
+      kty: "OKP",
+      crv: "X25519",
+      x: Buffer.from(remoteRaw).toString("base64url"),
+    },
+    format: "jwk",
+  });
+  return new Uint8Array(
+    diffieHellman({ privateKey: identityKeys.privateKey(), publicKey }),
+  );
+};
+
 const deriveKey = (shared: Buffer): Buffer =>
   Buffer.from(hkdfSync("sha256", shared, Buffer.alloc(0), HKDF_INFO, 32));
 

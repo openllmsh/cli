@@ -15,13 +15,13 @@ import {
   VENDOR_CLI_INSTALL_STALE_MS,
   VendorCliInstall,
 } from "@openllmsh/protocol";
-import { Schema } from "effect";
+import { Result, Schema } from "effect";
 import { processStartTime } from "./child-supervisor";
 import { stateDir } from "./env";
 
 const MAX_RECORD_BYTES = 4_096;
 
-const decodeWire = Schema.decodeUnknownEither(VendorCliInstall);
+const decodeWire = Schema.decodeUnknownResult(VendorCliInstall);
 
 type TLocalRecord = TVendorCliInstall & {
   readonly provider: string;
@@ -151,7 +151,7 @@ const toWire = (record: TVendorCliInstall): TVendorCliInstall | undefined => {
     ...(record.reason !== undefined ? { reason: record.reason } : {}),
   };
   const decoded = decodeWire(candidate);
-  return decoded._tag === "Right" ? decoded.right : undefined;
+  return Result.isSuccess(decoded) ? decoded.success : undefined;
 };
 
 const readRawRecord = (slug: string): TLocalRecord | null => {

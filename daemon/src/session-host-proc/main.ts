@@ -17,7 +17,7 @@ import {
 import { join } from "node:path";
 import type {
   TDeviceSessionCli,
-  TSessionStreamOpenPayload,
+  TLocalSessionOpenPayload,
 } from "@openllmsh/protocol";
 import {
   DeviceSessionCli,
@@ -325,7 +325,7 @@ const protocolError = (socket: TSocket): void => {
 const parseAttachOpen = (
   value: unknown,
   expected: TSessionHostArgs,
-): TSessionStreamOpenPayload | null => {
+): TLocalSessionOpenPayload | null => {
   if (!isRecord(value)) return null;
   if (
     value.session_id !== expected.id ||
@@ -342,6 +342,7 @@ const parseAttachOpen = (
     cols: value.cols,
     rows: value.rows,
     mode: "attach",
+    ...(value.observer === true ? { observer: true } : {}),
   };
 };
 
@@ -372,6 +373,8 @@ export const runSessionHost = (
   let ownsClaim = false;
   let meta: TSessionHostMeta | null = null;
   let published = false;
+  /** Drop the signal handlers (set once the claim is held). */
+  let detachSignals: (() => void) | null = null;
 
   const fail = (): void => {
     cleanup();
@@ -382,6 +385,7 @@ export const runSessionHost = (
   const cleanup = (): void => {
     if (cleaned) return;
     cleaned = true;
+    detachSignals?.();
     if (activityTimer !== null) clearInterval(activityTimer);
     if (ownerTimer !== null) clearInterval(ownerTimer);
     server?.stop(true);
@@ -431,6 +435,19 @@ export const runSessionHost = (
     fail();
     return;
   }
+  // From the claim on, a signal cleans up: a spawner that gave up waiting for
+  // the socket stops this host, and a claim left behind would refuse every
+  // later host for the same id.
+  const shutdown = (): void => {
+    closeSession(args.id);
+    exit();
+  };
+  process.once("SIGINT", shutdown);
+  process.once("SIGTERM", shutdown);
+  detachSignals = (): void => {
+    process.off("SIGINT", shutdown);
+    process.off("SIGTERM", shutdown);
+  };
 
   if (existsSync(directory)) {
     fail();
@@ -577,12 +594,6 @@ export const runSessionHost = (
     ACTIVITY_POLL_MS,
   );
   activityTimer.unref?.();
-  const shutdown = (): void => {
-    closeSession(args.id);
-    exit();
-  };
-  process.once("SIGINT", shutdown);
-  process.once("SIGTERM", shutdown);
 
   // The trace harness marks only its source-client children. A host launched
   // from that client may be detached, so it must reap itself when that exact

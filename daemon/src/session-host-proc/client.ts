@@ -1,25 +1,17 @@
 /**
- * Durable session-host discovery, spawn, and CLI-pipe attach client.
+ * Durable session-host discovery and spawn client.
  *
  * The daemon never opens a session unix socket itself — the CLI owns that
- * path. Browser attach is a child process of `openllm sessions attach --pipe`
- * whose stdio is bridged to the relay stream. Spawn still launches the
- * detached `__session-host` sibling (same binary) so the host is ready before
- * the attach child dials it.
+ * path. Spawn launches the detached `__session-host` sibling (same binary)
+ * so the host is ready before a client dials it locally.
  */
 
 import { readdirSync, readFileSync, rmSync, statSync } from "node:fs";
 import { join } from "node:path";
-import type {
-  TDeviceSessionCli,
-  TSessionStreamOpenPayload,
-} from "@openllmsh/protocol";
+import type { TDeviceSessionCli } from "@openllmsh/protocol";
 import { DeviceSessionCli, SESSION_ID_PATTERN } from "@openllmsh/protocol";
-import { decodeJsonPayload, encodeJsonPayload } from "@openllmsh/tunnel/codec";
 import { Schema as S } from "effect";
 import { daemonSelfInvocation } from "../child-supervisor/self-exec";
-import { resolveOpenllmCli } from "../cli-path";
-import { spawnCommand } from "../command";
 import type { TDeadlineBudget } from "../deadline-budget";
 import {
   budgetFromSignal,
@@ -28,7 +20,6 @@ import {
 } from "../deadline-budget";
 import { stateDir } from "../env";
 import { withoutCommandReplayContext } from "../op-context";
-import type { TSessionStream } from "../session-core";
 import type { TSessionHostMeta } from "./main";
 
 const DEFAULT_SPAWN_SOCKET_TIMEOUT_MS = 2_000;
@@ -42,10 +33,6 @@ const DISCOVERY_CONCURRENCY = 4;
  */
 const DISCOVERY_TIMEOUT_MS = 1_000;
 const DEFAULT_SPAWN_SOCKET_POLL_MS = 25;
-
-/** RS (0x1e) prefixes a JSON control line on the pipe-mode attach stdio. */
-const PIPE_CTRL = 0x1e;
-const PIPE_CTRL_MAX_BYTES = 512;
 
 export type TLiveSessionHost = TSessionHostMeta & {
   readonly socketPath: string;
@@ -74,6 +61,14 @@ type TSpawnSessionHostProcFn = (
   args: TSpawnSessionHostProc,
 ) => Promise<string | null>;
 
+/** A detached host process just launched (only its kill is needed). */
+export type TSpawnedHostProcess = { readonly kill: () => void };
+
+/** Launch the detached host process; throws when it cannot start. */
+export type TSpawnHostProcess = (
+  argv: readonly string[],
+) => TSpawnedHostProcess;
+
 export type TSessionHostClientDeps = {
   readonly discoveryTimeoutMs?: number;
   readonly processIdentityTimeoutMs?: number;
@@ -81,17 +76,15 @@ export type TSessionHostClientDeps = {
   readonly spawnSocketTimeoutMs?: number;
   readonly readProcessIdentity?: TProcessIdentityReader;
   readonly spawnSessionHostProc?: TSpawnSessionHostProcFn;
+  /** The detached launch itself (tests); defaults to `Bun.spawn`. */
+  readonly spawnHostProcess?: TSpawnHostProcess;
 };
 
 export type TSessionHostClient = {
   readonly discoverSessionHosts: () => Promise<readonly TLiveSessionHost[]>;
-  readonly findSessionHost: (id: string) => Promise<TLiveSessionHost | null>;
   readonly spawnSessionHostProc: (
     args: TSpawnSessionHostProc,
   ) => Promise<string | null>;
-  readonly attachSessionHostViaCli: (
-    open: TSessionStreamOpenPayload,
-  ) => TSessionStream | null;
 };
 
 const isCli: (value: unknown) => value is TDeviceSessionCli =
@@ -231,204 +224,17 @@ const daemonBinary = (): readonly string[] => {
   return daemonSelfInvocation();
 };
 
-const openllmCliBinary = (): string | null => resolveOpenllmCli();
-
-/**
- * A TSessionStream that pipes to `openllm sessions attach --pipe`.
- *
- * The CLI child owns the unix-socket dial; the daemon only owns this process
- * and the bridge. Binary frames go to the child's stdin; RS-prefixed JSON
- * lines carry resize/close controls. The child's stdout is PTY output.
- */
-class CliPipeSessionStream implements TSessionStream {
-  private readonly dataHandlers = new Set<(payload: Uint8Array) => unknown>();
-  private readonly ctrlHandlers = new Set<(payload: Uint8Array) => unknown>();
-  private readonly resetHandlers = new Set<(payload: Uint8Array) => unknown>();
-  private readonly endHandlers = new Set<() => void>();
-  private closed = false;
-
-  constructor(
-    private readonly proc: ReturnType<typeof Bun.spawn>,
-    private readonly stdin: {
-      write: (data: Uint8Array | string) => number | Promise<number>;
-      flush: () => number | Promise<number>;
-    },
-  ) {
-    const stdout = proc.stdout;
-    if (stdout !== null && typeof stdout !== "number") {
-      void (async () => {
-        const reader = (stdout as ReadableStream<Uint8Array>).getReader();
-        const ctrlDecoder = new TextDecoder();
-        let ctrlBytes: number[] = [];
-        let ctrlOverflow = false;
-        try {
-          for (;;) {
-            const { done, value } = await reader.read();
-            if (done || value === undefined) break;
-            let index = 0;
-            while (index < value.length) {
-              if (
-                ctrlBytes.length > 0 ||
-                ctrlOverflow ||
-                value[index] === PIPE_CTRL
-              ) {
-                if (ctrlBytes.length === 0 && !ctrlOverflow) index += 1;
-                while (index < value.length) {
-                  const byte = value[index] ?? 0;
-                  index += 1;
-                  if (byte === 0x0a) {
-                    if (!ctrlOverflow) {
-                      try {
-                        const decoded: unknown = JSON.parse(
-                          ctrlDecoder.decode(new Uint8Array(ctrlBytes)),
-                        );
-                        if (
-                          typeof decoded === "object" &&
-                          decoded !== null &&
-                          !Array.isArray(decoded)
-                        ) {
-                          const control = decoded as Record<string, unknown>;
-                          if (control.t === "reset") {
-                            const { t: _tag, ...reset } = control;
-                            const payload = encodeJsonPayload(reset);
-                            for (const handler of this.resetHandlers)
-                              handler(payload);
-                          } else {
-                            const payload = encodeJsonPayload(control);
-                            for (const handler of this.ctrlHandlers)
-                              handler(payload);
-                          }
-                        }
-                      } catch {
-                        // Malformed control — drop and keep streaming.
-                      }
-                    }
-                    ctrlBytes = [];
-                    ctrlOverflow = false;
-                    break;
-                  }
-                  ctrlBytes.push(byte);
-                  if (ctrlBytes.length > PIPE_CTRL_MAX_BYTES) {
-                    // Keep consuming through newline so a malformed frame tail
-                    // cannot be emitted as raw terminal output.
-                    ctrlBytes = [];
-                    ctrlOverflow = true;
-                  }
-                }
-                continue;
-              }
-              const start = index;
-              while (index < value.length && value[index] !== PIPE_CTRL)
-                index += 1;
-              if (index > start) {
-                const bytes = value.subarray(start, index);
-                for (const handler of this.dataHandlers) handler(bytes);
-              }
-            }
-          }
-        } catch {
-          // Child closed stdout.
-        } finally {
-          this.fireEnd();
-        }
-      })();
-    }
-    void proc.exited.then(() => this.fireEnd());
-  }
-
-  private fireEnd = (): void => {
-    if (this.closed) return;
-    this.closed = true;
-    for (const handler of this.endHandlers) handler();
-  };
-
-  write = async (bytes: Uint8Array): Promise<void> => {
-    if (this.closed) throw new Error("session pipe closed");
-    await this.stdin.write(bytes);
-    await this.stdin.flush();
-  };
-
-  private writeControl = (control: object): void => {
-    void Promise.resolve(
-      this.stdin.write(
-        `${String.fromCharCode(PIPE_CTRL)}${JSON.stringify(control)}\n`,
-      ),
-    )
-      .then(() => this.stdin.flush())
-      .catch(() => this.fireEnd());
-  };
-
-  sendCtrl = (payload: Uint8Array): void => {
-    if (this.closed) return;
-    const decoded = decodeJsonPayload(payload);
-    if (
-      decoded === undefined ||
-      typeof decoded !== "object" ||
-      decoded === null
-    )
-      return;
-    const ctrl = decoded as {
-      t?: string;
-      cols?: number;
-      rows?: number;
-      intent?: string;
-    };
-    if (
-      ctrl.t === "resize" &&
-      typeof ctrl.cols === "number" &&
-      typeof ctrl.rows === "number"
-    ) {
-      this.writeControl({ t: "resize", cols: ctrl.cols, rows: ctrl.rows });
-      return;
-    }
-    if (ctrl.t === "focus") {
-      // Forward opaque focus claims so a browser tab can claim primary through
-      // the pipe-bridged attach child without typing.
-      this.writeControl({ t: "focus" });
-      return;
-    }
-    if (ctrl.t === "close") {
-      this.writeControl({ t: "close", intent: ctrl.intent ?? "detach" });
-    }
-  };
-
-  reset = (_payload?: Uint8Array): void => {
-    // Parent-side teardown: kill the attach child. The durable host is untouched.
-    try {
-      this.proc.kill();
-    } catch {
-      /* already gone */
-    }
-    this.fireEnd();
-  };
-
-  end = (): void => {
-    this.sendCtrl(encodeJsonPayload({ t: "close", intent: "detach" }));
-    try {
-      this.proc.kill();
-    } catch {
-      /* already gone */
-    }
-    this.fireEnd();
-  };
-
-  onData = (handler: (payload: Uint8Array) => unknown): (() => void) => {
-    this.dataHandlers.add(handler);
-    return () => this.dataHandlers.delete(handler);
-  };
-  onCtrl = (handler: (payload: Uint8Array) => unknown): (() => void) => {
-    this.ctrlHandlers.add(handler);
-    return () => this.ctrlHandlers.delete(handler);
-  };
-  onReset = (handler: (payload: Uint8Array) => unknown): (() => void) => {
-    this.resetHandlers.add(handler);
-    return () => this.resetHandlers.delete(handler);
-  };
-  onEnd = (handler: () => void): (() => void) => {
-    this.endHandlers.add(handler);
-    return () => this.endHandlers.delete(handler);
-  };
-}
+const spawnHostProcessDefault: TSpawnHostProcess = (argv) => {
+  // Bare spawn (not superviseSpawn): session hosts are intentionally
+  // long-lived + detached and outlive the spawning daemon process; the
+  // disposable child registry must not reap them on boot/drain.
+  const proc = Bun.spawn([...argv], {
+    detached: true,
+    stdio: ["ignore", "ignore", "ignore"],
+  });
+  proc.unref();
+  return proc;
+};
 
 const buildSessionHostClient = (
   deps: TSessionHostClientDeps = {},
@@ -443,6 +249,7 @@ const buildSessionHostClient = (
   const processIdentityReader =
     deps.readProcessIdentity ?? defaultProcessIdentity;
   const spawnOverride = deps.spawnSessionHostProc;
+  const spawnHostProcess = deps.spawnHostProcess ?? spawnHostProcessDefault;
 
   type TProbeWaiter = {
     granted: boolean;
@@ -640,36 +447,6 @@ const buildSessionHostClient = (
   const discoverSessionHosts = async (): Promise<readonly TLiveSessionHost[]> =>
     (await discoverSessionHostOutcome()).hosts;
 
-  const lookupSessionHost = async (
-    id: string,
-  ): Promise<TLiveSessionHost | null> => {
-    const budget = createDeadlineBudget(discoveryTimeoutMs);
-    const meta = readSessionHostMeta(id);
-    if (meta === null) return null;
-    const socketPath = sessionHostSocketPath(id);
-    const socketReady = socketPresent(socketPath);
-    const identity = await boundedProcessIdentity(meta, budget.signal);
-    if (budget.expired()) return null;
-    // Attach never reaps. Unknown stays unknown; dead is a negative attach.
-    return liveHostIfAttachable(meta, identity, socketPath, socketReady);
-  };
-
-  /**
-   * Targeted attach lookup. A coalesced scan's last-known list never authorizes
-   * attach. A complete-scan hit still requires a live socket; a miss (or stale
-   * socket) rechecks only this id against identity + socket.
-   */
-  const findSessionHost = async (
-    id: string,
-  ): Promise<TLiveSessionHost | null> => {
-    const outcome = await discoverSessionHostOutcome();
-    if (outcome.complete) {
-      const hit = outcome.hosts.find((host) => host.id === id);
-      if (hit !== undefined && socketPresent(hit.socketPath)) return hit;
-    }
-    return lookupSessionHost(id);
-  };
-
   const waitForSessionHostSocket = async (
     id: string,
   ): Promise<string | null> => {
@@ -708,16 +485,23 @@ const buildSessionHostClient = (
       "--rows",
       String(args.rows),
     ];
+    let proc: TSpawnedHostProcess;
     try {
-      const proc = Bun.spawn([...daemonBinary(), ...argv], {
-        detached: true,
-        stdio: ["ignore", "ignore", "ignore"],
-      });
-      proc.unref();
+      proc = spawnHostProcess([...daemonBinary(), ...argv]);
     } catch {
       return null;
     }
-    return waitForSessionHostSocket(args.id);
+    const socketPath = await waitForSessionHostSocket(args.id);
+    if (socketPath === null) {
+      // Never published in time: the caller reports the spawn as failed, so
+      // stop the detached host rather than leave an unowned TUI running.
+      try {
+        proc.kill();
+      } catch {
+        // Already gone.
+      }
+    }
+    return socketPath;
   };
 
   /** Spawn a detached sibling session host and wait for its private control socket. */
@@ -728,50 +512,9 @@ const buildSessionHostClient = (
     return spawnSessionHostProcDefault(args);
   };
 
-  /**
-   * Attach to a durable session by spawning `openllm sessions attach --pipe`.
-   * The CLI owns the unix-socket dial; this returns a TSessionStream over the
-   * child's stdio so the daemon can bridge a relay mux stream without opening
-   * any session socket itself.
-   */
-  const attachSessionHostViaCli = (
-    open: TSessionStreamOpenPayload,
-  ): TSessionStream | null => {
-    const bin = openllmCliBinary();
-    if (bin === null) return null;
-    const proc = Bun.spawn(
-      spawnCommand(process.platform, bin, [
-        "sessions",
-        "attach",
-        open.session_id,
-        "--pipe",
-        "--cols",
-        String(open.cols),
-        "--rows",
-        String(open.rows),
-      ]),
-      {
-        stdin: "pipe",
-        stdout: "pipe",
-        stderr: "ignore",
-      },
-    );
-    if (proc.stdin === null || typeof proc.stdin === "number") {
-      try {
-        proc.kill();
-      } catch {
-        /* already gone */
-      }
-      return null;
-    }
-    return new CliPipeSessionStream(proc, proc.stdin);
-  };
-
   return {
     discoverSessionHosts,
-    findSessionHost,
     spawnSessionHostProc,
-    attachSessionHostViaCli,
   };
 };
 
@@ -793,24 +536,8 @@ export const discoverSessionHosts = async (): Promise<
   readonly TLiveSessionHost[]
 > => defaultSessionHostClient.discoverSessionHosts();
 
-export const findSessionHost = async (
-  id: string,
-): Promise<TLiveSessionHost | null> =>
-  defaultSessionHostClient.findSessionHost(id);
-
 /** Spawn a detached sibling session host and wait for its private control socket. */
 export const spawnSessionHostProc = async (
   args: TSpawnSessionHostProc,
 ): Promise<string | null> =>
   defaultSessionHostClient.spawnSessionHostProc(args);
-
-/**
- * Attach to a durable session by spawning `openllm sessions attach --pipe`.
- * The CLI owns the unix-socket dial; this returns a TSessionStream over the
- * child's stdio so the daemon can bridge a relay mux stream without opening
- * any session socket itself.
- */
-export const attachSessionHostViaCli = (
-  open: TSessionStreamOpenPayload,
-): TSessionStream | null =>
-  defaultSessionHostClient.attachSessionHostViaCli(open);

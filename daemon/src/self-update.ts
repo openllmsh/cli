@@ -17,6 +17,11 @@ const DRAIN_POLL_MS = 250;
 // would leave `updating = true` for the rest of the process lifetime, blocking
 // every later update attempt.
 const DOWNLOAD_TIMEOUT_MS = 60_000;
+/**
+ * The binary is ~120 MB: a total deadline cut off every connection slower
+ * than ~2 MB/s, forever. Give up only when bytes stop arriving.
+ */
+export const BINARY_STALL_TIMEOUT_MS = 30_000;
 
 export type TDrainTiming = {
   readonly maxMs: number;
@@ -148,12 +153,31 @@ export const currentTarget = (): TCliTarget | null => {
 
 /** Fetch a published binary, decompressing the gzipped release asset. */
 export const fetchBinary = async (url: string): Promise<Buffer> => {
-  const res = await fetch(url, {
-    redirect: "follow",
-    signal: AbortSignal.timeout(DOWNLOAD_TIMEOUT_MS),
-  });
-  if (!res.ok) throw new Error(`binary download failed: ${res.status}`);
-  const buf = Buffer.from(await res.arrayBuffer());
+  const abort = new AbortController();
+  let stall = setTimeout(() => abort.abort(), BINARY_STALL_TIMEOUT_MS);
+  const bump = (): void => {
+    clearTimeout(stall);
+    stall = setTimeout(() => abort.abort(), BINARY_STALL_TIMEOUT_MS);
+  };
+  const chunks: Uint8Array[] = [];
+  try {
+    const res = await fetch(url, { redirect: "follow", signal: abort.signal });
+    if (!res.ok) throw new Error(`binary download failed: ${res.status}`);
+    if (res.body === null) throw new Error("binary download had no body");
+    const reader = res.body.getReader();
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      chunks.push(value);
+      bump();
+    }
+  } catch (err) {
+    if (abort.signal.aborted) throw new Error("binary download stalled");
+    throw err;
+  } finally {
+    clearTimeout(stall);
+  }
+  const buf = Buffer.concat(chunks);
   // The published asset is gzipped (`openllm-<target>.gz`); decompress when the
   // gzip magic bytes (0x1f 0x8b) are present, tolerating a raw binary too. The
   // sha256 is checked against the DECOMPRESSED bytes (what runs), so the gate is

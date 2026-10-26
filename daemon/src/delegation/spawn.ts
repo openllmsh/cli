@@ -27,6 +27,10 @@ import {
 } from "../deadline-budget";
 import { opaqueDoctorCorrelation } from "../doctor-report/correlation";
 import {
+  maybeInvalidateLauncherOnExecFailure,
+  maybeInvalidateLauncherOnExitCode,
+} from "../launcher-exec-invalidate";
+import {
   logDebug,
   logError,
   logInfo,
@@ -35,10 +39,6 @@ import {
 } from "../logger";
 import { currentTickId } from "../op-context";
 import { augmentSpawnPath } from "../path-utils";
-import {
-  maybeInvalidateLauncherOnExecFailure,
-  maybeInvalidateLauncherOnExitCode,
-} from "../launcher-exec-invalidate";
 import { sandboxSpawnArgs } from "../sandbox/exec";
 import { daemonTempDir } from "../sandbox/working-set";
 import { redactSensitiveArgv } from "./redact-sensitive-argv";
@@ -222,6 +222,12 @@ export type TRunCaptureOpts = {
    * Tests inject delayed/immediate fires without module-global setters.
    */
   readonly scheduleTimeout?: TTimeoutScheduler;
+  /**
+   * Clock for timer-arm / timer-fire / race timestamps (lateness diagnostics).
+   * Defaults to `performance.now`. Pair with `scheduleTimeout` when a test
+   * drives the watchdog on a synthetic clock.
+   */
+  readonly nowMs?: () => number;
 };
 
 const FAILURE_STDERR_MAX_BYTES = 2_048;
@@ -410,6 +416,7 @@ export const runCaptureResult = async (
       parentBudget?.child(configuredTimeoutMs) ??
       createDeadlineBudget(configuredTimeoutMs, opts?.signal);
     const remainingAtSpawn = budget.remainingMs();
+    const nowMs = opts?.nowMs ?? ((): number => performance.now());
     let timer: ReturnType<typeof setTimeout> | null = null;
     let timerArmedAtMs: number | null = null;
     let timerFiredAtMs: number | null = null;
@@ -478,9 +485,9 @@ export const runCaptureResult = async (
       const scheduleTimeout = opts?.scheduleTimeout ?? defaultTimeoutScheduler;
       const timeout = new Promise<TCaptureOutcome>((resolve) => {
         timerDelayMs = budget.remainingMs();
-        timerArmedAtMs = performance.now();
+        timerArmedAtMs = nowMs();
         timer = scheduleTimeout(() => {
-          timerFiredAtMs = performance.now();
+          timerFiredAtMs = nowMs();
           resolve({ kind: "timeout" });
         }, timerDelayMs);
       });
@@ -497,7 +504,7 @@ export const runCaptureResult = async (
           ? [complete, timeout]
           : [complete, timeout, abortWait],
       );
-      const raceObservedAtMs = performance.now();
+      const raceObservedAtMs = nowMs();
       // Race winner is authoritative. Unbind before branching so a late abort
       // cannot flip the shared flag and discard a completed stdout.
       unbind();
@@ -1588,6 +1595,8 @@ export const openUrl = (url: string): void => {
     // browser is a user-facing action like the session-PTY exemption — the
     // launcher must reach the real GUI session/LaunchServices state, and it
     // takes only the URL string (no filesystem payload to confine).
+    // Bare spawn (not superviseSpawn): fire-and-forget OS URL opener; we never
+    // kill it and must not group-track a user browser session.
     Bun.spawn(argv, {
       stdin: "ignore",
       stdout: "ignore",

@@ -33,8 +33,18 @@
 // guards it.
 import "reflect-metadata";
 
-import { AUTH_LOCAL_PATH } from "@openllmsh/protocol";
+import { AGENT_HOOK_LOCAL_PATH, AUTH_LOCAL_PATH } from "@openllmsh/protocol";
 import { isStreamResetError } from "@openllmsh/tunnel";
+import { handleLocalAgentHook } from "./agent/hook-endpoint";
+import type { TLocalAgentSocketData } from "./agent/loopback";
+import {
+  AGENT_LOCAL_PATH,
+  createLocalAgentWebSocket,
+  localAgentRefusal,
+  localAgentRefusalResponse,
+  localAgentSocketData,
+  selectedLocalAgentProtocol,
+} from "./agent/loopback";
 import {
   guardCrashLoop,
   guardRtcCircuitBreaker,
@@ -64,9 +74,12 @@ import {
 } from "./env";
 import { buildHealth } from "./health";
 import { handleLocalAuth } from "./local-auth";
+import {
+  handleLocalDeviceControl,
+  isLocalDeviceControlPath,
+} from "./local-device-control";
 import { flushLogs, logError, logInfo, safeDiagnosticMessage } from "./logger";
 import { startPlanCacheSweeper } from "./plan-cache";
-import { ptySessionsEnabled } from "./pty-sessions-pref";
 import type { TLocalRealtimeSocketData } from "./realtime-handler";
 import {
   authorizeLocalRealtimeRequest,
@@ -89,6 +102,19 @@ const bootstrapBackoff = createBootstrapBackoff(bootstrapBackoffConfig);
 // Wall-clock at process start, for the `/status` uptime field. Module-load time
 // is "boot" for our purposes (the listener binds within the same tick).
 const BOOT_AT = Date.now();
+
+/** Per-socket data of the two local WS surfaces (realtime + loopback agent). */
+type TLocalSocketData = TLocalRealtimeSocketData | TLocalAgentSocketData;
+
+const isAgentSocket = (
+  socket: Bun.ServerWebSocket<TLocalSocketData>,
+): socket is Bun.ServerWebSocket<TLocalAgentSocketData> =>
+  "agentLoopback" in socket.data;
+
+const isRealtimeSocket = (
+  socket: Bun.ServerWebSocket<TLocalSocketData>,
+): socket is Bun.ServerWebSocket<TLocalRealtimeSocketData> =>
+  !("agentLoopback" in socket.data);
 
 export const main = async (): Promise<void> => {
   // `daemonPort()` loads the env file, so the kill-switch / opt-in vars are
@@ -357,6 +383,15 @@ export const main = async (): Promise<void> => {
     return handleInference(req);
   };
 
+  // Agent sessions (plan: agent-sessions-replace-remote-pty). The runtime pulls
+  // the mux host; loaded after listen, before the relay hello (so the hello's
+  // caps carry `agent1`). The loopback socket reads it per open.
+  type TAgentRuntimeMod = typeof import("./agent/runtime");
+  let agentRuntime: TAgentRuntimeMod | null = null;
+  const localAgentWebSocket = createLocalAgentWebSocket(
+    () => agentRuntime?.activeAgentDispatcher() ?? null,
+  );
+
   // Graceful-exit beacon: flip the key offline immediately on Ctrl-C /
   // termination instead of waiting for the presence-staleness window.
   let shuttingDown = false;
@@ -365,6 +400,11 @@ export const main = async (): Promise<void> => {
       if (controlChannel !== null) await controlChannel.stopControlChannel();
     } catch (err) {
       logError("control-channel", err);
+    }
+    try {
+      agentRuntime?.stopAgentSessions();
+    } catch (err) {
+      logError("agent", err);
     }
     // Durable local session hosts are detached from this daemon. The supervisor
     // tracks only disposable children, leaving their PTYs alone.
@@ -395,7 +435,7 @@ export const main = async (): Promise<void> => {
       idleTimeout: 255,
       fetch: async (
         req: Request,
-        server: Bun.Server<TLocalRealtimeSocketData>,
+        server: Bun.Server<TLocalSocketData>,
       ): Promise<Response | undefined> => {
         const url = new URL(req.url);
         // `/v1/realtime` is a WebSocket upgrade, not `handleInference` HTTP —
@@ -496,6 +536,44 @@ export const main = async (): Promise<void> => {
         // and it carries the real sandbox posture this process applied at boot —
         // which `openllmd status` can't compute itself. Secret-free subset of
         // `computeStatus()`; see `health.ts`. Shares the loopback CORS grant.
+        // `/local/agent` — the desktop app's loopback agent sessions (no device
+        // grant: loopback peer + Host, Tauri/OpenLLM Origin, local control
+        // capability). See `agent/loopback.ts`.
+        if (url.pathname === AGENT_HOOK_LOCAL_PATH) {
+          return handleLocalAgentHook(req, server.requestIP(req)?.address);
+        }
+        if (url.pathname === AGENT_LOCAL_PATH) {
+          const refusal = localAgentRefusal(
+            req,
+            server.requestIP(req)?.address,
+          );
+          if (refusal !== null) return localAgentRefusalResponse(refusal);
+          if (agentRuntime?.activeAgentDispatcher() == null) {
+            return new Response(
+              JSON.stringify({ error: "agent_unavailable" }),
+              {
+                status: 503,
+                headers: { "content-type": "application/json" },
+              },
+            );
+          }
+          const protocol = selectedLocalAgentProtocol(req);
+          const upgraded = server.upgrade(req, {
+            data: localAgentSocketData(),
+            ...(protocol === null
+              ? {}
+              : { headers: { "sec-websocket-protocol": protocol } }),
+          });
+          return upgraded
+            ? undefined
+            : new Response("websocket upgrade failed", { status: 400 });
+        }
+        // `/local/identity` + `/local/device-control` — TOFU-free identity read
+        // and device-control pin for the desktop app (same admission as
+        // `/local/agent`). See `local-device-control.ts`.
+        if (isLocalDeviceControlPath(url.pathname)) {
+          return handleLocalDeviceControl(req, server.requestIP(req)?.address);
+        }
         if (url.pathname === AUTH_LOCAL_PATH) return handleLocalAuth(req);
         {
           const doctor = await loadDoctor();
@@ -514,7 +592,6 @@ export const main = async (): Promise<void> => {
             sandbox: sandboxState(),
             cloudState: getCloudState(),
             keyConfigured: hasApiKey(),
-            ptySessions: ptySessionsEnabled(),
             cloudOrigin: daemonEnv().cloudOrigin,
             bootAt: BOOT_AT,
             now: Date.now(),
@@ -528,11 +605,27 @@ export const main = async (): Promise<void> => {
           headers: { "content-type": "application/json" },
         });
       },
-      // The ONLY local WS surface: `/v1/realtime` (see `fetch` above). Every
-      // upgrade this handler ever sees already carried a validated `open`
-      // payload in `data` — `localRealtimeWebSocket` never re-parses the
-      // request itself.
-      websocket: localRealtimeWebSocket,
+      // Two local WS surfaces: `/v1/realtime` and `/local/agent` (see `fetch`
+      // above). Every upgrade already passed its admission; `data` says which
+      // surface the socket belongs to.
+      websocket: {
+        open: (socket) => {
+          if (isAgentSocket(socket)) localAgentWebSocket.open(socket);
+          else if (isRealtimeSocket(socket))
+            localRealtimeWebSocket.open(socket);
+        },
+        message: (socket, message) => {
+          if (isAgentSocket(socket))
+            localAgentWebSocket.message(socket, message);
+          else if (isRealtimeSocket(socket))
+            localRealtimeWebSocket.message(socket, message);
+        },
+        close: (socket) => {
+          if (isAgentSocket(socket)) localAgentWebSocket.close(socket);
+          else if (isRealtimeSocket(socket))
+            localRealtimeWebSocket.close(socket);
+        },
+      },
     });
   } catch (err) {
     const code =
@@ -563,6 +656,15 @@ export const main = async (): Promise<void> => {
     return;
   }
 
+  // Ready signal at BIND time — `/whoami` and `/status` already answer. The
+  // install-time launcher and test harnesses gate on this line; it used to
+  // print only after agent/control/reconcile, which under load made "listening"
+  // mean "past post-bind work" rather than "port is bound".
+  process.stdout.write(
+    `openllmd v${DAEMON_VERSION}${isDevMode() ? " (dev)" : ""} listening on http://127.0.0.1:${port}\n`,
+  );
+  logInfo("boot", `openllmd v${DAEMON_VERSION} listening on :${port}`);
+
   {
     const doctor = await loadDoctor();
     doctor.initDoctorCursorAtTail();
@@ -589,6 +691,14 @@ export const main = async (): Promise<void> => {
   // restart reconnects in seconds, not after session-host reconcile. Commands
   // stay deferred until reconcile finishes (handlers must not race that pass).
   // See `docs/audit/2026-10-20-deploy-zero-downtime.md` fix #3.
+  // Register the agent dispatcher BEFORE the hello so its caps carry `agent1`.
+  try {
+    agentRuntime = await import("./agent/runtime");
+    agentRuntime.startAgentSessions();
+  } catch (err) {
+    logError("agent", err);
+  }
+
   const cc = await loadControlChannel();
   cc.startControlChannel({ deferCommandsUntilReady: true });
 
@@ -624,12 +734,6 @@ export const main = async (): Promise<void> => {
   setTimeout(() => {
     markHealthyBoot();
   }, 3_000);
-
-  // Single line to stdout so the install-time launcher can confirm boot.
-  process.stdout.write(
-    `openllmd v${DAEMON_VERSION}${isDevMode() ? " (dev)" : ""} listening on http://127.0.0.1:${port}\n`,
-  );
-  logInfo("boot", `openllmd v${DAEMON_VERSION} listening on :${port}`);
 };
 
 /**

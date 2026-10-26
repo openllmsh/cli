@@ -70,7 +70,7 @@ import {
 } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join } from "node:path";
-import { parseOpenllmDaemonPort } from "@openllmsh/protocol";
+import { bearerApiKeyOf, parseOpenllmDaemonPort } from "@openllmsh/protocol";
 // NOTE: logger.ts imports `stateDir` from this module — a benign cycle, since
 // both sides only dereference the other's exports lazily inside functions.
 import {
@@ -78,6 +78,7 @@ import {
   DEV_CLOUD_ORIGIN,
   DEV_DEFAULT_DAEMON_PORT,
   isOpenllmDevMode,
+  parseApiKeyId,
 } from "../../src/runtime-contracts";
 
 export type TDaemonEnv = {
@@ -87,19 +88,7 @@ export type TDaemonEnv = {
   readonly dashboardOrigin: string;
 };
 
-/**
- * Extract the public id half of a `sk-llm-{id}.{secret}` key. The daemon
- * never imports `@openllm/vault`; this is a shape-only parse (id only —
- * secret is ignored). Returns null on any mismatch.
- */
-export const parseApiKeyId = (raw: string): string | null => {
-  if (!raw.startsWith("sk-llm-")) return null;
-  const rest = raw.slice("sk-llm-".length);
-  const dot = rest.indexOf(".");
-  if (dot <= 0 || dot === rest.length - 1) return null;
-  const id = rest.slice(0, dot);
-  return id.length > 0 ? id : null;
-};
+export { parseApiKeyId } from "../../src/runtime-contracts";
 
 /**
  * This daemon's api key id (the `key_id` grants must target). Null when
@@ -152,6 +141,26 @@ export const isDevMode = (): boolean => isOpenllmDevMode();
  * `OPENLLM_DAEMON_DEV` (mode), `OPENLLM_DAEMON_ENV_FILE` (path override), and
  * `OPENLLM_DAEMON_STATE_DIR` (state root).
  */
+/**
+ * The env-file line that holds the install-time device trust anchor
+ * (`OPENLLM_DEVICE_ANCHOR=<86 base64url chars>`), written beside the BARE
+ * `OPENLLM_API_KEY` by install.sh / `openllm login` / `openllm daemon anchor`.
+ * It is read from the runtime's env file only ({@link deviceAnchorFromEnvFile})
+ * and never enters `process.env`, so no child process, vendor config or log
+ * can pick it up. Must match `packages/cli/src/env.ts` (parity-tested).
+ */
+export const DEVICE_ANCHOR_ENV = "OPENLLM_DEVICE_ANCHOR";
+
+/**
+ * Drop an inherited `OPENLLM_DEVICE_ANCHOR` from `process.env` (systemd's
+ * `EnvironmentFile=` injects every line of the env file before exec, and a
+ * user may export it). Called on every env load, so it is gone before any
+ * child is spawned.
+ */
+export const scrubDeviceAnchorFromProcessEnv = (): void => {
+  delete process.env[DEVICE_ANCHOR_ENV];
+};
+
 const LOAD_ENV_FILE_NO_OVERRIDE_KEYS = new Set([
   "OPENLLM_DAEMON_DEV",
   "OPENLLM_DAEMON_ENV_FILE",
@@ -164,6 +173,9 @@ const LOAD_ENV_FILE_NO_OVERRIDE_KEYS = new Set([
  */
 function shouldWriteEnvVar(key: string, devMode: boolean): boolean {
   if (LOAD_ENV_FILE_NO_OVERRIDE_KEYS.has(key)) return false;
+  // The device trust anchor stays in the FILE: anything in process.env is
+  // inherited by every child (vendor CLIs, mcp, hooks, sandboxed tools).
+  if (key === DEVICE_ANCHOR_ENV) return false;
   if (!devMode) return process.env[key] === undefined;
   return true;
 }
@@ -286,6 +298,7 @@ const callerPortValue = (): string | undefined => {
  * when the file is missing. Synchronous (boot-time, before anything reads env).
  */
 export const loadEnvFile = (): void => {
+  scrubDeviceAnchorFromProcessEnv();
   const callerPort = callerPortValue();
   if (callerPort === undefined) delete process.env.OPENLLM_DAEMON_PORT;
   else process.env.OPENLLM_DAEMON_PORT = callerPort;
@@ -575,15 +588,28 @@ export const deviceId = (): string => {
  * merge, which would leak the prod origin/port/device-id into dev) and never
  * written anywhere, so dev reuses the paired key without forking it.
  */
+/**
+ * Defense in depth: a device trust anchor that reached the env
+ * (`sk-llm-<key>.<anchor>`) is dropped here, so it can never become the
+ * bearer, a log field, or a cloud payload. A key whose suffix is MALFORMED
+ * (truncated / wrong-charset anchor) loads as no key at all — the daemon
+ * stays keyless rather than send it. The anchor itself is accepted only by
+ * `openllm daemon anchor`.
+ */
+const withoutAnchor = (key: string): string | null => bearerApiKeyOf(key);
+
 const loadApiKey = (): string | null => {
   const fromEnv = process.env.OPENLLM_API_KEY?.trim();
-  if (fromEnv !== undefined && fromEnv.length > 0) return fromEnv;
+  if (fromEnv !== undefined && fromEnv.length > 0)
+    return withoutAnchor(fromEnv);
   if (isDevMode()) {
     try {
       const shared = parseEnvLines(readFileSync(sharedEnvFilePath(), "utf-8"))
         .get("OPENLLM_API_KEY")
         ?.trim();
-      if (shared !== undefined && shared.length > 0) return shared;
+      if (shared !== undefined && shared.length > 0) {
+        return withoutAnchor(shared);
+      }
     } catch {
       // no shared file — keyless
     }
@@ -652,6 +678,18 @@ export const envFileValue = (
   } catch {
     return null;
   }
+};
+
+/**
+ * The device trust anchor from THIS runtime's env file (`.env`, or `.dev.env`
+ * in dev — {@link envFilePath}), or null when absent or blank. Read fresh on
+ * every call so an anchor written by another process (install.sh, `openllm
+ * login`) is seen on the next boot or bootstrap tick. Shape is validated by
+ * the caller (`decodeDeviceAnchor`).
+ */
+export const deviceAnchorFromEnvFile = (): string | null => {
+  const value = envFileValue(envFilePath(), DEVICE_ANCHOR_ENV)?.trim() ?? "";
+  return value.length > 0 ? value : null;
 };
 
 export const hasApiKey = (): boolean => daemonEnv().apiKey !== null;

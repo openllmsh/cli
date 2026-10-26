@@ -243,7 +243,7 @@ const authHeaders = (): Record<string, string> => {
 export const CLOUD_FETCH_TIMEOUT_MS = 15_000;
 const MEDIA_UPLOAD_TIMEOUT_MS = 120_000;
 
-const cloudFetch = (url: string, init: RequestInit): Promise<Response> =>
+export const cloudFetch = (url: string, init: RequestInit): Promise<Response> =>
   fetch(url, {
     ...init,
     signal:
@@ -258,7 +258,7 @@ const cloudFetch = (url: string, init: RequestInit): Promise<Response> =>
 // Default to the pinned cloud origin, but let a signed plan override
 // per-request with the deployment that signed it, so one daemon serves any
 // deployment.
-const cloudUrl = (path: string, origin?: string | null): string => {
+export const cloudUrl = (path: string, origin?: string | null): string => {
   const base =
     origin !== undefined && origin !== null && origin.length > 0
       ? origin.replace(/\/+$/, "")

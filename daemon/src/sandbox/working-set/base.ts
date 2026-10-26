@@ -9,17 +9,17 @@
  *   - the path-safety helpers (`existing`, `SENSITIVE_ROOTS`) both layers and
  *     the sandbox backends rely on,
  *   - the dynamic vendor-CLI exec-dir resolver (`resolveCliExecDirs`) + the
- *     hardcoded vendor exec-dir floor (`vendorExecDirs`) — shared because BOTH
- *     the `auth-state` layer (login/usage delegation) and the
- *     `vendor-cli-tunnel` layer (device PTY sessions) exec the vendor CLIs,
+ *     hardcoded vendor exec-dir floor (`vendorExecDirs`) — used by the
+ *     `auth-state` layer (login/usage delegation + local session-host), which
+ *     is the only remaining layer that execs the vendor CLIs,
  *   - `daemonTempDir`,
  *   - `baseWorkingSet()` — the state dir, the daemon-owned temp, the binary's
  *     own dir, `/dev`, and the read-only system trees: everything shared by all
- *     four layers (the parent supervisor lives here too).
+ *     three layers (the parent supervisor lives here too).
  *
- * The layer modules (`auth-state.ts`, `browser-chat.ts`, `fleet.ts`,
- * `vendor-cli-tunnel.ts`) import from here; they NEVER import each other, so no
- * process can pull in another layer's working set (R2-T9).
+ * The layer modules (`auth-state.ts`, `browser-chat.ts`, `fleet.ts`) import
+ * from here; they NEVER import each other, so no process can pull in another
+ * layer's working set (R2-T9).
  *
  * Original single-file rationale (2026-07-03 working-set-exposure audit
  * §5-A/B/C and the `daemon-os-sandbox-and-typed-control.md` §3.1 derivation)
@@ -325,12 +325,11 @@ export const daemonTempDir = (home?: string): string => {
 
 /**
  * The hardcoded vendor-CLI exec-dir FLOOR + the dynamic `resolveCliExecDirs`
- * resolution, as a READ+EXEC set. Shared by the `auth-state` layer (the daemon
- * execs vendor CLIs for login/usage/credential delegation) AND the
- * `vendor-cli-tunnel` layer (device PTY sessions exec the same binaries). The
- * daemon RUNS the vendor CLIs but never WRITES them: installs are user-run +
- * unsandboxed, and vendor self-update happens out of band. Read+exec, not
- * read-write.
+ * resolution, as a READ+EXEC set. Used by the `auth-state` layer (the daemon
+ * execs vendor CLIs for login/usage/credential delegation and the local
+ * session-host). The daemon RUNS the vendor CLIs but never WRITES them:
+ * installs are user-run + unsandboxed, and vendor self-update happens out of
+ * band. Read+exec, not read-write.
  *
  * Emits the hardcoded floor (grok bin/downloads, ~/.local/bin, cursor + claude
  * versioned dirs) AND, for every provider, the real dir of every node along its
@@ -424,12 +423,12 @@ export const vendorExecDirs = (home: string): string[] => {
  * module-load code has already called it by then.)
  *
  * TODO(R2-M2): the whole `state` dir is granted here because it is genuinely
- * shared (auth-state, vendor-cli-tunnel, and the parent all sit under it) AND
- * to keep the M1.5 union byte-identical to the pre-split single builder. When
- * the `--sub` subprocesses actually drop the shared grant, decompose `state`
- * into its sub-paths (`<state>/cli` → auth-state, `<state>/run` +
- * `<state>/sessions` → vendor-cli-tunnel) so each subprocess carries only its
- * own slice.
+ * shared (auth-state and the parent both sit under it) AND to keep the M1.5
+ * union byte-identical to the pre-split single builder. When the `--sub`
+ * subprocesses actually drop the shared grant, decompose `state` into its
+ * sub-paths (`<state>/cli` → auth-state, `<state>/run` + `<state>/sessions` →
+ * auth-state / local session-host) so each subprocess carries only its own
+ * slice.
  */
 export const baseWorkingSet = (homeOverride?: string): TWorkingSet => {
   const state = stateDir(homeOverride);

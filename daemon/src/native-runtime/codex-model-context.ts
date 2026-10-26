@@ -75,7 +75,10 @@ export class CodexModelContextCatalog {
     this.closed = true;
     await Promise.allSettled([...this.catalogs.values()]);
     const root = this.root;
-    if (root !== null) await rm(await root, { recursive: true, force: true });
+    // Best-effort: a temp dir that can't be removed (EPERM while a child
+    // still holds it) must not fail the session teardown that called this.
+    if (root !== null)
+      await rm(await root, { recursive: true, force: true }).catch(() => {});
     this.catalogs.clear();
     this.root = null;
   }

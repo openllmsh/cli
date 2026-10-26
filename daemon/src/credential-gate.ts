@@ -4,13 +4,20 @@ import type {
   TCredentialGateMode,
   TCredentialGateTerminal,
 } from "@openllmsh/protocol";
-import { isUsableOpenllmApiKey } from "@openllmsh/protocol";
+import {
+  isUsableOpenllmApiKey,
+  splitAnchoredApiKey,
+} from "@openllmsh/protocol";
+import { decodeDeviceAnchor } from "@openllmsh/tunnel";
+import { invalidateDeviceAccessPin } from "./device-access-verify";
 import {
   applyPersistedApiKey,
+  DEVICE_ANCHOR_ENV,
   daemonEnv,
   envFilePath,
   envFileValue,
   isDevMode,
+  parseApiKeyId,
   sharedEnvFilePath,
   writeEnvFileVars,
 } from "./env";
@@ -125,9 +132,39 @@ const defaultTerminal: TCredentialGateTerminal = {
   },
 };
 
-const persistServiceKey = (key: string, targetPath: string): boolean => {
-  if (!writeEnvFileVars({ OPENLLM_API_KEY: key }, targetPath)) return false;
+const persistServiceKey = (
+  key: string,
+  targetPath: string,
+  anchor?: string | null,
+): boolean => {
+  // A pasted key may replace the anchor line. An anchored paste writes it.
+  // A bare paste (`null`) blanks an existing anchor only when its key id
+  // differs from the saved OPENLLM_API_KEY id (or either cannot be parsed).
+  // The anchor's pair secret is bound to the id, so re-saving any key with
+  // the same id leaves it. `undefined`
+  // (an inherited key made durable) leaves the anchor alone. The device-access
+  // pin is invalidated only when the anchor line actually changes.
+  const vars: Record<string, string> = { OPENLLM_API_KEY: key };
+  const savedAnchor = envFileValue(targetPath, DEVICE_ANCHOR_ENV)?.trim() ?? "";
+  const savedKey = envFileValue(targetPath, "OPENLLM_API_KEY")?.trim() ?? "";
+  let anchorChanged = false;
+  if (typeof anchor === "string") {
+    if (anchor !== savedAnchor) {
+      vars[DEVICE_ANCHOR_ENV] = anchor;
+      anchorChanged = true;
+    }
+  } else if (
+    anchor === null &&
+    savedAnchor !== "" &&
+    (parseApiKeyId(savedKey) === null ||
+      parseApiKeyId(savedKey) !== parseApiKeyId(key))
+  ) {
+    vars[DEVICE_ANCHOR_ENV] = "";
+    anchorChanged = true;
+  }
+  if (!writeEnvFileVars(vars, targetPath)) return false;
   applyPersistedApiKey(key);
+  if (anchorChanged) invalidateDeviceAccessPin();
   return true;
 };
 
@@ -190,11 +227,22 @@ export const requireServiceApiKey = (
     if (pasted === null || pasted.trim().length === 0) {
       return { ok: false, message: "[openllm] API key setup cancelled.\n" };
     }
-    if (!isUsableApiKey(pasted)) {
+    const split = splitAnchoredApiKey(pasted);
+    if (split === null) {
       terminal.write("The API key format is invalid. Please try again.\n");
       continue;
     }
-    if (!persistServiceKey(pasted.trim(), targetPath)) {
+    // A key from "Set up device sessions" carries a device trust anchor: it
+    // is saved as its own OPENLLM_DEVICE_ANCHOR line beside the bare key.
+    if (split.anchor !== null) {
+      const decoded = decodeDeviceAnchor(split.anchor);
+      if (decoded === null) {
+        terminal.write("The API key format is invalid. Please try again.\n");
+        continue;
+      }
+      decoded.pairSecret.fill(0);
+    }
+    if (!persistServiceKey(split.key, targetPath, split.anchor)) {
       return { ok: false, message: "[openllm] Could not save the API key.\n" };
     }
     terminal.write(`Saved to ${targetPath}.\n`);

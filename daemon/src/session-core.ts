@@ -11,11 +11,11 @@ import { homedir } from "node:os";
 import { basename, isAbsolute, resolve } from "node:path";
 import type {
   TDeviceSessionCli,
-  TSessionStreamOpenPayload,
+  TLocalSessionOpenPayload,
 } from "@openllmsh/protocol";
 import {
   DANGEROUS_SESSION_CLIS,
-  parseStreamCtrlPayload,
+  parseLocalSessionCtrlPayload,
   SESSION_ID_PATTERN,
 } from "@openllmsh/protocol";
 import { decodeJsonPayload, encodeJsonPayload } from "@openllmsh/tunnel/codec";
@@ -38,6 +38,19 @@ const MAX_LIVE_SESSIONS = 4;
 const MAX_RETAINED_SESSIONS = 32;
 
 /** Vendor session ids accepted for cold resume: url-safe, no leading dash. */
+const UUID_PATTERN =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+/** Claude flags that already choose a session; never add `--session-id`. */
+const CLAUDE_SESSION_SELECT_FLAGS: ReadonlySet<string> = new Set([
+  "--resume",
+  "-r",
+  "--continue",
+  "-c",
+  "--session-id",
+  "--fork-session",
+  "-p",
+  "--print",
+]);
 export const RESUME_ID_PATTERN = /^[A-Za-z0-9_][A-Za-z0-9_-]{0,127}$/;
 
 /** Scrollback ring cap — enough to repaint a screenful+history on attach
@@ -142,6 +155,9 @@ const bunPtySpawner: TPtySpawner = (args) => {
   });
   let proc: ReturnType<typeof Bun.spawn>;
   try {
+    // Bare spawn (not superviseSpawn): interactive PTY session shells are
+    // durable user sessions, not disposable vendor children; they already
+    // lead their own process group via `detached: true` for job control.
     proc = Bun.spawn([...args.argv], {
       cwd: args.cwd,
       env: spawnEnv(args.env),
@@ -196,6 +212,8 @@ type TAttachedConsumer = {
   /** When this consumer last focused or resized. Only used to pick a successor
    *  when the primary leaves — the most recently focused viewer takes over. */
   lastActiveAtMs: number;
+  /** Structured observer (agent engine): not a viewer — see `observer`. */
+  readonly observer: boolean;
 };
 
 export type TSession = {
@@ -326,7 +344,11 @@ const psActivityProbe: TActivityProbe = async (
   return busy;
 };
 
-const isAttached = (session: TSession): boolean => session.consumers.size > 0;
+/** A real viewer is attached. Observers (the agent engine) never count. */
+const isAttached = (session: TSession): boolean => {
+  for (const consumer of session.consumers) if (!consumer.observer) return true;
+  return false;
+};
 
 const scheduleReapKill = (session: TSession, pty: TPtyLike): void => {
   const timer = setTimeout(() => {
@@ -674,9 +696,15 @@ const fanOut = (session: TSession, chunk: Uint8Array): void => {
     writeConsumer(session, consumer, chunk);
 };
 
-/** Fan out one out-direction chunk to every attached transport-neutral consumer. */
+/**
+ * Fan out one out-direction chunk to every connected consumer, observers
+ * included. An observer is not a VIEWER (it never counts for detach / idle
+ * reap), but the agent engine reads the paint for Claude's folder-trust
+ * dialog. Gating on `isAttached` sent a web-only session's observer nothing,
+ * so the dialog was never seen and the session sat on it.
+ */
 const sendOut = (session: TSession, chunk: Uint8Array): void => {
-  if (isAttached(session)) fanOut(session, chunk);
+  if (session.consumers.size > 0) fanOut(session, chunk);
 };
 
 /** Paint the current screen for a newly attached consumer: one serialize of the
@@ -728,6 +756,7 @@ const claimPrimary = (
 const promoteSuccessorPrimary = (session: TSession): void => {
   let successor: TAttachedConsumer | null = null;
   for (const consumer of session.consumers) {
+    if (consumer.observer) continue;
     if (
       successor === null ||
       consumer.lastActiveAtMs > successor.lastActiveAtMs
@@ -1215,7 +1244,7 @@ export const openSession = (
       // Legacy JSON has no stream object in the consumer set, so it is the sole
       // viewer: authoritatively drive the PTY to its size and replay the
       // emulator's screen (or raw scrollback when no emulator exists).
-      if (!isAttached(existing)) {
+      if (existing.consumers.size === 0) {
         applyCanonicalResize(existing, frame.cols, frame.rows);
         if (existing.emulator !== null) {
           sendOut(existing, serializeScreenBytes(existing.emulator));
@@ -1254,8 +1283,22 @@ export const openSession = (
         (existing !== undefined ? existing.cwd : undefined) ??
         undefined,
     );
-    const vendorSessionId =
-      resumeId ?? (existing !== undefined ? existing.vendorSessionId : null);
+    // A NEW Claude session pins its transcript id to the host id
+    // (`--session-id`), so the terminal session and the agent engine name
+    // the same Claude session and the transcript is found without probing.
+    const pinsSessionId =
+      cli === "claude_code" &&
+      resumeId === null &&
+      existing === undefined &&
+      frame.mode === "spawn" &&
+      UUID_PATTERN.test(frame.session_id) &&
+      !(vendorArgs ?? []).some((arg) =>
+        CLAUDE_SESSION_SELECT_FLAGS.has(arg.split("=")[0] ?? arg),
+      );
+    const vendorSessionId = pinsSessionId
+      ? frame.session_id
+      : (resumeId ??
+        (existing !== undefined ? existing.vendorSessionId : null));
 
     // `continue` after a daemon restart: no in-memory record — recreate it.
     const s: TSession = existing ?? {
@@ -1298,8 +1341,10 @@ export const openSession = (
         cli,
         frame.mode === "continue" ? "continue" : "spawn",
         frame.dangerous === true,
-        vendorSessionId,
-        vendorArgs,
+        pinsSessionId ? null : vendorSessionId,
+        pinsSessionId
+          ? ["--session-id", frame.session_id, ...(vendorArgs ?? [])]
+          : vendorArgs,
         realPty,
       );
       logDebug("session", "session open started", {
@@ -1403,7 +1448,7 @@ export const openSession = (
 /** Bind a transport-neutral session stream without changing the legacy JSON state machine. */
 export const bindSessionStream = (
   stream: TSessionStream,
-  open: TSessionStreamOpenPayload,
+  open: TLocalSessionOpenPayload,
   opts: {
     readonly vendorArgs?: readonly string[];
     readonly onExit?: (code: number) => void;
@@ -1420,6 +1465,7 @@ export const bindSessionStream = (
     cols: open.cols,
     rows: open.rows,
     lastActiveAtMs: Date.now(),
+    observer: open.observer === true,
   };
   const registerConsumer = (session: TSession): void => {
     if (session.consumers.has(consumer)) return;
@@ -1460,13 +1506,20 @@ export const bindSessionStream = (
     // It becomes primary only when the session has none (it is the first, or
     // the previous primary left); otherwise it gets a private view + a
     // serialized paint at its own size, and takes over when it focuses.
+    // An observer never takes primacy or resizes — it only gets the paint.
     if (
-      session.primaryConsumer === null ||
-      !session.consumers.has(session.primaryConsumer)
+      !consumer.observer &&
+      (session.primaryConsumer === null ||
+        !session.consumers.has(session.primaryConsumer))
     ) {
       claimPrimary(session, consumer, consumer.lastActiveAtMs);
     }
-    setConsumerViewport(session, consumer, open.cols, open.rows);
+    if (consumer.observer) {
+      consumer.cols = session.canonicalCols;
+      consumer.rows = session.canonicalRows;
+    } else {
+      setConsumerViewport(session, consumer, open.cols, open.rows);
+    }
     // Every attach gets the current screen before live output. This consumer's
     // private write tail orders it ahead of subsequent output without delaying
     // the other viewers.
@@ -1502,7 +1555,9 @@ export const bindSessionStream = (
     }),
     stream.onCtrl((payload) => {
       if (!session.consumers.has(consumer)) return;
-      const ctrl = parseStreamCtrlPayload(decodeJsonPayload(payload));
+      const ctrl = parseLocalSessionCtrlPayload(decodeJsonPayload(payload));
+      if (consumer.observer && (ctrl?.t === "resize" || ctrl?.t === "focus"))
+        return;
       if (ctrl?.t === "resize") {
         // Someone dragged THIS viewer's window. A deliberate act on a specific
         // viewer, so it takes the PTY size with it.
@@ -1519,7 +1574,7 @@ export const bindSessionStream = (
       }
       if (ctrl?.t === "close" && ctrl.intent === "kill") {
         endPty(session, "killed");
-        // END is a clean terminal close to sessionStream.closed ("done").
+        // END is a clean terminal close to the local session broker ("done").
         terminalClose(session);
       }
     }),

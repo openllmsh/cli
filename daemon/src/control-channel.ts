@@ -16,7 +16,7 @@ import type {
   TRelayFrame,
 } from "@openllmsh/protocol";
 import { RELAY_PROTOCOL_VERSION, RelayFrame } from "@openllmsh/protocol";
-import { Schema } from "effect";
+import { Result, Schema } from "effect";
 import { WebSocket as ReconnectingWebSocket } from "partysocket";
 import { setAuthSink } from "./auth-events";
 import {
@@ -101,7 +101,7 @@ import type { TStatusPublishTrigger } from "./status-publish-coalesce";
 import { createStatusPublishCoalescer } from "./status-publish-coalesce";
 import { createSupersedeBackoff, isSupersededClose } from "./supersede-backoff";
 
-const decodeFrame = Schema.decodeUnknownEither(RelayFrame);
+const decodeFrame = Schema.decodeUnknownResult(RelayFrame);
 
 /** Full-snapshot stringify — only on a changed watcher tick / actual publish. */
 export const stringifyStatusSnapshot = (status: unknown): string =>
@@ -183,11 +183,26 @@ export const statusChangeKey = (status: TDaemonStatus): string => {
     status.daemon_version,
     status.key_configured ? "1" : "0",
     status.auto_update === undefined ? "" : String(status.auto_update),
-    status.pty_sessions === undefined ? "" : String(status.pty_sessions),
     status.cloud_state,
     // Omitted/undefined is "0" so a false→true flip is a real key change.
     status.identity_conflict ? "1" : "0",
     status.pubkey ?? "",
+    // The device-trust surface: a pin / anchor / switch change must reach the
+    // dashboard (Manage device status, dpk proof) without waiting for an
+    // unrelated field to move.
+    status.device_access_pin === undefined
+      ? ""
+      : joinChangeKeyParts([
+          status.device_access_pin.fp,
+          status.device_access_pin.kind,
+          status.device_access_pin.via ?? "",
+        ]),
+    status.device_sessions === undefined
+      ? ""
+      : joinChangeKeyParts([
+          String(status.device_sessions.anchored),
+          status.device_sessions.dpk_proof ?? "",
+        ]),
     status.port === undefined ? "" : String(status.port),
     status.sandbox ?? "",
     status.cli === undefined
@@ -769,6 +784,19 @@ export const pushStatusIfChanged = async (
   } finally {
     statusWatcherGate.noteComputed();
   }
+};
+
+/**
+ * An agent session started or exited: publish the running set now, without
+ * the provider probes (nothing auth-related changed). Settles briefly first
+ * so the session host's own register/unregister is in the snapshot.
+ */
+const SESSIONS_CHANGED_SETTLE_MS = 300;
+export const pushSessionsChanged = (): void => {
+  setTimeout(() => {
+    watcherSkipProviderProbes = true;
+    void pushStatusIfChanged("watcher").catch(() => {});
+  }, SESSIONS_CHANGED_SETTLE_MS).unref?.();
 };
 
 const startWatcher = (): void => {
@@ -1383,7 +1411,7 @@ const onMessage = (data: unknown): void => {
     return;
   }
   const r = decodeFrame(json);
-  if (r._tag === "Right") onFrame(r.right);
+  if (Result.isSuccess(r)) onFrame(r.success);
 };
 
 /** partysocket calls this before every (re)connect — fetch a fresh channel so

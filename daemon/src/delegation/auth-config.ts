@@ -39,6 +39,7 @@
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { AccountKeyedMap } from "../account-scope";
+import { superviseSpawn } from "../child-supervisor";
 import type { TCliProvider } from "../cli-paths";
 import { cliAccountsDir, cliBin, cliEnv, cliRoot } from "../cli-paths";
 import { logDebug, logInfo, logWarn } from "../logger";
@@ -545,14 +546,16 @@ const captureInferenceRequest = async (
     spec.usePty === true
       ? (ptyScriptArgv(cmdArgv, "/dev/null") ?? cmdArgv)
       : cmdArgv;
-  let proc: ReturnType<typeof Bun.spawn> | null = null;
+  let supervised: ReturnType<typeof superviseSpawn> | null = null;
   try {
     // claude's identity capture runs the CLI's `exec`, which reads the isolated
     // keychain credential; unconfined on macOS for the keychain providers,
-    // confined otherwise — `sandbox/policy.ts`.
-    proc = Bun.spawn(
+    // confined otherwise — `sandbox/policy.ts`. Supervised so a hung capture
+    // cannot leave vendor helpers orphaned under launchd.
+    supervised = superviseSpawn(
       sandboxSpawnArgs(spawnArgv, { probe: unwrapKeychainSpawn(provider) }),
       {
+        kind: "vendor-capture",
         stdin: "ignore",
         stdout: "ignore",
         stderr: "ignore",
@@ -574,6 +577,7 @@ const captureInferenceRequest = async (
 
   // Resolve as soon as the inference request is captured, OR the CLI exits — a
   // CLI that errors before issuing its request is never going to send one.
+  const proc = supervised.subprocess;
   const captured = await withTimeout(
     Promise.race([
       recorder.first,
@@ -582,7 +586,7 @@ const captureInferenceRequest = async (
     CAPTURE_TIMEOUT_MS,
     null as TCapturedRequest | null,
   );
-  proc.kill();
+  await supervised.terminate();
   recorder.stop();
 
   if (captured === null) {

@@ -6,6 +6,8 @@
  * with whatever final env it's given.
  */
 
+import type { TSupervisedChild } from "../child-supervisor";
+import { superviseSpawn } from "../child-supervisor";
 import { spawnCwd } from "../delegation/util";
 import { sandboxSpawnArgs } from "../sandbox/exec";
 import { unwrapKeychainSpawn } from "../sandbox/policy";
@@ -55,15 +57,18 @@ export type TSpawnClaudeCliParams = TClaudeCliArgvParams & {
   readonly finalEnv: Record<string, string>;
 };
 
-/** Build the argv and spawn the isolated `claude` CLI child. Throws whatever
- *  `Bun.spawn` throws; callers translate that into their own decline. */
+/** Build the argv and spawn the isolated `claude` CLI child under the child
+ *  supervisor (own process group; `terminate()` reaps descendants). Throws
+ *  whatever `superviseSpawn`/`Bun.spawn` throws; callers translate that into
+ *  their own decline. */
 export const spawnClaudeCli = (
   params: TSpawnClaudeCliParams,
-): ReturnType<typeof Bun.spawn> => {
+): TSupervisedChild => {
   const argv = buildClaudeCliArgv(params);
-  return Bun.spawn(
+  return superviseSpawn(
     sandboxSpawnArgs(argv, { probe: unwrapKeychainSpawn("claude_code") }),
     {
+      kind: "native-runtime",
       stdin: new TextEncoder().encode(params.userText),
       stdout: "pipe",
       stderr: "pipe",
@@ -171,7 +176,8 @@ export type TSpawnClaudeFacadeCliParams = TClaudeFacadeCliArgvParams & {
 };
 
 /**
- * Spawn the facade's `claude` child with a WRITABLE stdin pipe — unlike
+ * Spawn the facade's `claude` child with a WRITABLE stdin pipe under the child
+ * supervisor (own process group; `terminate()` reaps descendants) — unlike
  * {@link spawnClaudeCli}'s one-shot buffered stdin, the facade writes framed
  * history turns incrementally and reads acknowledgments between writes (see
  * `claude-sdk-facade.ts`'s replay loop), so stdin must stay open as a stream
@@ -179,11 +185,12 @@ export type TSpawnClaudeFacadeCliParams = TClaudeFacadeCliArgvParams & {
  */
 export const spawnClaudeFacadeCli = (
   params: TSpawnClaudeFacadeCliParams,
-): ReturnType<typeof Bun.spawn> => {
+): TSupervisedChild => {
   const argv = buildClaudeFacadeArgv(params);
-  return Bun.spawn(
+  return superviseSpawn(
     sandboxSpawnArgs(argv, { probe: unwrapKeychainSpawn("claude_code") }),
     {
+      kind: "native-runtime",
       stdin: "pipe",
       stdout: "pipe",
       stderr: "pipe",

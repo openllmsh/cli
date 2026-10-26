@@ -21,6 +21,10 @@ import { basename } from "node:path";
 import { printSelfVersion } from "./cli-version";
 import { daemonArgs } from "./daemon-argv";
 
+// The device trust anchor lives only in the env FILE; never let an exported
+// copy reach a child of either half (inline: `env.ts` is not imported here).
+delete process.env.OPENLLM_DEVICE_ANCHOR;
+
 const argv = process.argv.slice(2);
 const first = argv[0];
 
@@ -42,6 +46,13 @@ const run = async (): Promise<void> => {
     process.exit(0);
   }
   // Per-prompt hooks should not initialize the vendor clients or MCP server.
+  if (first === "exec" && argv[1] === "agent" && argv[2] === "hook") {
+    // Not under a session host → nothing to bridge; skip every import.
+    if ((process.env.OPENLLM_DEVICE_SESSION_ID ?? "").trim() === "")
+      process.exit(0);
+    const { runAgentHookCommand } = await import("./agent-hook-cmd");
+    process.exit(await runAgentHookCommand(argv.slice(3)));
+  }
   if (first === "exec" && argv[1] === "memory") {
     const { runMemoryHookCommand } = await import("./memory-hooks/command");
     process.exit(await runMemoryHookCommand(argv.slice(2)));

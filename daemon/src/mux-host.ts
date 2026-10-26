@@ -1,12 +1,13 @@
 import type { TRelayFrame } from "@openllmsh/protocol";
 import {
+  AGENT_CAP,
   MEDIA_HTTP_CAP,
   MEDIA_HTTP_VIDEO_CAP,
   MUX_CAP,
-  parseStreamOpenPayload,
   REALTIME_DUPLEX_CAP,
   RTC_CAP,
   SEEDGATE_CAP,
+  streamOpenKindOf,
 } from "@openllmsh/protocol";
 import {
   channelIdToBytes,
@@ -14,20 +15,38 @@ import {
   encodeChannelEnvelopeWithTag,
 } from "@openllmsh/tunnel/channel-envelope";
 import { decodeJsonPayload, encodeJsonPayload } from "@openllmsh/tunnel/codec";
-import type { TDuplex, TMuxChannel } from "@openllmsh/tunnel/mux";
+import { noiseGrantBinding } from "@openllmsh/tunnel/device-grant";
+import type { TDuplex, TMuxChannel, TMuxStream } from "@openllmsh/tunnel/mux";
 import { createChannel } from "@openllmsh/tunnel/mux";
-import type { TServeTunnel } from "@openllmsh/tunnel/streams";
-import { serveStream } from "@openllmsh/tunnel/streams";
-import { enforceSeedGate, getDeviceAccessPubkey } from "./device-access-verify";
+import type {
+  TNoiseStaticKey,
+  TSecureAuthorizeContext,
+} from "@openllmsh/tunnel/secure";
+import {
+  SecureChannelError,
+  secureMuxStream,
+  x25519RawFromSpkiB64,
+} from "@openllmsh/tunnel/secure";
+import type { TServeAgent, TServeTunnel } from "@openllmsh/tunnel/streams";
+import {
+  AGENT_SECURE_PROLOGUE_INFO,
+  agentSecurePrologue,
+  serveStream,
+} from "@openllmsh/tunnel/streams";
+import {
+  AGENT_PIN_REFUSALS,
+  agentSessionRefusal,
+  enforceSeedGate,
+  getDeviceAccessPubkey,
+} from "./device-access-verify";
 import { daemonApiKeyId } from "./env";
-import { daemonPublicKey } from "./keypair";
-import { logInfo, logWarn, safeDiagnosticMessage } from "./logger";
-import { ptySessionsEnabled } from "./pty-sessions-pref";
+import { daemonPublicKey, daemonX25519Dh } from "./keypair";
+import { logDebug, logInfo, logWarn, safeDiagnosticMessage } from "./logger";
 import { serveMuxRealtime } from "./realtime-handler";
-import type { TSessionStream } from "./session-core";
-import type { TSessionHostClient } from "./session-host-proc";
-import { defaultSessionHostClient } from "./session-host-proc";
 import { admitMuxTunnel, serveMuxTunnel } from "./tunnel-server";
+
+/** Re-export so daemon tests keep a single import site with the mux host. */
+export { AGENT_SECURE_PROLOGUE_INFO, agentSecurePrologue };
 
 /**
  * Base capabilities advertised on hello/status.
@@ -36,7 +55,8 @@ import { admitMuxTunnel, serveMuxTunnel } from "./tunnel-server";
  * concurrent channels; `rtc1` = WebRTC data-channel mux host and fleet consumer
  * offerer (RTC → relay mux). RTC data channels are NEVER enveloped — they carry
  * a single mux directly, with no relay hop. `seedgate1` is layered on when a
- * device-access pubkey is pinned — see {@link currentDaemonCaps}.
+ * device-access pubkey is pinned, and `agent1` once an agent handler is
+ * registered — see {@link currentDaemonCaps}.
  */
 export const DAEMON_MUX_CAPS = [
   MUX_CAP,
@@ -74,18 +94,241 @@ export const DAEMON_MUX_CAPS = [
  * UDP is sent — and everything still works over relay mux, one hop slower.
  *
  * Deliberately separate from `OPENLLM_MUX_DISABLE`, which withdraws the mux
- * transport wholesale and takes terminal sessions down with it. That was the
+ * transport wholesale and takes agent sessions down with it. That was the
  * only lever available the first time this was needed, and it was too blunt.
  */
 const rtcDisabled = (): boolean => process.env.OPENLLM_RTC_DISABLE === "1";
 
-/** Live capability list — includes `seedgate1` when device access is provisioned. */
+/**
+ * Registration seam for the agent dispatcher (owned by the agent workstream).
+ * `null` restores the default, which resets every `kind:"agent"` OPEN with
+ * `agent_unavailable`. Looked up per OPEN, so registering after the mux host
+ * and RTC host are wired still takes effect.
+ */
+let agentStreamHandler: TServeAgent | null = null;
+
+export const setAgentStreamHandler = (handler: TServeAgent | null): void => {
+  agentStreamHandler = handler;
+};
+
+const unavailableAgentHandler: TServeAgent = (stream) => {
+  stream.reset(
+    encodeJsonPayload({
+      code: "agent_unavailable",
+      message: "agent sessions are not available on this device",
+    }),
+  );
+};
+
+/**
+ * Live capability list — includes `seedgate1` when device access is
+ * provisioned and `agent1` when an agent stream handler is registered
+ * ({@link setAgentStreamHandler}). `agent1` stays off until something can
+ * actually serve `kind:"agent"`, so the UI shows "update your device" rather
+ * than an OPEN that can only reset `agent_unavailable`.
+ */
 export const currentDaemonCaps = (): string[] => {
   const caps: string[] = DAEMON_MUX_CAPS.filter(
     (cap) => cap !== RTC_CAP || !rtcDisabled(),
   );
   if (getDeviceAccessPubkey() !== null) caps.push(SEEDGATE_CAP);
+  if (agentStreamHandler !== null) caps.push(AGENT_CAP);
   return caps;
+};
+
+/**
+ * How a serving mux channel admits each stream kind — the SAME table on the
+ * relay-WS mux and on an RTC-mounted mux ({@link admitStreamKind}).
+ *
+ * - `open`      — served on any same-user channel the relay admitted
+ *                 (request tunnelling, realtime voice). Origin and fleet
+ *                 (`consumer:"daemon"`) peers live here and only here.
+ * - `seedgated` — requires a BROWSER consumer that presented a verified vault
+ *                 device grant whose `dpk` is this daemon's own X25519 key.
+ *                 A `consumer:"daemon"` peer (origin, fleet) can never satisfy
+ *                 it: it has no vault DEK, and an API key is not a grant. On
+ *                 the relay mux an admitted `agent` stream must additionally
+ *                 complete a Noise_IK handshake (responder = this daemon's
+ *                 key) whose message-1 payload is a FRESH grant for the same
+ *                 channel ({@link serveSecureAgentStream}). Refused with RESET
+ *                 `unauthorized` otherwise.
+ * - `retired`   — no longer served; dispatch resets it with a clear code
+ *                 (`RETIRED_STREAM_KIND_RESET`).
+ *
+ * A kind missing from the table is treated as `seedgated` (fail closed), so a
+ * new kind cannot ride an ungated channel by omission.
+ */
+export type TStreamKindGate = "open" | "seedgated" | "retired";
+
+export const STREAM_KIND_GATES: Readonly<Record<string, TStreamKindGate>> = {
+  tunnel: "open",
+  realtime: "open",
+  agent: "seedgated",
+  session: "retired",
+};
+
+/** Gate for a raw OPEN kind; unknown or missing kinds fail closed. */
+export const streamKindGateOf = (kind: string | null): TStreamKindGate =>
+  kind !== null && Object.hasOwn(STREAM_KIND_GATES, kind)
+    ? (STREAM_KIND_GATES[kind] ?? "seedgated")
+    : "seedgated";
+
+export type TStreamGateContext = {
+  readonly transport: "relay" | "rtc";
+  readonly channelId: string;
+  /**
+   * The channel carries a verified BROWSER device grant bound to this
+   * daemon's key (`dpk`). Always false for a `consumer:"daemon"` peer.
+   */
+  readonly seedGated: boolean;
+};
+
+/**
+ * Apply {@link STREAM_KIND_GATES} to one OPEN. Returns false after RESETting
+ * the stream `unauthorized` when the kind is `seedgated` and the channel is
+ * not; `open` and `retired` kinds pass through (dispatch resets a retired
+ * kind with its own clear code). Shared by the relay mux and RTC host.
+ */
+export const admitStreamKind = (
+  stream: TMuxStream,
+  kind: string | null,
+  context: TStreamGateContext,
+): boolean => {
+  if (kind === "agent") {
+    // Every agent OPEN, on either rung, so "the browser never opened" and
+    // "the daemon refused" are distinguishable in the log.
+    logDebug("agent", "agent stream open received", {
+      channelId: context.channelId,
+      transport: context.transport,
+      seedGated: context.seedGated,
+    });
+  }
+  if (streamKindGateOf(kind) !== "seedgated") return true;
+  // Re-checked per OPEN: a channel / RTC session admitted while the device was
+  // anchored must not keep serving agent streams after a signed remote
+  // disable or a local `openllm daemon device disable` (both blank the anchor).
+  const refusal = context.seedGated ? agentSessionRefusal() : null;
+  if (context.seedGated && refusal === null) return true;
+  logWarn(
+    "mux-host",
+    safeDiagnosticMessage`stream open refused: channel not seed-gated`,
+    {
+      channelId: context.channelId,
+      transport: context.transport,
+      kind: kind ?? "unknown",
+      ...(refusal === null ? {} : { reason: refusal }),
+    },
+  );
+  stream.reset(
+    encodeJsonPayload(
+      refusal === null ? { code: "unauthorized" } : { code: refusal },
+    ),
+  );
+  return false;
+};
+
+/** This daemon's long-lived X25519 identity as a Noise static key. */
+const daemonNoiseStaticKey = (): TNoiseStaticKey => {
+  const publicKey = x25519RawFromSpkiB64(daemonPublicKey());
+  if (publicKey === null) {
+    throw new Error("daemon identity is not an X25519 SPKI key");
+  }
+  return {
+    publicKey,
+    dh: async (remotePublic) => daemonX25519Dh(remotePublic),
+  };
+};
+
+const strictUtf8 = new TextDecoder("utf-8", { fatal: true });
+
+/**
+ * Noise `authorize` for a relay-mux agent stream. Admits only when the
+ * channel is STILL seed-gated (a browser `channel_open` grant with our `dpk`)
+ * AND the message-1 payload is a fresh device grant — its own nonce, the same
+ * `cid`, `aud` and `dpk` = this daemon's key, signed for use `noise` and bound
+ * to the initiator's Noise static key. The relay sees every `channel_open`
+ * grant in plaintext (and can withhold one before its nonce is spent), so
+ * only the use + binding stop it replaying one here as its own initiator.
+ */
+const authorizeAgentHandshake =
+  (channelId: string, isGated: () => boolean) =>
+  ({ payload, remoteStatic }: TSecureAuthorizeContext): Uint8Array | null => {
+    if (!isGated()) {
+      logInfo("mux-host", "agent handshake refused: channel not seed-gated", {
+        channelId,
+      });
+      return null;
+    }
+    let grant: string;
+    try {
+      grant = strictUtf8.decode(payload);
+    } catch {
+      return null;
+    }
+    // A `noise` grant bound to the initiator's static key: the relay sees the
+    // `channel_open` grant in plaintext, and a harvested grant of any other
+    // use, or one bound to another initiator, is refused.
+    const gate = enforceSeedGate(grant, {
+      use: "noise",
+      bind: noiseGrantBinding(remoteStatic),
+      keyId: daemonApiKeyId(),
+      cid: channelId,
+      aud: daemonPublicKey(),
+      requireDpk: true,
+    });
+    if (gate.mode === "reject") {
+      logInfo("mux-host", "agent handshake refused: grant", {
+        channelId,
+        reason: gate.reason,
+      });
+      return null;
+    }
+    return new Uint8Array();
+  };
+
+/**
+ * Relay-mux agent rung: run the Noise_IK responder on the raw stream, then
+ * hand the E2E-encrypted stream to `handler`. Starts synchronously (the
+ * wrapper must subscribe to DATA before the peer's message 1 can land). A
+ * refused or failed handshake RESETs `unauthorized` inside
+ * {@link secureMuxStream}; the agent handler is never reached.
+ */
+export const serveSecureAgentStream = (
+  stream: TMuxStream,
+  open: Uint8Array,
+  options: {
+    readonly channelId: string;
+    readonly isGated: () => boolean;
+    readonly handler: (stream: TMuxStream, open: Uint8Array) => void;
+  },
+): void => {
+  let localStatic: TNoiseStaticKey;
+  try {
+    localStatic = daemonNoiseStaticKey();
+  } catch (err) {
+    logWarn("mux-host", safeDiagnosticMessage`agent handshake unavailable`, {
+      channelId: options.channelId,
+      err: err instanceof Error ? err.message : String(err),
+    });
+    stream.reset(encodeJsonPayload({ code: "unauthorized" }));
+    return;
+  }
+  void secureMuxStream(stream, {
+    role: "responder",
+    localStatic,
+    prologue: agentSecurePrologue(options.channelId, stream.id),
+    authorize: authorizeAgentHandshake(options.channelId, options.isGated),
+  }).then(
+    (secured) => {
+      options.handler(secured, open);
+    },
+    (err: unknown) => {
+      logInfo("mux-host", "agent handshake failed", {
+        channelId: options.channelId,
+        code: err instanceof SecureChannelError ? err.code : "unknown",
+      });
+    },
+  );
 };
 
 /**
@@ -101,13 +344,14 @@ type TRelayChannel = {
    */
   channelTag: Uint8Array | null;
   readonly keyId: string | null;
-  readonly consumer: "browser" | "daemon" | null;
+  /** Relay-stamped peer role of the latest (re)open; `null` on consumer side. */
+  consumer: "browser" | "daemon" | null;
   readonly channel: TMuxChannel;
   /**
    * Seed gate outcome for this channel, re-evaluated on every (re)open. True
-   * for a relay-stamped `consumer:"daemon"` (a fleet peer or origin) or a
-   * verified grant. Only PTY `kind:"session"` streams require it; tunnel and
-   * realtime streams are served on any same-user channel the relay admitted.
+   * ONLY for a browser consumer whose `channel_open` grant verified with a
+   * `dpk` equal to this daemon's key — never for `consumer:"daemon"`. Which
+   * stream kinds require it is {@link STREAM_KIND_GATES}.
    */
   seedGated: boolean;
   /** The mux's durable inbound callback, installed exactly once at construction. */
@@ -306,8 +550,9 @@ export const muxChannelTo = async (
       muxAckTimeoutMs,
     );
     opening.set(keyId, { resolve, timer, channelId });
-    // Fleet peer hop: mark consumer so the serving daemon can skip browser-only
-    // seedgate (this process has no vault DEK to mint a grant).
+    // Fleet peer hop: mark consumer so the serving daemon knows no grant is
+    // coming (this process has no vault DEK). A `consumer:"daemon"` channel
+    // is served `tunnel`/`realtime` only — never a seed-gated kind.
     send({
       type: "channel_open",
       channel_id: channelId,
@@ -408,20 +653,32 @@ const registerChannel = (
       ? {
           onStream: (stream, open) => {
             if (record !== null) touchChannel(record);
+            const kind = streamOpenKindOf(decodeJsonPayload(open));
+            const isGated = (): boolean =>
+              record !== null &&
+              record.consumer === "browser" &&
+              record.seedGated;
             if (
-              record?.seedGated !== true &&
-              parseStreamOpenPayload(decodeJsonPayload(open))?.kind ===
-                "session"
+              !admitStreamKind(stream, kind, {
+                transport: "relay",
+                channelId,
+                seedGated: isGated(),
+              })
             ) {
-              logWarn(
-                "mux-host",
-                safeDiagnosticMessage`session open refused: channel not seed-gated`,
-                { channelId },
-              );
-              stream.reset(encodeJsonPayload({ code: "unauthorized" }));
               return;
             }
-            (streamHandler ?? serveMuxOnStream)(stream, open);
+            const handler = streamHandler ?? serveMuxOnStream;
+            if (kind === "agent") {
+              // The relay sees every byte of this rung: run Noise_IK first so
+              // the agent handler only ever sees an E2E-encrypted stream.
+              serveSecureAgentStream(stream, open, {
+                channelId,
+                isGated,
+                handler,
+              });
+              return;
+            }
+            handler(stream, open);
           },
         }
       : {}),
@@ -490,125 +747,25 @@ export const getMuxChannel = (channelId: string): TMuxChannel | undefined =>
   channels.get(channelId)?.channel;
 
 /**
- * Shared OPEN dispatcher for every daemon-side mux channel (relay WS + RTC).
- * Keep tunnel-server reachable through this single closure so rtc-host does
- * not re-implement admit/serve. Session OPEN binds a PTY via session-host.
- */
-const pipeSessionStreams = (
-  relay: TSessionStream,
-  host: TSessionStream,
-): void => {
-  let closed = false;
-  const closeHost = (): void => {
-    if (closed) return;
-    closed = true;
-    host.end();
-  };
-  relay.onData((bytes) => {
-    void host.write(bytes).catch(() => {
-      closed = true;
-      host.reset();
-      relay.reset();
-    });
-  });
-  relay.onCtrl((payload) => host.sendCtrl(payload));
-  relay.onReset((payload) => {
-    host.reset(payload);
-    closed = true;
-  });
-  relay.onEnd(closeHost);
-  host.onData((bytes) => {
-    void relay.write(bytes).catch(() => {
-      // Mirror the host-write rejection path: tear down both sides so a
-      // rejected relay write cannot leave the TSessionStream half-open.
-      if (closed) return;
-      closed = true;
-      host.reset();
-      relay.reset();
-    });
-  });
-  host.onCtrl((payload) => relay.sendCtrl(payload));
-  host.onReset((payload) => {
-    closed = true;
-    relay.reset(payload);
-  });
-  host.onEnd(() => {
-    if (closed) return;
-    closed = true;
-    relay.end();
-  });
-};
-
-/**
- * Build the daemon's mux stream handler over a tunnel server. Pure — the
- * production handler is {@link serveMuxOnStream}. Browser mux streams are
- * attach clients; durable hosts own every PTY.
+ * Build the daemon's mux stream handler over a tunnel server — the shared
+ * OPEN dispatcher for every daemon-side mux channel (relay WS + RTC). Pure;
+ * the production handler is {@link serveMuxOnStream}. `agent` overrides the
+ * registered handler (tests); otherwise {@link setAgentStreamHandler}'s
+ * handler is looked up per OPEN. A legacy PTY `kind:"session"` OPEN is reset
+ * by `serveStream` with `pty_unsupported`.
  */
 export const createMuxOnStream = ({
   tunnel,
-  sessionHosts = defaultSessionHostClient,
+  agent,
 }: {
   readonly tunnel: TServeTunnel;
-  readonly sessionHosts?: TSessionHostClient;
+  readonly agent?: TServeAgent;
 }): ReturnType<typeof serveStream> =>
   serveStream({
     tunnel,
     realtime: (stream, open) => serveMuxRealtime(stream, open),
-    session: async (stream, open) => {
-      if (!ptySessionsEnabled()) {
-        logInfo("session", "remote session open refused: sessions disabled", {
-          id: open.session_id,
-        });
-        stream.reset(
-          encodeJsonPayload({
-            code: "sessions_disabled",
-            message:
-              "remote terminal sessions are disabled on this device — run: openllmd sessions on",
-          }),
-        );
-        return;
-      }
-      // Spawn (if needed) then attach via a CLI pipe child. The CLI owns the
-      // unix-socket dial; the daemon never opens a session socket itself.
-      if (open.mode !== "attach") {
-        const socketPath = await sessionHosts.spawnSessionHostProc({
-          id: open.session_id,
-          cli: open.cli,
-          cols: open.cols,
-          rows: open.rows,
-          ...(open.cwd === undefined ? {} : { cwd: open.cwd }),
-          ...(open.title === undefined ? {} : { title: open.title }),
-          ...(open.dangerous === undefined
-            ? {}
-            : { dangerous: open.dangerous }),
-          ...(open.resume_session_id === undefined
-            ? {}
-            : { resume: open.resume_session_id }),
-        });
-        if (socketPath === null) {
-          stream.reset(encodeJsonPayload({ code: "spawn_failed" }));
-          return;
-        }
-      } else if (
-        (await sessionHosts.findSessionHost(open.session_id)) === null
-      ) {
-        stream.reset(encodeJsonPayload({ code: "session_not_found" }));
-        return;
-      }
-      const host = sessionHosts.attachSessionHostViaCli({
-        ...open,
-        mode: "attach",
-      });
-      if (host === null) {
-        stream.reset(
-          encodeJsonPayload({
-            code: open.mode === "attach" ? "session_not_found" : "spawn_failed",
-          }),
-        );
-        return;
-      }
-      pipeSessionStreams(stream, host);
-    },
+    agent: (stream, open) =>
+      (agent ?? agentStreamHandler ?? unavailableAgentHandler)(stream, open),
     admitTunnel: () => admitMuxTunnel(),
     invalidOpenCode: "invalid_tunnel",
   });
@@ -620,31 +777,67 @@ export const serveMuxOnStream = createMuxOnStream({
 });
 
 /**
- * Seed gate — PTY sessions only, never request tunnelling. A fleet peer or
- * origin (`consumer:"daemon"`) is gated by its relay identity; anything else
- * must present a vault-signed grant. Trust boundary: the relay stamps
- * `consumer` from the authenticated socket role before forward, so a watcher
- * cannot claim "daemon". The result is recorded on the channel; the open is
- * never refused for it. Shared by fresh opens AND rebinds.
+ * Seed gate — `seedgated` kinds only ({@link STREAM_KIND_GATES}: agent
+ * streams), never request tunnelling. ONLY a browser consumer presenting a
+ * vault-signed grant bound to this daemon's key (`dpk`) is gated. A
+ * `consumer:"daemon"` peer (origin, fleet) is never gated — its relay
+ * identity is an API key, which is exactly what the seed gate exists to not
+ * trust; it keeps `tunnel`/`realtime` only. The result is recorded on the
+ * channel; the open is never refused for it. Shared by fresh opens AND
+ * rebinds.
  */
+/**
+ * Strict-gate refusals that still leave a valid grant usable for the
+ * tunnel/realtime kinds — the same set the RTC offer gate degrades on
+ * (`rtc-host.ts`). They fail before the grant's nonce is spent.
+ */
+const MUX_TUNNEL_ONLY_REASONS: ReadonlySet<string> = new Set([
+  "dpk_missing",
+  ...AGENT_PIN_REFUSALS,
+]);
+
+/** `ok` = agent-eligible; `tunnel_only` = valid grant, agent refused. */
+type TSeedGateOutcome = "ok" | "tunnel_only" | "reject";
+
+/**
+ * The strict (agent-eligible) gate. With `allowTunnelOnly`, a grant refused
+ * only for a tunnel-only reason is re-checked without the agent requirements;
+ * that second check spends the grant's nonce, so only a rebind asks for it.
+ */
+const seedGateOutcomeOf = (
+  frame: {
+    readonly channel_id: string;
+    readonly grant?: string;
+    readonly consumer?: "browser" | "daemon";
+  },
+  allowTunnelOnly: boolean,
+): TSeedGateOutcome => {
+  if (frame.consumer === "daemon") return "reject";
+  const expect = {
+    use: "channel" as const,
+    keyId: daemonApiKeyId(),
+    cid: frame.channel_id,
+    aud: daemonPublicKey(),
+  };
+  const gate = enforceSeedGate(frame.grant, { ...expect, requireDpk: true });
+  if (gate.mode !== "reject") return "ok";
+  logInfo("mux-host", "channel_open not seed-gated (agent refused)", {
+    channelId: frame.channel_id,
+    reason: gate.reason,
+  });
+  if (!allowTunnelOnly || !MUX_TUNNEL_ONLY_REASONS.has(gate.reason)) {
+    return "reject";
+  }
+  return enforceSeedGate(frame.grant, expect).mode === "ok"
+    ? "tunnel_only"
+    : "reject";
+};
+
 const seedGateOf = (frame: {
   readonly channel_id: string;
   readonly grant?: string;
   readonly consumer?: "browser" | "daemon";
-}): boolean => {
-  if (frame.consumer === "daemon") return true;
-  const gate = enforceSeedGate(frame.grant, {
-    keyId: daemonApiKeyId(),
-    cid: frame.channel_id,
-    aud: daemonPublicKey(),
-  });
-  if (gate.mode !== "reject") return true;
-  logInfo("mux-host", "channel_open not seed-gated (sessions refused)", {
-    channelId: frame.channel_id,
-    reason: gate.reason,
-  });
-  return false;
-};
+}): boolean => seedGateOutcomeOf(frame, false) === "ok";
 
 /** Accept the relay-authorized channel. `mux2` allows several concurrent. */
 export const acceptChannel = (frame: {
@@ -698,13 +891,18 @@ export const acceptChannel = (frame: {
     // REBIND: the browser derives its channel id deterministically and the
     // relay re-forwards it after a reconnect, so a same-id re-open of a live
     // serving channel is the consumer re-attaching — NOT a collision. Swap the
-    // inbound sink onto the EXISTING channel (its attached session streams
-    // survive untouched; PTY hosts are durable and never respawned here) and
+    // inbound sink onto the EXISTING channel (its attached streams survive
+    // untouched; agent sessions are durable and never respawned here) and
     // re-ack so the peer's open settles. The rebind re-evaluates the seed gate.
-    // A grant-less consumer must not inherit a gated channel's live PTY
-    // session streams: refuse the downgrade, leave the incumbent alone.
-    const gated = seedGateOf(frame);
-    if (existing.seedGated && !gated) {
+    // A grant-less consumer must not inherit a gated channel's live agent
+    // streams: refuse the downgrade, leave the incumbent alone.
+    // Losing the local device anchor turns agent sessions off but does not
+    // invalidate a control-signed browser grant for the tunnel/realtime kinds,
+    // so a tunnel-only refusal still authorizes this rebind. The channel is
+    // then left un-gated below, which keeps agent streams refused.
+    const outcome = seedGateOutcomeOf(frame, existing.seedGated);
+    const gated = outcome === "ok";
+    if (existing.seedGated && outcome === "reject") {
       send({
         type: "channel_open_ack",
         channel_id: frame.channel_id,
@@ -714,6 +912,7 @@ export const acceptChannel = (frame: {
       return;
     }
     existing.seedGated = gated;
+    existing.consumer = frame.consumer ?? "browser";
     bindSink(existing);
     touchChannel(existing);
     logInfo("mux-host", "channel_open rebind", {
@@ -727,7 +926,9 @@ export const acceptChannel = (frame: {
   // got reaped — drop it so the re-open registers fresh below.
   if (existing !== undefined) channels.delete(frame.channel_id);
   const seedGated = seedGateOf(frame);
-  registerChannel(frame.channel_id, null, "daemon").seedGated = seedGated;
+  const record = registerChannel(frame.channel_id, null, "daemon");
+  record.seedGated = seedGated;
+  record.consumer = frame.consumer ?? "browser";
   logInfo("mux-host", "channel_open accepted", {
     channelId: frame.channel_id,
     consumer: frame.consumer ?? "browser",
@@ -738,7 +939,7 @@ export const acceptChannel = (frame: {
 /**
  * The relay says this channel's peer is gone (`consumer_gone` when a browser
  * socket dies, `daemon_gone` for a serving peer). Tear the local half down so
- * its streams RESET — which detaches any device PTY bound to them — and so the
+ * its streams RESET — which detaches any agent session bound to them — and so the
  * next `channel_open` is not refused `channel_exists` by a channel whose other
  * end no longer exists. Previously this frame had no handler at all: the stale
  * channel survived until the daemon's OWN relay socket cycled, stranding every
@@ -789,7 +990,7 @@ export const muxHostOnBytes = (bytes: Uint8Array | null): void => {
   record.sink?.(envelope.payload);
 };
 
-/** A dead relay socket tears down all stream state without killing PTYs. */
+/** A dead relay socket tears down all stream state without ending agent sessions. */
 export const resetAllChannels = (): void => {
   for (const keyId of [...opening.keys()]) failOpen(keyId);
   for (const record of [...channels.values()]) {

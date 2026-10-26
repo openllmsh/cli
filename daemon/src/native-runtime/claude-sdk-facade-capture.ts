@@ -81,12 +81,10 @@ export type TClaudeSdkFacadeCaptureParams = TClaudeSdkFacadeParams & {
   readonly maxBodyBytes?: number;
 };
 
-const killProc = (proc: ReturnType<typeof Bun.spawn>): void => {
-  try {
-    proc.kill("SIGTERM");
-  } catch {
-    // already exited
-  }
+const killProc = (child: {
+  readonly terminate: () => Promise<unknown>;
+}): void => {
+  void child.terminate();
 };
 
 /** Thin timing wrapper around {@link runClaudeSdkFacadeCaptureCore} — reuses
@@ -153,9 +151,9 @@ const runClaudeSdkFacadeCaptureCore = async (
   const cleaned = cleanNativeSpawnEnv(params.env);
   const spawnEnv = withClaudeCaptureBaseUrl(cleaned, loopback.baseUrl);
 
-  let proc: ReturnType<typeof Bun.spawn>;
+  let supervised: ReturnType<typeof spawnClaudeFacadeCli>;
   try {
-    proc = spawnClaudeFacadeCli({
+    supervised = spawnClaudeFacadeCli({
       bin: params.bin,
       providerModelId: params.providerModelId,
       systemText: plan.systemText,
@@ -171,11 +169,12 @@ const runClaudeSdkFacadeCaptureCore = async (
       reason: `spawn failed: ${error instanceof Error ? error.message : String(error)}`,
     };
   }
+  const proc = supervised.subprocess;
 
   const kill = (): void => {
     params.signal.removeEventListener("abort", kill);
     stopMcpServer?.();
-    killProc(proc);
+    killProc(supervised);
   };
   if (params.signal.aborted) {
     kill();

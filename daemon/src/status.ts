@@ -17,6 +17,7 @@ import type {
   TProviderUsageSnapshot,
 } from "@openllmsh/protocol";
 import {
+  DEVICE_SESSIONS_CONTROL_CAP,
   MULTI_ACCOUNT_CONTROL_CAP,
   normalizeProviderConnection,
 } from "@openllmsh/protocol";
@@ -49,12 +50,14 @@ import {
 import { storeIdentityEpoch } from "./delegation/observation-cache";
 import { DEFAULT_CAPTURE_TIMEOUT_MS } from "./delegation/spawn";
 import { STATUS_CHECK_FAILED_DETAIL } from "./delegation/util";
+import { deviceSessionsReport } from "./device-anchor";
 import { getCliState } from "./device-state";
 import { daemonPort, hasApiKey } from "./env";
 import { authCooldownForProvider } from "./hop-cooldown";
 import { attachHostSignIn } from "./host-sign-in";
 import { hasIdentityConflict } from "./identity-state";
 import { daemonPublicKey } from "./keypair";
+import { deviceAccessPinReport } from "./local-device-control";
 import { currentLocalServerStates } from "./local-servers";
 import { logWarn, safeDiagnosticMessage } from "./logger";
 import { currentDaemonCaps } from "./mux-host";
@@ -68,7 +71,6 @@ import {
 } from "./op-context";
 import { resolveOnPath } from "./path-utils";
 import { getPendingAuth, pendingAuthWire } from "./pending-auth";
-import { ptySessionsEnabled } from "./pty-sessions-pref";
 import { sandboxState } from "./sandbox/landlock";
 import { ptySupported, sessionStatusReport } from "./session-host";
 import { stateScoped } from "./state-scoped";
@@ -894,14 +896,19 @@ const computeStatusFreshInner = async (
     installed_version: getCliState().version ?? null,
     key_configured: hasApiKey(),
     auto_update: autoUpdateEnabled(),
-    pty_sessions: ptySessionsEnabled(),
     cloud_state: getCloudState(),
     pubkey: daemonPublicKey(),
     identity_conflict: hasIdentityConflict() || undefined,
+    device_access_pin: deviceAccessPinReport() ?? undefined,
+    device_sessions: deviceSessionsReport(),
     port: daemonPort(),
     sandbox: sandboxState(),
     caps: currentDaemonCaps(),
-    control_caps: ["refresh_models_due", MULTI_ACCOUNT_CONTROL_CAP],
+    control_caps: [
+      "refresh_models_due",
+      MULTI_ACCOUNT_CONTROL_CAP,
+      DEVICE_SESSIONS_CONTROL_CAP,
+    ],
     connections,
     // TTL-cached CLI probe from `getCliState()`. It returns cached state when fresh
     // and schedules a background refresh when stale, so status can stay responsive

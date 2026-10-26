@@ -60,6 +60,17 @@ export type TRtcRun = {
   readonly rtcEnabled: boolean;
 };
 
+/**
+ * Path that set the device-access pin (see `device-access-verify.ts`).
+ * `anchor` / `local` / `rotation` (from an anchored pin) are the only
+ * agent-eligible paths; `tofu` is cloud-delivered and serves `/v1` + tunnel +
+ * realtime only.
+ */
+export type TDeviceAccessPinVia = "anchor" | "tofu" | "local" | "rotation";
+
+const isPinVia = (v: unknown): v is TDeviceAccessPinVia =>
+  v === "anchor" || v === "tofu" || v === "local" || v === "rotation";
+
 export type TDaemonState = {
   readonly updateAttempts: {
     readonly daemon?: TUpdateAttempt;
@@ -72,11 +83,31 @@ export type TDaemonState = {
     readonly cli?: TUpdateFailure;
   };
   /**
-   * Seed-derived device-access public key (SPKI DER, base64) pinned from
-   * bootstrap. `null` means explicitly un-provisioned; absent means never
+   * Device-access public key (SPKI DER, base64) pinned from bootstrap — the
+   * account device-control key when {@link deviceAccessPinKind} is
+   * `"control"`, else a legacy per-key value. `null` means explicitly un-provisioned; absent means never
    * set. Survives restarts so enforcement does not wait on the next poll.
+   * Once set, bootstrap cannot replace it without a signed rotation or a
+   * local confirmation (the install anchor, loopback).
    */
   readonly deviceAccessPubkey?: string | null;
+  /**
+   * `"control"` when {@link deviceAccessPubkey} is the account device-control
+   * key (phrase-derived). Absent = legacy per-key DEK-derived pin, which agent
+   * sessions refuse (`device_not_anchored`). See `device-access-verify.ts`.
+   */
+  readonly deviceAccessPinKind?: "control";
+  /** Control-key generation of the pin (`cv`), when known. */
+  readonly deviceAccessPinVersion?: number;
+  /** Which path set the pin — `tofu` is trust-on-first-use. */
+  readonly deviceAccessPinVia?: TDeviceAccessPinVia;
+  /**
+   * True when the pin descends from a local trust root (the install anchor,
+   * the desktop app over loopback) — directly or along
+   * a rotation chain signed by such a pin. Only an anchored pin authorises
+   * agent sessions (`device_not_anchored` otherwise).
+   */
+  readonly deviceAccessPinAnchored?: true;
   /** RTC native-crash breaker: this run's liveness sentinel (see {@link TRtcRun}). */
   readonly rtcRun?: TRtcRun | null;
   /** Timestamps of detected native crashes while RTC was live (bounded window). */
@@ -129,6 +160,10 @@ const coerceState = (v: unknown): TDaemonState => {
     updateFailures?: unknown;
     bootHistory?: unknown;
     deviceAccessPubkey?: unknown;
+    deviceAccessPinKind?: unknown;
+    deviceAccessPinVersion?: unknown;
+    deviceAccessPinVia?: unknown;
+    deviceAccessPinAnchored?: unknown;
     rtcRun?: unknown;
     rtcCrashes?: unknown;
     rtcCrashesVersion?: unknown;
@@ -152,6 +187,26 @@ const coerceState = (v: unknown): TDaemonState => {
           raw.deviceAccessPubkey.length > 0
         ? raw.deviceAccessPubkey
         : undefined;
+  // Pin metadata only means something next to a pin.
+  const pinMeta =
+    typeof pubkey === "string"
+      ? {
+          ...(raw.deviceAccessPinKind === "control"
+            ? { deviceAccessPinKind: "control" as const }
+            : {}),
+          ...(typeof raw.deviceAccessPinVersion === "number" &&
+          Number.isInteger(raw.deviceAccessPinVersion) &&
+          raw.deviceAccessPinVersion >= 1
+            ? { deviceAccessPinVersion: raw.deviceAccessPinVersion }
+            : {}),
+          ...(isPinVia(raw.deviceAccessPinVia)
+            ? { deviceAccessPinVia: raw.deviceAccessPinVia }
+            : {}),
+          ...(raw.deviceAccessPinAnchored === true
+            ? { deviceAccessPinAnchored: true as const }
+            : {}),
+        }
+      : {};
   const rtcCrashes = numberList(raw.rtcCrashes);
   const rtcCrashesVersion =
     typeof raw.rtcCrashesVersion === "string" &&
@@ -166,6 +221,7 @@ const coerceState = (v: unknown): TDaemonState => {
     ...(Object.keys(updateFailures).length > 0 ? { updateFailures } : {}),
     bootHistory: numberList(raw.bootHistory),
     ...(pubkey !== undefined ? { deviceAccessPubkey: pubkey } : {}),
+    ...pinMeta,
     ...(isRtcRun(raw.rtcRun) ? { rtcRun: raw.rtcRun } : {}),
     ...(rtcCrashes.length > 0 ? { rtcCrashes } : {}),
     ...(rtcCrashesVersion !== undefined ? { rtcCrashesVersion } : {}),
