@@ -8,8 +8,13 @@
 import type { CallToolResult } from "@modelcontextprotocol/server";
 import { fromJsonSchema, McpServer } from "@modelcontextprotocol/server";
 import { serveStdio } from "@modelcontextprotocol/server/stdio";
+import type { TGateway } from "../clients/gateway";
 import { fetchTier } from "../clients/gateway";
-import { fetchMarketplaceLaunch } from "../clients/marketplace";
+import type { TMarketplaceLaunch } from "../clients/marketplace";
+import {
+  fetchMarketplaceLaunch,
+  LAUNCH_TIMEOUT_MS,
+} from "../clients/marketplace";
 import type { TMcpGroup } from "../commands";
 import { mcpGroupsForTier } from "../commands";
 import { CLI_VERSION } from "../env";
@@ -173,11 +178,54 @@ export const attachMarketplaceUpstreams = (
   }
 };
 
-/** How long the first `tools/list` (via the server factory) may wait for
- *  marketplace upstreams before serving built-ins alone. Clients that list
- *  once still see marketplace tools when the handshake finishes in time;
- *  slower handshakes land via `tools/list_changed` after listen. */
-const MARKETPLACE_LIST_WAIT_MS = 2_500;
+export type TLaunchConnected = {
+  readonly upstreams: readonly TUpstream[];
+  readonly builtins: readonly string[];
+};
+
+export type TMarketplaceLoad = {
+  readonly launchPromise: Promise<TMarketplaceLaunch>;
+  readonly marketplacePromise: Promise<TLaunchConnected>;
+};
+
+export type TBeginMarketplaceLoadOptions = {
+  readonly fetchLaunch?: (gateway: TGateway) => Promise<TMarketplaceLaunch>;
+  readonly connect?: (
+    servers: TMarketplaceLaunch["servers"],
+  ) => Promise<readonly TUpstream[]>;
+};
+
+/**
+ * Kick off `/api/marketplace/launch` whenever the `openllm` OR
+ * `openllm-memory` group is requested. Builtins settle with the launch
+ * response; upstream dials (only for `openllm`) may lag behind.
+ */
+export const beginMarketplaceLoad = (
+  requested: readonly TMcpGroup[],
+  gateway: TGateway,
+  options: TBeginMarketplaceLoadOptions = {},
+): TMarketplaceLoad => {
+  const fetchLaunch = options.fetchLaunch ?? fetchMarketplaceLaunch;
+  const connect = options.connect ?? connectUpstreams;
+  const wantsLaunch =
+    requested.includes("openllm") || requested.includes("openllm-memory");
+  const emptyLaunch: TMarketplaceLaunch = { servers: [], builtins: [] };
+  const launchPromise = wantsLaunch
+    ? fetchLaunch(gateway)
+    : Promise.resolve(emptyLaunch);
+  const marketplacePromise: Promise<TLaunchConnected> = requested.includes(
+    "openllm",
+  )
+    ? launchPromise.then(async (launch) => ({
+        upstreams: await connect(launch.servers),
+        builtins: launch.builtins,
+      }))
+    : launchPromise.then((launch) => ({
+        upstreams: [] as readonly TUpstream[],
+        builtins: launch.builtins,
+      }));
+  return { launchPromise, marketplacePromise };
+};
 
 export const runMcpServer = async (
   requested: readonly TMcpGroup[],
@@ -206,28 +254,22 @@ export const runMcpServer = async (
   };
   // Kick off gateway reads before we listen — but do NOT await marketplace
   // upstream handshakes on the critical path. `serveStdio` starts reading
-  // stdin immediately; the factory (called on the client's first message)
-  // waits briefly so one-shot `tools/list` clients still see marketplace
-  // tools when the handshake is fast.
+  // stdin immediately; the factory waits for the launch response (builtins)
+  // bounded by the launch timeout. Slower upstream dials land via
+  // `tools/list_changed` after listen.
   const tierPromise = fetchTier(gateway);
-  type TLaunchConnected = {
-    readonly upstreams: readonly TUpstream[];
-    readonly builtins: readonly string[];
-  };
-  const marketplacePromise: Promise<TLaunchConnected> = requested.includes(
-    "openllm",
-  )
-    ? fetchMarketplaceLaunch(gateway).then(async (launch) => ({
-        upstreams: await connectUpstreams(launch.servers),
-        builtins: launch.builtins,
-      }))
-    : Promise.resolve({
-        upstreams: [] as readonly TUpstream[],
-        builtins: [] as readonly string[],
-      });
+  const { launchPromise, marketplacePromise } = beginMarketplaceLoad(
+    requested,
+    gateway,
+  );
   let upstreams: readonly TUpstream[] = [];
   let builtins: readonly string[] = [];
   let marketplaceSettled = false;
+  // Builtins are available as soon as launch returns — do not wait on
+  // upstream handshakes to enable memory tools.
+  void launchPromise.then((launch) => {
+    builtins = launch.builtins;
+  });
   const marketplaceTask = marketplacePromise.then(
     (connected) => {
       upstreams = connected.upstreams;
@@ -242,7 +284,8 @@ export const runMcpServer = async (
       );
       return {
         upstreams: [] as readonly TUpstream[],
-        builtins: [] as readonly string[],
+        // Preserve builtins already set from a successful launch.
+        builtins,
       };
     },
   );
@@ -256,17 +299,15 @@ export const runMcpServer = async (
   serveStdio(async () => {
     const [tier] = await Promise.all([
       tierPromise,
-      marketplaceSettled
-        ? Promise.resolve()
-        : Promise.race([
-            marketplaceTask.then(() => undefined),
-            new Promise<void>((resolve) => {
-              setTimeout(resolve, MARKETPLACE_LIST_WAIT_MS);
-            }),
-          ]),
+      Promise.race([
+        launchPromise.then(() => undefined),
+        new Promise<void>((resolve) => {
+          setTimeout(resolve, LAUNCH_TIMEOUT_MS);
+        }),
+      ]),
     ]);
     // Snapshot which upstreams the constructor already registered so a late
-    // attach does not double-register when the wait budget covered them.
+    // attach does not double-register when they finished during the wait.
     const includedAtCreate = upstreams;
     const builtinsAtCreate = builtins;
     const server = createMcpServer({
@@ -277,7 +318,7 @@ export const runMcpServer = async (
       builtins: builtinsAtCreate,
     });
     if (includedAtCreate.length > 0) attachedLate = true;
-    // Marketplace finished after the wait budget: attach remotes and notify
+    // Upstream dials finished after create: attach remotes and notify
     // tools/list_changed. Builtin memory tools are fixed at create time from
     // the launch snapshot (next MCP start picks up a toggle that landed late).
     if (!marketplaceSettled) {

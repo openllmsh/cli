@@ -50,7 +50,8 @@ const isLaunchServer = (v: unknown): v is TMarketplaceLaunchServer => {
   );
 };
 
-const LAUNCH_TIMEOUT_MS = 5_000;
+/** Bound for `/api/marketplace/launch` and for the MCP factory wait on it. */
+export const LAUNCH_TIMEOUT_MS = 5_000;
 
 /** Reserved ids — an integration can never shadow the built-in server. */
 const RESERVED = new Set(["openllm"]);
