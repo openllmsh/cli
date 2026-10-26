@@ -1000,10 +1000,17 @@ const acceptChannelAsync = async (frame: {
       return;
     }
     const decision = await admitTeamGrantOnChannel(frame.team_grant);
-    if (!decision.ok) {
+    // The relay stamps peer_user_id from the authenticated socket but no
+    // longer verifies grants, so the grant's consumer must match it here —
+    // otherwise a leaked grant opens a channel for any authenticated user.
+    const wrongConsumer =
+      decision.ok &&
+      peerUserId !== null &&
+      decision.grant.consumer !== peerUserId;
+    if (!decision.ok || wrongConsumer) {
       logWarn("mux-host", "channel_open team grant refused", {
         channelId: frame.channel_id,
-        reason: decision.reason,
+        reason: decision.ok ? "wrong_consumer" : decision.reason,
       });
       send({
         type: "channel_open_ack",
@@ -1018,10 +1025,17 @@ const acceptChannelAsync = async (frame: {
     // Grant present on a same-user / unknown-peer open — still verify
     // (defence in depth; older relay path).
     const decision = await admitTeamGrantOnChannel(frame.team_grant);
-    if (!decision.ok) {
+    // The relay stamps peer_user_id from the authenticated socket but no
+    // longer verifies grants, so the grant's consumer must match it here —
+    // otherwise a leaked grant opens a channel for any authenticated user.
+    const wrongConsumer =
+      decision.ok &&
+      peerUserId !== null &&
+      decision.grant.consumer !== peerUserId;
+    if (!decision.ok || wrongConsumer) {
       logWarn("mux-host", "channel_open team grant refused", {
         channelId: frame.channel_id,
-        reason: decision.reason,
+        reason: decision.ok ? "wrong_consumer" : decision.reason,
       });
       send({
         type: "channel_open_ack",
