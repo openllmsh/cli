@@ -20,6 +20,7 @@ import {
   DEVICE_SESSIONS_CONTROL_CAP,
   MULTI_ACCOUNT_CONTROL_CAP,
   normalizeProviderConnection,
+  TEAM_SERVE_CAP,
 } from "@openllmsh/protocol";
 import {
   pruneOrphanAccountDirs,
@@ -78,6 +79,7 @@ import type {
   TStatusPublishQueueSnapshot,
   TStatusPublishTrigger,
 } from "./status-publish-coalesce";
+import { teamServeEnabled } from "./team-grant-admit";
 import { cachedUsage, peekUsage } from "./usage-cache";
 import { attachVendorCliInstall } from "./vendor-cli-install";
 import { DAEMON_VERSION } from "./version";
@@ -908,6 +910,7 @@ const computeStatusFreshInner = async (
       "refresh_models_due",
       MULTI_ACCOUNT_CONTROL_CAP,
       DEVICE_SESSIONS_CONTROL_CAP,
+      ...(teamServeEnabled() ? [TEAM_SERVE_CAP] : []),
     ],
     connections,
     // TTL-cached CLI probe from `getCliState()`. It returns cached state when fresh

@@ -27,14 +27,21 @@ import type {
 import {
   MEDIA_PERSISTENCE_BROWSER,
   MEDIA_PERSISTENCE_REQUEST_HEADER,
+  TEAM_GRANT_HEADER,
   TUNNELED_REQUEST_HEADER,
   TUNNELED_REQUEST_VALUE,
   tunnelResponseHeadersFromHttp,
 } from "@openllmsh/protocol";
+import { StreamResetError } from "@openllmsh/tunnel/stream-reset-error";
 import type { TServeTunnel } from "@openllmsh/tunnel/streams";
 import { handleInference } from "./listener";
 import { logWarn } from "./logger";
 import { beginRequest, endRequest } from "./self-update";
+import {
+  admitTeamGrant,
+  estimateTeamReserveTokens,
+  modelFromRequestBody,
+} from "./team-grant-admit";
 
 /** Max concurrently-served tunnels — beyond it, mux opens are nacked
  *  `tunnel_busy`. Concurrent tunnels behave like concurrent loopback
@@ -96,6 +103,11 @@ const forwardedHeaders = (open: {
     headers.set("anthropic-beta", open.headers.anthropic_beta);
   if (open.headers?.user_agent !== undefined)
     headers.set("user-agent", open.headers.user_agent);
+  // Team grant: re-check on the request path (model / local cap / kill switch).
+  // Same-user hops omit it. See docs/plan/2026-10-26-teams.md §16.1 / §16.4.
+  if (open.headers?.team_grant !== undefined) {
+    headers.set(TEAM_GRANT_HEADER, open.headers.team_grant);
+  }
   // Only fleet-daemon hops are tunnel-borne for the walker loop-guard.
   // Browser (or omitted consumer) leaves the header off so the selected
   // device may still tryFleetTunnel once.
@@ -160,6 +172,11 @@ export const admitMuxTunnel = (): "tunnel_busy" | null =>
 /**
  * Build a mux tunnel server over `dispatch`. Pure: returns a serving function
  * and installs nothing. Admission + self-update fencing stay daemon-wide.
+ *
+ * Team traffic: when `open.headers.team_grant` is present the grant is
+ * verified (signature, device, model, local cap, kill switch,
+ * `teamShareable`) before dispatch. Same-user opens omit the field and behave
+ * exactly as before.
  */
 export const createMuxTunnelServer =
   (dispatch: TTunnelDispatch): TServeTunnel =>
@@ -183,7 +200,48 @@ export const createMuxTunnelServer =
       throw new Error("mux tunnel aborted before dispatch");
     }
     try {
-      const response = await dispatch(tunneledRequest(open, body, signal));
+      // Buffer the body when a team grant is present so we can read `model`
+      // and estimate a local reservation without consuming the dispatch stream.
+      let dispatchBody: ReadableStream<Uint8Array> | Uint8Array = body;
+      const teamToken = open.headers?.team_grant;
+      if (teamToken !== undefined) {
+        const chunks: Uint8Array[] = [];
+        let total = 0;
+        const reader = body.getReader();
+        for (;;) {
+          if (signal.aborted) {
+            complete();
+            throw new Error("mux tunnel aborted before dispatch");
+          }
+          const next = await reader.read();
+          if (next.done) break;
+          total += next.value.byteLength;
+          chunks.push(next.value);
+        }
+        const buffered = new Uint8Array(total);
+        let offset = 0;
+        for (const c of chunks) {
+          buffered.set(c, offset);
+          offset += c.byteLength;
+        }
+        dispatchBody = buffered;
+        const decision = await admitTeamGrant(
+          teamToken,
+          modelFromRequestBody(buffered),
+          estimateTeamReserveTokens(buffered),
+        );
+        if (!decision.ok) {
+          complete();
+          logWarn("tunnel", "Team grant refused.", {
+            reason: decision.reason,
+          });
+          throw new StreamResetError("unauthorized", `team_${decision.reason}`);
+        }
+      }
+      const response =
+        dispatchBody instanceof Uint8Array
+          ? await dispatch(tunneledRequest(open, dispatchBody, signal))
+          : await dispatch(tunneledRequest(open, dispatchBody, signal));
       return {
         status: response.status,
         headers: tunnelResponseHeadersFromHttp(response.headers),

@@ -807,7 +807,12 @@ silent signaling timeouts. Detail lives in
   `x-openllm-tunneled` **only** when the stream OPEN carries
   `consumer:"daemon"` (fleet hop from another daemon) so the peer walker
   cannot re-tunnel. Browser tunnels omit the stamp so the selected device
-  may still `tryFleetTunnel` once (browser→A→B).
+  may still `tryFleetTunnel` once (browser→A→B). Team hops carry
+  `headers.team_grant` (→ `x-openllm-team-grant`): verified against bootstrap
+  `team_grant_pubkey` for model / local `cap_tokens` / `teamShareable` /
+  `OPENLLM_TEAM_SERVE` kill switch before dispatch. Same-user traffic omits
+  the grant and is unchanged. The daemon also advertises `team_serve` on
+  mux caps, bootstrap caps, and `control_caps` when the kill switch is on.
 - `device-access-verify.ts` verifies device grants signed by the account
   **device-control key** (phrase-derived in the browser, never from the DEK —
   so the cloud cannot sign) with node:crypto: ts window + nonce map + optional

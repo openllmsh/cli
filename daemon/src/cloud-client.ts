@@ -36,6 +36,7 @@ import {
   MODEL_CAPABILITIES_OPEN_CAP,
   PLAN_SURFACE_QUERY_KEY,
   RelayChannelResponse,
+  TEAM_SERVE_CAP,
   VideoJobPlanRequest,
 } from "@openllmsh/protocol";
 import { Schema } from "effect";
@@ -224,8 +225,21 @@ const authHeaders = (): Record<string, string> => {
     [DAEMON_PLATFORM_HEADER]: process.platform,
     // Capability negotiation (never version-gated): open model capabilities
     // list (post image_editing/realtime widening).
-    [DAEMON_BOOTSTRAP_CAPS_HEADER]: [MODEL_CAPABILITIES_OPEN_CAP].join(","),
+    [DAEMON_BOOTSTRAP_CAPS_HEADER]: [
+      MODEL_CAPABILITIES_OPEN_CAP,
+      // team_serve: origin only offers this device as a contributor when the
+      // local kill switch is on. Imported lazily to avoid a config cycle.
+      ...(teamServeEnabledForBootstrap() ? [TEAM_SERVE_CAP] : []),
+    ].join(","),
   };
+};
+
+/** Lazy so cloud-client does not import the admit module at top level. */
+const teamServeEnabledForBootstrap = (): boolean => {
+  const raw = process.env.OPENLLM_TEAM_SERVE;
+  if (raw === undefined) return true;
+  const v = raw.trim().toLowerCase();
+  return v !== "0" && v !== "false" && v !== "off" && v !== "no";
 };
 
 // Cloud control-plane calls must never hang forever. Bun's `fetch` has NO

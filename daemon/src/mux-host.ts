@@ -8,6 +8,7 @@ import {
   RTC_CAP,
   SEEDGATE_CAP,
   streamOpenKindOf,
+  TEAM_SERVE_CAP,
 } from "@openllmsh/protocol";
 import {
   channelIdToBytes,
@@ -43,6 +44,7 @@ import { daemonApiKeyId } from "./env";
 import { daemonPublicKey, daemonX25519Dh } from "./keypair";
 import { logDebug, logInfo, logWarn, safeDiagnosticMessage } from "./logger";
 import { serveMuxRealtime } from "./realtime-handler";
+import { admitTeamGrantOnChannel, teamServeEnabled } from "./team-grant-admit";
 import { admitMuxTunnel, serveMuxTunnel } from "./tunnel-server";
 
 /** Re-export so daemon tests keep a single import site with the mux host. */
@@ -133,6 +135,9 @@ export const currentDaemonCaps = (): string[] => {
   );
   if (getDeviceAccessPubkey() !== null) caps.push(SEEDGATE_CAP);
   if (agentStreamHandler !== null) caps.push(AGENT_CAP);
+  // Team serving: advertised when the local kill switch is on. Origin only
+  // offers devices that list this cap; older daemons omit it.
+  if (teamServeEnabled()) caps.push(TEAM_SERVE_CAP);
   return caps;
 };
 
@@ -843,8 +848,18 @@ const seedGateOf = (frame: {
 export const acceptChannel = (frame: {
   readonly channel_id: string;
   readonly grant?: string;
+  readonly team_grant?: string;
   readonly consumer?: "browser" | "daemon";
 }): void => {
+  void acceptChannelAsync(frame);
+};
+
+const acceptChannelAsync = async (frame: {
+  readonly channel_id: string;
+  readonly grant?: string;
+  readonly team_grant?: string;
+  readonly consumer?: "browser" | "daemon";
+}): Promise<void> => {
   const send = sendFrame;
   const binary = sendBinary;
   if (send === null || binary === null) return;
@@ -867,6 +882,24 @@ export const acceptChannel = (frame: {
       error: "not_capable",
     });
     return;
+  }
+  // Team cross-user opens carry team_grant (relay already verified). Re-check
+  // here: kill switch, pubkey, device binding. Model/cap run per request.
+  if (frame.team_grant !== undefined && frame.team_grant.length > 0) {
+    const decision = await admitTeamGrantOnChannel(frame.team_grant);
+    if (!decision.ok) {
+      logWarn("mux-host", "channel_open team grant refused", {
+        channelId: frame.channel_id,
+        reason: decision.reason,
+      });
+      send({
+        type: "channel_open_ack",
+        channel_id: frame.channel_id,
+        ok: false,
+        error: "unauthorized",
+      });
+      return;
+    }
   }
   const existing = channels.get(frame.channel_id);
   if (existing !== undefined && existing.muxSink !== null) {

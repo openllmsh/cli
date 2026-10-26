@@ -191,6 +191,13 @@ export const refreshBootstrap = (): Promise<boolean> =>
 export const planSigningKey = (): string | null =>
   snapshot.plan_signing_key ?? null;
 
+/**
+ * Origin team-grant public key (SPKI b64) from bootstrap. Null when the cloud
+ * has no `TEAM_GRANT_SIGNING_KEY` — team traffic is then refused.
+ */
+export const teamGrantPubkey = (): string | null =>
+  snapshot.team_grant_pubkey ?? null;
+
 /** Sparse per-model user overrides from the authenticated bootstrap snapshot. */
 export const modelSettingsOverrides = (): TModelSettingsOverrides =>
   snapshot.model_settings ?? {};
