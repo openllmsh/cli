@@ -30,6 +30,8 @@ import type {
   TUsage,
 } from "@openllmsh/protocol";
 import { codexServiceTier } from "@openllmsh/protocol";
+import type { TSupervisedChild } from "../child-supervisor";
+import { superviseSpawn } from "../child-supervisor";
 import { spawnCwd } from "../delegation/util";
 import { logError, logWarn, safeDiagnosticMessage } from "../logger";
 import { sandboxSpawnArgs } from "../sandbox/exec";
@@ -138,6 +140,7 @@ class CodexAppServerClient {
   private stdin: { write: (s: string) => void; flush?: () => void } | null =
     null;
   private proc: ReturnType<typeof Bun.spawn> | null = null;
+  private supervised: TSupervisedChild | null = null;
   /**
    * The CURRENT/most-recent child's `proc.exited` promise, retained here
    * (not read off `this.proc`) so it survives a `dispose()` call — `dispose()`
@@ -182,50 +185,43 @@ class CodexAppServerClient {
    * the shared warm client's fire-and-forget teardown always worked.
    */
   dispose(): void {
-    const proc = this.proc;
+    const supervised = this.supervised;
+    this.supervised = null;
     this.proc = null;
-    try {
-      proc?.kill();
-    } catch {
-      // already exited
-    }
+    // Fire-and-forget group terminate — `disposeAndWaitForExit` awaits the
+    // same idempotent promise when a confirmed exit is required.
+    void supervised?.terminate();
     this.teardown("codex app-server disposed");
   }
 
   /**
    * Same signal + teardown as {@link dispose} (calls it verbatim, so the
    * shared warm client's immediate/fire-and-forget behavior is untouched),
-   * but resolves only once the child has ACTUALLY exited — awaits
-   * {@link exited}, the persistent per-spawn promise, rather than returning
-   * as soon as the kill signal is sent. `kill()` only requests termination;
-   * the process can still be running — and, in the capture path, still
-   * holding/reading its ephemeral `CODEX_HOME` — for a window after
-   * `dispose()` returns. Callers that must delete that directory (isolated
-   * capture builders) need this, not `dispose()`, to avoid deleting out from
-   * under a still-live child.
+   * but resolves only once the child (and its process group) has ACTUALLY
+   * exited — awaits the supervisor `terminate()` promise rather than
+   * returning as soon as the kill signal is sent. `terminate()` only
+   * requests termination; the process can still be running — and, in the
+   * capture path, still holding/reading its ephemeral `CODEX_HOME` — for a
+   * window after `dispose()` returns. Callers that must delete that directory
+   * (isolated capture builders) need this, not `dispose()`, to avoid deleting
+   * out from under a still-live child.
    *
    * IDEMPOTENT and safe to call concurrently or after a prior synchronous
-   * `dispose()`: reads {@link exited} (a field, not derived from `this.proc`)
-   * BEFORE calling `dispose()`, so every caller — however many, in whatever
-   * order relative to a plain `dispose()` — awaits the SAME promise for the
-   * SAME child and none can resolve early just because an earlier call
-   * already cleared `this.proc`.
-   *
-   * Does NOT swallow an unexpected rejection from `exited` as a confirmed
-   * exit — `Bun.Subprocess.exited` does not reject in normal operation, but
-   * if it ever did, treating that as "the child is gone" would be unsafe
-   * (the caller could delete a directory a still-running child is using).
-   * The rejection propagates; callers that chain cleanup after this MUST
-   * NOT run that cleanup from a `.catch()` on this call.
+   * `dispose()`: captures the supervised handle BEFORE calling `dispose()`,
+   * so every caller — however many, in whatever order relative to a plain
+   * `dispose()` — awaits the SAME terminate promise for the SAME child.
    */
   async disposeAndWaitForExit(): Promise<void> {
+    const supervised = this.supervised;
     const exited = this.exited;
     const catalog = this.modelContextCatalog;
     this.dispose();
-    if (exited !== null) {
-      await exited;
-      await catalog?.cleanup();
-    }
+    // Prefer the supervisor terminate promise (group reap). If a prior
+    // synchronous `dispose()` already cleared `supervised`, fall back to the
+    // retained root `exited` promise so catalog cleanup still waits for exit.
+    if (supervised !== null) await supervised.terminate();
+    else if (exited !== null) await exited;
+    if (supervised !== null || exited !== null) await catalog?.cleanup();
   }
 
   /** Config overrides alone cannot replace ModelInfo's 95% reserve/max clamp. */
@@ -314,9 +310,10 @@ class CodexAppServerClient {
   }
 
   private async start(): Promise<void> {
-    const proc = Bun.spawn(
+    const supervised = superviseSpawn(
       sandboxSpawnArgs([this.bin, "app-server", ...this.spawnArgvExtra]),
       {
+        kind: "native-runtime",
         stdin: "pipe",
         stdout: "pipe",
         stderr: "ignore",
@@ -324,6 +321,8 @@ class CodexAppServerClient {
         env: cleanNativeSpawnEnv(this.env),
       },
     );
+    const proc = supervised.subprocess;
+    this.supervised = supervised;
     this.proc = proc;
     const contextCatalog = new CodexModelContextCatalog(
       this.modelMetadataHome,

@@ -225,6 +225,9 @@ const daemonBinary = (): readonly string[] => {
 };
 
 const spawnHostProcessDefault: TSpawnHostProcess = (argv) => {
+  // Bare spawn (not superviseSpawn): session hosts are intentionally
+  // long-lived + detached and outlive the spawning daemon process; the
+  // disposable child registry must not reap them on boot/drain.
   const proc = Bun.spawn([...argv], {
     detached: true,
     stdio: ["ignore", "ignore", "ignore"],

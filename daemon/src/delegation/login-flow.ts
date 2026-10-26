@@ -40,6 +40,8 @@ import {
   requestStatusPush,
 } from "../auth-events";
 import { noteAuthStoreIdentityChange } from "../auth-user-action";
+import type { TSupervisedChild } from "../child-supervisor";
+import { superviseSpawn } from "../child-supervisor";
 import { opaqueDoctorCorrelation } from "../doctor-report/correlation";
 import { launcherProfileFor } from "../launcher-profile-state";
 import { logInfo, logWarn, safeDiagnosticMessage } from "../logger";
@@ -1231,7 +1233,8 @@ export type TStreamLoginResult<T> =
        *  connect layer can surface the captured error only when it's real. */
       readonly crashed: boolean;
       /** Spawn-level failure (e.g. `EPERM`, `ENOENT`) with a short redacted
-       *  message. Set when `Bun.spawn(...)` itself throws before a child exists.
+       *  message. Set when `superviseSpawn(...)` itself throws before a child
+       *  exists.
        */
       readonly spawnFailure?: TSpawnFailure;
       /** True iff we hit the hard login ceiling and reaped a still-alive child. */
@@ -1267,14 +1270,12 @@ export const spawnStreamLogin = async <T>(
   opts: TStreamLoginOpts<T>,
 ): Promise<TStreamLoginResult<T>> => {
   const flow = resolveLoginFlow(opts.provider, opts.mode ?? "browser");
-  let proc: ReturnType<typeof Bun.spawn> | null = null;
+  let supervised: TSupervisedChild | null = null;
   if (
     !opts.slot.start(() => {
-      try {
-        proc?.kill();
-      } catch {
-        // already exited — its own exit handler ran
-      }
+      // Group-kill via the supervisor so a shell's `sleep` / vendor browser
+      // helper is not reparented to launchd when the login root dies.
+      void supervised?.terminate();
     }, flow)
   ) {
     return {
@@ -1290,15 +1291,19 @@ export const spawnStreamLogin = async <T>(
     };
   }
   try {
-    proc = Bun.spawn(sandboxSpawnArgs(opts.argv, { probe: opts.probe }), {
-      stdin: "ignore",
-      // Always pipe BOTH fds: the prompt may be on stdout (device-code) while
-      // the `--sandbox-exec` shim writes inner posix_spawn EPERM to stderr.
-      stdout: "pipe",
-      stderr: "pipe",
-      cwd: spawnCwd(opts.env),
-      env: spawnEnv(opts.env) ?? mergeSpawnEnv(process.env),
-    });
+    supervised = superviseSpawn(
+      sandboxSpawnArgs(opts.argv, { probe: opts.probe }),
+      {
+        kind: "login",
+        stdin: "ignore",
+        // Always pipe BOTH fds: the prompt may be on stdout (device-code) while
+        // the `--sandbox-exec` shim writes inner posix_spawn EPERM to stderr.
+        stdout: "pipe",
+        stderr: "pipe",
+        cwd: spawnCwd(opts.env),
+        env: spawnEnv(opts.env) ?? mergeSpawnEnv(process.env),
+      },
+    );
   } catch (error) {
     opts.slot.end(flow.flowId);
     const spawnFailure = spawnFailureFromError(error);
@@ -1311,7 +1316,7 @@ export const spawnStreamLogin = async <T>(
       flow,
     };
   }
-  if (proc === null) {
+  if (supervised === null) {
     opts.slot.end(flow.flowId);
     return {
       found: null,
@@ -1322,7 +1327,8 @@ export const spawnStreamLogin = async <T>(
       flow,
     };
   }
-  const child = proc;
+  const childHandle = supervised;
+  const child = childHandle.subprocess;
   emitLoginStarted(flow);
   try {
     const target = opts.argv[0];
@@ -1436,11 +1442,7 @@ export const spawnStreamLogin = async <T>(
         sleep(graceMs).then(() => null),
       ]);
       if (exitCode === null) {
-        try {
-          child.kill();
-        } catch {
-          // already gone
-        }
+        void childHandle.terminate();
       }
       opts.slot.end();
       return {
@@ -1452,11 +1454,7 @@ export const spawnStreamLogin = async <T>(
         flow,
       };
     }
-    try {
-      child.kill();
-    } catch {
-      // already gone
-    }
+    void childHandle.terminate();
     opts.slot.end();
     return {
       found: null,
@@ -1476,18 +1474,16 @@ export const spawnStreamLogin = async <T>(
   // poll waiting for the user. If the user neither finishes NOR cancels, nothing
   // else bounds it — an abandoned `codex login` would sit alive holding that
   // callback indefinitely (leaking a process + a stale pending_auth). Reap it at
-  // the login ceiling. A reap is an EXPIRY, not a crash, so report `exitCode: 0`
-  // → `finishInBackground` emits `poll_expired` (not `cli_crash`); a login that
-  // DID land a credential in the last moment still reports succeeded, since
-  // `finishInBackground` checks typed verify before the exit code.
+  // the login ceiling via the supervisor (group TERM→KILL) so a shell's
+  // `sleep`/vendor helper is not orphaned under launchd. A reap is an EXPIRY,
+  // not a crash, so report `exitCode: 0` → `finishInBackground` emits
+  // `poll_expired` (not `cli_crash`); a login that DID land a credential in the
+  // last moment still reports succeeded, since `finishInBackground` checks typed
+  // verify before the exit code.
   let reaped = false;
   const reaper = setTimeout(() => {
     reaped = true;
-    try {
-      child.kill();
-    } catch {
-      // already exited — its own exit handler ran
-    }
+    void childHandle.terminate();
   }, ceilingMs);
   void child.exited.then(async (exitCode) => {
     clearTimeout(reaper);

@@ -1595,6 +1595,8 @@ export const openUrl = (url: string): void => {
     // browser is a user-facing action like the session-PTY exemption — the
     // launcher must reach the real GUI session/LaunchServices state, and it
     // takes only the URL string (no filesystem payload to confine).
+    // Bare spawn (not superviseSpawn): fire-and-forget OS URL opener; we never
+    // kill it and must not group-track a user browser session.
     Bun.spawn(argv, {
       stdin: "ignore",
       stdout: "ignore",

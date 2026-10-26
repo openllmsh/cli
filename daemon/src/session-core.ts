@@ -155,6 +155,9 @@ const bunPtySpawner: TPtySpawner = (args) => {
   });
   let proc: ReturnType<typeof Bun.spawn>;
   try {
+    // Bare spawn (not superviseSpawn): interactive PTY session shells are
+    // durable user sessions, not disposable vendor children; they already
+    // lead their own process group via `detached: true` for job control.
     proc = Bun.spawn([...args.argv], {
       cwd: args.cwd,
       env: spawnEnv(args.env),

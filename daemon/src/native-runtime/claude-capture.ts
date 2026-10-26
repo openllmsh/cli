@@ -328,12 +328,10 @@ export const declineClaudeCaptureForUnsupportedControls = (
   canonical: TChatCompletionRequest,
 ): string | null => unsupportedNativeControl(canonical);
 
-const killProc = (proc: ReturnType<typeof Bun.spawn>): void => {
-  try {
-    proc.kill("SIGTERM");
-  } catch {
-    // already exited
-  }
+const killProc = (child: {
+  readonly terminate: () => Promise<unknown>;
+}): void => {
+  void child.terminate();
 };
 
 /**
@@ -695,9 +693,9 @@ export const runClaudeTextCapture = async (
   const cleaned = cleanNativeSpawnEnv(params.env);
   const spawnEnv = withClaudeCaptureBaseUrl(cleaned, loopback.baseUrl);
 
-  let proc: ReturnType<typeof Bun.spawn>;
+  let supervised: ReturnType<typeof spawnClaudeCli>;
   try {
-    proc = spawnClaudeCli({
+    supervised = spawnClaudeCli({
       bin: params.bin,
       providerModelId: params.providerModelId,
       systemText: params.systemText,
@@ -716,8 +714,9 @@ export const runClaudeTextCapture = async (
       diagnostics,
     };
   }
+  const proc = supervised.subprocess;
 
-  const kill = (): void => killProc(proc);
+  const kill = (): void => killProc(supervised);
   if (params.signal.aborted) {
     kill();
     loopback.stop();

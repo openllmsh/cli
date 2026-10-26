@@ -53,6 +53,8 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { join } from "node:path";
 import type { TChatCompletionChunk, TUsage } from "@openllmsh/protocol";
 import { estimateBodyTokens } from "@openllmsh/wire/lib/canonical/token-estimate";
+import type { TSupervisedChild } from "../child-supervisor";
+import { superviseSpawn } from "../child-supervisor";
 import { spawnCwd } from "../delegation/util";
 import { logInfo, safeDiagnosticMessage } from "../logger";
 import { sandboxSpawnArgs } from "../sandbox/exec";
@@ -454,6 +456,7 @@ export class AcpClient {
     }
   >();
   private readonly proc: ReturnType<typeof Bun.spawn>;
+  private readonly supervised: TSupervisedChild;
   private readonly stdin: { write: (s: string) => void; flush?: () => void };
   private disposed = false;
   private exited = false;
@@ -485,11 +488,12 @@ export class AcpClient {
       0,
       spawn?.cancelDisposeGraceMs ?? DEFAULT_ACP_CANCEL_DISPOSE_GRACE_MS,
     );
-    this.proc = Bun.spawn(
+    this.supervised = superviseSpawn(
       sandboxSpawnArgs(argv, {
         probe: spawn?.probe ?? unwrapKeychainSpawn("cursor"),
       }),
       {
+        kind: "native-runtime",
         stdin: "pipe",
         stdout: "pipe",
         // Native stderr is not a safe diagnostic channel (may contain secrets).
@@ -498,6 +502,7 @@ export class AcpClient {
         env: spawn?.exactEnv === true ? env : cleanNativeSpawnEnv(env),
       },
     );
+    this.proc = this.supervised.subprocess;
     this.stdin = this.proc.stdin as unknown as {
       write: (s: string) => void;
       flush?: () => void;
@@ -597,11 +602,8 @@ export class AcpClient {
     this.disposed = true;
     clearTimeout(this.cancelTimer);
     this.failAllPending(`${this.label} disposed`);
-    try {
-      this.proc.kill("SIGTERM");
-    } catch {
-      // already exited
-    }
+    // Group terminate so ACP helpers the agent spawned are not orphaned.
+    void this.supervised.terminate();
   }
 
   private failAllPending(reason: string): void {

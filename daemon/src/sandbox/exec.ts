@@ -183,6 +183,9 @@ export const runSandboxExec = async (
   }
   let proc: ReturnType<typeof Bun.spawn>;
   try {
+    // Bare spawn (not superviseSpawn): this IS the `--sandbox-exec` shim that
+    // already-supervised daemon children re-exec through; nesting another
+    // supervisor here would double-detach and break signal forwarding below.
     proc = Bun.spawn([...tail], {
       stdio: ["inherit", "inherit", "inherit"],
       env: process.env,
