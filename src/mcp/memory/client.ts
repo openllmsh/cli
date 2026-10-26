@@ -8,6 +8,7 @@
  */
 
 import type { TProjectRef } from "../../memory-hooks/project-ref";
+import { MemoryHookFailure } from "../../memory-hooks/transport";
 import type { THttpClientOptions } from "../../sdk/client";
 import type { PluginConfig } from "./config";
 
@@ -70,6 +71,10 @@ export interface SearchOptions {
 const MEMORY_ROOT_PRIMARY = "/api/integrations/memory";
 const MEMORY_ROOT_LEGACY = "/api/plugins/memory";
 
+/** Hook transport throws on non-OK; a 404 is a missing route, not a hard fault. */
+const isRouteMissing = (error: unknown): boolean =>
+  error instanceof MemoryHookFailure && error.diagnostic.status === 404;
+
 export class MemoryClient {
   private baseUrl: string;
   private apiKey: string;
@@ -116,16 +121,25 @@ export class MemoryClient {
     for (const root of roots) {
       const path = `${root}/${action}`;
       lastPath = path;
-      const res = await this.requestOnce(method, path, body);
-      if (res.ok) {
-        this.root = root;
-        if (res.status === 204) return undefined as unknown as T;
-        return (await res.json()) as T;
+      try {
+        const res = await this.requestOnce(method, path, body);
+        if (res.ok) {
+          this.root = root;
+          if (res.status === 204) return undefined as unknown as T;
+          return (await res.json()) as T;
+        }
+        lastStatus = res.status;
+        lastText = await res.text().catch(() => "");
+        // Only fall through to the legacy alias on a missing new route.
+        if (res.status !== 404 || root === MEMORY_ROOT_LEGACY) break;
+      } catch (error) {
+        if (isRouteMissing(error) && root !== MEMORY_ROOT_LEGACY) {
+          lastStatus = 404;
+          lastText = "";
+          continue;
+        }
+        throw error;
       }
-      lastStatus = res.status;
-      lastText = await res.text().catch(() => "");
-      // Only fall through to the legacy alias on a missing new route.
-      if (res.status !== 404 || root === MEMORY_ROOT_LEGACY) break;
     }
     throw new Error(`${method} ${lastPath} → ${lastStatus}: ${lastText}`);
   }
@@ -146,18 +160,25 @@ export class MemoryClient {
     let sawOnly404 = true;
     for (const root of roots) {
       const path = `${root}/enabled`;
-      const res = await this.requestOnce("GET", path, undefined);
-      if (res.ok) {
-        this.root = root;
-        const body = (await res.json()) as { enabled?: unknown };
-        // Only an explicit `false` disables. Missing/unknown fields (and
-        // older mocks that return an empty JSON body) stay enabled.
-        return body.enabled !== false;
-      }
-      if (res.status !== 404) {
-        sawOnly404 = false;
-        const text = await res.text().catch(() => "");
-        throw new Error(`GET ${path} → ${res.status}: ${text}`);
+      try {
+        const res = await this.requestOnce("GET", path, undefined);
+        if (res.ok) {
+          this.root = root;
+          const body = (await res.json()) as { enabled?: unknown };
+          // Only an explicit `false` disables. Missing/unknown fields (and
+          // older mocks that return an empty JSON body) stay enabled.
+          return body.enabled !== false;
+        }
+        if (res.status !== 404) {
+          sawOnly404 = false;
+          const text = await res.text().catch(() => "");
+          throw new Error(`GET ${path} → ${res.status}: ${text}`);
+        }
+      } catch (error) {
+        // Hook transport throws MemoryHookFailure on 404 — same as a
+        // missing route from an older gateway without the probe.
+        if (isRouteMissing(error)) continue;
+        throw error;
       }
     }
     if (sawOnly404) return true;

@@ -65,9 +65,16 @@ export const isPersonalMemoryEnabledCached = async (
   config: TCliConfig,
 ): Promise<boolean> => {
   if (!config.apiKey || !config.gatewayUrl) return false;
-  const path = cachePath(config);
-  const cached = readCache(path);
-  if (cached !== null) return cached.enabled;
+  // Cache path/read live inside the fail-open path: mkdirSync/read
+  // failures are a cache miss (never a rejected hook promise).
+  let path: string | null = null;
+  try {
+    path = cachePath(config);
+    const cached = readCache(path);
+    if (cached !== null) return cached.enabled;
+  } catch {
+    path = null;
+  }
   try {
     const client = new MemoryClient(
       {
@@ -79,7 +86,7 @@ export const isPersonalMemoryEnabledCached = async (
       { timeoutMs: 1_500, fetch: memoryHookTransport() },
     );
     const enabled = await client.isEnabled();
-    writeCache(path, enabled);
+    if (path !== null) writeCache(path, enabled);
     return enabled;
   } catch {
     // Fail-open = skip (do not block the prompt / extract).
