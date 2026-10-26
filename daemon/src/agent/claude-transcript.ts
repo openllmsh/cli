@@ -355,6 +355,14 @@ export type TTranscriptParser = {
   readonly turnField: () => { turn_id?: string };
   /** Turns opened so far (the ordinal of the latest `t<n>`). */
   readonly turnCount: () => number;
+  /** Background subagent calls launched and not yet finished. */
+  readonly openBackground: () => number;
+  /**
+   * Transcript text after what this parser saw (a history page's later
+   * turns): the task notifications in it finish the background calls still
+   * open, with no marker row. Everything else in it is ignored.
+   */
+  readonly settleBackground: (later: string) => void;
 };
 
 export type TTranscriptParserOptions = {
@@ -686,7 +694,11 @@ export const createTranscriptParser = (
   };
 
   /** A background task stopped: finish its call, mark the transcript. */
-  const onTaskNotification = (row: TJson, note: TTaskNotification): void => {
+  const onTaskNotification = (
+    row: TJson,
+    note: TTaskNotification,
+    marker = true,
+  ): void => {
     // By the call id; else by task id — a notification may carry no
     // tool-use-id, or the id of the SendMessage that resumed the agent.
     const callId =
@@ -718,6 +730,7 @@ export const createTranscriptParser = (
       },
       call.parent,
     );
+    if (!marker) return;
     item(
       "item.completed",
       `${str(row.uuid) ?? callId}:subagent-finished`,
@@ -993,6 +1006,29 @@ export const createTranscriptParser = (
       !SLOW_LOCAL_COMMANDS.has(turn.command),
     turnField,
     turnCount: () => turnCounter,
+    openBackground: () => background.size,
+    settleBackground: (later) => {
+      for (const line of later.split("\n")) {
+        if (background.size === 0) return;
+        if (!line.includes("task-notification")) continue;
+        let row: unknown;
+        try {
+          row = JSON.parse(line);
+        } catch {
+          continue;
+        }
+        if (!isRecord(row)) continue;
+        const raw =
+          row.type === "attachment" && isRecord(row.attachment)
+            ? promptOf(row.attachment.prompt)
+            : row.type === "user" && isRecord(row.message)
+              ? promptOf(row.message.content)
+              : null;
+        const note = raw === null ? null : parseTaskNotification(raw);
+        // The marker row belongs to the later turn; only the call settles.
+        if (note !== null) onTaskNotification(row, note, false);
+      }
+    },
   };
 };
 

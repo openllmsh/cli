@@ -194,6 +194,12 @@ export const createClaudeHistory = (args: {
       pageParser.push(bytes.toString("utf8"));
       // The page's last turn is over (a later turn exists): close it.
       pageParser.completeTurn();
+      // A background subagent launched here may finish in a later turn: its
+      // notification lies past the page, and the page would show it running.
+      if (pageParser.openBackground() > 0 && to < end) {
+        const later = readBytes(path, to, end);
+        if (later !== null) pageParser.settleBackground(later.toString("utf8"));
+      }
       const dir = subagentDirOf(path);
       for (const task of tasks) {
         events.push(
