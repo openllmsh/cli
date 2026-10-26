@@ -1019,34 +1019,6 @@ export const API_OPERATIONS: readonly TApiOperation[] = [
     "hasBody": true
   },
   {
-    "id": "teams.getPolicy",
-    "method": "get",
-    "path": "/teams/{id}/policy",
-    "summary": "",
-    "tags": [
-      "teams"
-    ],
-    "pathParams": [
-      "id"
-    ],
-    "queryParams": [],
-    "hasBody": false
-  },
-  {
-    "id": "teams.updatePolicy",
-    "method": "put",
-    "path": "/teams/{id}/policy",
-    "summary": "",
-    "tags": [
-      "teams"
-    ],
-    "pathParams": [
-      "id"
-    ],
-    "queryParams": [],
-    "hasBody": true
-  },
-  {
     "id": "teams.upsertShare",
     "method": "post",
     "path": "/teams/{id}/shares",
@@ -1074,21 +1046,6 @@ export const API_OPERATIONS: readonly TApiOperation[] = [
     ],
     "queryParams": [],
     "hasBody": false
-  },
-  {
-    "id": "teams.patchShare",
-    "method": "patch",
-    "path": "/teams/{id}/shares/{shareId}",
-    "summary": "",
-    "tags": [
-      "teams"
-    ],
-    "pathParams": [
-      "id",
-      "shareId"
-    ],
-    "queryParams": [],
-    "hasBody": true
   },
   {
     "id": "teams.getUsage",
