@@ -20,7 +20,7 @@
 >     `.app` in `/Applications` — no vendor config is written);
 >  2. serves ONE MCP server exposing the MCP-relevant subset of the native
 >     gateway API (inference + read-only ops; §MCP), local daemon auth commands,
->     the openllm-memory tool group, and the user's enabled marketplace
+>     the openllm-memory tool group when launch lists that builtin, and the user's enabled marketplace
 >     integrations proxied in as `<id>__<tool>` — clients never get a second
 >     MCP entry.
 >
