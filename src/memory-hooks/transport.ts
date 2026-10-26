@@ -7,6 +7,7 @@ export type THookStage =
   | "recall"
   | "whoami"
   | "projects"
+  | "match"
   | "context"
   | "inference"
   | "parse"
