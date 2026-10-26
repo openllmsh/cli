@@ -4,33 +4,29 @@
  * usage record can attribute the hop, and the local cap can charge actual
  * tokens on success.
  *
- * Single-threaded Bun event loop — nested dispatches restore the previous
- * token in `finally`.
+ * Bound with AsyncLocalStorage so concurrent tunnels (up to MAX_SERVED_TUNNELS)
+ * and stream-completion `report()` callbacks scheduled inside the dispatch
+ * keep the correct grant — module globals cannot.
  */
 
+import { AsyncLocalStorage } from "node:async_hooks";
 import type { TTeamGrant } from "@openllmsh/tunnel";
 
-let currentTeamGrant: string | null = null;
-let currentTeamGrantFields: TTeamGrant | null = null;
+type TTeamGrantStore = {
+  readonly token: string;
+  readonly grant: TTeamGrant;
+};
+
+const teamGrantContext = new AsyncLocalStorage<TTeamGrantStore>();
 
 export const withTeamGrant = async <T>(
   token: string,
   grant: TTeamGrant,
   run: () => Promise<T>,
-): Promise<T> => {
-  const previousToken = currentTeamGrant;
-  const previousFields = currentTeamGrantFields;
-  currentTeamGrant = token;
-  currentTeamGrantFields = grant;
-  try {
-    return await run();
-  } finally {
-    currentTeamGrant = previousToken;
-    currentTeamGrantFields = previousFields;
-  }
-};
+): Promise<T> => teamGrantContext.run({ token, grant }, run);
 
-export const currentTeamGrantToken = (): string | null => currentTeamGrant;
+export const currentTeamGrantToken = (): string | null =>
+  teamGrantContext.getStore()?.token ?? null;
 
 export const currentTeamGrantFieldsOf = (): TTeamGrant | null =>
-  currentTeamGrantFields;
+  teamGrantContext.getStore()?.grant ?? null;
