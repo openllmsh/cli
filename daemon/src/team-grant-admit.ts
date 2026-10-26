@@ -4,22 +4,30 @@
  * OPEN as `headers.team_grant` (mapped to `x-openllm-team-grant` on the
  * in-process Request). Same-user traffic omits the grant and is untouched.
  *
- * Checks: signature + expiry (bootstrap `team_grant_pubkey`), device_key_id
- * matches this daemon, model matches the request, local monthly cap when
- * `cap_tokens` is set, `teamShareable(provider)`, and the local kill switch.
+ * Checks: HMAC signature + expiry (bootstrap `team_grant_key`), device_key_id
+ * matches this daemon, device_user_id matches bootstrap `user_id` when known,
+ * model matches the request, local monthly cap when `cap_tokens` is set,
+ * `teamShareable(provider)`, and the local kill switch.
+ *
+ * Cross-user safety: a new relay stamps `peer_user_id` on every
+ * `channel_open`. When that id differs from this daemon's bootstrap
+ * `user_id`, a valid team_grant is REQUIRED. An older relay omits
+ * `peer_user_id`; grant-less opens then rely on the trusted-relay
+ * assumption (the relay never forwards a grant-less cross-user open).
  */
 
 import type { TTeamGrant } from "@openllmsh/tunnel";
 import { verifyTeamGrant } from "@openllmsh/tunnel";
-import { teamGrantPubkey } from "./config";
+import { daemonUserId, teamGrantKey } from "./config";
 import { daemonApiKeyId } from "./env";
 import { teamShareable } from "./team-shareable";
 import { teamUsageCanCharge } from "./team-usage";
 
 export type TTeamGrantAdmitDeps = {
   readonly now?: () => number;
-  readonly pubkey?: () => string | null;
+  readonly hmacKey?: () => string | null;
   readonly keyId?: () => string | null;
+  readonly userId?: () => string | null;
   readonly teamServeEnabled?: () => boolean;
   readonly shareable?: (provider: string) => boolean;
   /** Soft capacity check — must not permanently increment. */
@@ -30,7 +38,7 @@ export type TTeamGrantAdmitDeps = {
   ) => boolean;
   readonly verify?: (
     token: string,
-    pubkey: string,
+    hmacKey: string,
     nowMs: number,
   ) => Promise<TTeamGrant | null>;
 };
@@ -38,9 +46,10 @@ export type TTeamGrantAdmitDeps = {
 export type TTeamGrantAdmitReason =
   | "ok"
   | "kill_switch"
-  | "no_pubkey"
+  | "no_key"
   | "invalid_grant"
   | "wrong_device"
+  | "wrong_user"
   | "wrong_model"
   | "not_shareable"
   | "over_cap";
@@ -107,8 +116,9 @@ export const createTeamGrantAdmit = (
   ) => Promise<TTeamGrantAdmitResult>;
 } => {
   const now = deps.now ?? (() => Date.now());
-  const pubkey = deps.pubkey ?? teamGrantPubkey;
+  const hmacKey = deps.hmacKey ?? teamGrantKey;
   const keyId = deps.keyId ?? daemonApiKeyId;
+  const userId = deps.userId ?? daemonUserId;
   const enabled = deps.teamServeEnabled ?? teamServeEnabled;
   const shareable = deps.shareable ?? teamShareable;
   const canCharge = deps.canCharge ?? teamUsageCanCharge;
@@ -121,13 +131,17 @@ export const createTeamGrantAdmit = (
       reserveTokens: number,
     ): Promise<TTeamGrantAdmitResult> {
       if (!enabled()) return { ok: false, reason: "kill_switch" };
-      const pub = pubkey();
-      if (pub === null) return { ok: false, reason: "no_pubkey" };
-      const grant = await verify(token, pub, now());
+      const key = hmacKey();
+      if (key === null) return { ok: false, reason: "no_key" };
+      const grant = await verify(token, key, now());
       if (grant === null) return { ok: false, reason: "invalid_grant" };
       const selfKey = keyId();
       if (selfKey === null || grant.device_key_id !== selfKey) {
         return { ok: false, reason: "wrong_device" };
+      }
+      const selfUser = userId();
+      if (selfUser !== null && grant.device_user_id !== selfUser) {
+        return { ok: false, reason: "wrong_user" };
       }
       if (requestModel !== undefined && requestModel !== grant.model) {
         return { ok: false, reason: "wrong_model" };

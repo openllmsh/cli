@@ -34,6 +34,7 @@ import {
   agentSecurePrologue,
   serveStream,
 } from "@openllmsh/tunnel/streams";
+import { daemonUserId } from "./config";
 import {
   AGENT_PIN_REFUSALS,
   agentSessionRefusal,
@@ -934,6 +935,7 @@ export const acceptChannel = (frame: {
   readonly channel_id: string;
   readonly grant?: string;
   readonly team_grant?: string;
+  readonly peer_user_id?: string;
   readonly consumer?: "browser" | "daemon";
 }): void => {
   void acceptChannelAsync(frame);
@@ -943,6 +945,7 @@ const acceptChannelAsync = async (frame: {
   readonly channel_id: string;
   readonly grant?: string;
   readonly team_grant?: string;
+  readonly peer_user_id?: string;
   readonly consumer?: "browser" | "daemon";
 }): Promise<void> => {
   const send = sendFrame;
@@ -968,11 +971,34 @@ const acceptChannelAsync = async (frame: {
     });
     return;
   }
-  // Team cross-user opens carry team_grant (relay already verified). Re-check
-  // here: kill switch, pubkey, device binding. Model/cap run per request.
-  const teamGranted =
+  // Team admission. A new relay stamps peer_user_id (authenticated consumer).
+  // When that differs from our bootstrap user_id, a valid team_grant is
+  // REQUIRED. Absent peer_user_id (older relay) → today's behaviour: verify
+  // a present grant, otherwise trust the relay not to forward grant-less
+  // cross-user opens. Model/cap run per request.
+  const ownUserId = daemonUserId();
+  const peerUserId =
+    frame.peer_user_id !== undefined && frame.peer_user_id.length > 0
+      ? frame.peer_user_id
+      : null;
+  const hasGrant =
     frame.team_grant !== undefined && frame.team_grant.length > 0;
-  if (teamGranted && frame.team_grant !== undefined) {
+  const crossUser =
+    peerUserId !== null && ownUserId !== null && peerUserId !== ownUserId;
+  let teamGranted = false;
+  if (crossUser) {
+    if (!hasGrant || frame.team_grant === undefined) {
+      logWarn("mux-host", "channel_open cross-user without team grant", {
+        channelId: frame.channel_id,
+      });
+      send({
+        type: "channel_open_ack",
+        channel_id: frame.channel_id,
+        ok: false,
+        error: "unauthorized",
+      });
+      return;
+    }
     const decision = await admitTeamGrantOnChannel(frame.team_grant);
     if (!decision.ok) {
       logWarn("mux-host", "channel_open team grant refused", {
@@ -987,6 +1013,25 @@ const acceptChannelAsync = async (frame: {
       });
       return;
     }
+    teamGranted = true;
+  } else if (hasGrant && frame.team_grant !== undefined) {
+    // Grant present on a same-user / unknown-peer open — still verify
+    // (defence in depth; older relay path).
+    const decision = await admitTeamGrantOnChannel(frame.team_grant);
+    if (!decision.ok) {
+      logWarn("mux-host", "channel_open team grant refused", {
+        channelId: frame.channel_id,
+        reason: decision.reason,
+      });
+      send({
+        type: "channel_open_ack",
+        channel_id: frame.channel_id,
+        ok: false,
+        error: "unauthorized",
+      });
+      return;
+    }
+    teamGranted = true;
   }
   const existing = channels.get(frame.channel_id);
   if (existing !== undefined && existing.muxSink !== null) {

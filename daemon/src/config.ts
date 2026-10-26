@@ -192,11 +192,18 @@ export const planSigningKey = (): string | null =>
   snapshot.plan_signing_key ?? null;
 
 /**
- * Origin team-grant public key (SPKI b64) from bootstrap. Null when the cloud
- * has no `TEAM_GRANT_SIGNING_KEY` — team traffic is then refused.
+ * Authenticated account id from bootstrap. Null when an older cloud omitted
+ * it — peer_user_id cross-user detection then falls back to the trusted-relay
+ * assumption for grant-less opens.
  */
-export const teamGrantPubkey = (): string | null =>
-  snapshot.team_grant_pubkey ?? null;
+export const daemonUserId = (): string | null => snapshot.user_id ?? null;
+
+/**
+ * Per-contributor HMAC key for team grants from bootstrap. Null when the
+ * cloud has no `NEON_AUTH_COOKIE_SECRET` — team traffic is then refused.
+ */
+export const teamGrantKey = (): string | null =>
+  snapshot.team_grant_key ?? null;
 
 /** Sparse per-model user overrides from the authenticated bootstrap snapshot. */
 export const modelSettingsOverrides = (): TModelSettingsOverrides =>
