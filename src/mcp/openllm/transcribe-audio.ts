@@ -362,6 +362,7 @@ const transcriptionCards = async (config: {
   try {
     const res = await fetch(new URL("/v1/models", config.baseUrl), {
       headers: { authorization: `Bearer ${config.apiKey}` },
+      signal: AbortSignal.timeout(10_000),
     });
     if (!res.ok) return null;
     const body = (await res.json()) as { data?: unknown };
@@ -489,7 +490,11 @@ export const transcribeAudio = async (
     const cards = await transcriptionCards(config);
     // No catalog (older gateway, network blip): let the gateway pick, the
     // historical behaviour.
-    if (cards === null)
+    // An empty ranked chain (no media-default cards) does the same.
+    if (
+      cards === null ||
+      (model === undefined && rankTranscriptionCards(cards).length === 0)
+    )
       return await sendTranscription(
         await legacyUpload(source),
         { ...(model === undefined ? {} : { model }), ...language },
