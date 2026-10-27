@@ -439,10 +439,11 @@ export const createAgentDispatcher = (
         if (!session.exited) publish(session, event);
       },
     );
-    for (const consumer of session.consumers) {
-      if (consumer.focused === true) session.engineSession.focus?.();
-      else if (consumer.focused === false) session.engineSession.blur?.();
-    }
+    // One observer link carries the whole session's focus: any focused
+    // browser holds it; blur only when a browser reported and none is.
+    const states = [...session.consumers].map((c) => c.focused);
+    if (states.includes(true)) session.engineSession.focus?.();
+    else if (states.includes(false)) session.engineSession.blur?.();
     options.onSessionsChanged?.();
     logInfo("agent", "agent session started", {
       id: session.id,
@@ -1045,6 +1046,12 @@ export const createAgentDispatcher = (
         },
         blur: () => {
           state.focused = false;
+          // Another attached browser may still hold focus for the session.
+          if (
+            bound !== null &&
+            [...bound.consumers].some((c) => c.focused === true)
+          )
+            return;
           bound?.engineSession?.blur?.();
         },
         detach: () => {
