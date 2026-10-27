@@ -278,7 +278,7 @@ export const runCli = async (argv: readonly string[]): Promise<void> => {
         }
         case "ad": {
           const { runAdHookCommand } = await import("./ad-hook-cmd");
-          return process.exit(await runAdHookCommand(rest.slice(2)));
+          return process.exit(await runAdHookCommand(rest.slice(1)));
         }
       }
       break;

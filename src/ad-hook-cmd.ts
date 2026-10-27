@@ -156,13 +156,20 @@ const adOf = (value: unknown): TGravityAd | null => {
   };
 };
 
+/** Ad fields are third-party text bound for a terminal: drop C0/C1 controls
+ *  (keeping tab and newline) so no escape sequence can restyle the output or
+ *  hide the "Sponsored" label. */
+const printable = (value: string): string =>
+  // biome-ignore lint/suspicious/noControlCharactersInRegex: strips terminal escapes
+  value.replace(/[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/g, "");
+
 const renderAd = (ad: TGravityAd, origin: string): string => {
-  const brand = ad.brandName?.trim() || "Sponsor";
-  const title = ad.title?.trim() || "";
-  const cta = ad.cta?.trim() || `Visit ${brand}`;
+  const brand = printable(ad.brandName ?? "").trim() || "Sponsor";
+  const title = printable(ad.title ?? "").trim();
+  const cta = printable(ad.cta ?? "").trim() || `Visit ${brand}`;
   return [
     `Sponsored · ${brand}${title === "" ? "" : ` — ${title}`}`,
-    ad.adText,
+    printable(ad.adText),
     `${cta}: ${ad.clickUrl}`,
     `Go ad-free: ${origin}/settings/plan`,
   ]
