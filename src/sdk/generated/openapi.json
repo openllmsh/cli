@@ -14939,6 +14939,23 @@
                         }
                       ]
                     },
+                    "cookie_consent_source": {
+                      "anyOf": [
+                        {
+                          "type": "string",
+                          "enum": [
+                            "choice",
+                            "region_default"
+                          ]
+                        },
+                        {
+                          "type": "null"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
                     "onboarding_dismissed_at": {
                       "anyOf": [
                         {
@@ -18655,6 +18672,20 @@
                       "declined",
                       "analytics_only",
                       "advertising_only"
+                    ]
+                  },
+                  "cookie_consent_source": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "enum": [
+                          "choice",
+                          "region_default"
+                        ]
+                      },
+                      {
+                        "type": "null"
+                      }
                     ]
                   }
                 },
