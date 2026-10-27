@@ -333,10 +333,12 @@ const recallBucketLabel = (
   return project;
 };
 
+// Fail private: only an explicit "project" label can reach a team.
 const scopeOf = (value: unknown): TMemoryScope =>
-  value === "personal" ? "personal" : "project";
+  value === "project" ? "project" : "personal";
 
-const extractionOf = (body: unknown): TExtraction => {
+/** Parse the extractor reply; exported for tests. */
+export const extractionOf = (body: unknown): TExtraction => {
   const choices = recordOf(body)?.choices;
   const first = Array.isArray(choices) ? recordOf(choices[0]) : null;
   const content = recordOf(first?.message)?.content;
