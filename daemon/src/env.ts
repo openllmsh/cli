@@ -192,9 +192,14 @@ function shouldWriteEnvVar(key: string, devMode: boolean): boolean {
  */
 export const stateDir = (home?: string): string => {
   const override = process.env.OPENLLM_DAEMON_STATE_DIR;
+  const envHome = process.env.HOME;
   return override !== undefined && override.length > 0 && isAbsolute(override)
     ? override
-    : join(home ?? homedir(), ".openllm");
+    : join(
+        home ??
+          (envHome !== undefined && envHome.length > 0 ? envHome : homedir()),
+        ".openllm",
+      );
 };
 
 /** The structured log file, isolated from the installed daemon in dev mode. */

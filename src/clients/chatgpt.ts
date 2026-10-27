@@ -353,8 +353,10 @@ const installChatgpt = async (opts?: {
  * reads `hooks.<Event>` from any config layer, so nothing is written to
  * `~/.codex`.
  */
-export const chatgptHookArgs = (bin: string): readonly string[] =>
-  codexHookArgs(OVERLAYS.chatgpt.hooks, bin);
+export const chatgptHookArgs = (
+  bin: string,
+  tier: "free" | "trial" | "pro" | undefined,
+): readonly string[] => codexHookArgs(OVERLAYS.chatgpt.hooks, bin, tier);
 
 /** The user's own hook approvals, read-only, so our `hooks.state` override
  *  (a whole-table replace) never revokes them. */
@@ -517,7 +519,7 @@ export const launchChatgpt = async (): Promise<number> => {
   // directory") and the OpenLLM tools silently vanish. Pin a folder we own so
   // the server starts for every thread, whatever its project.
   const bin = openllmBinPath();
-  const hookArgs = chatgptHookArgs(bin);
+  const hookArgs = chatgptHookArgs(bin, tier);
   const trustArgs = await chatgptHookTrustArgs(codex, hookArgs);
   const mcpArgs = [
     ...args,

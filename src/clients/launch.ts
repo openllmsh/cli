@@ -187,6 +187,33 @@ const CLAUDE_KEY_HELPER = `#!/bin/sh\nprintf '%s' "$${HELPER_KEY_VAR}"\n`;
  * setting, so the two can never drift apart.
  */
 const CLAUDE_KEY_HELPER_REL = "hooks/api-key.sh";
+const AD_HOOK_COMMAND = "exec ad";
+
+type TClaudeHook = { readonly command?: unknown };
+type TClaudeHookGroup = { readonly hooks?: readonly TClaudeHook[] };
+type TClaudeHooks = Record<string, readonly TClaudeHookGroup[]>;
+
+/** Drops the contextual-ad Stop hook without disturbing the static overlay's other hooks. */
+const claudeHooksForTier = (
+  hooks: TClaudeHooks,
+  tier: TTier | undefined,
+): TClaudeHooks => {
+  if (tier === "free") return hooks;
+  const stop = hooks.Stop?.map((group) => ({
+    ...group,
+    hooks: group.hooks?.filter(
+      (hook) =>
+        typeof hook.command !== "string" ||
+        !hook.command.includes(AD_HOOK_COMMAND),
+    ),
+  })).filter((group) => (group.hooks?.length ?? 0) > 0);
+  return {
+    ...hooks,
+    ...(stop === undefined || stop.length === 0
+      ? { Stop: [] }
+      : { Stop: stop }),
+  };
+};
 
 /** Hooks use the validated launch snapshot, never a second account's file key. */
 const memoryHookEnv = (
@@ -225,6 +252,10 @@ const planClaude = (inputs: TLaunchInputs): TLaunchPlan => {
       "settings.json": `${JSON.stringify(
         {
           ...settings,
+          hooks: claudeHooksForTier(
+            settings.hooks as TClaudeHooks,
+            inputs.tier,
+          ),
           apiKeyHelper: helperPath,
           // Claude auto-fetches the user's claude.ai cloud MCP connectors, then
           // reports that it disabled them because another auth source takes
@@ -310,7 +341,7 @@ const planCodex = (inputs: TLaunchInputs): TLaunchPlan => {
   if (inputs.catalog !== undefined) files["models.json"] = inputs.catalog;
   const args = [
     ...codexOverrideArgs(overlayVars(inputs), inputs.catalog !== undefined),
-    ...codexHookArgs(OVERLAYS.codex.hooks, inputs.binPath),
+    ...codexHookArgs(OVERLAYS.codex.hooks, inputs.binPath, inputs.tier),
   ];
   return {
     files,
