@@ -1079,6 +1079,8 @@ export const createClaudeTuiSession = (
   );
   const attachmentCounter = attachmentCounterOf(attachmentsDir);
   let link: TPtyLink | null = null;
+  /** Latest observer presence while the PTY link is still opening. */
+  let focused: boolean | null = null;
   let ended = false;
   /**
    * How the session ended, for a link that opens after it did: close /
@@ -1582,6 +1584,8 @@ export const createClaudeTuiSession = (
         return;
       }
       link = opened;
+      if (focused === true) opened.focus();
+      else if (focused === false) opened.blur();
       hookKeys.add(opened.hostId);
       hookHandlers.set(opened.hostId, onHook);
       opened.onOutput(onOutput);
@@ -1963,8 +1967,14 @@ export const createClaudeTuiSession = (
       return true;
     },
     turnActive: () => parser.turnActive(),
-    focus: () => link?.focus(),
-    blur: () => link?.blur(),
+    focus: () => {
+      focused = true;
+      link?.focus();
+    },
+    blur: () => {
+      focused = false;
+      link?.blur();
+    },
     history: (beforeTurnId, limit) => history.page(beforeTurnId, limit),
     setModel: (model) => {
       if (ended)

@@ -26,6 +26,7 @@ import {
   DOCTOR_LOCAL_CAPABILITY_HEADER,
   encodeAgentLine,
   parseAgentCommand,
+  parseStreamCtrlPayload,
 } from "@openllmsh/protocol";
 import { isTrustedDeploymentOrigin } from "../cors";
 import { capabilityMatches } from "../doctor-report/capability";
@@ -200,6 +201,15 @@ export const createLocalAgentWebSocket = (
       parsed = JSON.parse(text) as unknown;
     } catch {
       connection.invalid(undefined);
+      return;
+    }
+    const ctrl = parseStreamCtrlPayload(parsed);
+    if (ctrl?.t === "focus") {
+      connection.focus();
+      return;
+    }
+    if (ctrl?.t === "blur") {
+      connection.blur();
       return;
     }
     const command: TAgentCommand | null = parseAgentCommand(parsed);

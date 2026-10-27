@@ -112,6 +112,8 @@ type TSession = {
   readonly id: string;
   readonly engine: TAgentEngine;
   engineSession: TAgentEngineSession | null;
+  /** Focus state last applied to the engine's single observer link. */
+  engineFocused: boolean;
   readonly consumers: Set<TConsumerState>;
   readonly log: TAgentEvent[];
   seq: number;
@@ -239,6 +241,22 @@ export const createAgentDispatcher = (
 
   // ── delivery ─────────────────────────────────────────────────────────
 
+  /** One observer link is focused while any attached browser is focused. */
+  const reconcileFocus = (session: TSession): void => {
+    const states = [...session.consumers].map((consumer) => consumer.focused);
+    if (states.includes(true)) {
+      if (!session.engineFocused) session.engineSession?.focus?.();
+      session.engineFocused = true;
+      return;
+    }
+    // A reported blur (including before bind) applies immediately. Once focus
+    // was applied, removing its last holder must blur even if no consumer has
+    // reported a new state yet.
+    if (states.includes(false) || session.engineFocused)
+      session.engineSession?.blur?.();
+    session.engineFocused = false;
+  };
+
   const dropConsumer = (
     session: TSession | null,
     state: TConsumerState,
@@ -246,8 +264,11 @@ export const createAgentDispatcher = (
   ): void => {
     if (state.gone) return;
     state.gone = true;
-    session?.consumers.delete(state);
-    if (session !== null) scheduleIdle(session);
+    if (session !== null) {
+      session.consumers.delete(state);
+      reconcileFocus(session);
+      scheduleIdle(session);
+    }
     if (code !== undefined) state.consumer.end(code);
   };
 
@@ -402,6 +423,7 @@ export const createAgentDispatcher = (
       id: args.id,
       engine: args.engine,
       engineSession: null,
+      engineFocused: false,
       consumers: new Set([args.state]),
       log: [],
       seq: 0,
@@ -439,11 +461,7 @@ export const createAgentDispatcher = (
         if (!session.exited) publish(session, event);
       },
     );
-    // One observer link carries the whole session's focus: any focused
-    // browser holds it; blur only when a browser reported and none is.
-    const states = [...session.consumers].map((c) => c.focused);
-    if (states.includes(true)) session.engineSession.focus?.();
-    else if (states.includes(false)) session.engineSession.blur?.();
+    reconcileFocus(session);
     options.onSessionsChanged?.();
     logInfo("agent", "agent session started", {
       id: session.id,
@@ -622,6 +640,7 @@ export const createAgentDispatcher = (
               );
               for (const event of window.events) deliver(live, state, event);
               live.consumers.add(state);
+              reconcileFocus(live);
               void state.chain.then(() => {
                 if (!state.gone) consumer.replayDone();
               });
@@ -1042,23 +1061,18 @@ export const createAgentDispatcher = (
         },
         focus: () => {
           state.focused = true;
-          bound?.engineSession?.focus?.();
+          if (bound !== null) reconcileFocus(bound);
         },
         blur: () => {
           state.focused = false;
-          // Another attached browser may still hold focus for the session.
-          if (
-            bound !== null &&
-            [...bound.consumers].some((c) => c.focused === true)
-          )
-            return;
-          bound?.engineSession?.blur?.();
+          if (bound !== null) reconcileFocus(bound);
         },
         detach: () => {
           if (state.gone) return;
           state.gone = true;
           if (bound !== null) {
             bound.consumers.delete(state);
+            reconcileFocus(bound);
             scheduleIdle(bound);
           }
         },
