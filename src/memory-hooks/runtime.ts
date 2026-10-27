@@ -34,6 +34,10 @@ import {
 /** Default recall HTTP budget (seconds). Hooks used to wait 5s; 2s fails open
  *  faster on a wedged gateway without changing successful RTT much. */
 const DEFAULT_RECALL_TIMEOUT_S = 2;
+/** Default extraction inference budget (seconds). Auto-save runs off the
+ *  prompt path, and the `lite` chain can lead with a subscription hop whose
+ *  native runtime cold-starts a vendor CLI — 30s cut those off mid-answer. */
+const DEFAULT_EXTRACT_TIMEOUT_S = 90;
 /** Short TTL for identical prompt recalls within one coding burst. */
 const RECALL_CACHE_TTL_MS = 60_000;
 
@@ -565,7 +569,16 @@ export const runMemoryExtraction = async (input: unknown): Promise<void> => {
           max_tokens: 700,
         },
       },
-      { timeoutMs: 30_000, fetch: memoryHookTransport() },
+      {
+        timeoutMs:
+          numeric(
+            memoryEnv("AUTO_TIMEOUT"),
+            DEFAULT_EXTRACT_TIMEOUT_S,
+            1,
+            300,
+          ) * 1000,
+        fetch: memoryHookTransport(),
+      },
     );
     const extraction = extractionOf(response.body);
     const mutations = cloudClient(config, 5000);
@@ -659,20 +672,21 @@ export const runMemoryExtraction = async (input: unknown): Promise<void> => {
       saved,
     );
   } catch (error) {
-    state.diagnostic(
-      diagnosticOf(
-        error,
-        error instanceof MemoryHookFailure
-          ? error.diagnostic.stage
-          : "inference",
-      ),
+    const diagnostic = diagnosticOf(
+      error,
+      error instanceof MemoryHookFailure ? error.diagnostic.stage : "inference",
     );
+    state.diagnostic(diagnostic);
     try {
       stamp(false);
     } catch {
       /* Unwritable state cannot poison future processing. */
     }
-    state.health("failure");
+    // A slow model answer is not a broken connection: the daemon/gateway was
+    // reached, and the turn is retried next Stop. Only real failures count
+    // toward the "repeatedly failed" notice.
+    if (!(diagnostic.stage === "inference" && diagnostic.code === "timeout"))
+      state.health("failure");
   } finally {
     session.release();
   }
