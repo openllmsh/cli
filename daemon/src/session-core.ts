@@ -6,9 +6,16 @@
  * or call openSession; this module never imports relay frame types.
  */
 
-import { existsSync, realpathSync, statSync } from "node:fs";
+import {
+  existsSync,
+  realpathSync,
+  renameSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import { homedir } from "node:os";
-import { basename, isAbsolute, resolve } from "node:path";
+import { basename, isAbsolute, join, resolve } from "node:path";
 import type {
   TDeviceSessionCli,
   TLocalSessionOpenPayload,
@@ -23,7 +30,7 @@ import { Terminal } from "@xterm/headless";
 import { resolveOpenllmCli } from "./cli-path";
 import { sessionEnv } from "./cli-paths";
 import { spawnEnv } from "./delegation/spawn";
-import { loadEnvFile } from "./env";
+import { loadEnvFile, stateDir } from "./env";
 import {
   openllmClientIdOf,
   pushDeviceCliResumeArgs,
@@ -216,6 +223,8 @@ type TAttachedConsumer = {
   readonly observer: boolean;
 };
 
+type TSessionUserAt = "terminal" | "browser";
+
 export type TSession = {
   readonly id: string;
   readonly cli: TDeviceSessionCli;
@@ -239,6 +248,8 @@ export type TSession = {
   /** The consumer driving the PTY size: whichever viewer focused or resized
    *  most recently. Input never changes this. */
   primaryConsumer: TAttachedConsumer | null;
+  /** Current ad surface authority, persisted by the session-host process. */
+  userAt: TSessionUserAt;
   /** Every active mux or broker consumer. */
   consumers: Set<TAttachedConsumer>;
   outSeq: number;
@@ -261,6 +272,27 @@ export type TSession = {
 
 const sessions = new Map<string, TSession>();
 let nextSessionGeneration = 0;
+
+const writeUserAt = (session: TSession, userAt: TSessionUserAt): void => {
+  session.userAt = userAt;
+  const directory = join(stateDir(), "sessions", session.id);
+  const target = join(directory, "focus.json");
+  const temp = join(directory, `.focus.json.${process.pid}.tmp`);
+  try {
+    writeFileSync(
+      temp,
+      `${JSON.stringify({ user_at: userAt, at: Date.now() })}\n`,
+      {
+        mode: 0o600,
+      },
+    );
+    renameSync(temp, target);
+  } catch {
+    try {
+      rmSync(temp, { force: true });
+    } catch {}
+  }
+};
 
 type TSessionLifecycleHooks = {
   readonly onSpawn: (session: TSession) => void;
@@ -624,6 +656,7 @@ const detachConsumer = (
   consumer: TAttachedConsumer,
 ): void => {
   if (!session.consumers.delete(consumer)) return;
+  if (consumer.observer) writeUserAt(session, "terminal");
   consumer.exitHandler = null;
   consumer.queuedBytes = 0;
   for (const unsubscribe of consumer.unsubscribe) unsubscribe();
@@ -1314,6 +1347,7 @@ export const openSession = (
       canonicalCols: frame.cols,
       canonicalRows: frame.rows,
       primaryConsumer: null,
+      userAt: "terminal",
       consumers: new Set(),
       outSeq: 0,
       startedAtMs: Date.now(),
@@ -1334,6 +1368,7 @@ export const openSession = (
     s.realPty = realPty;
     if (frame.title !== undefined) s.title = frame.title;
     sessions.set(s.id, s);
+    if (existing === undefined) writeUserAt(s, "terminal");
     evictStaleDeadSessions();
 
     try {
@@ -1547,24 +1582,32 @@ export const bindSessionStream = (
   consumer.unsubscribe.push(
     stream.onData((bytes) => {
       if (!session.consumers.has(consumer)) return;
-      // Input is input. It does NOT move primacy and does NOT resize the PTY —
-      // see the note on the primary at the top of this file. A keystroke is not
-      // a viewport announcement, and treating it as one made the canonical size
-      // alternate between two attached viewers as the user typed.
+      // Input does not change PTY primacy, but it does establish that the user
+      // is at this terminal for the per-turn ad surface.
+      if (!consumer.observer) writeUserAt(session, "terminal");
       session.pty?.write(bytes);
     }),
     stream.onCtrl((payload) => {
       if (!session.consumers.has(consumer)) return;
       const ctrl = parseLocalSessionCtrlPayload(decodeJsonPayload(payload));
-      if (consumer.observer && (ctrl?.t === "resize" || ctrl?.t === "focus"))
+      if (consumer.observer && ctrl?.t === "focus") {
+        writeUserAt(session, "browser");
         return;
+      }
+      if (consumer.observer && ctrl?.t === "blur") {
+        writeUserAt(session, "terminal");
+        return;
+      }
+      if (consumer.observer && ctrl?.t === "resize") return;
       if (ctrl?.t === "resize") {
+        writeUserAt(session, "terminal");
         // Someone dragged THIS viewer's window. A deliberate act on a specific
         // viewer, so it takes the PTY size with it.
         claimPrimary(session, consumer, Date.now());
         setConsumerViewport(session, consumer, ctrl.cols, ctrl.rows);
       }
       if (ctrl?.t === "focus") {
+        writeUserAt(session, "terminal");
         // The signal that decides who drives: tab focus, or a local attach
         // coming to the foreground. Carries the consumer's CURRENT dims, so a
         // pure focus never invents a size — and `setConsumerViewport` is a

@@ -42,6 +42,8 @@ export const createAgentStreamHandler =
       if (ctrl?.t === "heartbeat" && !ended) {
         stream.sendCtrl(encodeJsonPayload({ t: "heartbeat" }));
       }
+      if (ctrl?.t === "focus") connection.focus();
+      if (ctrl?.t === "blur") connection.blur();
     });
     const detach = (): void => {
       ended = true;

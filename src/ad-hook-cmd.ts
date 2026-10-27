@@ -5,8 +5,10 @@
  * configuration, no-fill, and every network or transcript error exit silently.
  */
 import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import type { TCliConfig } from "./env";
 import { cliConfig } from "./env";
+import { sessionHostDir } from "./session-host";
 
 /** Keep in parity with the schema/browser context contract (tested). */
 export const GRAVITY_CHAT_AD_MAX_CONTENT_CHARS = 8000;
@@ -237,12 +239,34 @@ const messagesFor = async (
   return fallback === null ? [] : [fallback];
 };
 
+/** True only for a valid host focus record that currently assigns the browser. */
+export const sessionUserAtBrowser = (
+  sessionId: string,
+  readFile: (path: string) => Uint8Array = (path) => readFileSync(path),
+): boolean => {
+  try {
+    const value: unknown = JSON.parse(
+      new TextDecoder().decode(
+        readFile(join(sessionHostDir(sessionId), "focus.json")),
+      ),
+    );
+    return (
+      typeof value === "object" &&
+      value !== null &&
+      (value as { readonly user_at?: unknown }).user_at === "browser"
+    );
+  } catch {
+    return false;
+  }
+};
+
 export type TAdHookDeps = {
   readonly env?: NodeJS.ProcessEnv;
   readonly stdin?: () => Promise<string>;
   readonly fetch?: typeof fetch;
   readonly config?: () => TCliConfig;
   readonly readFile?: (path: string) => Uint8Array;
+  readonly focusReadFile?: (path: string) => Uint8Array;
   readonly decompress?: (value: Uint8Array) => Promise<Uint8Array>;
   readonly write?: (text: string) => void;
 };
@@ -254,9 +278,11 @@ export const runAdHookCommand = async (
   const client = args[0] === "--client" ? args[1] : undefined;
   if (client !== "claude" && client !== "codex") return 0;
   const env = deps.env ?? process.env;
+  const deviceSessionId = (env.OPENLLM_DEVICE_SESSION_ID ?? "").trim();
   if (
-    (env.OPENLLM_DEVICE_SESSION_ID ?? "").trim() !== "" ||
-    env.OPENLLM_ADS === "0"
+    env.OPENLLM_ADS === "0" ||
+    (deviceSessionId !== "" &&
+      sessionUserAtBrowser(deviceSessionId, deps.focusReadFile))
   )
     return 0;
   const input = parseInput(await (deps.stdin ?? readStdin)());

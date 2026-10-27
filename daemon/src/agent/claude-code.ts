@@ -285,6 +285,9 @@ export type TPtyLink = {
    */
   readonly fresh: boolean;
   readonly write: (bytes: Uint8Array) => void;
+  /** Browser device-session gained/lost focus; observer controls only. */
+  readonly focus: () => void;
+  readonly blur: () => void;
   /** End the session (kill the PTY). */
   readonly kill: () => void;
   /** Drop the observer; the PTY keeps running. */
@@ -345,6 +348,14 @@ export const dialObserver = (
       fresh,
       write: (bytes) => {
         if (ws.readyState === WebSocket.OPEN) ws.send(new Uint8Array(bytes));
+      },
+      focus: () => {
+        if (ws.readyState === WebSocket.OPEN)
+          ws.send(JSON.stringify({ t: "ctrl", p: { t: "focus" } }));
+      },
+      blur: () => {
+        if (ws.readyState === WebSocket.OPEN)
+          ws.send(JSON.stringify({ t: "ctrl", p: { t: "blur" } }));
       },
       kill: () => {
         if (ws.readyState === WebSocket.OPEN)
@@ -1952,6 +1963,8 @@ export const createClaudeTuiSession = (
       return true;
     },
     turnActive: () => parser.turnActive(),
+    focus: () => link?.focus(),
+    blur: () => link?.blur(),
     history: (beforeTurnId, limit) => history.page(beforeTurnId, limit),
     setModel: (model) => {
       if (ended)

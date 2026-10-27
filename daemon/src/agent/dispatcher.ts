@@ -1032,6 +1032,8 @@ export const createAgentDispatcher = (
             undefined,
           );
         },
+        focus: () => bound?.engineSession?.focus?.(),
+        blur: () => bound?.engineSession?.blur?.(),
         detach: () => {
           if (state.gone) return;
           state.gone = true;

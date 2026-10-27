@@ -67,6 +67,9 @@ export type TAgentEngineSession = {
   readonly respond: (command: TAgentRespondCommand) => boolean;
   /** True while a turn runs (sends are queued meanwhile). */
   readonly turnActive: () => boolean;
+  /** Browser device-session focus controls, if this engine is PTY-backed. */
+  readonly focus?: () => void;
+  readonly blur?: () => void;
   /**
    * Switch the model (absent → the engine cannot). Applied when idle, queued
    * while a turn runs; `session.configured` confirms it.
@@ -123,6 +126,9 @@ export type TAgentConnection = {
   readonly command: (command: TAgentCommand) => void;
   /** A line that did not validate as a command. */
   readonly invalid: (value: unknown) => void;
+  /** Browser visibility follows the connected PTY observer when available. */
+  readonly focus: () => void;
+  readonly blur: () => void;
   /** The transport went away: leave the session running for a later attach. */
   readonly detach: () => void;
 };
