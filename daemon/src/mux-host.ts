@@ -741,6 +741,10 @@ const registerChannel = (
                 );
                 return;
               }
+              logInfo("mux-host", "team stream open received", {
+                channelId,
+                transport: "relay",
+              });
             }
             const handler = streamHandler ?? serveMuxOnStream;
             if (kind === "agent") {
