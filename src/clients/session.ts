@@ -32,6 +32,7 @@ import {
   waitForSessionHostSocket,
 } from "../session-host";
 import { attachBrokerSession } from "./attach";
+import { codexCatalogFor } from "./codex-catalog";
 import { fetchModelCatalog, fetchTier, resolveGateway } from "./gateway";
 import { hermesBundledTuiDir, hermesProfileConfigPath } from "./hermes-home";
 import { HOOK_SCRIPTS } from "./hooks";
@@ -521,7 +522,9 @@ export const runSessionClient = async (
 
   // Catalog and tier were started with preflight above — both fail open.
   // Marketplace integrations are served by `openllm mcp`.
-  const [catalog, tier] = await Promise.all([catalogPromise, tierPromise]);
+  const [fetched, tier] = await Promise.all([catalogPromise, tierPromise]);
+  const catalog =
+    client.catalogSlug === "codex" ? codexCatalogFor(fetched, bin) : fetched;
 
   const runDir = createRunDir(client.id);
   let code = 1;
