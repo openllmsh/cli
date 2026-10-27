@@ -203,9 +203,10 @@ export const admitTeamGrant = (
  */
 export const admitTeamGrantOnChannel = async (
   token: string,
-  deps: TTeamGrantAdmitDeps = {},
+  deps?: TTeamGrantAdmitDeps,
 ): Promise<TTeamGrantAdmitResult> => {
-  const admit = createTeamGrantAdmit(deps);
+  // Production shares one instance so the refresh rate limit holds.
+  const admit = deps === undefined ? defaultAdmit : createTeamGrantAdmit(deps);
   return admit.admit(token, undefined, 0);
 };
 
@@ -218,7 +219,7 @@ export const admitTeamGrantOnChannel = async (
 export const admitChannelTeamGrant = async (
   token: string,
   peerUserId: string | null,
-  deps: TTeamGrantAdmitDeps = {},
+  deps?: TTeamGrantAdmitDeps,
 ): Promise<TTeamGrantAdmitResult> => {
   const decision = await admitTeamGrantOnChannel(token, deps);
   if (
