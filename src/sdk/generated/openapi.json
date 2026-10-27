@@ -19338,6 +19338,22 @@
                     "minItems": 1,
                     "maxItems": 6
                   },
+                  "surface": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "enum": [
+                          "chat",
+                          "device_session",
+                          "cli_claude",
+                          "cli_codex"
+                        ]
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
                   "gravity_context": {
                     "anyOf": [
                       {
