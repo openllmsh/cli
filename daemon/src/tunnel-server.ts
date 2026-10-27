@@ -28,6 +28,7 @@ import {
   MEDIA_PERSISTENCE_BROWSER,
   MEDIA_PERSISTENCE_REQUEST_HEADER,
   TEAM_GRANT_HEADER,
+  TUNNEL_MEDIA_MAX_BODY_BYTES,
   TUNNELED_REQUEST_HEADER,
   TUNNELED_REQUEST_VALUE,
   tunnelResponseHeadersFromHttp,
@@ -217,6 +218,11 @@ export const createMuxTunnelServer =
           const next = await reader.read();
           if (next.done) break;
           total += next.value.byteLength;
+          if (total > TUNNEL_MEDIA_MAX_BODY_BYTES) {
+            void reader.cancel().catch(() => {});
+            complete();
+            throw new StreamResetError("unauthorized", "team_body_too_large");
+          }
           chunks.push(next.value);
         }
         const buffered = new Uint8Array(total);

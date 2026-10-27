@@ -924,7 +924,19 @@ export const acceptChannel = (frame: {
   readonly peer_user_id?: string;
   readonly consumer?: "browser" | "daemon";
 }): void => {
-  void acceptChannelAsync(frame);
+  // An admission throw must still answer the peer, or its open hangs.
+  acceptChannelAsync(frame).catch((err: unknown) => {
+    logWarn("mux-host", safeDiagnosticMessage`channel_open admission threw`, {
+      channelId: frame.channel_id,
+      err: err instanceof Error ? err.message : String(err),
+    });
+    sendFrame?.({
+      type: "channel_open_ack",
+      channel_id: frame.channel_id,
+      ok: false,
+      error: "unauthorized",
+    });
+  });
 };
 
 const acceptChannelAsync = async (frame: {
