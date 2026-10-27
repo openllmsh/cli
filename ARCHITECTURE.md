@@ -289,13 +289,28 @@ routes this one name, inside its group/listed-tool guard, to
 `src/mcp/openllm/transcribe-audio.ts`. That module alone imports filesystem and
 subprocess APIs; never import it from the browser-shared `tools.ts`.
 Relative paths resolve from the MCP server working directory. Regular-file
-checks and bounded reads enforce a 25 MiB input ceiling. WAV/MP3/WebM pass
-through by signature (provider codec restrictions still apply); Ogg/Opus,
-including `.ogg` voice notes, and FLAC require **system ffmpeg on PATH** and
-convert to mono 16 kHz signed PCM16 WAV. Other formats must be converted first.
-No codec is downloaded or bundled. Conversion is no-shell, forced-demuxer,
-pipe-only input, time/diagnostic/output bounded, and uses a private seekable
-WAV file so its headers contain final sizes; cleanup runs on all outcomes.
+checks and bounded reads enforce a 25 MiB input ceiling. Input is recognised
+by signature: WAV, MP3, WebM, M4A/MP4, Ogg/Opus and FLAC; other formats must be
+converted first. **The audio format never reorders the chain.** With `model`
+omitted the tool reads `/v1/models`, ranks the transcription cards the way the
+gateway's media default does (`default_tiers` `media`, host-included first, then
+`tier_rank`), and walks them in order, sending each hop an explicit `model`.
+For a hop declaring `audio_support.input_formats` it passes the bytes through
+when they already match, and otherwise converts them with **system ffmpeg on
+PATH** to mono 16 kHz PCM16 WAV or WebM/Opus. A hop without declared formats
+(API-key) gets WAV/MP3/WebM as-is, and Ogg/FLAC/MP4 as 16 kHz WAV. One conversion
+is reused by every hop that wants it. A failed conversion moves on to the next
+model, and so does a hop refused before acceptance (401/404/415/429, or a
+400/403 whose gateway `error.type` is pre-dispatch, e.g.
+`subscription_requires_daemon`). Any other failure (5xx, transport error,
+timeout, other 4xx) ends the walk, so audio a provider may have accepted is
+never resent and never billed twice. An explicit `model` is the only hop tried, and an unreadable
+catalog falls back to one gateway-selected request. The constants come from the
+generated `sdk/generated/inference-headers.ts`, because CLI command code never
+imports `@openllmsh/protocol`. No codec is downloaded or bundled. Conversion is
+no-shell, forced-demuxer, pipe-only input, time/diagnostic/output bounded, and
+writes to a private seekable file so WAV headers contain final sizes; cleanup
+runs on all outcomes.
 Converted audio is capped at 25 MiB too, and overflow is an error, not truncation.
 The adapter constructs the data URL internally, redacts echoed audio, and reuses
 `handleOpenllmTool` / `callOperation` for auth and transport. An absent model

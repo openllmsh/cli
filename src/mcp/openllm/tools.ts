@@ -296,7 +296,7 @@ export const openllmToolDefs = AGENT_OPERATIONS.filter(isMcpExposed).map(
     if (def.name !== TRANSCRIPTION_TOOL_NAME) return def;
     return {
       ...def,
-      description: `${def.description} Transcribe a local audio file by path; never send audio bytes or base64. Relative paths resolve from the MCP server working directory. Input and converted audio are limited to 25 MiB. WAV, MP3 and WebM pass through (provider codec restrictions still apply); Ogg (including Opus voice notes) and FLAC require system ffmpeg on PATH and are converted to mono 16 kHz PCM WAV.`,
+      description: `${def.description} Transcribe a local audio file by path; never send audio bytes or base64. Relative paths resolve from the MCP server working directory. Input and converted audio are limited to 25 MiB. Accepts WAV, MP3, WebM, M4A/MP4, Ogg/Opus and FLAC. With model omitted, models are tried in catalog order and the audio is converted (system ffmpeg on PATH) to whatever each model accepts, so the format never changes which model is used.`,
       inputSchema: {
         type: "object",
         properties: {
@@ -310,7 +310,7 @@ export const openllmToolDefs = AGENT_OPERATIONS.filter(isMcpExposed).map(
             type: "string",
             minLength: 1,
             description:
-              "Optional model; omit to use the catalog-ranked media default chain (subscription first, then a compatible API-key tail).",
+              "Optional model; omit to walk the catalog-ranked transcription chain, falling through to the next model on failure.",
           },
           language: {
             type: "string",

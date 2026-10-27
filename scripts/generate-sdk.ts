@@ -36,6 +36,8 @@ import {
   OPENLLM_RESOLVED_MODEL_HEADER,
 } from "../../protocol/inference-headers";
 import { OAuthProviderSlug } from "../../protocol/local-provider";
+import { MediaAudioInputFormat } from "../../protocol/media-default";
+import { MEDIA_DEFAULT_CLASS } from "../../protocol/models";
 
 const PKG_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const OUT_DIR = join(PKG_ROOT, "src", "sdk", "generated");
@@ -167,6 +169,11 @@ const inferenceHeadersSource = (): string => `/**
  */
 export const OPENLLM_RESOLVED_MODEL_HEADER = ${JSON.stringify(OPENLLM_RESOLVED_MODEL_HEADER)};
 export const OPENLLM_CHAIN_HEADER = ${JSON.stringify(OPENLLM_CHAIN_HEADER)};
+
+/** Generated from protocol models.ts / media-default.ts — the media default
+ *  chain class and the audio encodings a transcription card may declare. */
+export const MEDIA_DEFAULT_CLASS = ${JSON.stringify(MEDIA_DEFAULT_CLASS)};
+export const MEDIA_AUDIO_INPUT_FORMATS = ${JSON.stringify(MediaAudioInputFormat.literals)} as const;
 `;
 
 const localAuthSource = (): string =>
