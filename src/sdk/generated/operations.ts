@@ -1078,6 +1078,21 @@ export const API_OPERATIONS: readonly TApiOperation[] = [
     "hasBody": true
   },
   {
+    "id": "teams.setMemberSupplier",
+    "method": "put",
+    "path": "/teams/{id}/members/{userId}/supplier",
+    "summary": "",
+    "tags": [
+      "teams"
+    ],
+    "pathParams": [
+      "id",
+      "userId"
+    ],
+    "queryParams": [],
+    "hasBody": true
+  },
+  {
     "id": "teams.setProjectExclusion",
     "method": "post",
     "path": "/teams/{id}/project-exclusions",
