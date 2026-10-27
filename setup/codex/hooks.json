@@ -1,0 +1,15 @@
+{
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"{{OPENLLM_BIN}}\" exec ad --client codex",
+            "timeout": 3
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -10,6 +10,7 @@
  */
 
 import { FREE_TIER_MCP_GROUPS } from "../commands";
+import { codexHookArgs } from "./codex-hooks";
 import {
   deepMerge,
   parseJsonLoose,
@@ -309,6 +310,7 @@ const planCodex = (inputs: TLaunchInputs): TLaunchPlan => {
   if (inputs.catalog !== undefined) files["models.json"] = inputs.catalog;
   const args = [
     ...codexOverrideArgs(overlayVars(inputs), inputs.catalog !== undefined),
+    ...codexHookArgs(OVERLAYS.codex.hooks, inputs.binPath),
   ];
   return {
     files,

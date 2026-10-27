@@ -57,6 +57,10 @@ const run = async (): Promise<void> => {
     const { runMemoryHookCommand } = await import("./memory-hooks/command");
     process.exit(await runMemoryHookCommand(argv.slice(2)));
   }
+  if (first === "exec" && argv[1] === "ad") {
+    const { runAdHookCommand } = await import("./ad-hook-cmd");
+    process.exit(await runAdHookCommand(argv.slice(2)));
+  }
   // Throttled, detached — the command below never waits on it.
   const { maybeLaunchUpdateCheck } = await import("./launch-update");
   maybeLaunchUpdateCheck(first);

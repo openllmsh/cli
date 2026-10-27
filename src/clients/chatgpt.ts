@@ -33,6 +33,7 @@ import { basename, join } from "node:path";
 import { CLI_VERSION, cliBinPath, openllmDir, userHome } from "../env";
 import { requireCliApiKey } from "../onboarding";
 import { codexCatalogFor } from "./codex-catalog";
+import { codexHookArgs } from "./codex-hooks";
 import { fetchModelCatalog, fetchTier, resolveGateway } from "./gateway";
 import { codexOverrideArgs, mcpArgsJson } from "./launch";
 import {
@@ -43,7 +44,7 @@ import {
   uninstallMacLauncher,
 } from "./mac-launcher";
 import type { TJsonObject } from "./merge";
-import { substitute, tomlLeaves, tomlValue } from "./merge";
+import { tomlValue } from "./merge";
 import { OVERLAYS } from "./overlays";
 import { requireProviderRouting } from "./provider-preflight";
 import type { TClientFlags } from "./registry";
@@ -352,15 +353,8 @@ const installChatgpt = async (opts?: {
  * reads `hooks.<Event>` from any config layer, so nothing is written to
  * `~/.codex`.
  */
-export const chatgptHookArgs = (bin: string): readonly string[] => {
-  const doc = JSON.parse(
-    substitute(OVERLAYS.chatgpt.hooks, { OPENLLM_BIN: bin }),
-  ) as TJsonObject;
-  return tomlLeaves({
-    features: { hooks: true },
-    hooks: doc.hooks,
-  }).flatMap((pair) => ["-c", pair]);
-};
+export const chatgptHookArgs = (bin: string): readonly string[] =>
+  codexHookArgs(OVERLAYS.chatgpt.hooks, bin);
 
 /** The user's own hook approvals, read-only, so our `hooks.state` override
  *  (a whole-table replace) never revokes them. */

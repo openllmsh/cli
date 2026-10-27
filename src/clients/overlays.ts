@@ -17,6 +17,7 @@ import claudeMcp from "../../setup/claude/mcp.json" with { type: "text" };
 import claudeSettings from "../../setup/claude/settings.json" with {
   type: "text",
 };
+import codexHooks from "../../setup/codex/hooks.json" with { type: "text" };
 import codexOverrides from "../../setup/codex/overrides.toml" with {
   type: "text",
 };
@@ -58,7 +59,7 @@ export const OVERLAYS = {
     mcp: asText(claudeMcp),
     guidance: claudeGuidance,
   },
-  codex: { overrides: codexOverrides },
+  codex: { overrides: codexOverrides, hooks: asText(codexHooks) },
   // ChatGPT.app runs the same embedded codex binary, so its app-server shim
   // reuses the Codex overlay verbatim (`codexOverrideArgs`) — one source.
   chatgpt: { overrides: codexOverrides, hooks: asText(chatgptHooks) },

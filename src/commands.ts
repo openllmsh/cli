@@ -21,13 +21,14 @@ export type TCommand = {
 
 /** The exec groups — every CLI utility runs through ONE path:
  *  `openllm exec <group> <verb> […]`. */
-export const EXEC_GROUPS = ["memory", "agent"] as const;
+export const EXEC_GROUPS = ["memory", "agent", "ad"] as const;
 export type TExecGroup = (typeof EXEC_GROUPS)[number];
 
 /** Per-group verbs (drives dispatch, help, and completion). */
 export const EXEC_VERBS: Record<TExecGroup, readonly string[]> = {
   memory: ["recall", "extract", "extract-worker", "import"],
   agent: ["hook"],
+  ad: ["--client"],
 };
 
 export type TFlag = { readonly name: string; readonly description: string };
