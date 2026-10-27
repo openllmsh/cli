@@ -87,6 +87,13 @@ import {
   MAX_LAST_RESORT_COMPACTION_ROUNDS,
   shouldSkipHopForContext,
 } from "@openllmsh/wire/features/context-skip";
+import type { TAffinityMemory } from "@openllmsh/wire/features/conversation-affinity";
+import {
+  affinitySlot,
+  conversationAffinityKey,
+  createAffinityMemory,
+  preferRemembered,
+} from "@openllmsh/wire/features/conversation-affinity";
 import { applyOutputTokenBackfill } from "@openllmsh/wire/features/max-tokens-backfill";
 import { applyModelSettings } from "@openllmsh/wire/features/model-settings";
 import {
@@ -336,6 +343,11 @@ export type TWalkArgs = {
    * usable `Retry-After`. Defaults to {@link DEFAULT_HOP_RETRY_DELAY_MS}.
    */
   readonly hopRetryDelayMs?: number;
+  /**
+   * Which hop/account last served each conversation. Defaults to the
+   * daemon-wide memory; a caller with its own lifetime passes its own.
+   */
+  readonly affinity?: TAffinityMemory;
   /**
    * Cap applied to a parsed `Retry-After` delay before a same-hop retry.
    * Defaults to {@link DEFAULT_HOP_RETRY_AFTER_CAP_MS}.
@@ -2568,6 +2580,9 @@ const isContextOverflowResponse = async (
 // walk set a hop cooldown, so a recovery pass can distinguish "a sibling cooled
 // this" (bypassable) from "I cooled this" (already tried — never re-dial).
 let walkCounter = 0;
+// Which hop and account last served each conversation, so the next turn
+// lands on the same backend and keeps its prompt cache warm.
+const processAffinity = createAffinityMemory();
 
 // Sentinel returned by `serveSubscriptionHop` meaning "this hop produced no
 // terminal response — keep walking" (the extracted stand-in for a `continue`).
@@ -2625,6 +2640,8 @@ const walkPlan = async (
   let siblingAccountsRemaining = 0;
   // Canonical view of the inbound for native-runtime eligibility and encoding.
   const canonical = canonicalFromInbound(args.surface, args.rawBody);
+  const conversation = conversationAffinityKey(args.rawBody);
+  const conversationAffinity = args.affinity ?? processAffinity;
   const baseEstimate = estimateBodyTokens(args.rawBody);
 
   // The cloud's execution preference — a global value plus per-provider
@@ -2770,6 +2787,12 @@ const walkPlan = async (
       headers.set("x-openllm-hop-failures", formatHopFailuresHeader(hopTrail));
     }
     if (won) {
+      if (conversation !== null) {
+        conversationAffinity.set(
+          affinitySlot.hop(conversation),
+          winner.modelId,
+        );
+      }
       if (!headers.has("x-openllm-resolved-model")) {
         headers.set(
           "x-openllm-resolved-model",
@@ -2868,6 +2891,20 @@ const walkPlan = async (
     if (order.length === 0 && finalHop && fallbackIndex !== undefined) {
       order = [fallbackIndex];
     }
+    // Stay on the account that served this conversation while it is still
+    // eligible; quota ranking only decides for a new conversation.
+    const accountSlot =
+      conversation === null
+        ? null
+        : affinitySlot.account(conversation, hop.provider);
+    const rememberedAccount =
+      accountSlot === null ? undefined : conversationAffinity.get(accountSlot);
+    order = [
+      ...preferRemembered(
+        order,
+        (index) => String(index) === rememberedAccount,
+      ),
+    ];
     for (let i = 0; i < order.length; i += 1) {
       const index = order[i] ?? DEFAULT_ACCOUNT_INDEX;
       siblingAccountsRemaining = order.length - 1 - i;
@@ -2883,7 +2920,16 @@ const walkPlan = async (
             },
           ),
         );
-        if (served !== HOP_CONTINUE) return { ...served, accountIndex: index };
+        if (served !== HOP_CONTINUE) {
+          if (
+            accountSlot !== null &&
+            served.servedLocally &&
+            served.response.status < 400
+          ) {
+            conversationAffinity.set(accountSlot, String(index));
+          }
+          return { ...served, accountIndex: index };
+        }
       } finally {
         siblingAccountsRemaining = 0;
       }
@@ -2916,7 +2962,17 @@ const walkPlan = async (
   const queue: Array<{
     readonly hop: THop;
     readonly forceContextAttempt: boolean;
-  }> = hops.map((hop) => ({ hop, forceContextAttempt: false }));
+  }> = (() => {
+    // The hop that served this conversation last leads while it is still in
+    // the plan, so a fallback that took over keeps the conversation.
+    const remembered =
+      conversation === null
+        ? undefined
+        : conversationAffinity.get(affinitySlot.hop(conversation));
+    return preferRemembered(hops, (hop) => hop.modelId === remembered).map(
+      (hop) => ({ hop, forceContextAttempt: false }),
+    );
+  })();
   const contextSkipped: THop[] = [];
   // Subscription hops the pass-1 cooldown gate skipped — candidates for the
   // post-loop recovery pass (a transient cooldown may be advisory).
