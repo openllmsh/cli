@@ -22,6 +22,7 @@
  * assumption (the relay never forwards a grant-less cross-user open).
  */
 
+import { providerOfModel } from "@openllmsh/protocol";
 import type { TTeamGrant } from "@openllmsh/tunnel";
 import { verifyTeamGrant } from "@openllmsh/tunnel";
 import { daemonUserId, refreshBootstrap, teamGrantKey } from "./config";
@@ -71,14 +72,8 @@ export type TTeamGrantAdmitResult =
   | { readonly ok: true; readonly grant: TTeamGrant }
   | { readonly ok: false; readonly reason: TTeamGrantAdmitReason };
 
+export { providerOfModel } from "@openllmsh/protocol";
 export { teamServeEnabled } from "./team-serve";
-
-/** Best-effort provider slug from a model id (`provider/model` or bare). */
-export const providerOfModel = (model: string): string => {
-  const slash = model.indexOf("/");
-  if (slash <= 0) return model;
-  return model.slice(0, slash);
-};
 
 /** Estimate tokens to reserve locally when the grant carries `cap_tokens`. */
 export const estimateTeamReserveTokens = (body: Uint8Array): number => {
