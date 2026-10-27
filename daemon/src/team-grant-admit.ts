@@ -9,6 +9,12 @@
  * model matches the request, local monthly cap when `cap_tokens` is set,
  * `teamShareable(provider)`, and the local kill switch.
  *
+ * Secret rotation: when a grant fails to verify (or there is no key yet),
+ * the daemon re-fetches bootstrap once — at most once per
+ * {@link TEAM_GRANT_REFRESH_INTERVAL_MS} — and re-verifies only if the key
+ * changed. Grants live 30 s, so no stale grant outlives a rotation; there is
+ * no previous-key fallback.
+ *
  * Cross-user safety: a new relay stamps `peer_user_id` on every
  * `channel_open`. When that id differs from this daemon's bootstrap
  * `user_id`, a valid team_grant is REQUIRED. An older relay omits
@@ -18,7 +24,7 @@
 
 import type { TTeamGrant } from "@openllmsh/tunnel";
 import { verifyTeamGrant } from "@openllmsh/tunnel";
-import { daemonUserId, teamGrantKey } from "./config";
+import { daemonUserId, refreshBootstrap, teamGrantKey } from "./config";
 import { daemonApiKeyId } from "./env";
 import { teamShareable } from "./team-shareable";
 import { teamUsageCanCharge } from "./team-usage";
@@ -41,7 +47,12 @@ export type TTeamGrantAdmitDeps = {
     hmacKey: string,
     nowMs: number,
   ) => Promise<TTeamGrant | null>;
+  /** Re-fetch bootstrap (picks up a rotated `team_grant_key`). */
+  readonly refreshKey?: () => Promise<unknown>;
 };
+
+/** Minimum gap between rotation-recovery bootstrap refreshes. */
+export const TEAM_GRANT_REFRESH_INTERVAL_MS = 60_000;
 
 export type TTeamGrantAdmitReason =
   | "ok"
@@ -123,6 +134,35 @@ export const createTeamGrantAdmit = (
   const shareable = deps.shareable ?? teamShareable;
   const canCharge = deps.canCharge ?? teamUsageCanCharge;
   const verify = deps.verify ?? verifyTeamGrant;
+  const refreshKey = deps.refreshKey ?? refreshBootstrap;
+  let lastRefreshAt = Number.NEGATIVE_INFINITY;
+
+  // Verify with the current key; on failure refresh bootstrap (rate-limited)
+  // and retry once when the key changed.
+  const verifyWithRefresh = async (
+    token: string,
+  ): Promise<TTeamGrantAdmitResult> => {
+    const first = hmacKey();
+    const grant = first === null ? null : await verify(token, first, now());
+    if (grant !== null) return { ok: true, grant };
+    const failed: TTeamGrantAdmitResult = {
+      ok: false,
+      reason: first === null ? "no_key" : "invalid_grant",
+    };
+    if (now() - lastRefreshAt < TEAM_GRANT_REFRESH_INTERVAL_MS) return failed;
+    lastRefreshAt = now();
+    try {
+      await refreshKey();
+    } catch {
+      return failed;
+    }
+    const next = hmacKey();
+    if (next === null || next === first) return failed;
+    const retried = await verify(token, next, now());
+    return retried === null
+      ? { ok: false, reason: "invalid_grant" }
+      : { ok: true, grant: retried };
+  };
 
   return {
     async admit(
@@ -131,10 +171,9 @@ export const createTeamGrantAdmit = (
       reserveTokens: number,
     ): Promise<TTeamGrantAdmitResult> {
       if (!enabled()) return { ok: false, reason: "kill_switch" };
-      const key = hmacKey();
-      if (key === null) return { ok: false, reason: "no_key" };
-      const grant = await verify(token, key, now());
-      if (grant === null) return { ok: false, reason: "invalid_grant" };
+      const verified = await verifyWithRefresh(token);
+      if (!verified.ok) return verified;
+      const grant = verified.grant;
       const selfKey = keyId();
       if (selfKey === null || grant.device_key_id !== selfKey) {
         return { ok: false, reason: "wrong_device" };
