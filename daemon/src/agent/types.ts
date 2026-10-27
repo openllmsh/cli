@@ -57,6 +57,10 @@ export type TAgentEngineSession = {
    * False when nothing is queued.
    */
   readonly sendNow?: () => boolean;
+  /** Resume automatic delivery after an interrupt held the queue. */
+  readonly resumeQueue?: () => boolean;
+  /** Cancel one queued prompt by its daemon-minted id. */
+  readonly cancelQueued?: (queueId: string) => boolean;
   /** Interrupt the active turn; false when no turn is active. */
   readonly interrupt: () => boolean;
   /** Answer a pending approval / user-input request; false when unknown. */

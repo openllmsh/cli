@@ -23,6 +23,7 @@ import { DOCTOR_REPORT_CLI_CONSTANTS } from "./generated/doctor-report-cli";
 export const AGENT_HOOK_PATH = "/local/agent-hook";
 export const AGENT_HOOK_EVENT_NAMES = [
   "PermissionRequest",
+  "PreToolUse",
   "Stop",
   "SessionStart",
 ] as const;

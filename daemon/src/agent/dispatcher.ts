@@ -695,6 +695,56 @@ export const createAgentDispatcher = (
               );
             return;
           }
+          case "resume_queue": {
+            const session = bound;
+            const resumeQueue = session?.engineSession?.resumeQueue;
+            if (session === null || resumeQueue === undefined) {
+              error(
+                state,
+                session,
+                "unsupported",
+                "This engine cannot resume its queue.",
+                commandId,
+              );
+              return;
+            }
+            if (!withCommand(session, commandId, () => resumeQueue()))
+              error(
+                state,
+                session,
+                "queue_not_held",
+                "The queue is not paused.",
+                commandId,
+              );
+            return;
+          }
+          case "cancel_queued": {
+            const session = bound;
+            const cancelQueued = session?.engineSession?.cancelQueued;
+            if (session === null || cancelQueued === undefined) {
+              error(
+                state,
+                session,
+                "unsupported",
+                "This engine cannot cancel queued messages.",
+                commandId,
+              );
+              return;
+            }
+            if (
+              !withCommand(session, commandId, () =>
+                cancelQueued(command.queue_id),
+              )
+            )
+              error(
+                state,
+                session,
+                "queue_not_found",
+                "That queued message is no longer available.",
+                commandId,
+              );
+            return;
+          }
           case "set_model": {
             const session = bound;
             if (session === null || session.engineSession === null) {

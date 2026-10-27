@@ -56,6 +56,17 @@
           }
         ]
       }
+    ],
+    "PreToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"$OPENLLM_BIN\" exec agent hook PreToolUse",
+            "timeout": 5
+          }
+        ]
+      }
     ]
   }
 }

@@ -1151,7 +1151,15 @@ export const createClaudeTuiSession = (
    */
   let awaitingStop = false;
   /** Prompts sent mid-turn, oldest first (`send` → `flushQueue`). */
-  const promptQueue: TAgentSendInput[] = [];
+  const promptQueue: Array<{
+    readonly id: string;
+    readonly input: TAgentSendInput;
+  }> = [];
+  let queueCounter = 0;
+  /** Interrupt pauses delivery until the user explicitly resumes it. */
+  let queueHeld = false;
+  /** A send-now awaits readiness; queue entries remain durable until pasted. */
+  let sendNowPending = false;
   /** The turn this daemon opened last (its prompt was typed by `send`). */
   let sentTurnId: string | null = null;
   /**
@@ -1410,6 +1418,25 @@ export const createClaudeTuiSession = (
       maybeReady();
     }
     if (event === "SessionStart") return null;
+    if (event === "PreToolUse") {
+      // Claude's hook carries the same tool_use_id its transcript later uses.
+      // Emit a running row immediately; the transcript's item.started and its
+      // eventual tool_result then reconcile this id rather than adding a row.
+      const toolUseId = str(payload.tool_use_id);
+      if (toolUseId !== undefined)
+        emit({
+          type: "item.started",
+          ...parser.turnField(),
+          item_id: toolUseId,
+          item: {
+            kind: "tool_call",
+            tool_name: toolNameOf(payload.tool_name),
+            input: payload.tool_input,
+            status: "in_progress",
+          },
+        });
+      return null;
+    }
     if (event === "Stop") {
       // Claude's prompt takes input again only after ALL Stop hooks finish
       // (measured: keys typed ~130 ms after ours returned were dropped).
@@ -1615,6 +1642,9 @@ export const createClaudeTuiSession = (
     awaitingStop = true;
     const localCommand = parser.quietLocalCommand();
     whenReady(() => {
+      // An interrupt before readiness aborts this turn; never paste its prompt
+      // once the TUI later becomes ready.
+      if (ended || parser.turnField().turn_id !== turnId) return;
       writeText(`${PASTE_START}${text}${PASTE_END}`);
       setTimeout(() => writeText("\r"), submitDelayMs);
       if (!localCommand) return;
@@ -1643,21 +1673,39 @@ export const createClaudeTuiSession = (
       type: "queue.updated",
       // Clipped: the strip shows one line each, and the whole queue rides
       // every event (and the replay log), so full prompts would not fit.
-      prompts: promptQueue.map((input) =>
-        input.prompt.slice(0, AGENT_SHORT_TEXT_MAX_LENGTH),
-      ),
+      prompts: promptQueue.map(({ id, input }) => ({
+        id,
+        prompt: input.prompt.slice(0, AGENT_SHORT_TEXT_MAX_LENGTH),
+        attachment_count: input.attachments.length,
+      })),
+      held: queueHeld,
     });
   };
   /** The next queued prompt opens its turn once the session is idle again. */
   const flushQueue = (): void => {
     // Past any prompt that can't be sent, or the rest would wait forever:
     // nothing else re-triggers a flush while no turn runs.
-    while (!(ended || parser.turnActive() || awaitingStop || modelTyping)) {
-      const next = promptQueue.shift();
+    while (
+      !(
+        ended ||
+        queueHeld ||
+        parser.turnActive() ||
+        awaitingStop ||
+        modelTyping
+      )
+    ) {
+      const next = promptQueue[0];
       if (next === undefined) return;
+      const result = startTurn(next.input);
+      if (result.ok) {
+        // Remove only after the turn has committed its parser state and ready
+        // callback. An interrupt before readiness therefore keeps the prompt.
+        promptQueue.shift();
+        emitQueue();
+        return;
+      }
+      promptQueue.shift();
       emitQueue();
-      const result = startTurn(next);
-      if (result.ok) return;
       emit({
         type: "runtime.warning",
         message: `A queued message wasn't sent: ${result.message}`,
@@ -1697,7 +1745,8 @@ export const createClaudeTuiSession = (
             code: "queue_full",
             message: "too many messages are already queued",
           };
-        promptQueue.push(input);
+        queueCounter += 1;
+        promptQueue.push({ id: `q${queueCounter}`, input });
         emitQueue();
         return { ok: true, queued: true };
       }
@@ -1711,49 +1760,73 @@ export const createClaudeTuiSession = (
         flushQueue();
         return true;
       }
-      // Into Claude's own queue, then its send-now: the transcript records
-      // them as the next prompt, which closes the running turn's tracking
-      // and opens theirs (the parser's terminal-prompt path).
-      const batch = promptQueue.splice(0);
-      emitQueue();
+      // Into Claude's own queue, then its send-now. Keep entries durable until
+      // their paste is committed: an interrupt before readiness must not lose
+      // them.
+      if (sendNowPending) return true;
+      sendNowPending = true;
       whenReady(() => {
-        for (const input of batch) {
-          const prepared = preparePrompt(input);
+        sendNowPending = false;
+        if (ended || queueHeld) return;
+        const delivered: string[] = [];
+        for (const entry of promptQueue) {
+          const prepared = preparePrompt(entry.input);
           if (!prepared.ok) {
             emit({
               type: "runtime.warning",
               message: `A queued message wasn't sent: ${prepared.message}`,
             });
+            delivered.push(entry.id);
             continue;
           }
           writeText(`${PASTE_START}${prepared.text}${PASTE_END}`);
           writeText(QUEUE_SUBMIT);
+          delivered.push(entry.id);
         }
+        if (delivered.length === 0) return;
+        const deliveredIds = new Set(delivered);
+        promptQueue.splice(
+          0,
+          promptQueue.length,
+          ...promptQueue.filter((entry) => !deliveredIds.has(entry.id)),
+        );
+        emitQueue();
         setTimeout(() => {
           if (!ended) writeText(SEND_NOW);
         }, submitDelayMs);
       });
       return true;
     },
+    resumeQueue: (): boolean => {
+      if (ended || !queueHeld) return false;
+      queueHeld = false;
+      emitQueue();
+      flushQueue();
+      return true;
+    },
+    cancelQueued: (queueId: string): boolean => {
+      const index = promptQueue.findIndex((entry) => entry.id === queueId);
+      if (index < 0) return false;
+      promptQueue.splice(index, 1);
+      if (promptQueue.length === 0) queueHeld = false;
+      emitQueue();
+      return true;
+    },
     interrupt: () => {
       if (ended || !parser.turnActive()) return false;
-      // Before the TUI is ready the prompt is only queued via whenReady; Esc
-      // would dismiss a startup/trust dialog instead of aborting a turn.
-      // Drop the queued send and still settle so a later ready paste cannot
-      // fire the cancelled prompt.
-      if (!ready) {
-        queued.splice(0);
-      } else {
-        writeText(ESC);
-      }
+      // Before readiness Esc would dismiss a startup dialog. Preserve any
+      // queued callbacks and prompts; the queue is explicitly held instead.
+      // Hold only real entries; an empty hold would strand later prompts.
+      queueHeld = promptQueue.length > 0;
+      emitQueue();
+      if (ready) writeText(ESC);
       parser.abortTurn("interrupted");
-      // Esc abort often skips Claude's Stop hook; clear so a queued `/model`
-      // is not stuck behind awaitingStop forever, then settle like Stop does.
+      // Esc can skip Stop. Clear the turn state, but deliberately do not drain
+      // the held queue; only `resume_queue` may restart it.
       awaitingStop = false;
       setTimeout(() => {
         if (ended) return;
         applyModel();
-        flushQueue();
       }, deps.stopSettleMs ?? STOP_SETTLE_MS);
       return true;
     },
