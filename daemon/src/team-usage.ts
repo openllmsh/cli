@@ -2,22 +2,19 @@
  * Local per-share monthly token counter for team grants. Origin already
  * reserves against `team_usage_counters`; this is the contributor daemon's
  * second line when a grant carries `cap_tokens`. Persisted under the daemon
- * state dir (same atomic JSON pattern as usage-cache).
+ * state dir via the shared atomic JSON helpers (`json-state-cache`).
  *
  * Charge only on successful completion (actual tokens). Admit-time checks
  * are soft (`canCharge`) and never permanently increment — failed/aborted
  * hops leave the counter untouched.
  */
 
-import {
-  mkdirSync,
-  readFileSync,
-  renameSync,
-  rmSync,
-  writeFileSync,
-} from "node:fs";
 import { dirname, join } from "node:path";
 import { isDevMode, stateDir } from "./env";
+import { readJsonStateFile, writeJsonStateAtomic } from "./json-state-cache";
+
+/** Generous: one number per share-month. A bigger file is treated as empty. */
+const MAX_FILE_BYTES = 1024 * 1024;
 
 export type TTeamUsageDeps = {
   readonly now?: () => number;
@@ -63,46 +60,26 @@ const defaultPath = (): string =>
   join(stateDir(), isDevMode() ? "team-usage.dev.json" : "team-usage.json");
 
 const readFile = (path: string): TTeamUsageFile => {
-  try {
-    const raw = JSON.parse(readFileSync(path, "utf8")) as unknown;
-    if (
-      typeof raw !== "object" ||
-      raw === null ||
-      typeof (raw as TTeamUsageFile).periods !== "object" ||
-      (raw as TTeamUsageFile).periods === null
-    ) {
-      return { periods: {} };
-    }
-    const periods: Record<string, number> = {};
-    for (const [k, v] of Object.entries((raw as TTeamUsageFile).periods)) {
-      if (typeof v === "number" && Number.isFinite(v) && v >= 0) {
-        periods[k] = v;
-      }
-    }
-    return { periods };
-  } catch {
+  const raw = readJsonStateFile(path, MAX_FILE_BYTES);
+  if (
+    typeof raw !== "object" ||
+    raw === null ||
+    typeof (raw as TTeamUsageFile).periods !== "object" ||
+    (raw as TTeamUsageFile).periods === null
+  ) {
     return { periods: {} };
   }
-};
-
-const writeFileAtomic = (path: string, data: TTeamUsageFile): void => {
-  try {
-    mkdirSync(dirname(path), { recursive: true });
-  } catch {
-    // parent may already exist
-  }
-  const tmp = `${path}.${process.pid}.tmp`;
-  try {
-    writeFileSync(tmp, JSON.stringify(data), { mode: 0o600 });
-    renameSync(tmp, path);
-  } catch {
-    try {
-      rmSync(tmp, { force: true });
-    } catch {
-      // ignore
+  const periods: Record<string, number> = {};
+  for (const [k, v] of Object.entries((raw as TTeamUsageFile).periods)) {
+    if (typeof v === "number" && Number.isFinite(v) && v >= 0) {
+      periods[k] = v;
     }
   }
+  return { periods };
 };
+
+const writeFileAtomic = (path: string, data: TTeamUsageFile): void =>
+  writeJsonStateAtomic(dirname(path), path, data);
 
 export const createTeamUsageTracker = (
   deps: TTeamUsageDeps = {},
