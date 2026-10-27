@@ -17,10 +17,15 @@ import { memoryEnv } from "./env";
 import type { THookDiagnostic } from "./transport";
 import { recordOf } from "./transport";
 
-type THealthOutcome = "failure" | "success" | "saved" | "noop";
+type THealthOutcome = "failure" | "timeout" | "success" | "saved" | "noop";
+/** Consecutive inference timeouts before the notice fires. A timeout usually
+ *  means a slow model answer (the response only starts once it finishes), so
+ *  it takes a longer streak than a hard failure to call the endpoint stuck. */
+const TIMEOUT_NOTICE_STREAK = 5;
 type TComponent = "extract" | "recall";
 type TComponentHealth = {
   failures: number;
+  timeouts: number;
   outcome: THealthOutcome;
   ts: number;
   lastSuccess: number;
@@ -90,6 +95,7 @@ const healthOf = (value: unknown): TComponentHealth | undefined => {
   const outcome = data.outcome;
   if (
     outcome !== "failure" &&
+    outcome !== "timeout" &&
     outcome !== "success" &&
     outcome !== "saved" &&
     outcome !== "noop"
@@ -98,6 +104,7 @@ const healthOf = (value: unknown): TComponentHealth | undefined => {
   return {
     outcome,
     failures: numeric(data.failures, 0, 0, 100),
+    timeouts: numeric(data.timeouts, 0, 0, 100),
     ts: numeric(data.ts, 0),
     lastSave: numeric(data.lastSave, 0),
     lastSuccess: numeric(data.lastSuccess, 0),
@@ -197,14 +204,24 @@ export class MemoryHookState {
     this.updateHealth((state): void => {
       const previous = state[this.component];
       const now = Date.now();
+      const failed = outcome === "failure" || outcome === "timeout";
       state[this.component] = {
         outcome,
         ts: now,
+        // A timeout neither adds to nor clears the hard-failure streak.
         failures:
           outcome === "failure"
             ? Math.min(100, (previous?.failures ?? 0) + 1)
-            : 0,
-        lastSuccess: outcome === "failure" ? (previous?.lastSuccess ?? 0) : now,
+            : outcome === "timeout"
+              ? (previous?.failures ?? 0)
+              : 0,
+        timeouts:
+          outcome === "timeout"
+            ? Math.min(100, (previous?.timeouts ?? 0) + 1)
+            : failed
+              ? (previous?.timeouts ?? 0)
+              : 0,
+        lastSuccess: failed ? (previous?.lastSuccess ?? 0) : now,
         lastSave: saved > 0 ? now : (previous?.lastSave ?? 0),
       };
     });
@@ -215,7 +232,8 @@ export class MemoryHookState {
     this.updateHealth((state): void => {
       const degraded = (["extract", "recall"] as const).filter(
         (name) =>
-          (state[name]?.failures ?? 0) >= 2 &&
+          ((state[name]?.failures ?? 0) >= 2 ||
+            (state[name]?.timeouts ?? 0) >= TIMEOUT_NOTICE_STREAK) &&
           !(name === "extract" && memoryEnv("AUTO_SAVE") === "0"),
       );
       const now = Date.now();

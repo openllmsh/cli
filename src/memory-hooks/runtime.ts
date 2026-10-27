@@ -682,11 +682,13 @@ export const runMemoryExtraction = async (input: unknown): Promise<void> => {
     } catch {
       /* Unwritable state cannot poison future processing. */
     }
-    // A slow model answer is not a broken connection: the daemon/gateway was
-    // reached, and the turn is retried next Stop. Only real failures count
-    // toward the "repeatedly failed" notice.
-    if (!(diagnostic.stage === "inference" && diagnostic.code === "timeout"))
-      state.health("failure");
+    // A timeout is usually a slow model answer rather than a broken
+    // connection, so it counts on its own, longer streak (see state.ts).
+    state.health(
+      diagnostic.stage === "inference" && diagnostic.code === "timeout"
+        ? "timeout"
+        : "failure",
+    );
   } finally {
     session.release();
   }
