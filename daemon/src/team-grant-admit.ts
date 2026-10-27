@@ -26,6 +26,7 @@ import type { TTeamGrant } from "@openllmsh/tunnel";
 import { verifyTeamGrant } from "@openllmsh/tunnel";
 import { daemonUserId, refreshBootstrap, teamGrantKey } from "./config";
 import { daemonApiKeyId } from "./env";
+import { teamServeEnabled } from "./team-serve";
 import { teamShareable } from "./team-shareable";
 import { teamUsageCanCharge } from "./team-usage";
 
@@ -56,6 +57,7 @@ export const TEAM_GRANT_REFRESH_INTERVAL_MS = 60_000;
 
 export type TTeamGrantAdmitReason =
   | "ok"
+  | "wrong_consumer"
   | "kill_switch"
   | "no_key"
   | "invalid_grant"
@@ -69,16 +71,7 @@ export type TTeamGrantAdmitResult =
   | { readonly ok: true; readonly grant: TTeamGrant }
   | { readonly ok: false; readonly reason: TTeamGrantAdmitReason };
 
-/**
- * Local kill switch. `OPENLLM_TEAM_SERVE=0` / `false` / `off` refuses all
- * team traffic; absent or any other value leaves serving on.
- */
-export const teamServeEnabled = (): boolean => {
-  const raw = process.env.OPENLLM_TEAM_SERVE;
-  if (raw === undefined) return true;
-  const v = raw.trim().toLowerCase();
-  return v !== "0" && v !== "false" && v !== "off" && v !== "no";
-};
+export { teamServeEnabled } from "./team-serve";
 
 /** Best-effort provider slug from a model id (`provider/model` or bare). */
 export const providerOfModel = (model: string): string => {
@@ -219,4 +212,47 @@ export const admitTeamGrantOnChannel = async (
 ): Promise<TTeamGrantAdmitResult> => {
   const admit = createTeamGrantAdmit(deps);
   return admit.admit(token, undefined, 0);
+};
+
+/**
+ * Channel-open admission with the consumer binding: the relay stamps
+ * `peer_user_id` from the authenticated socket but does not verify grants,
+ * so the grant's consumer must match it — otherwise a leaked grant opens a
+ * channel for any authenticated user.
+ */
+export const admitChannelTeamGrant = async (
+  token: string,
+  peerUserId: string | null,
+  deps: TTeamGrantAdmitDeps = {},
+): Promise<TTeamGrantAdmitResult> => {
+  const decision = await admitTeamGrantOnChannel(token, deps);
+  if (
+    decision.ok &&
+    peerUserId !== null &&
+    decision.grant.consumer !== peerUserId
+  ) {
+    return { ok: false, reason: "wrong_consumer" };
+  }
+  return decision;
+};
+
+/** Pull `headers.team_grant` from a decoded mux stream OPEN payload. */
+export const teamGrantFromStreamOpen = (decoded: unknown): string | null => {
+  if (
+    decoded === null ||
+    typeof decoded !== "object" ||
+    Array.isArray(decoded)
+  ) {
+    return null;
+  }
+  const headers = (decoded as { headers?: unknown }).headers;
+  if (
+    headers === null ||
+    typeof headers !== "object" ||
+    Array.isArray(headers)
+  ) {
+    return null;
+  }
+  const token = (headers as { team_grant?: unknown }).team_grant;
+  return typeof token === "string" && token.length > 0 ? token : null;
 };

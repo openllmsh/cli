@@ -9,6 +9,7 @@
  * No subscription token or user content ever appears in these payloads
  * (the no-off-box-exfiltration invariant — see the proposal §6).
  */
+
 import { hostname } from "node:os";
 import type {
   TDaemonBootstrap,
@@ -43,6 +44,7 @@ import { Schema } from "effect";
 import { daemonEnv, deviceId } from "./env";
 import { hasIdentityConflict, setIdentityConflict } from "./identity-state";
 import { logWarn, safeDiagnosticMessage } from "./logger";
+import { teamServeEnabled } from "./team-serve";
 
 const decodeChannel = Schema.decodeUnknownSync(RelayChannelResponse);
 const decodePlan = Schema.decodeUnknownSync(DaemonPlanResponse);
@@ -228,18 +230,10 @@ const authHeaders = (): Record<string, string> => {
     [DAEMON_BOOTSTRAP_CAPS_HEADER]: [
       MODEL_CAPABILITIES_OPEN_CAP,
       // team_serve: origin only offers this device as a contributor when the
-      // local kill switch is on. Imported lazily to avoid a config cycle.
-      ...(teamServeEnabledForBootstrap() ? [TEAM_SERVE_CAP] : []),
+      // local kill switch is on.
+      ...(teamServeEnabled() ? [TEAM_SERVE_CAP] : []),
     ].join(","),
   };
-};
-
-/** Lazy so cloud-client does not import the admit module at top level. */
-const teamServeEnabledForBootstrap = (): boolean => {
-  const raw = process.env.OPENLLM_TEAM_SERVE;
-  if (raw === undefined) return true;
-  const v = raw.trim().toLowerCase();
-  return v !== "0" && v !== "false" && v !== "off" && v !== "no";
 };
 
 // Cloud control-plane calls must never hang forever. Bun's `fetch` has NO

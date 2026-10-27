@@ -45,7 +45,14 @@ import { daemonApiKeyId } from "./env";
 import { daemonPublicKey, daemonX25519Dh } from "./keypair";
 import { logDebug, logInfo, logWarn, safeDiagnosticMessage } from "./logger";
 import { serveMuxRealtime } from "./realtime-handler";
-import { admitTeamGrantOnChannel, teamServeEnabled } from "./team-grant-admit";
+import {
+  admitChannelTeamGrant,
+  teamGrantFromStreamOpen,
+} from "./team-grant-admit";
+
+export { teamGrantFromStreamOpen } from "./team-grant-admit";
+
+import { teamServeEnabled } from "./team-serve";
 import { admitMuxTunnel, serveMuxTunnel } from "./tunnel-server";
 
 /** Re-export so daemon tests keep a single import site with the mux host. */
@@ -192,27 +199,6 @@ export type TStreamGateContext = {
    * may open ONLY the `tunnel` stream kind — realtime/agent/others reset.
    */
   readonly teamGranted?: boolean;
-};
-
-/** Pull `headers.team_grant` from a decoded mux stream OPEN payload. */
-export const teamGrantFromStreamOpen = (decoded: unknown): string | null => {
-  if (
-    decoded === null ||
-    typeof decoded !== "object" ||
-    Array.isArray(decoded)
-  ) {
-    return null;
-  }
-  const headers = (decoded as { headers?: unknown }).headers;
-  if (
-    headers === null ||
-    typeof headers !== "object" ||
-    Array.isArray(headers)
-  ) {
-    return null;
-  }
-  const token = (headers as { team_grant?: unknown }).team_grant;
-  return typeof token === "string" && token.length > 0 ? token : null;
 };
 
 /**
@@ -999,18 +985,11 @@ const acceptChannelAsync = async (frame: {
       });
       return;
     }
-    const decision = await admitTeamGrantOnChannel(frame.team_grant);
-    // The relay stamps peer_user_id from the authenticated socket but no
-    // longer verifies grants, so the grant's consumer must match it here —
-    // otherwise a leaked grant opens a channel for any authenticated user.
-    const wrongConsumer =
-      decision.ok &&
-      peerUserId !== null &&
-      decision.grant.consumer !== peerUserId;
-    if (!decision.ok || wrongConsumer) {
+    const decision = await admitChannelTeamGrant(frame.team_grant, peerUserId);
+    if (!decision.ok) {
       logWarn("mux-host", "channel_open team grant refused", {
         channelId: frame.channel_id,
-        reason: decision.ok ? "wrong_consumer" : decision.reason,
+        reason: decision.reason,
       });
       send({
         type: "channel_open_ack",
@@ -1024,18 +1003,11 @@ const acceptChannelAsync = async (frame: {
   } else if (hasGrant && frame.team_grant !== undefined) {
     // Grant present on a same-user / unknown-peer open — still verify
     // (defence in depth; older relay path).
-    const decision = await admitTeamGrantOnChannel(frame.team_grant);
-    // The relay stamps peer_user_id from the authenticated socket but no
-    // longer verifies grants, so the grant's consumer must match it here —
-    // otherwise a leaked grant opens a channel for any authenticated user.
-    const wrongConsumer =
-      decision.ok &&
-      peerUserId !== null &&
-      decision.grant.consumer !== peerUserId;
-    if (!decision.ok || wrongConsumer) {
+    const decision = await admitChannelTeamGrant(frame.team_grant, peerUserId);
+    if (!decision.ok) {
       logWarn("mux-host", "channel_open team grant refused", {
         channelId: frame.channel_id,
-        reason: decision.ok ? "wrong_consumer" : decision.reason,
+        reason: decision.reason,
       });
       send({
         type: "channel_open_ack",

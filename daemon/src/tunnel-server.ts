@@ -41,6 +41,7 @@ import {
   admitTeamGrant,
   estimateTeamReserveTokens,
   modelFromRequestBody,
+  teamGrantFromStreamOpen,
 } from "./team-grant-admit";
 import { withTeamGrant } from "./team-request-context";
 
@@ -203,9 +204,8 @@ export const createMuxTunnelServer =
     try {
       // Buffer the body when a team grant is present so we can read `model`
       // and estimate a local reservation without consuming the dispatch stream.
-      let dispatchBody: ReadableStream<Uint8Array> | Uint8Array = body;
-      const teamToken = open.headers?.team_grant;
-      if (teamToken !== undefined) {
+      const teamToken = teamGrantFromStreamOpen(open);
+      if (teamToken !== null) {
         const chunks: Uint8Array[] = [];
         let total = 0;
         const reader = body.getReader();
@@ -225,7 +225,6 @@ export const createMuxTunnelServer =
           buffered.set(c, offset);
           offset += c.byteLength;
         }
-        dispatchBody = buffered;
         const decision = await admitTeamGrant(
           teamToken,
           modelFromRequestBody(buffered),
@@ -248,10 +247,7 @@ export const createMuxTunnelServer =
           onComplete: complete,
         };
       }
-      const response =
-        dispatchBody instanceof Uint8Array
-          ? await dispatch(tunneledRequest(open, dispatchBody, signal))
-          : await dispatch(tunneledRequest(open, dispatchBody, signal));
+      const response = await dispatch(tunneledRequest(open, body, signal));
       return {
         status: response.status,
         headers: tunnelResponseHeadersFromHttp(response.headers),
