@@ -20,6 +20,7 @@ import { sessionHostDir } from "./session-host";
 export const GRAVITY_CHAT_AD_MAX_CONTENT_CHARS = 8000;
 export const GRAVITY_CHAT_AD_CONTEXT_MESSAGES = 4;
 export const GRAVITY_CHAT_AD_FETCH_TIMEOUT_MS = 1500;
+export const GRAVITY_CHAT_AD_IMPRESSION_TIMEOUT_MS = 500;
 export const GRAVITY_CHAT_AD_TRANSCRIPT_TAIL_BYTES = 256 * 1024;
 
 export type TAdHookClient = "claude" | "codex";
@@ -388,7 +389,7 @@ export const runAdHookCommand = async (
         await (deps.fetch ?? fetch)(ad.impUrl, {
           credentials: "omit",
           referrerPolicy: "no-referrer",
-          signal: AbortSignal.timeout(GRAVITY_CHAT_AD_FETCH_TIMEOUT_MS),
+          signal: AbortSignal.timeout(GRAVITY_CHAT_AD_IMPRESSION_TIMEOUT_MS),
         });
       } catch {
         // Impression delivery is best-effort after the visible message.

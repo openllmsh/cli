@@ -6,7 +6,9 @@ const AD_HOOK_COMMAND = "exec ad";
 
 type TCodexHook = { readonly command?: unknown };
 type TCodexHookGroup = { readonly hooks?: readonly TCodexHook[] };
-type TCodexHooks = { readonly Stop?: readonly TCodexHookGroup[] };
+type TCodexHooks = TJsonObject & {
+  readonly Stop?: readonly TCodexHookGroup[];
+};
 
 /** Drops the contextual-ad Stop hook without disturbing other Codex hooks. */
 const hooksForTier = (
@@ -22,7 +24,9 @@ const hooksForTier = (
         !hook.command.includes(AD_HOOK_COMMAND),
     ),
   })).filter((group) => (group.hooks?.length ?? 0) > 0);
-  return stop === undefined || stop.length === 0 ? {} : { Stop: stop };
+  if (stop === undefined) return hooks;
+  const { Stop: _stop, ...otherHooks } = hooks;
+  return stop.length === 0 ? otherHooks : { ...otherHooks, Stop: stop };
 };
 
 /** Materialize embedded hooks as Codex session overrides for a launch tier. */
