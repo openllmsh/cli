@@ -221,6 +221,8 @@ type TAttachedConsumer = {
   lastActiveAtMs: number;
   /** Structured observer (agent engine): not a viewer — see `observer`. */
   readonly observer: boolean;
+  /** The browser observer currently owns the ad surface authority. */
+  focused: boolean;
 };
 
 type TSessionUserAt = "terminal" | "browser";
@@ -250,6 +252,8 @@ export type TSession = {
   primaryConsumer: TAttachedConsumer | null;
   /** Current ad surface authority, persisted by the session-host process. */
   userAt: TSessionUserAt;
+  /** Last authority durably written to focus.json; null means retry is needed. */
+  persistedUserAt: TSessionUserAt | null;
   /** Every active mux or broker consumer. */
   consumers: Set<TAttachedConsumer>;
   outSeq: number;
@@ -275,6 +279,9 @@ let nextSessionGeneration = 0;
 
 const writeUserAt = (session: TSession, userAt: TSessionUserAt): void => {
   session.userAt = userAt;
+  // Terminal input can arrive in tiny chunks. Avoid a synchronous write+rename
+  // unless the authority changed, while retaining a retry after a failed write.
+  if (session.persistedUserAt === userAt) return;
   const directory = join(stateDir(), "sessions", session.id);
   const target = join(directory, "focus.json");
   const temp = join(directory, `.focus.json.${process.pid}.tmp`);
@@ -287,11 +294,23 @@ const writeUserAt = (session: TSession, userAt: TSessionUserAt): void => {
       },
     );
     renameSync(temp, target);
+    session.persistedUserAt = userAt;
   } catch {
     try {
       rmSync(temp, { force: true });
     } catch {}
   }
+};
+
+const refreshUserAtFromObservers = (session: TSession): void => {
+  writeUserAt(
+    session,
+    [...session.consumers].some(
+      (consumer) => consumer.observer && consumer.focused,
+    )
+      ? "browser"
+      : "terminal",
+  );
 };
 
 type TSessionLifecycleHooks = {
@@ -656,7 +675,7 @@ const detachConsumer = (
   consumer: TAttachedConsumer,
 ): void => {
   if (!session.consumers.delete(consumer)) return;
-  if (consumer.observer) writeUserAt(session, "terminal");
+  if (consumer.observer) refreshUserAtFromObservers(session);
   consumer.exitHandler = null;
   consumer.queuedBytes = 0;
   for (const unsubscribe of consumer.unsubscribe) unsubscribe();
@@ -1348,6 +1367,7 @@ export const openSession = (
       canonicalRows: frame.rows,
       primaryConsumer: null,
       userAt: "terminal",
+      persistedUserAt: null,
       consumers: new Set(),
       outSeq: 0,
       startedAtMs: Date.now(),
@@ -1501,6 +1521,7 @@ export const bindSessionStream = (
     rows: open.rows,
     lastActiveAtMs: Date.now(),
     observer: open.observer === true,
+    focused: false,
   };
   const registerConsumer = (session: TSession): void => {
     if (session.consumers.has(consumer)) return;
@@ -1591,11 +1612,13 @@ export const bindSessionStream = (
       if (!session.consumers.has(consumer)) return;
       const ctrl = parseLocalSessionCtrlPayload(decodeJsonPayload(payload));
       if (consumer.observer && ctrl?.t === "focus") {
-        writeUserAt(session, "browser");
+        consumer.focused = true;
+        refreshUserAtFromObservers(session);
         return;
       }
       if (consumer.observer && ctrl?.t === "blur") {
-        writeUserAt(session, "terminal");
+        consumer.focused = false;
+        refreshUserAtFromObservers(session);
         return;
       }
       if (consumer.observer && ctrl?.t === "resize") return;

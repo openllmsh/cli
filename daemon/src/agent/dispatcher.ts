@@ -104,6 +104,8 @@ type TConsumerState = {
   queued: number;
   chain: Promise<void>;
   gone: boolean;
+  /** Latest browser presence signal received before the engine binds. */
+  focused: boolean | null;
 };
 
 type TSession = {
@@ -437,6 +439,10 @@ export const createAgentDispatcher = (
         if (!session.exited) publish(session, event);
       },
     );
+    for (const consumer of session.consumers) {
+      if (consumer.focused === true) session.engineSession.focus?.();
+      else if (consumer.focused === false) session.engineSession.blur?.();
+    }
     options.onSessionsChanged?.();
     logInfo("agent", "agent session started", {
       id: session.id,
@@ -469,6 +475,7 @@ export const createAgentDispatcher = (
         queued: 0,
         chain: Promise.resolve(),
         gone: false,
+        focused: null,
       };
       let bound: TSession | null = null;
       let closing = false;
@@ -1032,8 +1039,14 @@ export const createAgentDispatcher = (
             undefined,
           );
         },
-        focus: () => bound?.engineSession?.focus?.(),
-        blur: () => bound?.engineSession?.blur?.(),
+        focus: () => {
+          state.focused = true;
+          bound?.engineSession?.focus?.();
+        },
+        blur: () => {
+          state.focused = false;
+          bound?.engineSession?.blur?.();
+        },
         detach: () => {
           if (state.gone) return;
           state.gone = true;
