@@ -4,7 +4,13 @@
  * Hooks must never delay or disrupt the host client: malformed input, missing
  * configuration, no-fill, and every network or transcript error exit silently.
  */
-import { readFileSync } from "node:fs";
+import {
+  closeSync,
+  fstatSync,
+  openSync,
+  readFileSync,
+  readSync,
+} from "node:fs";
 import { join } from "node:path";
 import type { TCliConfig } from "./env";
 import { cliConfig } from "./env";
@@ -14,6 +20,7 @@ import { sessionHostDir } from "./session-host";
 export const GRAVITY_CHAT_AD_MAX_CONTENT_CHARS = 8000;
 export const GRAVITY_CHAT_AD_CONTEXT_MESSAGES = 4;
 export const GRAVITY_CHAT_AD_FETCH_TIMEOUT_MS = 1500;
+export const GRAVITY_CHAT_AD_TRANSCRIPT_TAIL_BYTES = 256 * 1024;
 
 export type TAdHookClient = "claude" | "codex";
 
@@ -62,63 +69,81 @@ const boundedMessage = (role: unknown, content: unknown): TAdMessage | null => {
   return { role, content: trimmed.slice(0, GRAVITY_CHAT_AD_MAX_CONTENT_CHARS) };
 };
 
+const messagesFromTail = (
+  jsonl: string,
+  startsMidLine: boolean,
+  parseLine: (line: string) => TAdMessage | null,
+): TAdMessage[] => {
+  const lines = jsonl.split("\n");
+  const messages: TAdMessage[] = [];
+  for (
+    let index = lines.length - 1;
+    index >= (startsMidLine ? 1 : 0);
+    index--
+  ) {
+    const parsed = parseLine(lines[index] ?? "");
+    if (parsed === null) continue;
+    messages.push(parsed);
+    if (messages.length === GRAVITY_CHAT_AD_CONTEXT_MESSAGES) break;
+  }
+  return messages.reverse();
+};
+
+const claudeMessage = (line: string): TAdMessage | null => {
+  try {
+    const item = JSON.parse(line) as {
+      type?: unknown;
+      message?: { role?: unknown; content?: unknown };
+    };
+    if (item.type !== "user" && item.type !== "assistant") return null;
+    const message = item.message;
+    return boundedMessage(
+      message?.role ?? item.type,
+      textContent(message?.content),
+    );
+  } catch {
+    return null;
+  }
+};
+
+const codexMessage = (line: string): TAdMessage | null => {
+  try {
+    const item = JSON.parse(line) as {
+      type?: unknown;
+      payload?: {
+        type?: unknown;
+        role?: unknown;
+        content?: ReadonlyArray<{ type?: unknown; text?: unknown }>;
+      };
+    };
+    if (item.type !== "response_item" || item.payload?.type !== "message")
+      return null;
+    const content = item.payload.content
+      ?.filter(
+        (
+          block,
+        ): block is {
+          readonly type: "input_text" | "output_text";
+          readonly text: string;
+        } =>
+          (block.type === "input_text" || block.type === "output_text") &&
+          typeof block.text === "string",
+      )
+      .map((block) => block.text)
+      .join("");
+    return boundedMessage(item.payload.role, content);
+  } catch {
+    return null;
+  }
+};
+
 /** Extract Claude Code's text user/assistant JSONL records. */
 export const parseClaudeTranscript = (jsonl: string): TAdMessage[] =>
-  jsonl
-    .split("\n")
-    .flatMap((line): TAdMessage[] => {
-      try {
-        const item = JSON.parse(line) as {
-          type?: unknown;
-          message?: { role?: unknown; content?: unknown };
-        };
-        if (item.type !== "user" && item.type !== "assistant") return [];
-        const message = item.message;
-        const content = textContent(message?.content);
-        const parsed = boundedMessage(message?.role ?? item.type, content);
-        return parsed === null ? [] : [parsed];
-      } catch {
-        return [];
-      }
-    })
-    .slice(-GRAVITY_CHAT_AD_CONTEXT_MESSAGES);
+  messagesFromTail(jsonl, false, claudeMessage);
 
 /** Extract Codex's `response_item` message records after zstd decompression. */
 export const parseCodexTranscript = (jsonl: string): TAdMessage[] =>
-  jsonl
-    .split("\n")
-    .flatMap((line): TAdMessage[] => {
-      try {
-        const item = JSON.parse(line) as {
-          type?: unknown;
-          payload?: {
-            type?: unknown;
-            role?: unknown;
-            content?: ReadonlyArray<{ type?: unknown; text?: unknown }>;
-          };
-        };
-        if (item.type !== "response_item" || item.payload?.type !== "message")
-          return [];
-        const content = item.payload.content
-          ?.filter(
-            (
-              block,
-            ): block is {
-              readonly type: "input_text" | "output_text";
-              readonly text: string;
-            } =>
-              (block.type === "input_text" || block.type === "output_text") &&
-              typeof block.text === "string",
-          )
-          .map((block) => block.text)
-          .join("");
-        const parsed = boundedMessage(item.payload.role, content);
-        return parsed === null ? [] : [parsed];
-      } catch {
-        return [];
-      }
-    })
-    .slice(-GRAVITY_CHAT_AD_CONTEXT_MESSAGES);
+  messagesFromTail(jsonl, false, codexMessage);
 
 const safeHttpUrl = (value: unknown): string | null => {
   if (typeof value !== "string") return null;
@@ -214,22 +239,53 @@ const readStdin = async (): Promise<string> => {
   }
 };
 
+type TTranscriptTail = {
+  readonly bytes: Uint8Array;
+  readonly startsMidLine: boolean;
+};
+
+const readClaudeTranscriptTail = (path: string): TTranscriptTail => {
+  const descriptor = openSync(path, "r");
+  try {
+    const size = fstatSync(descriptor).size;
+    const length = Math.min(size, GRAVITY_CHAT_AD_TRANSCRIPT_TAIL_BYTES);
+    const bytes = new Uint8Array(length);
+    readSync(descriptor, bytes, 0, length, size - length);
+    return { bytes, startsMidLine: size > length };
+  } finally {
+    closeSync(descriptor);
+  }
+};
+
 const messagesFor = async (
   client: TAdHookClient,
   input: TAdHookInput,
   readFile: (path: string) => Uint8Array,
+  readClaudeTail: (path: string) => TTranscriptTail,
   decompress: (value: Uint8Array) => Promise<Uint8Array>,
 ): Promise<TAdMessage[]> => {
   try {
     if (input.transcriptPath === null) throw new Error("No transcript");
-    const bytes = readFile(input.transcriptPath);
-    const text = new TextDecoder().decode(
-      client === "codex" ? await decompress(bytes) : bytes,
-    );
-    const messages =
+    const transcript =
+      client === "claude"
+        ? readClaudeTail(input.transcriptPath)
+        : (() => {
+            const bytes = readFile(input.transcriptPath);
+            return { bytes, startsMidLine: false };
+          })();
+    const decoded =
       client === "codex"
-        ? parseCodexTranscript(text)
-        : parseClaudeTranscript(text);
+        ? await decompress(transcript.bytes)
+        : transcript.bytes;
+    const tail = decoded.slice(-GRAVITY_CHAT_AD_TRANSCRIPT_TAIL_BYTES);
+    const text = new TextDecoder().decode(tail);
+    const startsMidLine =
+      transcript.startsMidLine || decoded.length > tail.length;
+    const messages = messagesFromTail(
+      text,
+      startsMidLine,
+      client === "codex" ? codexMessage : claudeMessage,
+    );
     if (messages.length > 0) return messages;
   } catch {
     // Codex explicitly falls back to the Stop payload when its compressed rollout
@@ -266,6 +322,7 @@ export type TAdHookDeps = {
   readonly fetch?: typeof fetch;
   readonly config?: () => TCliConfig;
   readonly readFile?: (path: string) => Uint8Array;
+  readonly readClaudeTail?: (path: string) => TTranscriptTail;
   readonly focusReadFile?: (path: string) => Uint8Array;
   readonly decompress?: (value: Uint8Array) => Promise<Uint8Array>;
   readonly write?: (text: string) => void;
@@ -293,6 +350,13 @@ export const runAdHookCommand = async (
     client,
     input,
     deps.readFile ?? ((path) => readFileSync(path)),
+    deps.readClaudeTail ??
+      (deps.readFile === undefined
+        ? readClaudeTranscriptTail
+        : (path) => ({
+            bytes: deps.readFile?.(path) ?? new Uint8Array(),
+            startsMidLine: false,
+          })),
     deps.decompress ?? (async (value) => Bun.zstdDecompress(value)),
   );
   if (messages.length === 0) return 0;
