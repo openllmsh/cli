@@ -1092,18 +1092,31 @@ export const createClaudeTuiSession = (
 
   /** Events of the drain in progress (emitted, possibly cut, at its end). */
   let drained: TAgentEvent[] | null = null;
+  /** Tool rows the PreToolUse hook already surfaced before the transcript. */
+  const preToolUseIds = new Set<string>();
   const parser = createTranscriptParser({
     emit: (event) => {
-      if (event.type === "session.configured" && event.model !== undefined)
+      // The transcript supplies the full input for a live hook row. Preserve
+      // its id but make it an update, so raw event consumers do not receive a
+      // second start for the same tool use.
+      const reconciled =
+        event.type === "item.started" && preToolUseIds.delete(event.item_id)
+          ? { ...event, type: "item.updated" as const }
+          : event;
+      if (
+        reconciled.type === "session.configured" &&
+        reconciled.model !== undefined
+      )
         modelInFlight = false;
       if (
-        event.type === "turn.completed" &&
-        event.stop_reason === LOCAL_COMMAND_STOP_REASON
+        reconciled.type === "turn.completed" &&
+        reconciled.stop_reason === LOCAL_COMMAND_STOP_REASON
       )
         // No Stop hook follows a local command: the prompt is idle again.
         settleAfterTurn();
       else if (
-        (event.type === "turn.completed" || event.type === "turn.aborted") &&
+        (reconciled.type === "turn.completed" ||
+          reconciled.type === "turn.aborted") &&
         promptQueue.length > 0
       )
         // The transcript can close the turn after the Stop hook settled;
@@ -1111,8 +1124,8 @@ export const createClaudeTuiSession = (
         setTimeout(() => {
           if (!ended) flushQueue();
         }, deps.stopSettleMs ?? STOP_SETTLE_MS);
-      if (drained !== null) drained.push(event);
-      else emit(event);
+      if (drained !== null) drained.push(reconciled);
+      else emit(reconciled);
     },
     toolOutputMax: AGENT_TOOL_OUTPUT_MAX_CHARS,
   });
@@ -1420,10 +1433,11 @@ export const createClaudeTuiSession = (
     if (event === "SessionStart") return null;
     if (event === "PreToolUse") {
       // Claude's hook carries the same tool_use_id its transcript later uses.
-      // Emit a running row immediately; the transcript's item.started and its
-      // eventual tool_result then reconcile this id rather than adding a row.
+      // The transcript's full call turns this into item.updated, not another
+      // item.started; its eventual tool_result completes the same id.
       const toolUseId = str(payload.tool_use_id);
-      if (toolUseId !== undefined)
+      if (toolUseId !== undefined) {
+        preToolUseIds.add(toolUseId);
         emit({
           type: "item.started",
           ...parser.turnField(),
@@ -1435,6 +1449,7 @@ export const createClaudeTuiSession = (
             status: "in_progress",
           },
         });
+      }
       return null;
     }
     if (event === "Stop") {
