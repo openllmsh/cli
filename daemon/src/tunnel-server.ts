@@ -39,12 +39,12 @@ import { handleInference } from "./listener";
 import { logInfo, logWarn, safeDiagnosticMessage } from "./logger";
 import { beginRequest, endRequest } from "./self-update";
 import {
-  admitTeamGrant,
+  admitTeamGrantForChannel,
   estimateTeamReserveTokens,
   modelFromRequestBody,
   teamGrantFromStreamOpen,
 } from "./team-grant-admit";
-import { withTeamGrant } from "./team-request-context";
+import { currentTeamChannelScope, withTeamGrant } from "./team-request-context";
 import {
   beginServedTunnel,
   canServeTunnel,
@@ -370,7 +370,12 @@ export const createMuxTunnelServer =
       // continues enforcing the media limit while dispatch is already running.
       // If the model is not early enough, retain the historical exact-body path.
       const teamToken = teamGrantFromStreamOpen(open);
-      if (teamToken !== null) {
+      const teamChannelScope = currentTeamChannelScope();
+      if (teamToken !== null && teamChannelScope === null) {
+        complete();
+        throw new StreamResetError("unauthorized", "team_channel_required");
+      }
+      if (teamToken !== null && teamChannelScope !== null) {
         const chunks: Uint8Array[] = [];
         let total = 0;
         let model: string | null = null;
@@ -416,10 +421,11 @@ export const createMuxTunnelServer =
           }
           const buffered = combineChunks(chunks, total);
           model = modelFromRequestBody(buffered);
-          const decision = await admitTeamGrant(
+          const decision = await admitTeamGrantForChannel(
             teamToken,
             model,
             estimateTeamReserveTokens(buffered),
+            teamChannelScope,
           );
           if (!decision.ok) {
             complete();
@@ -449,10 +455,11 @@ export const createMuxTunnelServer =
           };
         }
 
-        const decision = await admitTeamGrant(
+        const decision = await admitTeamGrantForChannel(
           teamToken,
           model,
           estimateTeamReserveTokens(combineChunks(chunks, total)),
+          teamChannelScope,
         );
         if (!decision.ok) {
           complete();

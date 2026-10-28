@@ -56,6 +56,7 @@ import {
 
 export { teamGrantFromStreamOpen } from "./team-grant-admit";
 
+import { withTeamChannelScope } from "./team-request-context";
 import { teamServeEnabled } from "./team-serve";
 import {
   admitMuxTunnel,
@@ -450,6 +451,12 @@ type TRelayChannel = {
    * sets it; a grant-less OPEN must not fall through to same-user dispatch).
    */
   teamGrantToken: string | null;
+  /** Relay-stamped scope from the admission grant. */
+  teamScope: {
+    readonly consumer: string;
+    readonly teamId: string;
+    readonly deviceKeyId: string;
+  } | null;
   /** The mux's durable inbound callback, installed exactly once at construction. */
   muxSink: ((bytes: Uint8Array | null) => void) | null;
   /** The relay binding currently allowed to deliver to {@link muxSink}. */
@@ -792,7 +799,12 @@ const registerChannel = (
               });
               return;
             }
-            handler(stream, open);
+            const scope = record?.teamScope ?? null;
+            if (scope === null) {
+              handler(stream, open);
+            } else {
+              withTeamChannelScope(scope, () => handler(stream, open));
+            }
           },
         }
       : {}),
@@ -815,6 +827,7 @@ const registerChannel = (
     seedGated: false,
     teamGranted: false,
     teamGrantToken: null,
+    teamScope: null,
     muxSink,
     sink: null,
     lastActivityAt: Date.now(),
@@ -1037,6 +1050,11 @@ const acceptChannelAsync = async (frame: {
   const crossUser =
     peerUserId !== null && ownUserId !== null && peerUserId !== ownUserId;
   let teamGranted = false;
+  let teamScope: {
+    readonly consumer: string;
+    readonly teamId: string;
+    readonly deviceKeyId: string;
+  } | null = null;
   if (crossUser) {
     if (!hasGrant || frame.team_grant === undefined) {
       logWarn("mux-host", "channel_open cross-user without team grant", {
@@ -1065,24 +1083,24 @@ const acceptChannelAsync = async (frame: {
       return;
     }
     teamGranted = true;
+    teamScope = {
+      consumer: decision.grant.consumer,
+      teamId: decision.grant.team_id,
+      deviceKeyId: decision.grant.device_key_id,
+    };
   } else if (hasGrant && frame.team_grant !== undefined) {
-    // Grant present on a same-user / unknown-peer open — still verify
-    // (defence in depth; older relay path).
-    const decision = await admitChannelTeamGrant(frame.team_grant, peerUserId);
-    if (!decision.ok) {
-      logWarn("mux-host", "channel_open team grant refused", {
-        channelId: frame.channel_id,
-        reason: decision.reason,
-      });
-      send({
-        type: "channel_open_ack",
-        channel_id: frame.channel_id,
-        ok: false,
-        error: "unauthorized",
-      });
-      return;
-    }
-    teamGranted = true;
+    // A same-user channel is never a team channel. Accepting a team grant here
+    // would let a caller turn an authenticated fleet channel into team traffic.
+    logWarn("mux-host", "channel_open same-user team grant refused", {
+      channelId: frame.channel_id,
+    });
+    send({
+      type: "channel_open_ack",
+      channel_id: frame.channel_id,
+      ok: false,
+      error: "unauthorized",
+    });
+    return;
   }
   const existing = channels.get(frame.channel_id);
   if (existing !== undefined && existing.muxSink !== null) {
@@ -1130,6 +1148,7 @@ const acceptChannelAsync = async (frame: {
     existing.seedGated = gated;
     existing.teamGranted = teamGranted;
     existing.teamGrantToken = teamGranted ? (frame.team_grant ?? null) : null;
+    existing.teamScope = teamScope;
     existing.consumer = frame.consumer ?? "browser";
     bindSink(existing);
     touchChannel(existing);
@@ -1148,6 +1167,7 @@ const acceptChannelAsync = async (frame: {
   record.seedGated = seedGated;
   record.teamGranted = teamGranted;
   record.teamGrantToken = teamGranted ? (frame.team_grant ?? null) : null;
+  record.teamScope = teamScope;
   record.consumer = frame.consumer ?? "browser";
   logInfo("mux-host", "channel_open accepted", {
     channelId: frame.channel_id,

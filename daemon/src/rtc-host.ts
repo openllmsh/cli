@@ -53,6 +53,7 @@ import {
   serveRtcOnStream,
 } from "./mux-host";
 import { admitChannelTeamGrant } from "./team-grant-admit";
+import { withTeamChannelScope } from "./team-request-context";
 
 /** Bound concurrent RTC sessions per daemon process. */
 const MAX_CONCURRENT_RTC = 16;
@@ -77,6 +78,11 @@ type TRtcSession = {
   readonly teamGranted: boolean;
   /** Channel-admission grant; every tunnel OPEN carries a fresh grant. */
   readonly teamGrantToken: string | null;
+  readonly teamScope: {
+    readonly consumer: string;
+    readonly teamId: string;
+    readonly deviceKeyId: string;
+  } | null;
   closed: boolean;
   nacked: boolean;
   handshakeTimer: ReturnType<typeof setTimeout> | null;
@@ -190,6 +196,11 @@ export const createRtcMuxOnStream =
     readonly seedGated: boolean;
     readonly teamGranted?: boolean;
     readonly teamGrantToken?: string | null;
+    readonly teamScope?: {
+      readonly consumer: string;
+      readonly teamId: string;
+      readonly deviceKeyId: string;
+    } | null;
     readonly handler: typeof serveRtcOnStream;
   }): typeof serveRtcOnStream =>
   (stream, open) => {
@@ -215,7 +226,13 @@ export const createRtcMuxOnStream =
     ) {
       return;
     }
-    options.handler(stream, open);
+    if (options.teamScope === undefined || options.teamScope === null) {
+      options.handler(stream, open);
+    } else {
+      withTeamChannelScope(options.teamScope, () =>
+        options.handler(stream, open),
+      );
+    }
   };
 
 /**
@@ -407,6 +424,7 @@ export const createRtcHost = (): TRtcHost => {
           seedGated: session.seedGated,
           teamGranted: session.teamGranted,
           teamGrantToken: session.teamGrantToken,
+          teamScope: session.teamScope,
           handler: streamHandler ?? serveRtcOnStream,
         }),
         onClose: () => {
@@ -516,6 +534,11 @@ export const createRtcHost = (): TRtcHost => {
       peerUserId !== null && ownUserId !== null && peerUserId !== ownUserId;
     let teamGranted = false;
     let teamGrantToken: string | null = null;
+    let teamScope: {
+      readonly consumer: string;
+      readonly teamId: string;
+      readonly deviceKeyId: string;
+    } | null = null;
     let seedGated = false;
     if (crossUser) {
       const sealedGrant = "teamGrant" in inner ? inner.teamGrant : undefined;
@@ -545,6 +568,11 @@ export const createRtcHost = (): TRtcHost => {
       }
       teamGranted = true;
       teamGrantToken = sealedGrant;
+      teamScope = {
+        consumer: decision.grant.consumer,
+        teamId: decision.grant.team_id,
+        deviceKeyId: decision.grant.device_key_id,
+      };
     } else {
       // Browser consumers need a provisioned pin + v2 device grant. Fleet
       // daemon→daemon hops skip the offer gate but never get seed-gated kinds.
@@ -607,6 +635,7 @@ export const createRtcHost = (): TRtcHost => {
       seedGated,
       teamGranted,
       teamGrantToken,
+      teamScope,
       closed: false,
       nacked: false,
       handshakeTimer: null,

@@ -17,7 +17,14 @@ type TTeamGrantStore = {
   readonly grant: TTeamGrant;
 };
 
+export type TTeamChannelScope = {
+  readonly consumer: string;
+  readonly teamId: string;
+  readonly deviceKeyId: string;
+};
+
 const teamGrantContext = new AsyncLocalStorage<TTeamGrantStore>();
+const teamChannelScopeContext = new AsyncLocalStorage<TTeamChannelScope>();
 
 export const withTeamGrant = async <T>(
   token: string,
@@ -30,3 +37,12 @@ export const currentTeamGrantToken = (): string | null =>
 
 export const currentTeamGrantFieldsOf = (): TTeamGrant | null =>
   teamGrantContext.getStore()?.grant ?? null;
+
+/** Relay-stamped channel scope, retained until each OPEN is dispatched. */
+export const withTeamChannelScope = <T>(
+  scope: TTeamChannelScope,
+  run: () => T,
+): T => teamChannelScopeContext.run(scope, run);
+
+export const currentTeamChannelScope = (): TTeamChannelScope | null =>
+  teamChannelScopeContext.getStore() ?? null;
