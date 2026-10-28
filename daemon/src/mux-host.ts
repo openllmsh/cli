@@ -1067,20 +1067,27 @@ const acceptChannelAsync = async (frame: {
     });
     return;
   }
-  // Team admission. A new relay stamps peer_user_id (authenticated consumer).
-  // When that differs from our bootstrap user_id, a valid team_grant is
-  // REQUIRED. Absent peer_user_id (older relay) → today's behaviour: verify
-  // a present grant, otherwise trust the relay not to forward grant-less
-  // cross-user opens. Model/cap run per request.
+  // Relay security stamps are mandatory. Never treat their absence as a
+  // same-user path: an old relay must fail closed rather than bypass team auth.
   const ownUserId = daemonUserId();
-  const peerUserId =
-    frame.peer_user_id !== undefined && frame.peer_user_id.length > 0
-      ? frame.peer_user_id
-      : null;
+  if (
+    frame.peer_user_id === undefined ||
+    frame.peer_user_id.length === 0 ||
+    ownUserId === null ||
+    ownUserId.length === 0
+  ) {
+    send({
+      type: "channel_open_ack",
+      channel_id: frame.channel_id,
+      ok: false,
+      error: "daemon_outdated",
+    });
+    return;
+  }
+  const peerUserId = frame.peer_user_id;
   const hasGrant =
     frame.team_grant !== undefined && frame.team_grant.length > 0;
-  const crossUser =
-    peerUserId !== null && ownUserId !== null && peerUserId !== ownUserId;
+  const crossUser = peerUserId !== ownUserId;
   let teamGranted = false;
   let teamScope: {
     readonly consumer: string;
