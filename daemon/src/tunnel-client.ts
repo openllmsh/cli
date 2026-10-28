@@ -20,21 +20,43 @@
 import type { TTunnelSurface } from "@openllmsh/protocol";
 import { RTC_CAP, SEEDGATE_CAP } from "@openllmsh/protocol";
 import { fleetRequest } from "@openllmsh/tunnel/fleet";
+import { createPeerLink } from "@openllmsh/tunnel/peer-link";
 import { fleetSubscriptionPubkeyFor } from "./config";
+import { logInfo, safeDiagnosticMessage } from "./logger";
 import { getMuxPeerCaps, muxChannelTo } from "./mux-host";
 import { ensureRtcTo, getRtcMuxChannel, markRtcFailure } from "./rtc-client";
 
-/**
- * Local mux errors that fire before FRAME_TYPE.open leaves the consumer —
- * the only safe window to re-dispatch the same request over relay mux.
- * Parity with browser `isPreDispatchTunnelError` in daemon-store.
- */
-const isPreDispatchTunnelError = (error: unknown): boolean => {
-  if (!(error instanceof Error)) return false;
-  return (
-    error.message === "channel is closed" ||
-    error.message === "stream ids exhausted"
-  );
+/** Local failures before OPEN can safely re-dispatch an inference request. */
+const isPreDispatchTunnelError = (error: unknown): boolean =>
+  error instanceof Error &&
+  (error.message === "channel is closed" ||
+    error.message === "stream ids exhausted");
+
+const recordTunnelRequest = (input: {
+  readonly transport: "rtc" | "mux";
+  readonly rungFallbackReason:
+    | "none"
+    | "rtc_failed"
+    | "rtc_unavailable"
+    | "mux_unavailable"
+    | "channel_open_failed";
+  readonly channelReused: boolean;
+  readonly openMs: number;
+  readonly resHeadMs: number;
+}): void => {
+  logInfo("tunnel_request", safeDiagnosticMessage`tunnel_request`, undefined, {
+    tunnel_path: "fleet",
+    tunnel_transport: input.transport,
+    rung_fallback_reason: input.rungFallbackReason,
+    channel_reused: input.channelReused,
+    plan_cache: "miss",
+    serving_inflight: 0,
+    timings: {
+      open_ms: input.openMs,
+      admission_ms: 0,
+      res_head_ms: input.resHeadMs,
+    },
+  });
 };
 
 export type TTunnelToPeerArgs = {
@@ -69,16 +91,6 @@ const tunnelToPeerLive: TTunnelToPeer = async (args) => {
 
   const peerCaps = getMuxPeerCaps(args.keyId);
   const peerPubkey = fleetSubscriptionPubkeyFor(args.keyId);
-  // Eager RTC: best-effort, never blocks the hop. If the channel is already
-  // open we use it; otherwise ensureRtcTo races setup while we try mux.
-  ensureRtcTo(args.keyId, {
-    pubkey: peerPubkey ?? "",
-    hasRtc1: peerCaps?.has(RTC_CAP) ?? false,
-    // Fleet daemons cannot mint a browser vault grant; a seed-gated peer must
-    // use relay mux (whose authenticated `consumer:"daemon"` is admitted).
-    hasSeedgate1: peerCaps?.has(SEEDGATE_CAP) ?? false,
-  });
-
   const request = {
     surface: args.surface,
     headers,
@@ -86,39 +98,77 @@ const tunnelToPeerLive: TTunnelToPeer = async (args) => {
     signal: args.signal,
   };
 
-  const rtc = getRtcMuxChannel(args.keyId);
-  if (rtc !== null) {
-    try {
-      return await fleetRequest(rtc, request);
-    } catch (error: unknown) {
-      // Caller abort is not an RTC path failure — do not cache or fall through.
-      if (args.signal.aborted) {
-        throw error instanceof Error
-          ? error
-          : new DOMException("Aborted", "AbortError");
-      }
-      // openStream sends FRAME_TYPE.open synchronously — once that returns the
-      // peer may already be dispatching. Only re-dispatch on known pre-dispatch
-      // local failures (parity with browser tunnelFetch).
-      markRtcFailure(args.keyId);
-      if (!isPreDispatchTunnelError(error)) throw error;
-      // Pre-dispatch RTC failure falls through to relay mux on this request.
-    }
-  }
-
-  const mux = await muxChannelTo(args.keyId);
-  if (mux === null) {
-    throw new Error(
-      "Device transport unavailable. Peer has neither RTC nor mux — update OpenLLM on the peer.",
-    );
-  }
+  const startedAt = Date.now();
+  let rtcFailed = false;
+  const link = createPeerLink({
+    target: args.keyId,
+    rtc: {
+      open: () => getRtcMuxChannel(args.keyId),
+      warm: () => {
+        // Fleet's cold RTC setup stays best-effort: mux is not held behind ICE.
+        ensureRtcTo(args.keyId, {
+          pubkey: peerPubkey ?? "",
+          hasRtc1: peerCaps?.has(RTC_CAP) ?? false,
+          hasSeedgate1: peerCaps?.has(SEEDGATE_CAP) ?? false,
+        });
+      },
+      dial: async () => getRtcMuxChannel(args.keyId),
+      drop: () => markRtcFailure(args.keyId),
+    },
+    mux: {
+      // `muxChannelTo` owns its channel map and joins an in-flight open.
+      // Its dial result therefore carries reuse semantics without a second lookup.
+      open: () => null,
+      dial: async () => muxChannelTo(args.keyId),
+    },
+    policy: {
+      retrySafe: (error) =>
+        !args.signal.aborted && isPreDispatchTunnelError(error),
+      classifyFailure: (error) => {
+        rtcFailed = true;
+        return error instanceof Error && error.message.includes("tunnel_busy")
+          ? "tunnel_busy"
+          : "transport";
+      },
+    },
+  });
+  const selection: { path: "rtc" | "mux"; reused: boolean } = {
+    path: "mux",
+    reused: false,
+  };
   try {
-    return await fleetRequest(mux, request);
-  } catch (error: unknown) {
+    const response = await link.attempt(async (selected) => {
+      selection.path = selected.path;
+      selection.reused = selected.reused;
+      try {
+        return await fleetRequest(selected.channel, request);
+      } finally {
+        selected.release();
+      }
+    });
+    recordTunnelRequest({
+      transport: selection.path,
+      rungFallbackReason:
+        selection.path === "rtc"
+          ? "none"
+          : rtcFailed
+            ? "rtc_failed"
+            : "rtc_unavailable",
+      channelReused: selection.reused,
+      openMs: 0,
+      resHeadMs: Date.now() - startedAt,
+    });
+    return response;
+  } catch (error) {
     if (args.signal.aborted) {
       throw error instanceof Error
         ? error
         : new DOMException("Aborted", "AbortError");
+    }
+    if (error instanceof Error && error.message === "peer link unavailable") {
+      throw new Error(
+        "Device transport unavailable. Peer has neither RTC nor mux — update OpenLLM on the peer.",
+      );
     }
     throw error instanceof Error ? error : new Error(String(error));
   }

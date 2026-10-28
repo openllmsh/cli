@@ -569,6 +569,16 @@ const sendBytes = (bytes: Uint8Array): void => {
   }
 };
 
+const relayBufferedAmount = (): number => ws?.bufferedAmount ?? 0;
+
+const onRelayDrain = (callback: () => void): (() => void) => {
+  const timer = setInterval(() => {
+    if (relayBufferedAmount() < 512 * 1024) callback();
+  }, 25);
+  timer.unref?.();
+  return () => clearInterval(timer);
+};
+
 const authTransportReady = (): boolean =>
   ws !== null && ws.readyState === ws.OPEN && helloSent;
 
@@ -1610,7 +1620,12 @@ export const startControlChannel = (options?: TControlChannelOptions): void => {
   // (including tests) can pass jitter / socket overrides without module seams.
   supersedeBackoff = createControlSupersedeBackoff(options);
   logDebug("control-channel", "connecting over websocket");
-  configureMuxHost({ send, sendBytes });
+  configureMuxHost({
+    send,
+    sendBytes,
+    bufferedAmount: relayBufferedAmount,
+    onDrain: onRelayDrain,
+  });
   configureRtcHost({ send });
   configureRtcClient({ send });
   const socket = new ReconnectingWebSocket(

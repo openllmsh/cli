@@ -42,14 +42,21 @@ import { rtcDuplex } from "@openllmsh/tunnel/rtc-duplex";
 import { preflightIceCandidate } from "@openllmsh/tunnel/rtc-ice";
 import type { RTCDataChannel, RTCIceCandidate } from "werift";
 import { RTCPeerConnection } from "werift";
+import { daemonUserId } from "./config";
 import { AGENT_PIN_REFUSALS, enforceRtcSeedGate } from "./device-access-verify";
 import { daemonApiKeyId } from "./env";
 import { daemonPublicKey, openSealed, sealTo } from "./keypair";
 import { logDebug, logWarn, safeDiagnosticMessage } from "./logger";
-import { admitStreamKind, serveMuxOnStream } from "./mux-host";
+import {
+  admitStreamKind,
+  admitTeamTunnelGrant,
+  serveRtcOnStream,
+} from "./mux-host";
+import { admitChannelTeamGrant } from "./team-grant-admit";
+import { withTeamChannelScope } from "./team-request-context";
 
 /** Bound concurrent RTC sessions per daemon process. */
-const MAX_CONCURRENT_RTC = 8;
+const MAX_CONCURRENT_RTC = 16;
 
 /**
  * Max wait from session insert until the mux mounts on the data channel.
@@ -67,6 +74,15 @@ type TRtcSession = {
    * `dpk` is this daemon's key. Fixed at offer time.
    */
   readonly seedGated: boolean;
+  /** Cross-user RTC session admitted with an end-to-end verified team grant. */
+  readonly teamGranted: boolean;
+  /** Channel-admission grant; every tunnel OPEN carries a fresh grant. */
+  readonly teamGrantToken: string | null;
+  readonly teamScope: {
+    readonly consumer: string;
+    readonly teamId: string;
+    readonly deviceKeyId: string;
+  } | null;
   closed: boolean;
   nacked: boolean;
   handshakeTimer: ReturnType<typeof setTimeout> | null;
@@ -76,7 +92,7 @@ export type TRtcHostOptions = {
   readonly send: (frame: TRelayFrame) => void;
   readonly iceServers?: ReadonlyArray<TIceServer> | null;
   /** Stream handler for mounted RTC muxes; defaults to {@link serveMuxOnStream}. */
-  readonly onStream?: typeof serveMuxOnStream;
+  readonly onStream?: typeof serveRtcOnStream;
 };
 
 export type TRtcOfferFrame = {
@@ -92,6 +108,10 @@ export type TRtcOfferFrame = {
    * `seedGateOf`).
    */
   readonly consumer?: "browser" | "daemon";
+  /** Relay-stamped authenticated offerer id. */
+  readonly peer_user_id?: string;
+  /** Opaque outer grant retained by the relay registry for routing only. */
+  readonly team_grant?: string;
 };
 
 export type TRtcIceFrame = {
@@ -174,8 +194,15 @@ export const createRtcMuxOnStream =
   (options: {
     readonly channelId: string;
     readonly seedGated: boolean;
-    readonly handler: typeof serveMuxOnStream;
-  }): typeof serveMuxOnStream =>
+    readonly teamGranted?: boolean;
+    readonly teamGrantToken?: string | null;
+    readonly teamScope?: {
+      readonly consumer: string;
+      readonly teamId: string;
+      readonly deviceKeyId: string;
+    } | null;
+    readonly handler: typeof serveRtcOnStream;
+  }): typeof serveRtcOnStream =>
   (stream, open) => {
     const kind = streamOpenKindOf(decodeJsonPayload(open));
     if (
@@ -183,11 +210,29 @@ export const createRtcMuxOnStream =
         transport: "rtc",
         channelId: options.channelId,
         seedGated: options.seedGated,
+        teamGranted: options.teamGranted,
       })
     ) {
       return;
     }
-    options.handler(stream, open);
+    if (
+      kind === "tunnel" &&
+      !admitTeamTunnelGrant(stream, decodeJsonPayload(open), {
+        channelId: options.channelId,
+        transport: "rtc",
+        teamGranted: options.teamGranted === true,
+        teamGrantToken: options.teamGrantToken ?? null,
+      })
+    ) {
+      return;
+    }
+    if (options.teamScope === undefined || options.teamScope === null) {
+      options.handler(stream, open);
+    } else {
+      withTeamChannelScope(options.teamScope, () =>
+        options.handler(stream, open),
+      );
+    }
   };
 
 /**
@@ -199,7 +244,7 @@ export const createRtcHost = (): TRtcHost => {
   /** Cloud-served ICE servers from the daemon's own channel handshake, if any. */
   let handshakeIceServers: ReadonlyArray<TIceServer> | null = null;
   const sessions = new Map<string, TRtcSession>();
-  let streamHandler: typeof serveMuxOnStream | null = null;
+  let streamHandler: typeof serveRtcOnStream | null = null;
 
   /** Wire the control-channel sender (idempotent; re-called on reconnect).
    *  `iceServers` carries the cloud handshake config when present. */
@@ -377,7 +422,10 @@ export const createRtcHost = (): TRtcHost => {
         onStream: createRtcMuxOnStream({
           channelId: session.channelId,
           seedGated: session.seedGated,
-          handler: streamHandler ?? serveMuxOnStream,
+          teamGranted: session.teamGranted,
+          teamGrantToken: session.teamGrantToken,
+          teamScope: session.teamScope,
+          handler: streamHandler ?? serveRtcOnStream,
         }),
         onClose: () => {
           session.mux = null;
@@ -473,28 +521,80 @@ export const createRtcHost = (): TRtcHost => {
       return;
     }
 
-    // Seed-gate: browser consumers need a provisioned pin + v2 grant.
-    // Fleet daemon→daemon hops (`consumer: "daemon"`) have no vault DEK —
-    // they skip the offer gate but the session is NEVER seed-gated, so the
-    // mounted mux refuses `agent` on it. The relay (or an in-process loopback
-    // that stands in for it) stamps this from the authenticated socket role.
-    const gate = rtcOfferSeedGate(
-      frame.consumer,
-      "grant" in inner ? inner.grant : undefined,
-      { cid: frame.channel_id, offerVersion: inner.v, fingerprint: inner.fb },
-    );
-    if (gate.mode === "reject") {
-      logWarn("rtc-host", safeDiagnosticMessage`seedgate rejected`, {
-        channelId: frame.channel_id,
-        reason: gate.reason,
-      });
-      // The offer WAS authenticated (sealed proof opened + fb bound) — the
-      // vault is just locked. Nack so the offerer surfaces "unlock to
-      // connect" instead of timing out.
-      sendNack(frame.channel_id, "seedgate");
-      return;
+    // Cross-user offers must be team-authorized end-to-end. `peer_user_id` is
+    // relay-stamped, but the grant must also be in the sealed inner so a relay
+    // cannot substitute an outer grant. These offers never enter the browser
+    // seed gate and cannot become a same-user fleet session.
+    const ownUserId = daemonUserId();
+    const peerUserId =
+      frame.peer_user_id !== undefined && frame.peer_user_id.length > 0
+        ? frame.peer_user_id
+        : null;
+    const crossUser =
+      peerUserId !== null && ownUserId !== null && peerUserId !== ownUserId;
+    let teamGranted = false;
+    let teamGrantToken: string | null = null;
+    let teamScope: {
+      readonly consumer: string;
+      readonly teamId: string;
+      readonly deviceKeyId: string;
+    } | null = null;
+    let seedGated = false;
+    if (crossUser) {
+      const sealedGrant = "teamGrant" in inner ? inner.teamGrant : undefined;
+      if (
+        sealedGrant === undefined ||
+        frame.team_grant === undefined ||
+        sealedGrant !== frame.team_grant
+      ) {
+        logWarn(
+          "rtc-host",
+          "cross-user rtc_offer missing or mismatched team grant",
+          {
+            channelId: frame.channel_id,
+          },
+        );
+        sendNack(frame.channel_id, "seedgate");
+        return;
+      }
+      const decision = await admitChannelTeamGrant(sealedGrant, peerUserId);
+      if (!decision.ok) {
+        logWarn("rtc-host", "cross-user rtc_offer team grant refused", {
+          channelId: frame.channel_id,
+          reason: decision.reason,
+        });
+        sendNack(frame.channel_id, "seedgate");
+        return;
+      }
+      teamGranted = true;
+      teamGrantToken = sealedGrant;
+      teamScope = {
+        consumer: decision.grant.consumer,
+        teamId: decision.grant.team_id,
+        deviceKeyId: decision.grant.device_key_id,
+      };
+    } else {
+      // Browser consumers need a provisioned pin + v2 device grant. Fleet
+      // daemon→daemon hops skip the offer gate but never get seed-gated kinds.
+      const gate = rtcOfferSeedGate(
+        frame.consumer,
+        "grant" in inner ? inner.grant : undefined,
+        {
+          cid: frame.channel_id,
+          offerVersion: inner.v,
+          fingerprint: inner.fb,
+        },
+      );
+      if (gate.mode === "reject") {
+        logWarn("rtc-host", safeDiagnosticMessage`seedgate rejected`, {
+          channelId: frame.channel_id,
+          reason: gate.reason,
+        });
+        sendNack(frame.channel_id, "seedgate");
+        return;
+      }
+      seedGated = gate.seedGated;
     }
-    const seedGated = gate.seedGated;
 
     const offerSdpMax = maxMessageSizeFromSdp(frame.sdp);
     const maxPayloadBytes = negotiateRtcPayloadCapFromSdp(frame.sdp);
@@ -533,6 +633,9 @@ export const createRtcHost = (): TRtcHost => {
       pc,
       mux: null,
       seedGated,
+      teamGranted,
+      teamGrantToken,
+      teamScope,
       closed: false,
       nacked: false,
       handshakeTimer: null,

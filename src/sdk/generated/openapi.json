@@ -58573,6 +58573,42 @@
                                     }
                                   ]
                                 },
+                                "open_ms": {
+                                  "anyOf": [
+                                    {
+                                      "type": "number",
+                                      "minimum": 0,
+                                      "maximum": 86400000
+                                    },
+                                    {
+                                      "type": "null"
+                                    }
+                                  ]
+                                },
+                                "admission_ms": {
+                                  "anyOf": [
+                                    {
+                                      "type": "number",
+                                      "minimum": 0,
+                                      "maximum": 86400000
+                                    },
+                                    {
+                                      "type": "null"
+                                    }
+                                  ]
+                                },
+                                "res_head_ms": {
+                                  "anyOf": [
+                                    {
+                                      "type": "number",
+                                      "minimum": 0,
+                                      "maximum": 86400000
+                                    },
+                                    {
+                                      "type": "null"
+                                    }
+                                  ]
+                                },
                                 "spawn_elapsed_ms": {
                                   "anyOf": [
                                     {
@@ -58755,6 +58791,90 @@
                                 }
                               },
                               "additionalProperties": false
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "tunnel_path": {
+                          "anyOf": [
+                            {
+                              "type": "string",
+                              "enum": [
+                                "fleet",
+                                "browser",
+                                "origin",
+                                "team"
+                              ]
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "tunnel_transport": {
+                          "anyOf": [
+                            {
+                              "type": "string",
+                              "enum": [
+                                "rtc",
+                                "mux"
+                              ]
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "rung_fallback_reason": {
+                          "anyOf": [
+                            {
+                              "type": "string",
+                              "enum": [
+                                "none",
+                                "rtc_failed",
+                                "rtc_unavailable",
+                                "mux_unavailable",
+                                "channel_open_failed"
+                              ]
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "channel_reused": {
+                          "anyOf": [
+                            {
+                              "type": "boolean"
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "plan_cache": {
+                          "anyOf": [
+                            {
+                              "type": "string",
+                              "enum": [
+                                "hit",
+                                "miss",
+                                "soft"
+                              ]
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "serving_inflight": {
+                          "anyOf": [
+                            {
+                              "type": "integer",
+                              "minimum": 0,
+                              "maximum": 1000000
                             },
                             {
                               "type": "null"

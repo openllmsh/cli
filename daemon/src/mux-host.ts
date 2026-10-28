@@ -19,6 +19,10 @@ import { decodeJsonPayload, encodeJsonPayload } from "@openllmsh/tunnel/codec";
 import { noiseGrantBinding } from "@openllmsh/tunnel/device-grant";
 import type { TDuplex, TMuxChannel, TMuxStream } from "@openllmsh/tunnel/mux";
 import { createChannel } from "@openllmsh/tunnel/mux";
+import {
+  PEER_LINK_DEFAULTS,
+  peerLinkFailureCache,
+} from "@openllmsh/tunnel/peer-link";
 import type {
   TNoiseStaticKey,
   TSecureAuthorizeContext,
@@ -52,8 +56,13 @@ import {
 
 export { teamGrantFromStreamOpen } from "./team-grant-admit";
 
+import { withTeamChannelScope } from "./team-request-context";
 import { teamServeEnabled } from "./team-serve";
-import { admitMuxTunnel, serveMuxTunnel } from "./tunnel-server";
+import {
+  admitMuxTunnel,
+  serveMuxTunnel,
+  serveRtcTunnel,
+} from "./tunnel-server";
 
 /** Re-export so daemon tests keep a single import site with the mux host. */
 export { AGENT_SECURE_PROLOGUE_INFO, agentSecurePrologue };
@@ -263,6 +272,50 @@ export const admitStreamKind = (
   return false;
 };
 
+/**
+ * Require each inference OPEN on a team-admitted channel to carry its own
+ * grant. The tunnel server verifies that fresh grant (signature, expiry,
+ * consumer/device/model/cap scope) before dispatch. The channel grant is
+ * admission-only, so a long-lived channel never pins a short-lived token.
+ * Shared by relay-mux and RTC hosts.
+ */
+export const admitTeamTunnelGrant = (
+  stream: TMuxStream,
+  decodedOpen: unknown,
+  context: {
+    readonly channelId: string;
+    readonly transport: "relay" | "rtc";
+    readonly teamGranted: boolean;
+    readonly teamGrantToken: string | null;
+  },
+): boolean => {
+  if (!context.teamGranted) return true;
+  const openGrant = teamGrantFromStreamOpen(decodedOpen);
+  if (openGrant !== null && context.teamGrantToken !== null) {
+    logInfo("mux-host", "team stream open received", {
+      channelId: context.channelId,
+      transport: context.transport,
+    });
+    return true;
+  }
+  logWarn(
+    "mux-host",
+    safeDiagnosticMessage`stream open refused: team tunnel missing or mismatched grant`,
+    {
+      channelId: context.channelId,
+      transport: context.transport,
+      hasOpenGrant: openGrant !== null,
+    },
+  );
+  stream.reset(
+    encodeJsonPayload({
+      code: "unauthorized",
+      reason: "team_grant_required",
+    }),
+  );
+  return false;
+};
+
 /** This daemon's long-lived X25519 identity as a Noise static key. */
 const daemonNoiseStaticKey = (): TNoiseStaticKey => {
   const publicKey = x25519RawFromSpkiB64(daemonPublicKey());
@@ -398,6 +451,12 @@ type TRelayChannel = {
    * sets it; a grant-less OPEN must not fall through to same-user dispatch).
    */
   teamGrantToken: string | null;
+  /** Relay-stamped scope from the admission grant. */
+  teamScope: {
+    readonly consumer: string;
+    readonly teamId: string;
+    readonly deviceKeyId: string;
+  } | null;
   /** The mux's durable inbound callback, installed exactly once at construction. */
   muxSink: ((bytes: Uint8Array | null) => void) | null;
   /** The relay binding currently allowed to deliver to {@link muxSink}. */
@@ -407,6 +466,8 @@ type TRelayChannel = {
 
 let sendFrame: ((frame: TRelayFrame) => void) | null = null;
 let sendBinary: ((bytes: Uint8Array) => void) | null = null;
+let relayBufferedAmount: (() => number) | null = null;
+let onRelayDrain: ((callback: () => void) => () => void) | null = null;
 /** Live channels by relay-assigned channel id. */
 const channels = new Map<string, TRelayChannel>();
 const peerCaps = new Map<string, ReadonlySet<string>>();
@@ -418,15 +479,13 @@ const opening = new Map<
     readonly channelId: string;
   }
 >();
-const failedUntil = new Map<string, number>();
-const MUX_ACK_TIMEOUT_MS = 5_000;
-const MUX_FAILURE_CACHE_MS = 60_000;
-export const MUX_CHANNEL_IDLE_TTL_MS = 90_000;
+const MUX_ACK_TIMEOUT_MS = PEER_LINK_DEFAULTS.muxAckSameUserMs;
+export const MUX_CHANNEL_IDLE_TTL_MS = PEER_LINK_DEFAULTS.idleTtlMs;
 const MUX_CHANNEL_REAPER_INTERVAL_MS = 10_000;
 const DEMUX_WARNING_THROTTLE_MS = 5_000;
-let muxAckTimeoutMs = MUX_ACK_TIMEOUT_MS;
+let muxAckTimeoutMs: number = MUX_ACK_TIMEOUT_MS;
 // Overridable via configureMuxChannelIdleTtl; default matches the export.
-let muxChannelIdleTtlMs = MUX_CHANNEL_IDLE_TTL_MS;
+let muxChannelIdleTtlMs: number = MUX_CHANNEL_IDLE_TTL_MS;
 let channelReaper: ReturnType<typeof setInterval> | null = null;
 const lastDemuxWarningAt = new Map<string, number>();
 
@@ -525,7 +584,7 @@ export const updateMuxPeerCaps = (
 ): void => {
   if (caps === undefined) peerCaps.delete(keyId);
   else peerCaps.set(keyId, new Set(caps));
-  failedUntil.delete(keyId);
+  peerLinkFailureCache.clear(keyId);
 };
 
 /**
@@ -537,7 +596,7 @@ export const replaceMuxPeerCaps = (
   caps: Readonly<Record<string, readonly string[]>> | undefined,
 ): void => {
   peerCaps.clear();
-  failedUntil.clear();
+  peerLinkFailureCache.clear();
   if (caps === undefined) return;
   for (const [keyId, values] of Object.entries(caps))
     updateMuxPeerCaps(keyId, values);
@@ -555,7 +614,7 @@ const failOpen = (keyId: string, reason?: string): void => {
   if (pending === undefined) return;
   opening.delete(keyId);
   clearTimeout(pending.timer);
-  failedUntil.set(keyId, Date.now() + MUX_FAILURE_CACHE_MS);
+  peerLinkFailureCache.set(keyId, "mux", "transport");
   sendFrame?.({
     type: "channel_close",
     channel_id: pending.channelId,
@@ -564,6 +623,10 @@ const failOpen = (keyId: string, reason?: string): void => {
   pending.resolve(null);
 };
 
+/** Whether the consumer already has a live relay-mux channel to `keyId`. */
+export const hasMuxChannelTo = (keyId: string): boolean =>
+  consumerChannelFor(keyId) !== undefined;
+
 /** Consumer-side negotiation. `mux2` permits one channel per fleet peer. */
 export const muxChannelTo = async (
   keyId: string,
@@ -571,8 +634,7 @@ export const muxChannelTo = async (
   if (process.env.OPENLLM_MUX_DISABLE === "1") return null;
   const caps = peerCaps.get(keyId);
   if (caps === undefined || !caps.has(MUX_CAP)) return null;
-  const failedAt = failedUntil.get(keyId);
-  if (failedAt !== undefined && failedAt > Date.now()) return null;
+  if (peerLinkFailureCache.has(keyId, "mux")) return null;
   const existing = consumerChannelFor(keyId);
   if (existing !== undefined) return existing.channel;
   const pending = opening.get(keyId);
@@ -625,7 +687,7 @@ export const handleChannelOpenAck = (frame: {
   if (binary === null) {
     opening.delete(keyId);
     clearTimeout(pending.timer);
-    failedUntil.set(keyId, Date.now() + MUX_FAILURE_CACHE_MS);
+    peerLinkFailureCache.set(keyId, "mux", "transport");
     sendFrame?.({
       type: "channel_close",
       channel_id: pending.channelId,
@@ -689,6 +751,8 @@ const registerChannel = (
         bindSink(record);
       }
     },
+    relayBufferedAmount ?? undefined,
+    onRelayDrain ?? undefined,
   );
   const channel = createChannel({
     duplex,
@@ -713,38 +777,16 @@ const registerChannel = (
             ) {
               return;
             }
-            // Team channels: every tunnel OPEN must carry the same grant the
-            // channel was admitted with. A grant-less OPEN would skip
-            // createMuxTunnelServer's model/cap checks and dispatch as
-            // same-user traffic.
-            if (record?.teamGranted === true && kind === "tunnel") {
-              const openGrant = teamGrantFromStreamOpen(decodedOpen);
-              if (
-                openGrant === null ||
-                record.teamGrantToken === null ||
-                openGrant !== record.teamGrantToken
-              ) {
-                logWarn(
-                  "mux-host",
-                  safeDiagnosticMessage`stream open refused: team tunnel missing or mismatched grant`,
-                  {
-                    channelId,
-                    transport: "relay",
-                    hasOpenGrant: openGrant !== null,
-                  },
-                );
-                stream.reset(
-                  encodeJsonPayload({
-                    code: "unauthorized",
-                    reason: "team_grant_required",
-                  }),
-                );
-                return;
-              }
-              logInfo("mux-host", "team stream open received", {
+            if (
+              kind === "tunnel" &&
+              !admitTeamTunnelGrant(stream, decodedOpen, {
                 channelId,
                 transport: "relay",
-              });
+                teamGranted: record?.teamGranted === true,
+                teamGrantToken: record?.teamGrantToken ?? null,
+              })
+            ) {
+              return;
             }
             const handler = streamHandler ?? serveMuxOnStream;
             if (kind === "agent") {
@@ -757,7 +799,12 @@ const registerChannel = (
               });
               return;
             }
-            handler(stream, open);
+            const scope = record?.teamScope ?? null;
+            if (scope === null) {
+              handler(stream, open);
+            } else {
+              withTeamChannelScope(scope, () => handler(stream, open));
+            }
           },
         }
       : {}),
@@ -780,6 +827,7 @@ const registerChannel = (
     seedGated: false,
     teamGranted: false,
     teamGrantToken: null,
+    teamScope: null,
     muxSink,
     sink: null,
     lastActivityAt: Date.now(),
@@ -793,8 +841,13 @@ const registerChannel = (
 export const relayDuplex = (
   sendBytes: (bytes: Uint8Array) => void,
   registerOnBytes: (callback: (bytes: Uint8Array | null) => void) => void,
+  bufferedAmount?: () => number,
+  onDrain?: (callback: () => void) => () => void,
 ): TDuplex => ({
   send: sendBytes,
+  bufferedAmount,
+  highWaterMark: bufferedAmount === undefined ? undefined : 1024 * 1024,
+  onDrain,
   onBytes: registerOnBytes,
   close: () => registerOnBytes(() => {}),
 });
@@ -804,12 +857,16 @@ let streamHandler: typeof serveMuxOnStream | null = null;
 export const configureMuxHost = (options: {
   readonly send: (frame: TRelayFrame) => void;
   readonly sendBytes: (bytes: Uint8Array) => void;
+  readonly bufferedAmount?: () => number;
+  readonly onDrain?: (callback: () => void) => () => void;
   /** Stream handler for relay mux channels; defaults to {@link serveMuxOnStream}. */
   readonly onStream?: typeof serveMuxOnStream;
 }): void => {
   sendFrame = options.send;
   streamHandler = options.onStream ?? null;
   sendBinary = options.sendBytes;
+  relayBufferedAmount = options.bufferedAmount ?? null;
+  onRelayDrain = options.onDrain ?? null;
   // The reaper lives with the host lifecycle, not the relay socket: the shared
   // persistent relay sandbox keeps sockets up for days, so relay-socket death
   // (resetAllChannels) can no longer be the only channel cleanup.
@@ -855,6 +912,11 @@ export const serveMuxOnStream = createMuxOnStream({
   // Keep the tunnel-server reference lazy: its production dispatcher reaches
   // the control channel, which imports this host during daemon initialization.
   tunnel: (open, body, signal) => serveMuxTunnel(open, body, signal),
+});
+
+/** RTC uses the same OPEN policy but preserves its transport in diagnostics. */
+export const serveRtcOnStream = createMuxOnStream({
+  tunnel: (open, body, signal) => serveRtcTunnel(open, body, signal),
 });
 
 /**
@@ -988,6 +1050,11 @@ const acceptChannelAsync = async (frame: {
   const crossUser =
     peerUserId !== null && ownUserId !== null && peerUserId !== ownUserId;
   let teamGranted = false;
+  let teamScope: {
+    readonly consumer: string;
+    readonly teamId: string;
+    readonly deviceKeyId: string;
+  } | null = null;
   if (crossUser) {
     if (!hasGrant || frame.team_grant === undefined) {
       logWarn("mux-host", "channel_open cross-user without team grant", {
@@ -1016,24 +1083,24 @@ const acceptChannelAsync = async (frame: {
       return;
     }
     teamGranted = true;
+    teamScope = {
+      consumer: decision.grant.consumer,
+      teamId: decision.grant.team_id,
+      deviceKeyId: decision.grant.device_key_id,
+    };
   } else if (hasGrant && frame.team_grant !== undefined) {
-    // Grant present on a same-user / unknown-peer open — still verify
-    // (defence in depth; older relay path).
-    const decision = await admitChannelTeamGrant(frame.team_grant, peerUserId);
-    if (!decision.ok) {
-      logWarn("mux-host", "channel_open team grant refused", {
-        channelId: frame.channel_id,
-        reason: decision.reason,
-      });
-      send({
-        type: "channel_open_ack",
-        channel_id: frame.channel_id,
-        ok: false,
-        error: "unauthorized",
-      });
-      return;
-    }
-    teamGranted = true;
+    // A same-user channel is never a team channel. Accepting a team grant here
+    // would let a caller turn an authenticated fleet channel into team traffic.
+    logWarn("mux-host", "channel_open same-user team grant refused", {
+      channelId: frame.channel_id,
+    });
+    send({
+      type: "channel_open_ack",
+      channel_id: frame.channel_id,
+      ok: false,
+      error: "unauthorized",
+    });
+    return;
   }
   const existing = channels.get(frame.channel_id);
   if (existing !== undefined && existing.muxSink !== null) {
@@ -1081,6 +1148,7 @@ const acceptChannelAsync = async (frame: {
     existing.seedGated = gated;
     existing.teamGranted = teamGranted;
     existing.teamGrantToken = teamGranted ? (frame.team_grant ?? null) : null;
+    existing.teamScope = teamScope;
     existing.consumer = frame.consumer ?? "browser";
     bindSink(existing);
     touchChannel(existing);
@@ -1099,6 +1167,7 @@ const acceptChannelAsync = async (frame: {
   record.seedGated = seedGated;
   record.teamGranted = teamGranted;
   record.teamGrantToken = teamGranted ? (frame.team_grant ?? null) : null;
+  record.teamScope = teamScope;
   record.consumer = frame.consumer ?? "browser";
   logInfo("mux-host", "channel_open accepted", {
     channelId: frame.channel_id,

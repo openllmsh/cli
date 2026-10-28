@@ -232,6 +232,36 @@ export const admitChannelTeamGrant = async (
   return decision;
 };
 
+/**
+ * Per-OPEN check for a channel previously admitted by a team grant. The
+ * channel identity is relay-stamped; never let a fresh valid grant switch its
+ * consumer, team, or serving device.
+ */
+export const admitTeamGrantForChannel = async (
+  token: string,
+  requestModel: string | null,
+  reserveTokens: number,
+  scope: {
+    readonly consumer: string;
+    readonly teamId: string;
+    readonly deviceKeyId: string;
+  },
+  deps?: TTeamGrantAdmitDeps,
+): Promise<TTeamGrantAdmitResult> => {
+  const admit = deps === undefined ? defaultAdmit : createTeamGrantAdmit(deps);
+  const decision = await admit.admit(token, requestModel, reserveTokens);
+  if (!decision.ok) return decision;
+  const { grant } = decision;
+  if (
+    grant.consumer !== scope.consumer ||
+    grant.team_id !== scope.teamId ||
+    grant.device_key_id !== scope.deviceKeyId
+  ) {
+    return { ok: false, reason: "wrong_consumer" };
+  }
+  return decision;
+};
+
 /** Pull `headers.team_grant` from a decoded mux stream OPEN payload. */
 export const teamGrantFromStreamOpen = (decoded: unknown): string | null => {
   if (

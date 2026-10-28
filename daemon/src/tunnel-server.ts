@@ -36,20 +36,20 @@ import {
 import { StreamResetError } from "@openllmsh/tunnel/stream-reset-error";
 import type { TServeTunnel } from "@openllmsh/tunnel/streams";
 import { handleInference } from "./listener";
-import { logWarn } from "./logger";
+import { logInfo, logWarn, safeDiagnosticMessage } from "./logger";
 import { beginRequest, endRequest } from "./self-update";
 import {
-  admitTeamGrant,
+  admitTeamGrantForChannel,
   estimateTeamReserveTokens,
   modelFromRequestBody,
   teamGrantFromStreamOpen,
 } from "./team-grant-admit";
-import { withTeamGrant } from "./team-request-context";
-
-/** Max concurrently-served tunnels — beyond it, mux opens are nacked
- *  `tunnel_busy`. Concurrent tunnels behave like concurrent loopback
- *  clients (the walker already serves several CLIs at once). */
-const MAX_SERVED_TUNNELS = 8;
+import { currentTeamChannelScope, withTeamGrant } from "./team-request-context";
+import {
+  beginServedTunnel,
+  canServeTunnel,
+  endServedTunnel,
+} from "./tunnel-capacity";
 
 /** The local endpoint each closed-vocabulary surface maps to. No free URL
  *  path ever crosses the relay — the serving daemon owns this mapping. */
@@ -88,7 +88,27 @@ const surfacePath = (
   }
 };
 
-let muxServedCount = 0;
+const recordTunnelRequest = (input: {
+  readonly path: "fleet" | "browser" | "team";
+  readonly transport: "rtc" | "mux";
+  readonly admissionMs: number;
+  readonly resHeadMs: number;
+  readonly servingInflight: number;
+}): void => {
+  logInfo("tunnel_request", safeDiagnosticMessage`tunnel_request`, undefined, {
+    tunnel_path: input.path,
+    tunnel_transport: input.transport,
+    rung_fallback_reason: "none",
+    channel_reused: false,
+    plan_cache: "miss",
+    serving_inflight: input.servingInflight,
+    timings: {
+      open_ms: 0,
+      admission_ms: input.admissionMs,
+      res_head_ms: input.resHeadMs,
+    },
+  });
+};
 
 const forwardedHeaders = (open: {
   readonly consumer?: "browser" | "daemon";
@@ -168,9 +188,150 @@ function tunneledRequest(
 /** The request dispatcher a mux tunnel server hands each tunneled request to. */
 export type TTunnelDispatch = (req: Request) => Promise<Response>;
 
+/**
+ * Enough leading JSON to find the routing model without making a slow client
+ * upload finish before the serving daemon can start walking it. A model after
+ * this bound takes the conservative, exact full-buffer admission path.
+ */
+export const TEAM_MODEL_SCAN_MAX_BYTES = 64 * 1024;
+
+const textDecoder = new TextDecoder();
+
+/**
+ * Return a top-level JSON `model` string from an incomplete leading body.
+ * This deliberately does not regex nested objects: a later `messages[].model`
+ * must not admit a request whose root model differs (or is absent).
+ */
+export const modelFromLeadingJson = (body: Uint8Array): string | null => {
+  const text = textDecoder.decode(body);
+  let depth = 0;
+  let stringStart = -1;
+  let stringKind: "key" | "model" | "ignore" = "ignore";
+  let escaped = false;
+  let pendingKey: string | null = null;
+  let awaitingKey = false;
+  let awaitingValue = false;
+
+  for (let index = 0; index < text.length; index += 1) {
+    const char = text[index];
+    if (stringStart >= 0) {
+      if (escaped) {
+        escaped = false;
+        continue;
+      }
+      if (char === "\\") {
+        escaped = true;
+        continue;
+      }
+      if (char !== '"') continue;
+      const encoded = text.slice(stringStart, index + 1);
+      const completedKind = stringKind;
+      stringStart = -1;
+      stringKind = "ignore";
+      if (completedKind === "ignore") continue;
+      let value: string;
+      try {
+        value = JSON.parse(encoded) as string;
+      } catch {
+        return null;
+      }
+      if (completedKind === "key") {
+        pendingKey = value;
+        awaitingKey = false;
+      } else {
+        return value.length > 0 ? value : null;
+      }
+      continue;
+    }
+    if (char === '"') {
+      stringStart = index;
+      stringKind =
+        depth === 1 && awaitingKey
+          ? "key"
+          : depth === 1 && awaitingValue && pendingKey === "model"
+            ? "model"
+            : "ignore";
+      continue;
+    }
+    if (char === "{") {
+      depth += 1;
+      if (depth === 1) awaitingKey = true;
+      continue;
+    }
+    if (char === "}") {
+      if (depth === 1) return null;
+      depth -= 1;
+      continue;
+    }
+    if (depth !== 1) continue;
+    if (char === ":" && pendingKey !== null) {
+      awaitingValue = true;
+      continue;
+    }
+    if (char === ",") {
+      pendingKey = null;
+      awaitingKey = true;
+      awaitingValue = false;
+      continue;
+    }
+    if (!/\s/.test(char) && awaitingValue) awaitingValue = false;
+  }
+  return null;
+};
+
+const combineChunks = (
+  chunks: readonly Uint8Array[],
+  total: number,
+): Uint8Array => {
+  const combined = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    combined.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return combined;
+};
+
+const bodyWithSizeLimit = (
+  reader: ReadableStreamDefaultReader<Uint8Array>,
+  prefix: readonly Uint8Array[],
+  prefixBytes: number,
+): ReadableStream<Uint8Array> => {
+  let prefixIndex = 0;
+  let total = prefixBytes;
+  return new ReadableStream({
+    async pull(controller): Promise<void> {
+      if (prefixIndex < prefix.length) {
+        controller.enqueue(prefix[prefixIndex]);
+        prefixIndex += 1;
+        return;
+      }
+      const next = await reader.read();
+      if (next.done) {
+        controller.close();
+        return;
+      }
+      total += next.value.byteLength;
+      if (total > TUNNEL_MEDIA_MAX_BODY_BYTES) {
+        await reader
+          .cancel("team body exceeds media size limit")
+          .catch(() => {});
+        controller.error(
+          new StreamResetError("unauthorized", "team_body_too_large"),
+        );
+        return;
+      }
+      controller.enqueue(next.value);
+    },
+    async cancel(reason): Promise<void> {
+      await reader.cancel(reason).catch(() => {});
+    },
+  });
+};
+
 /** Admission remains daemon-owned so concurrent mux tunnels share one cap. */
 export const admitMuxTunnel = (): "tunnel_busy" | null =>
-  muxServedCount >= MAX_SERVED_TUNNELS ? "tunnel_busy" : null;
+  canServeTunnel() ? null : "tunnel_busy";
 
 /**
  * Build a mux tunnel server over `dispatch`. Pure: returns a serving function
@@ -182,16 +343,17 @@ export const admitMuxTunnel = (): "tunnel_busy" | null =>
  * exactly as before.
  */
 export const createMuxTunnelServer =
-  (dispatch: TTunnelDispatch): TServeTunnel =>
+  (dispatch: TTunnelDispatch, transport: "rtc" | "mux" = "mux"): TServeTunnel =>
   async (open, body, signal) => {
-    muxServedCount += 1;
+    const startedAt = Date.now();
+    const servingInflight = beginServedTunnel();
     beginRequest();
     let completed = false;
     const complete = (): void => {
       if (completed) return;
       completed = true;
       signal.removeEventListener("abort", complete);
-      muxServedCount -= 1;
+      endServedTunnel();
       endRequest();
     };
     // Dispatch can still be awaiting a provider when the relay dies. Release
@@ -203,20 +365,32 @@ export const createMuxTunnelServer =
       throw new Error("mux tunnel aborted before dispatch");
     }
     try {
-      // Buffer the body when a team grant is present so we can read `model`
-      // and estimate a local reservation without consuming the dispatch stream.
+      // Read only as far as a root `model` (bounded) before admitting a team
+      // request. The replay stream preserves those bytes for the walker and
+      // continues enforcing the media limit while dispatch is already running.
+      // If the model is not early enough, retain the historical exact-body path.
       const teamToken = teamGrantFromStreamOpen(open);
-      if (teamToken !== null) {
+      const teamChannelScope = currentTeamChannelScope();
+      if (teamToken !== null && teamChannelScope === null) {
+        complete();
+        throw new StreamResetError("unauthorized", "team_channel_required");
+      }
+      if (teamToken !== null && teamChannelScope !== null) {
         const chunks: Uint8Array[] = [];
         let total = 0;
+        let model: string | null = null;
+        let ended = false;
         const reader = body.getReader();
-        for (;;) {
+        while (!ended && total < TEAM_MODEL_SCAN_MAX_BYTES && model === null) {
           if (signal.aborted) {
             complete();
             throw new Error("mux tunnel aborted before dispatch");
           }
           const next = await reader.read();
-          if (next.done) break;
+          if (next.done) {
+            ended = true;
+            break;
+          }
           total += next.value.byteLength;
           if (total > TUNNEL_MEDIA_MAX_BODY_BYTES) {
             void reader.cancel().catch(() => {});
@@ -224,28 +398,92 @@ export const createMuxTunnelServer =
             throw new StreamResetError("unauthorized", "team_body_too_large");
           }
           chunks.push(next.value);
+          model = modelFromLeadingJson(
+            combineChunks(chunks, total).subarray(0, TEAM_MODEL_SCAN_MAX_BYTES),
+          );
         }
-        const buffered = new Uint8Array(total);
-        let offset = 0;
-        for (const c of chunks) {
-          buffered.set(c, offset);
-          offset += c.byteLength;
+
+        if (model === null && !ended) {
+          for (;;) {
+            if (signal.aborted) {
+              complete();
+              throw new Error("mux tunnel aborted before dispatch");
+            }
+            const next = await reader.read();
+            if (next.done) break;
+            total += next.value.byteLength;
+            if (total > TUNNEL_MEDIA_MAX_BODY_BYTES) {
+              void reader.cancel().catch(() => {});
+              complete();
+              throw new StreamResetError("unauthorized", "team_body_too_large");
+            }
+            chunks.push(next.value);
+          }
+          const buffered = combineChunks(chunks, total);
+          model = modelFromRequestBody(buffered);
+          const decision = await admitTeamGrantForChannel(
+            teamToken,
+            model,
+            estimateTeamReserveTokens(buffered),
+            teamChannelScope,
+          );
+          if (!decision.ok) {
+            complete();
+            logWarn("tunnel", "Team grant refused.", {
+              reason: decision.reason,
+            });
+            throw new StreamResetError(
+              "unauthorized",
+              `team_${decision.reason}`,
+            );
+          }
+          const response = await withTeamGrant(teamToken, decision.grant, () =>
+            dispatch(tunneledRequest(open, buffered, signal)),
+          );
+          recordTunnelRequest({
+            path: "team",
+            transport,
+            admissionMs: Date.now() - startedAt,
+            resHeadMs: Date.now() - startedAt,
+            servingInflight,
+          });
+          return {
+            status: response.status,
+            headers: tunnelResponseHeadersFromHttp(response.headers),
+            body: response.body,
+            onComplete: complete,
+          };
         }
-        const decision = await admitTeamGrant(
+
+        const decision = await admitTeamGrantForChannel(
           teamToken,
-          modelFromRequestBody(buffered),
-          estimateTeamReserveTokens(buffered),
+          model,
+          estimateTeamReserveTokens(combineChunks(chunks, total)),
+          teamChannelScope,
         );
         if (!decision.ok) {
           complete();
-          logWarn("tunnel", "Team grant refused.", {
-            reason: decision.reason,
-          });
+          logWarn("tunnel", "Team grant refused.", { reason: decision.reason });
           throw new StreamResetError("unauthorized", `team_${decision.reason}`);
         }
         const response = await withTeamGrant(teamToken, decision.grant, () =>
-          dispatch(tunneledRequest(open, buffered, signal)),
+          dispatch(
+            ended
+              ? tunneledRequest(open, combineChunks(chunks, total), signal)
+              : tunneledRequest(
+                  open,
+                  bodyWithSizeLimit(reader, chunks, total),
+                  signal,
+                ),
+          ),
         );
+        recordTunnelRequest({
+          path: "team",
+          transport,
+          admissionMs: Date.now() - startedAt,
+          resHeadMs: Date.now() - startedAt,
+          servingInflight,
+        });
         return {
           status: response.status,
           headers: tunnelResponseHeadersFromHttp(response.headers),
@@ -254,6 +492,13 @@ export const createMuxTunnelServer =
         };
       }
       const response = await dispatch(tunneledRequest(open, body, signal));
+      recordTunnelRequest({
+        path: open.consumer === "daemon" ? "fleet" : "browser",
+        transport,
+        admissionMs: Date.now() - startedAt,
+        resHeadMs: Date.now() - startedAt,
+        servingInflight,
+      });
       return {
         status: response.status,
         headers: tunnelResponseHeadersFromHttp(response.headers),
@@ -274,4 +519,10 @@ export const createMuxTunnelServer =
 /** Daemon adapter for the generic mux serving seam (dispatches to the walker). */
 export const serveMuxTunnel: TServeTunnel = createMuxTunnelServer((req) =>
   handleInference(req),
+);
+
+/** RTC-mounted muxes share dispatch but report their actual transport. */
+export const serveRtcTunnel: TServeTunnel = createMuxTunnelServer(
+  (req) => handleInference(req),
+  "rtc",
 );

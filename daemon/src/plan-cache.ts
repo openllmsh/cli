@@ -47,6 +47,15 @@ export const PLAN_CACHE_SWEEP_MS = PLAN_CACHE_TTL_MS;
 /** Soft cap — drop oldest entries when exceeded (session-store uses 500). */
 export const PLAN_CACHE_MAX_ENTRIES = 500;
 
+/** A team supplier keeps recently served surface/model pairs warm for this long. */
+export const TEAM_PLAN_WARM_WINDOW_MS = 10 * 60_000;
+
+/** Team traffic refreshes on the cache's existing soft-refresh cadence. */
+export const TEAM_PLAN_WARM_REFRESH_MS = PLAN_CACHE_SOFT_REFRESH_MS;
+
+/** One supplier only keeps a small, demand-driven working set warm. */
+export const TEAM_PLAN_WARM_MAX_ENTRIES = 16;
+
 import type { TContextOverflowStrategy } from "@openllmsh/protocol";
 
 export type TCachedPlan = {
@@ -71,6 +80,13 @@ const inFlight = new Map<string, Promise<TInFlightShared>>();
  *  when it has moved on (in-flight work started before the clear). */
 let cacheGeneration = 0;
 let sweepTimer: ReturnType<typeof setInterval> | null = null;
+
+type TTeamPlanWarmEntry = {
+  readonly lastServedAtMs: number;
+  readonly refresh: () => Promise<TPlanTuple | null>;
+};
+const warmTeamPlans = new Map<string, TTeamPlanWarmEntry>();
+let warmTeamPlanTimer: ReturnType<typeof setInterval> | null = null;
 
 /** Remember the signed tuple that served `alias` (called after every verified
  *  plan fetch while the flag is on — the newest tuple wins). */
@@ -224,6 +240,65 @@ export const stopPlanCacheSweeper = (): void => {
 
 /** Current entry count (bootstrap metrics / introspection). */
 export const planCacheSize = (): number => cache.size;
+
+/**
+ * Remember a plan key only after this daemon has successfully served it for a
+ * team peer. The timer exists exclusively while that demand-driven working set
+ * is non-empty; each entry refreshes through the normal cache single-flight.
+ */
+export const noteTeamPlanServed = (
+  key: string,
+  refresh: () => Promise<TPlanTuple | null>,
+): void => {
+  warmTeamPlans.set(key, { lastServedAtMs: Date.now(), refresh });
+  if (warmTeamPlans.size > TEAM_PLAN_WARM_MAX_ENTRIES) {
+    const oldest = warmTeamPlans.keys().next().value;
+    if (oldest !== undefined) warmTeamPlans.delete(oldest);
+  }
+  startTeamPlanWarmRefresh();
+};
+
+/** Refresh and expire the recently served team-plan working set. */
+export const refreshWarmTeamPlans = async (
+  nowMs: number = Date.now(),
+): Promise<void> => {
+  const refreshes: Array<Promise<TCachedPlan | null>> = [];
+  for (const [key, entry] of warmTeamPlans) {
+    if (nowMs - entry.lastServedAtMs >= TEAM_PLAN_WARM_WINDOW_MS) {
+      warmTeamPlans.delete(key);
+      continue;
+    }
+    refreshes.push(loadPlan(key, entry.refresh));
+  }
+  if (warmTeamPlans.size === 0) stopTeamPlanWarmRefresh();
+  await Promise.all(refreshes.map((refresh) => refresh.catch(() => null)));
+};
+
+/** Start the team-plan warmer only after team traffic establishes demand. */
+export const startTeamPlanWarmRefresh = (): void => {
+  if (warmTeamPlanTimer !== null) return;
+  warmTeamPlanTimer = setInterval(() => {
+    void refreshWarmTeamPlans();
+  }, TEAM_PLAN_WARM_REFRESH_MS);
+  warmTeamPlanTimer.unref?.();
+};
+
+/** Stop the team-plan warmer when no recent team traffic remains. */
+export const stopTeamPlanWarmRefresh = (): void => {
+  if (warmTeamPlanTimer !== null) {
+    clearInterval(warmTeamPlanTimer);
+    warmTeamPlanTimer = null;
+  }
+};
+
+/** Current recently served team pair count (tests / diagnostics). */
+export const warmTeamPlanSize = (): number => warmTeamPlans.size;
+
+/** Drop the team working set and its timer (tests / shutdown). */
+export const clearWarmTeamPlans = (): void => {
+  warmTeamPlans.clear();
+  stopTeamPlanWarmRefresh();
+};
 
 /** Drop everything (bootstrap refresh / key rotation). */
 export const clearPlanCache = (): void => {
