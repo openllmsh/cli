@@ -17,6 +17,10 @@ import { MAX_PAYLOAD_BYTES } from "@openllmsh/tunnel/codec";
 import type { TMuxChannel } from "@openllmsh/tunnel/mux";
 import { createChannel } from "@openllmsh/tunnel/mux";
 import {
+  PEER_LINK_DEFAULTS,
+  peerLinkFailureCache,
+} from "@openllmsh/tunnel/peer-link";
+import {
   decodeAnswerInner,
   encodeOfferInner,
   fingerprintFromSdp,
@@ -37,9 +41,9 @@ import type { TEphKeypair } from "./keypair";
 import { generateEphKeypair, openSealedWith, sealTo } from "./keypair";
 import { logDebug, logWarn, safeDiagnosticMessage } from "./logger";
 
-const RTC_SIGNALING_TIMEOUT_MS = 10_000;
-const RTC_ICE_TIMEOUT_MS = 20_000;
-export const RTC_FAILURE_CACHE_MS = 60_000;
+const RTC_SIGNALING_TIMEOUT_MS = PEER_LINK_DEFAULTS.rtcSignalingMs;
+const RTC_ICE_TIMEOUT_MS = PEER_LINK_DEFAULTS.rtcIceMs;
+export const RTC_FAILURE_CACHE_MS = PEER_LINK_DEFAULTS.failureTtlMs;
 const RTC_DISCONNECT_GRACE_MS = 3_000;
 
 type TRtcClientSession = {
@@ -120,7 +124,6 @@ export const createRtcClient = (): TRtcClient => {
   let handshakeIceServers: ReadonlyArray<TIceServer> | null = null;
   const sessionsByKey = new Map<string, TRtcClientSession>();
   const sessionsByChannel = new Map<string, TRtcClientSession>();
-  const failedUntil = new Map<string, number>();
 
   /** Wire the control-channel sender (idempotent; re-called on reconnect).
    *  `iceServers` carries the cloud handshake config when present. */
@@ -221,7 +224,7 @@ export const createRtcClient = (): TRtcClient => {
   };
 
   const cacheFailure = (keyId: string): void => {
-    failedUntil.set(keyId, Date.now() + RTC_FAILURE_CACHE_MS);
+    peerLinkFailureCache.set(keyId, "rtc", "transport");
   };
 
   /** Mark a failed live RTC path and prevent immediate re-offers for one minute. */
@@ -231,13 +234,8 @@ export const createRtcClient = (): TRtcClient => {
     if (session !== undefined) closeSession(session, "rtc_failure");
   };
 
-  const failureCached = (keyId: string): boolean => {
-    const until = failedUntil.get(keyId);
-    if (until === undefined) return false;
-    if (until > Date.now()) return true;
-    failedUntil.delete(keyId);
-    return false;
-  };
+  const failureCached = (keyId: string): boolean =>
+    peerLinkFailureCache.has(keyId, "rtc");
 
   const mountMux = (session: TRtcClientSession, answerSdp: string): void => {
     if (
@@ -263,7 +261,7 @@ export const createRtcClient = (): TRtcClient => {
       },
     });
     clearTimers(session);
-    failedUntil.delete(session.keyId);
+    peerLinkFailureCache.clear(session.keyId);
     logDebug("rtc-client", "mux mounted on data channel", {
       keyId: session.keyId,
       channelId: session.channelId,
@@ -561,7 +559,7 @@ export const createRtcClient = (): TRtcClient => {
   const closeAll = (): void => {
     for (const session of [...sessionsByKey.values()])
       closeSession(session, "relay_restart");
-    failedUntil.clear();
+    peerLinkFailureCache.clear();
   };
 
   return {

@@ -101,6 +101,7 @@ const tunnelToPeerLive: TTunnelToPeer = async (args) => {
   const startedAt = Date.now();
   let rtcFailed = false;
   const link = createPeerLink({
+    target: args.keyId,
     rtc: {
       open: () => getRtcMuxChannel(args.keyId),
       warm: () => {

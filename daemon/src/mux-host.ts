@@ -19,6 +19,10 @@ import { decodeJsonPayload, encodeJsonPayload } from "@openllmsh/tunnel/codec";
 import { noiseGrantBinding } from "@openllmsh/tunnel/device-grant";
 import type { TDuplex, TMuxChannel, TMuxStream } from "@openllmsh/tunnel/mux";
 import { createChannel } from "@openllmsh/tunnel/mux";
+import {
+  PEER_LINK_DEFAULTS,
+  peerLinkFailureCache,
+} from "@openllmsh/tunnel/peer-link";
 import type {
   TNoiseStaticKey,
   TSecureAuthorizeContext,
@@ -424,15 +428,13 @@ const opening = new Map<
     readonly channelId: string;
   }
 >();
-const failedUntil = new Map<string, number>();
-const MUX_ACK_TIMEOUT_MS = 5_000;
-const MUX_FAILURE_CACHE_MS = 60_000;
-export const MUX_CHANNEL_IDLE_TTL_MS = 90_000;
+const MUX_ACK_TIMEOUT_MS = PEER_LINK_DEFAULTS.muxAckSameUserMs;
+export const MUX_CHANNEL_IDLE_TTL_MS = PEER_LINK_DEFAULTS.idleTtlMs;
 const MUX_CHANNEL_REAPER_INTERVAL_MS = 10_000;
 const DEMUX_WARNING_THROTTLE_MS = 5_000;
-let muxAckTimeoutMs = MUX_ACK_TIMEOUT_MS;
+let muxAckTimeoutMs: number = MUX_ACK_TIMEOUT_MS;
 // Overridable via configureMuxChannelIdleTtl; default matches the export.
-let muxChannelIdleTtlMs = MUX_CHANNEL_IDLE_TTL_MS;
+let muxChannelIdleTtlMs: number = MUX_CHANNEL_IDLE_TTL_MS;
 let channelReaper: ReturnType<typeof setInterval> | null = null;
 const lastDemuxWarningAt = new Map<string, number>();
 
@@ -531,7 +533,7 @@ export const updateMuxPeerCaps = (
 ): void => {
   if (caps === undefined) peerCaps.delete(keyId);
   else peerCaps.set(keyId, new Set(caps));
-  failedUntil.delete(keyId);
+  peerLinkFailureCache.clear(keyId);
 };
 
 /**
@@ -543,7 +545,7 @@ export const replaceMuxPeerCaps = (
   caps: Readonly<Record<string, readonly string[]>> | undefined,
 ): void => {
   peerCaps.clear();
-  failedUntil.clear();
+  peerLinkFailureCache.clear();
   if (caps === undefined) return;
   for (const [keyId, values] of Object.entries(caps))
     updateMuxPeerCaps(keyId, values);
@@ -561,7 +563,7 @@ const failOpen = (keyId: string, reason?: string): void => {
   if (pending === undefined) return;
   opening.delete(keyId);
   clearTimeout(pending.timer);
-  failedUntil.set(keyId, Date.now() + MUX_FAILURE_CACHE_MS);
+  peerLinkFailureCache.set(keyId, "mux", "transport");
   sendFrame?.({
     type: "channel_close",
     channel_id: pending.channelId,
@@ -581,8 +583,7 @@ export const muxChannelTo = async (
   if (process.env.OPENLLM_MUX_DISABLE === "1") return null;
   const caps = peerCaps.get(keyId);
   if (caps === undefined || !caps.has(MUX_CAP)) return null;
-  const failedAt = failedUntil.get(keyId);
-  if (failedAt !== undefined && failedAt > Date.now()) return null;
+  if (peerLinkFailureCache.has(keyId, "mux")) return null;
   const existing = consumerChannelFor(keyId);
   if (existing !== undefined) return existing.channel;
   const pending = opening.get(keyId);
@@ -635,7 +636,7 @@ export const handleChannelOpenAck = (frame: {
   if (binary === null) {
     opening.delete(keyId);
     clearTimeout(pending.timer);
-    failedUntil.set(keyId, Date.now() + MUX_FAILURE_CACHE_MS);
+    peerLinkFailureCache.set(keyId, "mux", "transport");
     sendFrame?.({
       type: "channel_close",
       channel_id: pending.channelId,
