@@ -205,7 +205,7 @@ const renderAd = (ad: TGravityAd, origin: string): string => {
     `Sponsored · ${brand}${title === "" ? "" : ` — ${title}`}`,
     printable(ad.adText),
     terminalHyperlink(ad.clickUrl, cta),
-    `Go ad-free: ${origin}/settings/plan`,
+    terminalHyperlink(`${origin}/settings/plan`, "Go ad-free"),
   ]
     .join("\n")
     .slice(0, 9000);

@@ -107,6 +107,10 @@ export const hydrateChatgptEntries = (
         context_window: entry.context_window ?? builtin.context_window,
         max_context_window:
           entry.max_context_window ?? builtin.max_context_window,
+        // Codex orders its picker by `priority` (stable sort). The built-in
+        // value (1–13) would list GPT models above the fallback chains; the
+        // gateway's ties them with every other entry, keeping its order.
+        priority: entry.priority ?? builtin.priority,
         visibility: "list",
       },
     ];
