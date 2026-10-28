@@ -49,7 +49,7 @@ import { logDebug, logWarn, safeDiagnosticMessage } from "./logger";
 import { admitStreamKind, serveRtcOnStream } from "./mux-host";
 
 /** Bound concurrent RTC sessions per daemon process. */
-const MAX_CONCURRENT_RTC = 8;
+const MAX_CONCURRENT_RTC = 16;
 
 /**
  * Max wait from session insert until the mux mounts on the data channel.
