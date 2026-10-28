@@ -55,7 +55,17 @@ type TUsage = { readonly input: number; readonly output: number };
 const usageOf = (value: unknown): TUsage => {
   if (value === null || typeof value !== "object")
     return { input: 0, output: 0 };
-  const owner = (value as { readonly response?: unknown }).response;
+  const record = value as {
+    readonly response?: unknown;
+    readonly message?: unknown;
+  };
+  const response = record.response;
+  const owner =
+    response !== null &&
+    typeof response === "object" &&
+    !Array.isArray(response)
+      ? response
+      : record.message;
   const usageOwner =
     owner !== null && typeof owner === "object" && !Array.isArray(owner)
       ? owner
