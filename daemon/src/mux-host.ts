@@ -411,6 +411,8 @@ type TRelayChannel = {
 
 let sendFrame: ((frame: TRelayFrame) => void) | null = null;
 let sendBinary: ((bytes: Uint8Array) => void) | null = null;
+let relayBufferedAmount: (() => number) | null = null;
+let onRelayDrain: ((callback: () => void) => () => void) | null = null;
 /** Live channels by relay-assigned channel id. */
 const channels = new Map<string, TRelayChannel>();
 const peerCaps = new Map<string, ReadonlySet<string>>();
@@ -697,6 +699,8 @@ const registerChannel = (
         bindSink(record);
       }
     },
+    relayBufferedAmount ?? undefined,
+    onRelayDrain ?? undefined,
   );
   const channel = createChannel({
     duplex,
@@ -801,8 +805,13 @@ const registerChannel = (
 export const relayDuplex = (
   sendBytes: (bytes: Uint8Array) => void,
   registerOnBytes: (callback: (bytes: Uint8Array | null) => void) => void,
+  bufferedAmount?: () => number,
+  onDrain?: (callback: () => void) => () => void,
 ): TDuplex => ({
   send: sendBytes,
+  bufferedAmount,
+  highWaterMark: bufferedAmount === undefined ? undefined : 1024 * 1024,
+  onDrain,
   onBytes: registerOnBytes,
   close: () => registerOnBytes(() => {}),
 });
@@ -812,12 +821,16 @@ let streamHandler: typeof serveMuxOnStream | null = null;
 export const configureMuxHost = (options: {
   readonly send: (frame: TRelayFrame) => void;
   readonly sendBytes: (bytes: Uint8Array) => void;
+  readonly bufferedAmount?: () => number;
+  readonly onDrain?: (callback: () => void) => () => void;
   /** Stream handler for relay mux channels; defaults to {@link serveMuxOnStream}. */
   readonly onStream?: typeof serveMuxOnStream;
 }): void => {
   sendFrame = options.send;
   streamHandler = options.onStream ?? null;
   sendBinary = options.sendBytes;
+  relayBufferedAmount = options.bufferedAmount ?? null;
+  onRelayDrain = options.onDrain ?? null;
   // The reaper lives with the host lifecycle, not the relay socket: the shared
   // persistent relay sandbox keeps sockets up for days, so relay-socket death
   // (resetAllChannels) can no longer be the only channel cleanup.
