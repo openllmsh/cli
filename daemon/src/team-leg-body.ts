@@ -75,7 +75,11 @@ export const observedTeamLegTokens = async (
   let complete = false;
   for (const line of text.split("\n")) {
     const value = line.trim();
-    if (value === "event: message_stop") complete = true;
+    if (
+      value === "event: message_stop" ||
+      value === "event: response.completed"
+    )
+      complete = true;
     if (!value.startsWith("data:")) continue;
     const data = value.slice(5).trim();
     if (data === "[DONE]") {
