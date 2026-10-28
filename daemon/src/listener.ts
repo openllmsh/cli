@@ -68,7 +68,13 @@ import {
   planFetchFailureAction,
 } from "./net-error";
 import type { TPlanTuple } from "./plan-cache";
-import { loadPlanWithShared, lookupPlan, planNeedsRefresh } from "./plan-cache";
+import {
+  loadPlanWithShared,
+  lookupPlan,
+  noteTeamPlanServed,
+  planNeedsRefresh,
+} from "./plan-cache";
+import { currentTeamGrantToken } from "./team-request-context";
 
 import { isBodylessVideoOp, videoOperationFor } from "./video-ops";
 import {
@@ -799,30 +805,76 @@ export const handleInference = async (req: Request): Promise<Response> => {
     sigParam,
     startedAt,
   };
-  return withCors(
-    req,
-    await (videoOperation === "create"
-      ? runVideoCreate(walkArgs)
-      : videoOperation === "poll"
-        ? runVideoPoll(walkArgs, videoId)
-        : videoOperation === "content"
-          ? runVideoContent(walkArgs, videoId)
-          : videoOperation === "cancel"
-            ? runVideoCancel(walkArgs, videoId)
-            : isResponsesCompact
-              ? runResponsesCompact(walkArgs)
-              : isCountTokens
-                ? runCountTokens(walkArgs)
-                : isImages
-                  ? runImageWalker(walkArgs)
-                  : isImageEdits
-                    ? runImageEditWalker(walkArgs)
-                    : isTranscriptions
-                      ? runAudioTranscriptionWalker(walkArgs, multipart)
-                      : isSpeech
-                        ? runAudioSpeechWalker(walkArgs)
-                        : isEmbeddings
-                          ? runEmbeddings(walkArgs)
-                          : runWalker(walkArgs)),
-  );
+  const response = await (videoOperation === "create"
+    ? runVideoCreate(walkArgs)
+    : videoOperation === "poll"
+      ? runVideoPoll(walkArgs, videoId)
+      : videoOperation === "content"
+        ? runVideoContent(walkArgs, videoId)
+        : videoOperation === "cancel"
+          ? runVideoCancel(walkArgs)
+          : isResponsesCompact
+            ? runResponsesCompact(walkArgs)
+            : isCountTokens
+              ? runCountTokens(walkArgs)
+              : isImages
+                ? runImageWalker(walkArgs)
+                : isImageEdits
+                  ? runImageEditWalker(walkArgs)
+                  : isTranscriptions
+                    ? runAudioTranscriptionWalker(walkArgs, multipart)
+                    : isSpeech
+                      ? runAudioSpeechWalker(walkArgs)
+                      : isEmbeddings
+                        ? runEmbeddings(walkArgs)
+                        : runWalker(walkArgs));
+
+  // Only a successful team-tunnel response earns a warm slot. The refresher
+  // retains just the model alias and surface; never the peer's prompt/body.
+  if (
+    response.ok &&
+    currentTeamGrantToken() !== null &&
+    planCacheEnabled() &&
+    planCacheKey !== null &&
+    explicitAlias !== null &&
+    planParam !== null
+  ) {
+    noteTeamPlanServed(planCacheKey, async (): Promise<TPlanTuple | null> => {
+      let refreshed: Awaited<ReturnType<typeof fetchPlan>>;
+      try {
+        refreshed = await fetchPlan(
+          explicitAlias,
+          0,
+          undefined,
+          mediaSurface ?? undefined,
+        );
+      } catch {
+        return null;
+      }
+      const refreshedContextOverflowStrategy =
+        refreshed.context_overflow_strategy ?? null;
+      const verified = planSignatureOk(
+        refreshed.plan,
+        refreshed.pmids,
+        refreshed.origin,
+        refreshedContextOverflowStrategy,
+        refreshed.sig,
+      );
+      const hasDaemonOnlyHop =
+        verified &&
+        parsePlan(refreshed.plan).some((entry) => {
+          const provider = entry.split("/")[0] ?? "";
+          return isOAuthSlug(provider) || isLocalServerSlug(provider);
+        });
+      if (!hasDaemonOnlyHop) return null;
+      return {
+        planParam: refreshed.plan,
+        pmidsParam: refreshed.pmids,
+        originParam: refreshed.origin,
+        contextOverflowStrategy: refreshedContextOverflowStrategy,
+        sigParam: refreshed.sig,
+      };
+    });
+  }
+  return withCors(req, response);
 };
