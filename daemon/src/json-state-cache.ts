@@ -18,7 +18,7 @@ export const writeJsonStateAtomic = (
   dir: string,
   file: string,
   body: unknown,
-): void => {
+): boolean => {
   tmpSeq += 1;
   const base = file.includes("/")
     ? file.slice(file.lastIndexOf("/") + 1)
@@ -28,12 +28,14 @@ export const writeJsonStateAtomic = (
     mkdirSync(dir, { recursive: true, mode: 0o700 });
     writeFileSync(tmp, JSON.stringify(body), { mode: 0o600 });
     renameSync(tmp, file);
+    return true;
   } catch {
     try {
       rmSync(tmp, { force: true });
     } catch {
       // best-effort temp cleanup
     }
+    return false;
   }
 };
 

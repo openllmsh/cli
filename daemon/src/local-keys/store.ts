@@ -19,6 +19,7 @@ const MAX_STORE_BYTES = 64 * 1024;
 const MAX_LABEL_LENGTH = 64;
 /** Same ceiling as `AccountIndex` on the wire. */
 const MAX_INDEX = 1023;
+const PERSIST_ERROR = "failed to persist provider key";
 
 export type TLocalKeySlot = {
   readonly index: number;
@@ -89,9 +90,13 @@ const writeSlots = (
   slug: TLocalKeyProviderSlug,
   slots: readonly TLocalKeySlot[],
   home?: string,
-): void => {
+): boolean => {
   const body: TLocalKeyStore = { version: STORE_VERSION, slots };
-  writeJsonStateAtomic(storeDir(home), localKeyStorePath(slug, home), body);
+  return writeJsonStateAtomic(
+    storeDir(home),
+    localKeyStorePath(slug, home),
+    body,
+  );
 };
 
 /** Lowest index not taken by `slots` (0, 1, … — no gaps after a removal). */
@@ -127,11 +132,15 @@ export const setLocalKeySlot = (
     if (args.index === undefined) {
       return { ok: false, error: "an empty key needs an account_index" };
     }
-    writeSlots(
-      slug,
-      slots.filter((s) => s.index !== args.index),
-      home,
-    );
+    if (
+      !writeSlots(
+        slug,
+        slots.filter((s) => s.index !== args.index),
+        home,
+      )
+    ) {
+      return { ok: false, error: PERSIST_ERROR };
+    }
     return { ok: true, index: null };
   }
   const existing =
@@ -150,13 +159,17 @@ export const setLocalKeySlot = (
     label,
     created_at_ms: existing?.created_at_ms ?? Date.now(),
   };
-  writeSlots(
-    slug,
-    [...slots.filter((s) => s.index !== index), slot].sort(
-      (a, b) => a.index - b.index,
-    ),
-    home,
-  );
+  if (
+    !writeSlots(
+      slug,
+      [...slots.filter((s) => s.index !== index), slot].sort(
+        (a, b) => a.index - b.index,
+      ),
+      home,
+    )
+  ) {
+    return { ok: false, error: PERSIST_ERROR };
+  }
   return { ok: true, index };
 };
 

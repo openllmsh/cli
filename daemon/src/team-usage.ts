@@ -78,8 +78,9 @@ const readFile = (path: string): TTeamUsageFile => {
   return { periods };
 };
 
-const writeFileAtomic = (path: string, data: TTeamUsageFile): void =>
+const writeFileAtomic = (path: string, data: TTeamUsageFile): void => {
   writeJsonStateAtomic(dirname(path), path, data);
+};
 
 export const createTeamUsageTracker = (
   deps: TTeamUsageDeps = {},
