@@ -173,7 +173,17 @@ const appendCombined = (line: string, sync: boolean): boolean => {
 export const flushLogs = (): Promise<void> => appendTail;
 
 type TLogObservation = TDoctorOutcomeLedger &
-  Pick<TDoctorObservationInput, "timings" | "correlation_id">;
+  Pick<
+    TDoctorObservationInput,
+    | "timings"
+    | "correlation_id"
+    | "tunnel_path"
+    | "tunnel_transport"
+    | "rung_fallback_reason"
+    | "channel_reused"
+    | "plan_cache"
+    | "serving_inflight"
+  >;
 
 const write = (
   level: TLevel,
@@ -190,6 +200,12 @@ const write = (
         message,
         timings: observation?.timings,
         correlation_id: observation?.correlation_id,
+        tunnel_path: observation?.tunnel_path,
+        tunnel_transport: observation?.tunnel_transport,
+        rung_fallback_reason: observation?.rung_fallback_reason,
+        channel_reused: observation?.channel_reused,
+        plan_cache: observation?.plan_cache,
+        serving_inflight: observation?.serving_inflight,
         replay_session_id: currentCommandReplaySessionId(),
         ...projectDoctorOutcomeLedger(observation ?? {}),
       });

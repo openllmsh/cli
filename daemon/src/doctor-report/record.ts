@@ -9,6 +9,10 @@ import type {
   TDoctorOutcomeLedger,
   TDoctorReportEvent,
   TDoctorSeverity,
+  TTunnelRequestFallbackReason,
+  TTunnelRequestPath,
+  TTunnelRequestPlanCache,
+  TTunnelRequestTransport,
 } from "@openllmsh/protocol";
 import {
   isReplaySessionId,
@@ -36,6 +40,12 @@ export type TDoctorObservationInput = {
   readonly replay_session_id?: string;
   readonly timings?: TDoctorEventTimings;
   readonly observed_at_ms?: number;
+  readonly tunnel_path?: TTunnelRequestPath;
+  readonly tunnel_transport?: TTunnelRequestTransport;
+  readonly rung_fallback_reason?: TTunnelRequestFallbackReason;
+  readonly channel_reused?: boolean;
+  readonly plan_cache?: TTunnelRequestPlanCache;
+  readonly serving_inflight?: number;
 } & TDoctorOutcomeLedger;
 
 export type TDoctorRecordDeps = {
@@ -102,6 +112,24 @@ export const createDoctorRecord = (
         : {}),
       ...(input.timings !== undefined
         ? { timings: projectDoctorTimings(input.timings) }
+        : {}),
+      ...(input.tunnel_path !== undefined
+        ? { tunnel_path: input.tunnel_path }
+        : {}),
+      ...(input.tunnel_transport !== undefined
+        ? { tunnel_transport: input.tunnel_transport }
+        : {}),
+      ...(input.rung_fallback_reason !== undefined
+        ? { rung_fallback_reason: input.rung_fallback_reason }
+        : {}),
+      ...(input.channel_reused !== undefined
+        ? { channel_reused: input.channel_reused }
+        : {}),
+      ...(input.plan_cache !== undefined
+        ? { plan_cache: input.plan_cache }
+        : {}),
+      ...(input.serving_inflight !== undefined
+        ? { serving_inflight: input.serving_inflight }
         : {}),
       ...projectDoctorOutcomeLedger({ ...input, ...doctorOsStamp() }),
     };

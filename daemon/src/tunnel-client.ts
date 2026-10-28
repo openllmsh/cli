@@ -21,7 +21,8 @@ import type { TTunnelSurface } from "@openllmsh/protocol";
 import { RTC_CAP, SEEDGATE_CAP } from "@openllmsh/protocol";
 import { fleetRequest } from "@openllmsh/tunnel/fleet";
 import { fleetSubscriptionPubkeyFor } from "./config";
-import { getMuxPeerCaps, muxChannelTo } from "./mux-host";
+import { getMuxPeerCaps, hasMuxChannelTo, muxChannelTo } from "./mux-host";
+import { logInfo, safeDiagnosticMessage } from "./logger";
 import { ensureRtcTo, getRtcMuxChannel, markRtcFailure } from "./rtc-client";
 
 /**
@@ -35,6 +36,33 @@ const isPreDispatchTunnelError = (error: unknown): boolean => {
     error.message === "channel is closed" ||
     error.message === "stream ids exhausted"
   );
+};
+
+const recordTunnelRequest = (input: {
+  readonly transport: "rtc" | "mux";
+  readonly rungFallbackReason:
+    | "none"
+    | "rtc_failed"
+    | "rtc_unavailable"
+    | "mux_unavailable"
+    | "channel_open_failed";
+  readonly channelReused: boolean;
+  readonly openMs: number;
+  readonly resHeadMs: number;
+}): void => {
+  logInfo("tunnel_request", safeDiagnosticMessage`tunnel_request`, undefined, {
+    tunnel_path: "fleet",
+    tunnel_transport: input.transport,
+    rung_fallback_reason: input.rungFallbackReason,
+    channel_reused: input.channelReused,
+    plan_cache: "miss",
+    serving_inflight: 0,
+    timings: {
+      open_ms: input.openMs,
+      admission_ms: 0,
+      res_head_ms: input.resHeadMs,
+    },
+  });
 };
 
 export type TTunnelToPeerArgs = {
@@ -86,10 +114,20 @@ const tunnelToPeerLive: TTunnelToPeer = async (args) => {
     signal: args.signal,
   };
 
+  const startedAt = Date.now();
+  let rungFallbackReason: "rtc_failed" | "rtc_unavailable" = "rtc_unavailable";
   const rtc = getRtcMuxChannel(args.keyId);
   if (rtc !== null) {
     try {
-      return await fleetRequest(rtc, request);
+      const response = await fleetRequest(rtc, request);
+      recordTunnelRequest({
+        transport: "rtc",
+        rungFallbackReason: "none",
+        channelReused: true,
+        openMs: 0,
+        resHeadMs: Date.now() - startedAt,
+      });
+      return response;
     } catch (error: unknown) {
       // Caller abort is not an RTC path failure — do not cache or fall through.
       if (args.signal.aborted) {
@@ -101,11 +139,14 @@ const tunnelToPeerLive: TTunnelToPeer = async (args) => {
       // peer may already be dispatching. Only re-dispatch on known pre-dispatch
       // local failures (parity with browser tunnelFetch).
       markRtcFailure(args.keyId);
+      rungFallbackReason = "rtc_failed";
       if (!isPreDispatchTunnelError(error)) throw error;
       // Pre-dispatch RTC failure falls through to relay mux on this request.
     }
   }
 
+  const muxWasReused = hasMuxChannelTo(args.keyId);
+  const muxStartedAt = Date.now();
   const mux = await muxChannelTo(args.keyId);
   if (mux === null) {
     throw new Error(
@@ -113,7 +154,15 @@ const tunnelToPeerLive: TTunnelToPeer = async (args) => {
     );
   }
   try {
-    return await fleetRequest(mux, request);
+    const response = await fleetRequest(mux, request);
+    recordTunnelRequest({
+      transport: "mux",
+      rungFallbackReason,
+      channelReused: muxWasReused,
+      openMs: Date.now() - muxStartedAt,
+      resHeadMs: Date.now() - startedAt,
+    });
+    return response;
   } catch (error: unknown) {
     if (args.signal.aborted) {
       throw error instanceof Error

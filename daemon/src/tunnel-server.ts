@@ -36,7 +36,7 @@ import {
 import { StreamResetError } from "@openllmsh/tunnel/stream-reset-error";
 import type { TServeTunnel } from "@openllmsh/tunnel/streams";
 import { handleInference } from "./listener";
-import { logWarn } from "./logger";
+import { logInfo, logWarn, safeDiagnosticMessage } from "./logger";
 import { beginRequest, endRequest } from "./self-update";
 import {
   admitTeamGrant,
@@ -89,6 +89,28 @@ const surfacePath = (
 };
 
 let muxServedCount = 0;
+
+const recordTunnelRequest = (input: {
+  readonly path: "fleet" | "browser" | "team";
+  readonly transport: "rtc" | "mux";
+  readonly admissionMs: number;
+  readonly resHeadMs: number;
+  readonly servingInflight: number;
+}): void => {
+  logInfo("tunnel_request", safeDiagnosticMessage`tunnel_request`, undefined, {
+    tunnel_path: input.path,
+    tunnel_transport: input.transport,
+    rung_fallback_reason: "none",
+    channel_reused: false,
+    plan_cache: "miss",
+    serving_inflight: input.servingInflight,
+    timings: {
+      open_ms: 0,
+      admission_ms: input.admissionMs,
+      res_head_ms: input.resHeadMs,
+    },
+  });
+};
 
 const forwardedHeaders = (open: {
   readonly consumer?: "browser" | "daemon";
@@ -182,9 +204,11 @@ export const admitMuxTunnel = (): "tunnel_busy" | null =>
  * exactly as before.
  */
 export const createMuxTunnelServer =
-  (dispatch: TTunnelDispatch): TServeTunnel =>
+  (dispatch: TTunnelDispatch, transport: "rtc" | "mux" = "mux"): TServeTunnel =>
   async (open, body, signal) => {
+    const startedAt = Date.now();
     muxServedCount += 1;
+    const servingInflight = muxServedCount;
     beginRequest();
     let completed = false;
     const complete = (): void => {
@@ -246,6 +270,13 @@ export const createMuxTunnelServer =
         const response = await withTeamGrant(teamToken, decision.grant, () =>
           dispatch(tunneledRequest(open, buffered, signal)),
         );
+        recordTunnelRequest({
+          path: "team",
+          transport,
+          admissionMs: Date.now() - startedAt,
+          resHeadMs: Date.now() - startedAt,
+          servingInflight,
+        });
         return {
           status: response.status,
           headers: tunnelResponseHeadersFromHttp(response.headers),
@@ -254,6 +285,13 @@ export const createMuxTunnelServer =
         };
       }
       const response = await dispatch(tunneledRequest(open, body, signal));
+      recordTunnelRequest({
+        path: open.consumer === "daemon" ? "fleet" : "browser",
+        transport,
+        admissionMs: Date.now() - startedAt,
+        resHeadMs: Date.now() - startedAt,
+        servingInflight,
+      });
       return {
         status: response.status,
         headers: tunnelResponseHeadersFromHttp(response.headers),
@@ -274,4 +312,10 @@ export const createMuxTunnelServer =
 /** Daemon adapter for the generic mux serving seam (dispatches to the walker). */
 export const serveMuxTunnel: TServeTunnel = createMuxTunnelServer((req) =>
   handleInference(req),
+);
+
+/** RTC-mounted muxes share dispatch but report their actual transport. */
+export const serveRtcTunnel: TServeTunnel = createMuxTunnelServer(
+  (req) => handleInference(req),
+  "rtc",
 );

@@ -46,7 +46,7 @@ import { AGENT_PIN_REFUSALS, enforceRtcSeedGate } from "./device-access-verify";
 import { daemonApiKeyId } from "./env";
 import { daemonPublicKey, openSealed, sealTo } from "./keypair";
 import { logDebug, logWarn, safeDiagnosticMessage } from "./logger";
-import { admitStreamKind, serveMuxOnStream } from "./mux-host";
+import { admitStreamKind, serveRtcOnStream } from "./mux-host";
 
 /** Bound concurrent RTC sessions per daemon process. */
 const MAX_CONCURRENT_RTC = 8;
@@ -76,7 +76,7 @@ export type TRtcHostOptions = {
   readonly send: (frame: TRelayFrame) => void;
   readonly iceServers?: ReadonlyArray<TIceServer> | null;
   /** Stream handler for mounted RTC muxes; defaults to {@link serveMuxOnStream}. */
-  readonly onStream?: typeof serveMuxOnStream;
+  readonly onStream?: typeof serveRtcOnStream;
 };
 
 export type TRtcOfferFrame = {
@@ -174,8 +174,8 @@ export const createRtcMuxOnStream =
   (options: {
     readonly channelId: string;
     readonly seedGated: boolean;
-    readonly handler: typeof serveMuxOnStream;
-  }): typeof serveMuxOnStream =>
+    readonly handler: typeof serveRtcOnStream;
+  }): typeof serveRtcOnStream =>
   (stream, open) => {
     const kind = streamOpenKindOf(decodeJsonPayload(open));
     if (
@@ -199,7 +199,7 @@ export const createRtcHost = (): TRtcHost => {
   /** Cloud-served ICE servers from the daemon's own channel handshake, if any. */
   let handshakeIceServers: ReadonlyArray<TIceServer> | null = null;
   const sessions = new Map<string, TRtcSession>();
-  let streamHandler: typeof serveMuxOnStream | null = null;
+  let streamHandler: typeof serveRtcOnStream | null = null;
 
   /** Wire the control-channel sender (idempotent; re-called on reconnect).
    *  `iceServers` carries the cloud handshake config when present. */
@@ -377,7 +377,7 @@ export const createRtcHost = (): TRtcHost => {
         onStream: createRtcMuxOnStream({
           channelId: session.channelId,
           seedGated: session.seedGated,
-          handler: streamHandler ?? serveMuxOnStream,
+          handler: streamHandler ?? serveRtcOnStream,
         }),
         onClose: () => {
           session.mux = null;

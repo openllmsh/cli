@@ -53,7 +53,11 @@ import {
 export { teamGrantFromStreamOpen } from "./team-grant-admit";
 
 import { teamServeEnabled } from "./team-serve";
-import { admitMuxTunnel, serveMuxTunnel } from "./tunnel-server";
+import {
+  admitMuxTunnel,
+  serveMuxTunnel,
+  serveRtcTunnel,
+} from "./tunnel-server";
 
 /** Re-export so daemon tests keep a single import site with the mux host. */
 export { AGENT_SECURE_PROLOGUE_INFO, agentSecurePrologue };
@@ -564,6 +568,10 @@ const failOpen = (keyId: string, reason?: string): void => {
   pending.resolve(null);
 };
 
+/** Whether the consumer already has a live relay-mux channel to `keyId`. */
+export const hasMuxChannelTo = (keyId: string): boolean =>
+  consumerChannelFor(keyId) !== undefined;
+
 /** Consumer-side negotiation. `mux2` permits one channel per fleet peer. */
 export const muxChannelTo = async (
   keyId: string,
@@ -855,6 +863,11 @@ export const serveMuxOnStream = createMuxOnStream({
   // Keep the tunnel-server reference lazy: its production dispatcher reaches
   // the control channel, which imports this host during daemon initialization.
   tunnel: (open, body, signal) => serveMuxTunnel(open, body, signal),
+});
+
+/** RTC uses the same OPEN policy but preserves its transport in diagnostics. */
+export const serveRtcOnStream = createMuxOnStream({
+  tunnel: (open, body, signal) => serveRtcTunnel(open, body, signal),
 });
 
 /**
