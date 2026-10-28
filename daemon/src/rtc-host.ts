@@ -75,7 +75,7 @@ type TRtcSession = {
   readonly seedGated: boolean;
   /** Cross-user RTC session admitted with an end-to-end verified team grant. */
   readonly teamGranted: boolean;
-  /** Exact channel grant, repeated on every team tunnel OPEN. */
+  /** Channel-admission grant; every tunnel OPEN carries a fresh grant. */
   readonly teamGrantToken: string | null;
   closed: boolean;
   nacked: boolean;

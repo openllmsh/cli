@@ -272,8 +272,11 @@ export const admitStreamKind = (
 };
 
 /**
- * Require each inference OPEN on a team-admitted channel to repeat precisely
- * the grant that admitted its channel. Shared by relay-mux and RTC hosts.
+ * Require each inference OPEN on a team-admitted channel to carry its own
+ * grant. The tunnel server verifies that fresh grant (signature, expiry,
+ * consumer/device/model/cap scope) before dispatch. The channel grant is
+ * admission-only, so a long-lived channel never pins a short-lived token.
+ * Shared by relay-mux and RTC hosts.
  */
 export const admitTeamTunnelGrant = (
   stream: TMuxStream,
@@ -287,11 +290,7 @@ export const admitTeamTunnelGrant = (
 ): boolean => {
   if (!context.teamGranted) return true;
   const openGrant = teamGrantFromStreamOpen(decodedOpen);
-  if (
-    openGrant !== null &&
-    context.teamGrantToken !== null &&
-    openGrant === context.teamGrantToken
-  ) {
+  if (openGrant !== null && context.teamGrantToken !== null) {
     logInfo("mux-host", "team stream open received", {
       channelId: context.channelId,
       transport: context.transport,
