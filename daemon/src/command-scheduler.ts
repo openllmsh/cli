@@ -113,6 +113,7 @@ export const commandLaneOf = (cmd: TDaemonCommand): TCommandLane => {
     case "set_device_sessions":
       return "global";
     case "set_local_key":
+    case "set_provider_key":
       return "mutation";
   }
 };

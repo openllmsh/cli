@@ -156,6 +156,9 @@ daemon/
       keys.ts               `OPENLLM_LOCAL_KEY_<PORT>` in `~/.openllm/.env` (0600); status exposes `has_key` only
       discover.ts           probe `http://127.0.0.1:<port>/v1/models` (presets + `OPENLLM_LOCAL_PORTS`); push `local_entries` + `local_servers` on status
       serve.ts              `serveLocalHop` / `serveLocalEmbeddings` — OpenAI-wire passthrough, no delegate/CLI
+    local-keys/             `local_key` plans (opencode_go, zai_coding, minimax_coding): device-held vendor API keys
+      store.ts              key slots in `<stateDir>/local-keys/<slug>.json` (0600); `set_provider_key` writes; status carries `key_hint` only
+      serve.ts              `serveLocalKeyHop` — vendor's hosted OpenAI-compat endpoint, slots tried in order (auth/quota/5xx advance)
     events.ts               /events SSE: push status on change (replaces polling)
     cors.ts                 shared CORS + PNA preflight for both surfaces
     cli-paths.ts            isolated-CLI paths + per-provider run env

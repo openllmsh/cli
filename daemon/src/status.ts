@@ -18,6 +18,8 @@ import type {
 } from "@openllmsh/protocol";
 import {
   DEVICE_SESSIONS_CONTROL_CAP,
+  LOCAL_KEY_PROVIDER_PRESETS,
+  LOCAL_KEY_PROVIDERS_CONTROL_CAP,
   MULTI_ACCOUNT_CONTROL_CAP,
   normalizeProviderConnection,
   TEAM_SERVE_CAP,
@@ -42,6 +44,7 @@ import {
   waitUntilExpired,
 } from "./deadline-budget";
 import { DELEGATES, getDelegate, isOAuthSlug } from "./delegation";
+import { accountHash } from "./delegation/account-id";
 import {
   loginOwnershipPending,
   loginSlot,
@@ -59,6 +62,7 @@ import { attachHostSignIn } from "./host-sign-in";
 import { hasIdentityConflict } from "./identity-state";
 import { daemonPublicKey } from "./keypair";
 import { deviceAccessPinReport } from "./local-device-control";
+import { keyHintOf, readLocalKeySlots } from "./local-keys";
 import { currentLocalServerStates } from "./local-servers";
 import { logWarn, safeDiagnosticMessage } from "./logger";
 import { currentDaemonCaps } from "./mux-host";
@@ -877,6 +881,20 @@ const computeStatusFreshInner = async (
       ),
     ),
   );
+  // `local_key` providers: one `connected` row per stored key slot. A key is
+  // present, not proven valid — a bad key surfaces as a failed hop.
+  for (const preset of LOCAL_KEY_PROVIDER_PRESETS) {
+    for (const slot of readLocalKeySlots(preset.slug)) {
+      connections.push({
+        provider: preset.slug,
+        status: "connected",
+        account_index: slot.index,
+        account_hash: accountHash(preset.slug, slot.key),
+        key_hint: keyHintOf(slot.key),
+        ...(slot.label !== null ? { account_label: slot.label } : {}),
+      });
+    }
+  }
   // Device-session-only CLI (no subscription connect card). Append so the
   // device picker can list it; /providers filters to subscription slugs.
   if (opencodeInstalled()) {
@@ -910,6 +928,7 @@ const computeStatusFreshInner = async (
       "refresh_models_due",
       MULTI_ACCOUNT_CONTROL_CAP,
       DEVICE_SESSIONS_CONTROL_CAP,
+      LOCAL_KEY_PROVIDERS_CONTROL_CAP,
       ...(teamServeEnabled() ? [TEAM_SERVE_CAP] : []),
     ],
     connections,

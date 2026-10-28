@@ -21,6 +21,7 @@ import {
   decodeVideoId,
   ImageGenerationInput,
   ImageGenerationRequest,
+  isLocalKeyProviderSlug,
   parseImageEditInput,
   parseImageEditMultipart,
   parseVideoGenerationInput,
@@ -544,7 +545,11 @@ export const handleInference = async (req: Request): Promise<Response> => {
         verified &&
         parsePlan(fetched.plan).some((entry) => {
           const provider = entry.split("/")[0] ?? "";
-          return isOAuthSlug(provider) || isLocalServerSlug(provider);
+          return (
+            isOAuthSlug(provider) ||
+            isLocalServerSlug(provider) ||
+            isLocalKeyProviderSlug(provider)
+          );
         });
       if (!verified || !hasDaemonOnlyHop) {
         // A verified plan with no daemon-only hop belongs to origin; the

@@ -389,7 +389,8 @@
                                 "type": "string",
                                 "enum": [
                                   "oauth",
-                                  "local"
+                                  "local",
+                                  "local_key"
                                 ]
                               },
                               {
@@ -54793,7 +54794,8 @@
                                 "type": "string",
                                 "enum": [
                                   "oauth",
-                                  "local"
+                                  "local",
+                                  "local_key"
                                 ]
                               },
                               {

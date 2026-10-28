@@ -57,6 +57,7 @@ import {
   ChatCompletionChunk,
   cooldownPolicyFor,
   daemonPlanSigningPayload,
+  isLocalKeyProviderSlug,
   resolveDefaultModelCaps,
   resolveModelSettings,
   TOOL_SESSION_HEADER,
@@ -229,6 +230,7 @@ import {
   peekHopCooldown,
   TRANSIENT_COOLDOWN_REASONS,
 } from "./hop-cooldown";
+import { serveLocalKeyHop } from "./local-keys";
 import { isLocalServerSlug, serveLocalHop } from "./local-servers";
 import { logWarn, safeDiagnosticMessage } from "./logger";
 import { maybeReportModels } from "./model-report";
@@ -531,6 +533,7 @@ export const planSignatureOk = (
 export const canWalkPlan = (hops: ReadonlyArray<THop>): boolean => {
   for (const hop of hops) {
     if (isLocalServerSlug(hop.provider)) continue; // local OpenAI-wire passthrough
+    if (isLocalKeyProviderSlug(hop.provider)) continue; // device-held vendor key
     if (!isOAuthSlug(hop.provider)) continue; // API-key → forwardable
     if (isNativeRuntimeProvider(hop.provider)) continue; // native runtime path (incl. bridge-only cursor)
     if (UPSTREAM_WIRE[hop.provider] === undefined) return false;
@@ -3531,6 +3534,31 @@ const walkPlan = async (
         reason: lastError,
       });
       continue;
+    }
+    if (isLocalKeyProviderSlug(hop.provider)) {
+      dialedHops.add(`${hop.provider}|${hop.modelId}`);
+      const keyResp = await serveLocalKeyHop(
+        hop,
+        {
+          surface: args.surface,
+          rawBody: args.rawBody,
+          req: args.req,
+          startedAt: args.startedAt,
+          endpoint: args.endpoint,
+          originParam: args.originParam,
+        },
+        finalHop,
+      );
+      if (keyResp === null) {
+        lastError = `local key hop ${hop.modelId} unavailable on this device`;
+        hopTrail.push({
+          modelId: hop.modelId,
+          provider: hop.provider,
+          reason: lastError,
+        });
+        continue;
+      }
+      return withHopTrailHeaders(keyResp, hop);
     }
     if (isLocalServerSlug(hop.provider)) {
       dialedHops.add(`${hop.provider}|${hop.modelId}`);

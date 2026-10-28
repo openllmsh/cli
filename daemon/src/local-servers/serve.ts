@@ -82,7 +82,7 @@ const authHeadersFor = (port: number): Record<string, string> => {
 };
 
 /** Best-effort OpenAI/Anthropic error envelope parse for hop classification. */
-const errorEnvelopeFrom = (raw: string): TErrorEnvelope | undefined => {
+export const errorEnvelopeFrom = (raw: string): TErrorEnvelope | undefined => {
   try {
     const json = JSON.parse(raw) as { error?: unknown };
     if (typeof json.error === "string") {
@@ -104,7 +104,7 @@ const errorEnvelopeFrom = (raw: string): TErrorEnvelope | undefined => {
  * Anthropic messages surface rewrite to `{ type: "error", error: { type, message } }`
  * so Claude Code sees a clean failure instead of an OpenAI-shaped envelope.
  */
-const localErrorResponse = (
+export const localErrorResponse = (
   status: number,
   raw: string,
   surface: TClientSurface,
@@ -141,7 +141,7 @@ const localErrorResponse = (
  * {@link inboundSignal} stays on the fetch via `AbortSignal.any` so a client
  * abort still cancels an in-flight body after headers arrive.
  */
-const postLocal = async (
+export const postLocal = async (
   url: string,
   init: RequestInit,
   inboundSignal: AbortSignal,
@@ -163,7 +163,7 @@ const postLocal = async (
   }
 };
 
-const decodeOpenaiJson = (
+export const decodeOpenaiJson = (
   json: unknown,
   providerModelId: string,
 ): TChatCompletionResponse => ({
@@ -171,7 +171,7 @@ const decodeOpenaiJson = (
   model: providerModelId,
 });
 
-const decodeOpenaiStream = (
+export const decodeOpenaiStream = (
   body: ReadableStream<Uint8Array>,
   providerModelId: string,
 ): ReadableStream<TChatCompletionChunk> =>
@@ -185,7 +185,7 @@ const decodeOpenaiStream = (
     { providerModelId },
   );
 
-const recordLocal = (
+export const recordLocal = (
   row: Omit<TDaemonRecordRequest, "idempotency_key"> & {
     readonly idempotency_key?: string;
   },

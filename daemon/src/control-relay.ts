@@ -41,6 +41,7 @@ import {
 } from "./device-anchor";
 import { daemonApiKeyId } from "./env";
 import { openSealed } from "./keypair";
+import { setLocalKeySlot } from "./local-keys";
 import {
   rescanLocalPort,
   rescanLocalServers,
@@ -674,6 +675,41 @@ const runCommandInAccount = async (
           id: cmd.id,
           status: "done",
           result: { local_server: state },
+        };
+      }
+      // Add / replace / remove a `local_key` provider key slot. Sealed to
+      // this daemon's X25519 pubkey; the plaintext is written only to the
+      // 0600 store and never echoed. The post-command status push carries the
+      // new slot as a `connections` row (key_hint only).
+      case "set_provider_key": {
+        let plaintext = "";
+        if (cmd.payload.sealed !== "") {
+          const opened = openSealed(cmd.payload.sealed);
+          if (opened === null) {
+            return {
+              id: cmd.id,
+              status: "error",
+              result: { error: "could not open sealed provider key" },
+            };
+          }
+          plaintext = opened;
+        }
+        const applied = setLocalKeySlot(cmd.payload.slug, {
+          index: cmd.payload.account_index,
+          key: plaintext,
+          label: cmd.payload.label,
+        });
+        if (!applied.ok) {
+          return {
+            id: cmd.id,
+            status: "error",
+            result: { error: applied.error },
+          };
+        }
+        return {
+          id: cmd.id,
+          status: "done",
+          result: { account_index: applied.index },
         };
       }
       // Control-key-signed device-sessions DISABLE. The cloud only relays the
