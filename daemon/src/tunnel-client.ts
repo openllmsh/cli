@@ -27,7 +27,7 @@ import { getMuxPeerCaps, muxChannelTo } from "./mux-host";
 import { ensureRtcTo, getRtcMuxChannel, markRtcFailure } from "./rtc-client";
 
 /** Local failures before OPEN can safely re-dispatch an inference request. */
-const isPreDispatchTunnelError = (error: unknown): boolean =>
+export const isPreDispatchTunnelError = (error: unknown): boolean =>
   error instanceof Error &&
   (error.message === "channel is closed" ||
     error.message === "stream ids exhausted");
