@@ -829,7 +829,7 @@ export const handleInference = async (req: Request): Promise<Response> => {
       : videoOperation === "content"
         ? runVideoContent(walkArgs, videoId)
         : videoOperation === "cancel"
-          ? runVideoCancel(walkArgs)
+          ? runVideoCancel(walkArgs, videoId)
           : isResponsesCompact
             ? runResponsesCompact(walkArgs)
             : isCountTokens
