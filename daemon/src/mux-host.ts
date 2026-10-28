@@ -271,6 +271,51 @@ export const admitStreamKind = (
   return false;
 };
 
+/**
+ * Require each inference OPEN on a team-admitted channel to repeat precisely
+ * the grant that admitted its channel. Shared by relay-mux and RTC hosts.
+ */
+export const admitTeamTunnelGrant = (
+  stream: TMuxStream,
+  decodedOpen: unknown,
+  context: {
+    readonly channelId: string;
+    readonly transport: "relay" | "rtc";
+    readonly teamGranted: boolean;
+    readonly teamGrantToken: string | null;
+  },
+): boolean => {
+  if (!context.teamGranted) return true;
+  const openGrant = teamGrantFromStreamOpen(decodedOpen);
+  if (
+    openGrant !== null &&
+    context.teamGrantToken !== null &&
+    openGrant === context.teamGrantToken
+  ) {
+    logInfo("mux-host", "team stream open received", {
+      channelId: context.channelId,
+      transport: context.transport,
+    });
+    return true;
+  }
+  logWarn(
+    "mux-host",
+    safeDiagnosticMessage`stream open refused: team tunnel missing or mismatched grant`,
+    {
+      channelId: context.channelId,
+      transport: context.transport,
+      hasOpenGrant: openGrant !== null,
+    },
+  );
+  stream.reset(
+    encodeJsonPayload({
+      code: "unauthorized",
+      reason: "team_grant_required",
+    }),
+  );
+  return false;
+};
+
 /** This daemon's long-lived X25519 identity as a Noise static key. */
 const daemonNoiseStaticKey = (): TNoiseStaticKey => {
   const publicKey = x25519RawFromSpkiB64(daemonPublicKey());
@@ -726,38 +771,16 @@ const registerChannel = (
             ) {
               return;
             }
-            // Team channels: every tunnel OPEN must carry the same grant the
-            // channel was admitted with. A grant-less OPEN would skip
-            // createMuxTunnelServer's model/cap checks and dispatch as
-            // same-user traffic.
-            if (record?.teamGranted === true && kind === "tunnel") {
-              const openGrant = teamGrantFromStreamOpen(decodedOpen);
-              if (
-                openGrant === null ||
-                record.teamGrantToken === null ||
-                openGrant !== record.teamGrantToken
-              ) {
-                logWarn(
-                  "mux-host",
-                  safeDiagnosticMessage`stream open refused: team tunnel missing or mismatched grant`,
-                  {
-                    channelId,
-                    transport: "relay",
-                    hasOpenGrant: openGrant !== null,
-                  },
-                );
-                stream.reset(
-                  encodeJsonPayload({
-                    code: "unauthorized",
-                    reason: "team_grant_required",
-                  }),
-                );
-                return;
-              }
-              logInfo("mux-host", "team stream open received", {
+            if (
+              kind === "tunnel" &&
+              !admitTeamTunnelGrant(stream, decodedOpen, {
                 channelId,
                 transport: "relay",
-              });
+                teamGranted: record?.teamGranted === true,
+                teamGrantToken: record?.teamGrantToken ?? null,
+              })
+            ) {
+              return;
             }
             const handler = streamHandler ?? serveMuxOnStream;
             if (kind === "agent") {
