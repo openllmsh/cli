@@ -71,18 +71,28 @@ export const observedTeamLegTokens = async (
     const usage = usageOf(JSON.parse(text));
     return usage.input + usage.output;
   }
-  let last: TUsage = { input: 0, output: 0 };
+  let usage: TUsage = { input: 0, output: 0 };
+  let complete = false;
   for (const line of text.split("\n")) {
     const value = line.trim();
+    if (value === "event: message_stop") complete = true;
     if (!value.startsWith("data:")) continue;
     const data = value.slice(5).trim();
-    if (data.length === 0 || data === "[DONE]") continue;
+    if (data === "[DONE]") {
+      complete = true;
+      continue;
+    }
+    if (data.length === 0) continue;
     try {
-      const usage = usageOf(JSON.parse(data));
-      if (usage.input > 0 || usage.output > 0) last = usage;
+      const next = usageOf(JSON.parse(data));
+      usage = {
+        input: Math.max(usage.input, next.input),
+        output: Math.max(usage.output, next.output),
+      };
     } catch {
       // A provider can interleave non-JSON SSE control frames.
     }
   }
-  return last.input + last.output;
+  if (!complete) throw new Error("team stream ended before completion");
+  return usage.input + usage.output;
 };
