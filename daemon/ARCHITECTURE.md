@@ -797,11 +797,13 @@ silent signaling timeouts. Detail lives in
   `channel_open` grant) rejects the offer; a `consumer:"daemon"`
   offer is never seed-gated so `agent` is refused; a grant with no `dpk`
   fails `dpk_missing` before the nonce is spent (retry admits tunnel-only).
-- `rtc-client.ts` is the fleet WebRTC offerer for daemon→daemon tunnels.
-  It reuses `rtc-auth`, `rtc-duplex`, and mux; it does not introduce a second
-  direct-path or hole-punch transport.
+- `rtc-client.ts` is the daemon→daemon WebRTC offerer for fleet and direct
+  team tunnels. A team offer carries its origin-issued grant both on the relay
+  frame and inside the sealed offer proof; the supplier verifies the match.
 - `tunnel-client.ts` uses the consumer ladder **RTC (when open) → relay binary
-  mux** for daemon→daemon fleet hops (mirrors browser `tunnelFetch`).
+  mux** for fleet and direct team hops. Team RTC is selected only when the
+  supplier advertises `team-rtc1`; otherwise the reused team-scoped mux channel
+  carries the request.
 - `tunnel-server.ts` maps a closed tunnel-surface vocabulary to the daemon's
   in-process `/v1/*` handler and streams the result. Stamps
   `x-openllm-tunneled` **only** when the stream OPEN carries

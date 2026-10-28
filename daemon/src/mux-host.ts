@@ -8,6 +8,7 @@ import {
   RTC_CAP,
   SEEDGATE_CAP,
   streamOpenKindOf,
+  TEAM_RTC_CAP,
   TEAM_SERVE_CAP,
 } from "@openllmsh/protocol";
 import {
@@ -154,7 +155,10 @@ export const currentDaemonCaps = (): string[] => {
   if (agentStreamHandler !== null) caps.push(AGENT_CAP);
   // Team serving: advertised when the local kill switch is on. Origin only
   // offers devices that list this cap; older daemons omit it.
-  if (teamServeEnabled()) caps.push(TEAM_SERVE_CAP);
+  if (teamServeEnabled()) {
+    caps.push(TEAM_SERVE_CAP);
+    if (!rtcDisabled()) caps.push(TEAM_RTC_CAP);
+  }
   return caps;
 };
 

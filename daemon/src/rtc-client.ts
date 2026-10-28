@@ -93,6 +93,9 @@ export type TEnsureRtcOptions = {
   readonly pubkey: string;
   readonly hasRtc1: boolean;
   readonly hasSeedgate1: boolean;
+  /** Cross-user team admission, duplicated inside the sealed offer proof. */
+  readonly teamGrant?: string;
+  readonly hasTeamRtc1?: boolean;
 };
 
 export type TRtcClient = {
@@ -273,7 +276,7 @@ export const createRtcClient = (): TRtcClient => {
   const ensureRtcTo = (keyId: string, options: TEnsureRtcOptions): void => {
     if (
       options.pubkey.length === 0 ||
-      !options.hasRtc1 ||
+      !(options.hasRtc1 || options.hasTeamRtc1 === true) ||
       options.hasSeedgate1 ||
       failureCached(keyId) ||
       sessionsByKey.has(keyId) ||
@@ -281,13 +284,15 @@ export const createRtcClient = (): TRtcClient => {
     ) {
       return;
     }
-    void beginConnect(keyId, options.pubkey).catch((error: unknown) => {
-      logWarn("rtc-client", safeDiagnosticMessage`beginConnect rejected`, {
-        keyId,
-        err: error instanceof Error ? error.message : String(error),
-      });
-      cacheFailure(keyId);
-    });
+    void beginConnect(keyId, options.pubkey, options.teamGrant).catch(
+      (error: unknown) => {
+        logWarn("rtc-client", safeDiagnosticMessage`beginConnect rejected`, {
+          keyId,
+          err: error instanceof Error ? error.message : String(error),
+        });
+        cacheFailure(keyId);
+      },
+    );
   };
 
   const sendIceCandidate = (
@@ -312,7 +317,11 @@ export const createRtcClient = (): TRtcClient => {
     for (const candidate of pending) sendIceCandidate(session, candidate);
   };
 
-  const beginConnect = async (keyId: string, pubkey: string): Promise<void> => {
+  const beginConnect = async (
+    keyId: string,
+    pubkey: string,
+    teamGrant?: string,
+  ): Promise<void> => {
     if (sessionsByKey.has(keyId) || failureCached(keyId) || sendFrame === null)
       return;
     let pc: RTCPeerConnection | null = null;
@@ -418,6 +427,7 @@ export const createRtcClient = (): TRtcClient => {
           n: session.nonce,
           fb: fingerprint,
           epk: eph.publicKeyB64,
+          ...(teamGrant === undefined ? {} : { teamGrant }),
         }),
       );
       sendFrame?.({
@@ -426,6 +436,7 @@ export const createRtcClient = (): TRtcClient => {
         key_id: keyId,
         sdp,
         fingerprint_proof: proof,
+        ...(teamGrant === undefined ? {} : { team_grant: teamGrant }),
       });
       session.offerSent = true;
       flushPendingIce(session);

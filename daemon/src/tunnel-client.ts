@@ -18,7 +18,7 @@
  */
 
 import type { TTunnelSurface } from "@openllmsh/protocol";
-import { RTC_CAP, SEEDGATE_CAP } from "@openllmsh/protocol";
+import { RTC_CAP, SEEDGATE_CAP, TEAM_RTC_CAP } from "@openllmsh/protocol";
 import { fleetRequest } from "@openllmsh/tunnel/fleet";
 import { createPeerLink } from "@openllmsh/tunnel/peer-link";
 import { fleetSubscriptionPubkeyFor } from "./config";
@@ -113,8 +113,15 @@ const tunnelToPeerLive: TTunnelToPeer = async (args) => {
         // Fleet's cold RTC setup stays best-effort: mux is not held behind ICE.
         ensureRtcTo(args.keyId, {
           pubkey: peerPubkey ?? "",
-          hasRtc1: peerCaps?.has(RTC_CAP) ?? false,
+          hasRtc1:
+            args.teamGrant === undefined && (peerCaps?.has(RTC_CAP) ?? false),
           hasSeedgate1: peerCaps?.has(SEEDGATE_CAP) ?? false,
+          ...(args.teamGrant === undefined
+            ? {}
+            : {
+                teamGrant: args.teamGrant,
+                hasTeamRtc1: peerCaps?.has(TEAM_RTC_CAP) ?? false,
+              }),
         });
       },
       dial: async () => getRtcMuxChannel(args.keyId),
