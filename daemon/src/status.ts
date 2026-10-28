@@ -890,7 +890,9 @@ const computeStatusFreshInner = async (
         status: "connected",
         account_index: slot.index,
         account_hash: accountHash(preset.slug, slot.key),
-        key_hint: keyHintOf(slot.key),
+        ...(keyHintOf(slot.key) !== ""
+          ? { key_hint: keyHintOf(slot.key) }
+          : {}),
         ...(slot.label !== null ? { account_label: slot.label } : {}),
       });
     }

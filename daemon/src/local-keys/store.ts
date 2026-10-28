@@ -84,6 +84,13 @@ const parseStore = (raw: unknown): readonly TLocalKeySlot[] => {
   return out.sort((a, b) => a.index - b.index);
 };
 
+/** A store we can safely rewrite: current version and an array of slots. */
+const isWellFormedStore = (raw: unknown): boolean =>
+  typeof raw === "object" &&
+  raw !== null &&
+  (raw as { version?: unknown }).version === STORE_VERSION &&
+  Array.isArray((raw as { slots?: unknown }).slots);
+
 /** Every stored key slot for `slug`, ascending by index. Never log the keys. */
 export const readLocalKeySlots = (
   slug: TLocalKeyProviderSlug,
@@ -138,7 +145,10 @@ export const setLocalKeySlot = (
   }
   // An existing file we cannot load must not be silently replaced.
   const path = localKeyStorePath(slug, home);
-  if (existsSync(path) && readJsonStateFile(path, MAX_STORE_BYTES) === null) {
+  if (
+    existsSync(path) &&
+    !isWellFormedStore(readJsonStateFile(path, MAX_STORE_BYTES))
+  ) {
     return { ok: false, error: "provider key store is unreadable" };
   }
   const slots = readLocalKeySlots(slug, home);
@@ -190,8 +200,10 @@ export const setLocalKeySlot = (
   return { ok: true, index };
 };
 
-/** Last four characters of a key — the only part status ever carries. */
-export const keyHintOf = (key: string): string => key.slice(-4);
+/** Last four characters of a key — the only part status ever carries.
+ *  Empty for keys too short to hide anything (never the whole secret). */
+export const keyHintOf = (key: string): string =>
+  key.length >= 12 ? key.slice(-4) : "";
 
 /** Every `local_key` provider with at least one stored key slot. */
 export const configuredLocalKeyProviders = (
