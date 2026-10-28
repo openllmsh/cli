@@ -477,6 +477,8 @@ const opening = new Map<
     resolve: (channel: TMuxChannel | null) => void;
     readonly timer: ReturnType<typeof setTimeout>;
     readonly channelId: string;
+    readonly relayKeyId: string;
+    readonly teamGrant?: string;
   }
 >();
 const MUX_ACK_TIMEOUT_MS = PEER_LINK_DEFAULTS.muxAckSameUserMs;
@@ -603,9 +605,13 @@ export const replaceMuxPeerCaps = (
 };
 
 /** The consumer channel already open to `keyId`, if any. */
-const consumerChannelFor = (keyId: string): TRelayChannel | undefined => {
+const consumerChannelFor = (
+  keyId: string,
+  teamId?: string,
+): TRelayChannel | undefined => {
+  const channelKey = teamId === undefined ? keyId : `${keyId}\u0000${teamId}`;
   for (const channel of channels.values())
-    if (channel.keyId === keyId) return channel;
+    if (channel.keyId === channelKey) return channel;
   return undefined;
 };
 
@@ -623,21 +629,35 @@ const failOpen = (keyId: string, reason?: string): void => {
   pending.resolve(null);
 };
 
-/** Whether the consumer already has a live relay-mux channel to `keyId`. */
-export const hasMuxChannelTo = (keyId: string): boolean =>
-  consumerChannelFor(keyId) !== undefined;
+export type TMuxChannelOptions = {
+  /** A team channel is distinct from the same-user fleet channel to this device. */
+  readonly teamId?: string;
+  /** Admission-only grant; every tunnel OPEN carries a fresh grant separately. */
+  readonly teamGrant?: string;
+};
 
-/** Consumer-side negotiation. `mux2` permits one channel per fleet peer. */
+const channelLookupKey = (keyId: string, teamId?: string): string =>
+  teamId === undefined ? keyId : `${keyId}\u0000${teamId}`;
+
+/** Whether the consumer already has a live relay-mux channel to this scope. */
+export const hasMuxChannelTo = (
+  keyId: string,
+  options?: TMuxChannelOptions,
+): boolean => consumerChannelFor(keyId, options?.teamId) !== undefined;
+
+/** Consumer-side negotiation. `mux2` permits separate fleet and team channels. */
 export const muxChannelTo = async (
   keyId: string,
+  options?: TMuxChannelOptions,
 ): Promise<TMuxChannel | null> => {
   if (process.env.OPENLLM_MUX_DISABLE === "1") return null;
   const caps = peerCaps.get(keyId);
   if (caps === undefined || !caps.has(MUX_CAP)) return null;
-  if (peerLinkFailureCache.has(keyId, "mux")) return null;
-  const existing = consumerChannelFor(keyId);
+  const lookupKey = channelLookupKey(keyId, options?.teamId);
+  if (peerLinkFailureCache.has(lookupKey, "mux")) return null;
+  const existing = consumerChannelFor(keyId, options?.teamId);
   if (existing !== undefined) return existing.channel;
-  const pending = opening.get(keyId);
+  const pending = opening.get(lookupKey);
   if (pending !== undefined)
     return new Promise((resolve) => {
       const previousResolve = pending.resolve;
@@ -652,18 +672,26 @@ export const muxChannelTo = async (
   const channelId = crypto.randomUUID();
   return new Promise<TMuxChannel | null>((resolve) => {
     const timer = setTimeout(
-      () => failOpen(keyId, "consumer_gone"),
+      () => failOpen(lookupKey, "consumer_gone"),
       muxAckTimeoutMs,
     );
-    opening.set(keyId, { resolve, timer, channelId });
-    // Fleet peer hop: mark consumer so the serving daemon knows no grant is
-    // coming (this process has no vault DEK). A `consumer:"daemon"` channel
-    // is served `tunnel`/`realtime` only — never a seed-gated kind.
+    opening.set(lookupKey, {
+      resolve,
+      timer,
+      channelId,
+      relayKeyId: keyId,
+      ...(options?.teamGrant === undefined
+        ? {}
+        : { teamGrant: options.teamGrant }),
+    });
     send({
       type: "channel_open",
       channel_id: channelId,
       key_id: keyId,
       consumer: "daemon",
+      ...(options?.teamGrant === undefined
+        ? {}
+        : { team_grant: options.teamGrant }),
     });
   });
 };

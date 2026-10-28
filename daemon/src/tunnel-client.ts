@@ -67,6 +67,10 @@ export type TTunnelToPeerArgs = {
   anthropicVersion?: string | null;
   anthropicBeta?: string | null;
   userAgent?: string | null;
+  /** Per-request team grant; channel admission has its own initial grant. */
+  teamGrant?: string;
+  /** Scopes a reusable cross-user relay channel. */
+  teamId?: string;
   signal: AbortSignal;
   /** Optional transport override (harness / instrumented host). */
   transport?: TTunnelToPeer;
@@ -87,6 +91,7 @@ const tunnelToPeerLive: TTunnelToPeer = async (args) => {
     ...(args.userAgent != null
       ? { user_agent: args.userAgent.slice(0, 512) }
       : {}),
+    ...(args.teamGrant === undefined ? {} : { team_grant: args.teamGrant }),
   };
 
   const peerCaps = getMuxPeerCaps(args.keyId);
@@ -119,7 +124,13 @@ const tunnelToPeerLive: TTunnelToPeer = async (args) => {
       // `muxChannelTo` owns its channel map and joins an in-flight open.
       // Its dial result therefore carries reuse semantics without a second lookup.
       open: () => null,
-      dial: async () => muxChannelTo(args.keyId),
+      dial: async () =>
+        muxChannelTo(args.keyId, {
+          ...(args.teamId === undefined ? {} : { teamId: args.teamId }),
+          ...(args.teamGrant === undefined
+            ? {}
+            : { teamGrant: args.teamGrant }),
+        }),
     },
     policy: {
       retrySafe: (error) =>

@@ -74,6 +74,7 @@ import {
   noteTeamPlanServed,
   planNeedsRefresh,
 } from "./plan-cache";
+import { tryDirectTeamLeg } from "./team-leg-client";
 import { currentTeamGrantToken } from "./team-request-context";
 
 import { isBodylessVideoOp, videoOperationFor } from "./video-ops";
@@ -572,6 +573,22 @@ export const handleInference = async (req: Request): Promise<Response> => {
       };
     };
 
+    const forwardTeamOrOrigin = async (): Promise<Response> => {
+      const model =
+        rawBody !== null &&
+        typeof rawBody === "object" &&
+        !Array.isArray(rawBody)
+          ? (rawBody as { readonly model?: unknown }).model
+          : undefined;
+      const direct = await tryDirectTeamLeg({
+        request: req,
+        body: new Uint8Array(rawBytes),
+        model,
+        surface,
+      });
+      return direct ?? passthroughToOrigin(req, rawBytes);
+    };
+
     const applyPlanFetchOutcome = async (
       outcome: TPlanFetchOutcome,
     ): Promise<Response | null> => {
@@ -590,7 +607,7 @@ export const handleInference = async (req: Request): Promise<Response> => {
         return null;
       }
       syncNormalizedJsonBytes();
-      return withCors(req, await passthroughToOrigin(req, rawBytes));
+      return withCors(req, await forwardTeamOrOrigin());
     };
 
     if (planCacheEnabled() && planCacheKey !== null) {
@@ -618,7 +635,7 @@ export const handleInference = async (req: Request): Promise<Response> => {
       } else if (planParam === null) {
         if (!embeddingsLocalFallback) {
           syncNormalizedJsonBytes();
-          return withCors(req, await passthroughToOrigin(req, rawBytes));
+          return withCors(req, await forwardTeamOrOrigin());
         }
       }
     } else if (planParam === null) {
