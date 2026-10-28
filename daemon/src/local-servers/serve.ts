@@ -35,6 +35,11 @@ import {
 import { recordRequest } from "../cloud-client";
 import { errorJson } from "../cors";
 import { tokensFromResponse, ZERO_TOKENS } from "../native-runtime/types";
+import {
+  currentTeamGrantFieldsOf,
+  currentTeamGrantToken,
+} from "../team-request-context";
+import { teamUsageCharge } from "../team-usage";
 import { localServerForModel, preflightLocalPort } from "./discover";
 import { localKeyForPort } from "./keys";
 
@@ -191,13 +196,33 @@ export const recordLocal = (
   },
   origin: string | null,
 ): void => {
+  // Team hops: attribute the row to the consumer and charge the share cap,
+  // exactly as the walker's `report` does.
+  const teamGrant = currentTeamGrantToken();
   void recordRequest(
     {
       ...row,
       idempotency_key: row.idempotency_key ?? crypto.randomUUID(),
+      ...(row.team_grant === undefined && teamGrant !== null
+        ? { team_grant: teamGrant }
+        : {}),
     },
     origin,
   );
+  const teamFields = currentTeamGrantFieldsOf();
+  if (
+    row.status === "success" &&
+    teamFields !== null &&
+    teamFields.cap_tokens !== undefined
+  ) {
+    const actual = Math.max(
+      0,
+      Math.floor(row.tokens_in) + Math.floor(row.tokens_out),
+    );
+    if (actual > 0) {
+      teamUsageCharge(teamFields.share_id, actual, teamFields.cap_tokens);
+    }
+  }
 };
 
 /**

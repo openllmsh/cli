@@ -8,6 +8,7 @@
  * after opening the browser's sealed box, and is never logged or pushed —
  * status carries `key_hint` (last four characters) only.
  */
+import { existsSync } from "node:fs";
 import { join } from "node:path";
 import type { TLocalKeyProviderSlug } from "@openllmsh/protocol";
 import { LOCAL_KEY_PROVIDER_PRESETS } from "@openllmsh/protocol";
@@ -15,7 +16,11 @@ import { stateDir } from "../env";
 import { readJsonStateFile, writeJsonStateAtomic } from "../json-state-cache";
 
 const STORE_VERSION = 1;
-const MAX_STORE_BYTES = 64 * 1024;
+const MAX_STORE_BYTES = 256 * 1024;
+/** Vendor keys are well under this; bounds the store size. */
+const MAX_KEY_LENGTH = 512;
+/** Keys per provider; with MAX_KEY_LENGTH and labels this fits MAX_STORE_BYTES. */
+const MAX_SLOTS = 64;
 const MAX_LABEL_LENGTH = 64;
 /** Same ceiling as `AccountIndex` on the wire. */
 const MAX_INDEX = 1023;
@@ -92,6 +97,7 @@ const writeSlots = (
   home?: string,
 ): boolean => {
   const body: TLocalKeyStore = { version: STORE_VERSION, slots };
+  if (Buffer.byteLength(JSON.stringify(body)) > MAX_STORE_BYTES) return false;
   return writeJsonStateAtomic(
     storeDir(home),
     localKeyStorePath(slug, home),
@@ -127,6 +133,14 @@ export const setLocalKeySlot = (
   home?: string,
 ): TSetLocalKeySlotResult => {
   const key = args.key.trim();
+  if (key.length > MAX_KEY_LENGTH) {
+    return { ok: false, error: "key is too long" };
+  }
+  // An existing file we cannot load must not be silently replaced.
+  const path = localKeyStorePath(slug, home);
+  if (existsSync(path) && readJsonStateFile(path, MAX_STORE_BYTES) === null) {
+    return { ok: false, error: "provider key store is unreadable" };
+  }
   const slots = readLocalKeySlots(slug, home);
   if (key.length === 0) {
     if (args.index === undefined) {
@@ -147,6 +161,9 @@ export const setLocalKeySlot = (
     args.index === undefined
       ? undefined
       : slots.find((s) => s.index === args.index);
+  if (existing === undefined && slots.length >= MAX_SLOTS) {
+    return { ok: false, error: "no free key slot" };
+  }
   const index = args.index ?? lowestFreeIndex(slots);
   if (index === null) return { ok: false, error: "no free key slot" };
   const label =
