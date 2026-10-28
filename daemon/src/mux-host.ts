@@ -446,9 +446,9 @@ type TRelayChannel = {
   /** True when this channel was admitted with a verified `team_grant`. */
   teamGranted: boolean;
   /**
-   * Wire token the channel was admitted with. Tunnel OPENs on a team channel
-   * must carry the same `headers.team_grant` (defence in depth — origin always
-   * sets it; a grant-less OPEN must not fall through to same-user dispatch).
+   * Admission token for this team channel. Every tunnel OPEN must carry a
+   * non-empty fresh `headers.team_grant`; it need not equal this token, but
+   * the tunnel server verifies it against the relay-stamped team scope.
    */
   teamGrantToken: string | null;
   /** Relay-stamped scope from the admission grant. */
