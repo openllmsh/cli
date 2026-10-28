@@ -26,11 +26,29 @@ import { logInfo, safeDiagnosticMessage } from "./logger";
 import { getMuxPeerCaps, muxChannelTo } from "./mux-host";
 import { ensureRtcTo, getRtcMuxChannel, markRtcFailure } from "./rtc-client";
 
+/** A local transport failure that happened before a tunnel OPEN was sent. */
+export class PreDispatchTunnelError extends Error {
+  constructor(message: string, options?: ErrorOptions) {
+    super(message, options);
+    this.name = "PreDispatchTunnelError";
+  }
+}
+
 /** Local failures before OPEN can safely re-dispatch an inference request. */
 export const isPreDispatchTunnelError = (error: unknown): boolean =>
-  error instanceof Error &&
-  (error.message === "channel is closed" ||
-    error.message === "stream ids exhausted");
+  error instanceof PreDispatchTunnelError;
+
+const preDispatchError = (error: unknown): PreDispatchTunnelError | null => {
+  if (error instanceof PreDispatchTunnelError) return error;
+  if (
+    error instanceof Error &&
+    (error.message === "channel is closed" ||
+      error.message === "stream ids exhausted")
+  ) {
+    return new PreDispatchTunnelError(error.message, { cause: error });
+  }
+  return null;
+};
 
 const recordTunnelRequest = (input: {
   readonly transport: "rtc" | "mux";
@@ -183,9 +201,12 @@ const tunnelToPeerLive: TTunnelToPeer = async (args) => {
         ? error
         : new DOMException("Aborted", "AbortError");
     }
+    const preDispatch = preDispatchError(error);
+    if (preDispatch !== null) throw preDispatch;
     if (error instanceof Error && error.message === "peer link unavailable") {
-      throw new Error(
+      throw new PreDispatchTunnelError(
         "Device transport unavailable. Peer has neither RTC nor mux — update OpenLLM on the peer.",
+        { cause: error },
       );
     }
     throw error instanceof Error ? error : new Error(String(error));

@@ -470,8 +470,10 @@ type TRelayChannel = {
 
 let sendFrame: ((frame: TRelayFrame) => void) | null = null;
 let sendBinary: ((bytes: Uint8Array) => void) | null = null;
-let relayBufferedAmount: (() => number) | null = null;
-let onRelayDrain: ((callback: () => void) => () => void) | null = null;
+const noRelayBackpressure = (): number => 0;
+const noRelayDrain = (): (() => void) => () => {};
+let relayBufferedAmount: () => number = noRelayBackpressure;
+let onRelayDrain: (callback: () => void) => () => void = noRelayDrain;
 /** Live channels by relay-assigned channel id. */
 const channels = new Map<string, TRelayChannel>();
 const peerCaps = new Map<string, ReadonlySet<string>>();
@@ -655,8 +657,15 @@ export const muxChannelTo = async (
   options?: TMuxChannelOptions,
 ): Promise<TMuxChannel | null> => {
   if (process.env.OPENLLM_MUX_DISABLE === "1") return null;
+  // Welcome snapshots name only the current user's daemons. A cross-user team
+  // target is authorized by its signed grant and therefore cannot be rejected
+  // by same-user capability discovery; the relay/supplier remains authoritative.
   const caps = peerCaps.get(keyId);
-  if (caps === undefined || !caps.has(MUX_CAP)) return null;
+  if (
+    options?.teamGrant === undefined &&
+    (caps === undefined || !caps.has(MUX_CAP))
+  )
+    return null;
   const lookupKey = channelLookupKey(keyId, options?.teamId);
   if (peerLinkFailureCache.has(lookupKey, "mux")) return null;
   const existing = consumerChannelFor(keyId, options?.teamId);
@@ -783,8 +792,8 @@ const registerChannel = (
         bindSink(record);
       }
     },
-    relayBufferedAmount ?? undefined,
-    onRelayDrain ?? undefined,
+    relayBufferedAmount,
+    onRelayDrain,
   );
   const channel = createChannel({
     duplex,
@@ -873,12 +882,12 @@ const registerChannel = (
 export const relayDuplex = (
   sendBytes: (bytes: Uint8Array) => void,
   registerOnBytes: (callback: (bytes: Uint8Array | null) => void) => void,
-  bufferedAmount?: () => number,
-  onDrain?: (callback: () => void) => () => void,
+  bufferedAmount: () => number = noRelayBackpressure,
+  onDrain: (callback: () => void) => () => void = noRelayDrain,
 ): TDuplex => ({
   send: sendBytes,
   bufferedAmount,
-  highWaterMark: bufferedAmount === undefined ? undefined : 1024 * 1024,
+  highWaterMark: 1024 * 1024,
   onDrain,
   onBytes: registerOnBytes,
   close: () => registerOnBytes(() => {}),
@@ -897,8 +906,8 @@ export const configureMuxHost = (options: {
   sendFrame = options.send;
   streamHandler = options.onStream ?? null;
   sendBinary = options.sendBytes;
-  relayBufferedAmount = options.bufferedAmount ?? null;
-  onRelayDrain = options.onDrain ?? null;
+  relayBufferedAmount = options.bufferedAmount ?? noRelayBackpressure;
+  onRelayDrain = options.onDrain ?? noRelayDrain;
   // The reaper lives with the host lifecycle, not the relay socket: the shared
   // persistent relay sandbox keeps sockets up for days, so relay-socket death
   // (resetAllChannels) can no longer be the only channel cleanup.

@@ -377,6 +377,10 @@ export const createMuxTunnelServer =
       }
       if (teamToken !== null && teamChannelScope !== null) {
         const chunks: Uint8Array[] = [];
+        // Scan into one bounded buffer instead of re-concatenating all chunks
+        // after every read (which made a fragmented upload quadratic).
+        const modelScan = new Uint8Array(TEAM_MODEL_SCAN_MAX_BYTES);
+        let modelScanLength = 0;
         let total = 0;
         let model: string | null = null;
         let ended = false;
@@ -398,9 +402,14 @@ export const createMuxTunnelServer =
             throw new StreamResetError("unauthorized", "team_body_too_large");
           }
           chunks.push(next.value);
-          model = modelFromLeadingJson(
-            combineChunks(chunks, total).subarray(0, TEAM_MODEL_SCAN_MAX_BYTES),
-          );
+          const remainingScanBytes =
+            TEAM_MODEL_SCAN_MAX_BYTES - modelScanLength;
+          if (remainingScanBytes > 0) {
+            const scanChunk = next.value.subarray(0, remainingScanBytes);
+            modelScan.set(scanChunk, modelScanLength);
+            modelScanLength += scanChunk.byteLength;
+          }
+          model = modelFromLeadingJson(modelScan.subarray(0, modelScanLength));
         }
 
         if (model === null && !ended) {
