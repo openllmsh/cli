@@ -75,7 +75,10 @@ import {
   planNeedsRefresh,
 } from "./plan-cache";
 import { tryDirectTeamLeg } from "./team-leg-client";
-import { currentTeamGrantToken } from "./team-request-context";
+import {
+  currentTeamGrantFieldsOf,
+  currentTeamGrantToken,
+} from "./team-request-context";
 
 import { isBodylessVideoOp, videoOperationFor } from "./video-ops";
 import {
@@ -226,6 +229,24 @@ export const handleInference = async (req: Request): Promise<Response> => {
           ? "Request body too large"
           : "Body must be valid JSON or multipart/form-data",
       ),
+    );
+  }
+
+  // The tunnel's leading-byte admission scanner can see an earlier duplicate
+  // key than JSON.parse (which retains the last key). Re-bind the parsed root
+  // model to the signed team grant at the dispatch boundary.
+  const teamGrant = currentTeamGrantFieldsOf();
+  if (
+    teamGrant !== null &&
+    !isBodylessVideoOp(videoOperation) &&
+    !isMultipart &&
+    (typeof rawBody !== "object" ||
+      rawBody === null ||
+      (rawBody as { readonly model?: unknown }).model !== teamGrant.model)
+  ) {
+    return withCors(
+      req,
+      errorJson(403, "Team grant model does not match request"),
     );
   }
 
