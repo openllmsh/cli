@@ -27,6 +27,7 @@ import {
   maxMessageSizeFromSdp,
   negotiateRtcPayloadCap,
   RTC_AUTH_NONCE_BYTES,
+  RTC_AUTH_VERSION,
   resolveIceServers,
   sdpFingerprintsMatch,
   verifyAnswerInner,
@@ -226,8 +227,12 @@ export const createRtcClient = (): TRtcClient => {
     logDebug("rtc-client", "session closed", { keyId: session.keyId, reason });
   };
 
-  const cacheFailure = (keyId: string): void => {
-    peerLinkFailureCache.set(keyId, "rtc", "transport");
+  const cacheFailure = (keyId: string, reason = "transport"): void => {
+    peerLinkFailureCache.set(
+      keyId,
+      "rtc",
+      reason === "daemon_outdated" ? "daemon_outdated" : "transport",
+    );
   };
 
   /** Mark a failed live RTC path and prevent immediate re-offers for one minute. */
@@ -277,7 +282,7 @@ export const createRtcClient = (): TRtcClient => {
     if (
       options.pubkey.length === 0 ||
       !(options.hasRtc1 || options.hasTeamRtc1 === true) ||
-      options.hasSeedgate1 ||
+      (options.hasSeedgate1 && options.teamGrant === undefined) ||
       failureCached(keyId) ||
       sessionsByKey.has(keyId) ||
       sendFrame === null
@@ -423,7 +428,7 @@ export const createRtcClient = (): TRtcClient => {
       const proof = sealTo(
         pubkey,
         encodeOfferInner({
-          v: 1,
+          v: RTC_AUTH_VERSION,
           n: session.nonce,
           fb: fingerprint,
           epk: eph.publicKeyB64,
@@ -526,6 +531,12 @@ export const createRtcClient = (): TRtcClient => {
     });
     if (reason === "overloaded") {
       // Transient — tear down without caching so a later attempt can retry.
+      closeSession(session, `nack_${reason}`);
+      return;
+    }
+    if (reason === "daemon_outdated") {
+      // A current relay mux can still serve this request; suppress RTC briefly.
+      cacheFailure(keyId, reason);
       closeSession(session, `nack_${reason}`);
       return;
     }
