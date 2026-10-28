@@ -1,6 +1,7 @@
 import type { TTunnelSurface } from "@openllmsh/protocol";
 import { daemonEnv } from "./env";
 import {
+  maxOutputTokensFromTeamLegBody,
   observedTeamLegTokens,
   rewriteTeamLegBodyModel,
 } from "./team-leg-body";
@@ -67,7 +68,13 @@ const settleResponse = (
   target: TTeamLegTarget,
 ): Response => {
   if (!response.ok || response.body === null) {
-    void refund(target.reservation_nonce, target.team_grant);
+    // OPEN reached the supplier, so this is dispatch-accounted even when its
+    // response is an error or bodyless. Never let a consumer refund it.
+    void settle(
+      target.reservation_nonce,
+      target.team_grant,
+      target.reserved_tokens,
+    );
     return response;
   }
   const [forClient, forUsage] = response.body.tee();
@@ -82,7 +89,13 @@ const settleResponse = (
         observed === 0 ? target.reserved_tokens : observed,
       ),
     )
-    .catch(() => refund(target.reservation_nonce, target.team_grant));
+    .catch(() =>
+      settle(
+        target.reservation_nonce,
+        target.team_grant,
+        target.reserved_tokens,
+      ),
+    );
   return new Response(forClient, {
     status: response.status,
     statusText: response.statusText,
@@ -110,6 +123,7 @@ export const tryDirectTeamLeg = async (args: {
       model: args.model,
       surface,
       estimated_tokens: Math.ceil(args.body.byteLength / 4),
+      max_output_tokens: maxOutputTokensFromTeamLegBody(args.body),
     }),
     signal: args.request.signal,
   }).catch(() => null);
@@ -143,7 +157,17 @@ export const tryDirectTeamLeg = async (args: {
   } catch (error) {
     // Once OPEN has been sent, retrying at origin can duplicate inference and
     // billing. Peer-link exposes this exact retry-safety classification.
-    if (!isPreDispatchTunnelError(error)) throw error;
+    if (!isPreDispatchTunnelError(error)) {
+      // Once OPEN has left this daemon the supplier may have started work.
+      // Settle the full hold before propagating the error rather than waiting
+      // for the stale-reservation sweep.
+      void settle(
+        target.reservation_nonce,
+        target.team_grant,
+        target.reserved_tokens,
+      );
+      throw error;
+    }
     await refund(target.reservation_nonce, target.team_grant);
     return null;
   }

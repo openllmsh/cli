@@ -1,4 +1,31 @@
-/** Rewrite the direct-leg JSON body without changing the origin fallback bytes. */
+/** Read the caller's requested output budget without trusting malformed JSON. */
+export const maxOutputTokensFromTeamLegBody = (body: Uint8Array): number => {
+  try {
+    const parsed: unknown = JSON.parse(new TextDecoder().decode(body));
+    if (
+      parsed === null ||
+      typeof parsed !== "object" ||
+      Array.isArray(parsed)
+    ) {
+      return 0;
+    }
+    const record = parsed as Record<string, unknown>;
+    for (const key of [
+      "max_tokens",
+      "max_completion_tokens",
+      "max_output_tokens",
+    ] as const) {
+      const value = record[key];
+      if (typeof value === "number" && Number.isFinite(value) && value > 0) {
+        return Math.floor(value);
+      }
+    }
+  } catch {
+    // The eventual supplier dispatch will return the request validation error.
+  }
+  return 0;
+};
+
 export const rewriteTeamLegBodyModel = (
   body: Uint8Array,
   resolvedModel: string,
