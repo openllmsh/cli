@@ -80,6 +80,7 @@ import type {
   TStatusPublishTrigger,
 } from "./status-publish-coalesce";
 import { teamServeEnabled } from "./team-grant-admit";
+import { servedTunnelCapacity, servedTunnelLoad } from "./tunnel-capacity";
 import { cachedUsage, peekUsage } from "./usage-cache";
 import { attachVendorCliInstall } from "./vendor-cli-install";
 import { DAEMON_VERSION } from "./version";
@@ -906,6 +907,10 @@ const computeStatusFreshInner = async (
     port: daemonPort(),
     sandbox: sandboxState(),
     caps: currentDaemonCaps(),
+    served_tunnels: {
+      active: servedTunnelLoad(),
+      capacity: servedTunnelCapacity(),
+    },
     control_caps: [
       "refresh_models_due",
       MULTI_ACCOUNT_CONTROL_CAP,

@@ -45,11 +45,11 @@ import {
   teamGrantFromStreamOpen,
 } from "./team-grant-admit";
 import { withTeamGrant } from "./team-request-context";
-
-/** Max concurrently-served tunnels — beyond it, mux opens are nacked
- *  `tunnel_busy`. Concurrent tunnels behave like concurrent loopback
- *  clients (the walker already serves several CLIs at once). */
-const MAX_SERVED_TUNNELS = 8;
+import {
+  beginServedTunnel,
+  canServeTunnel,
+  endServedTunnel,
+} from "./tunnel-capacity";
 
 /** The local endpoint each closed-vocabulary surface maps to. No free URL
  *  path ever crosses the relay — the serving daemon owns this mapping. */
@@ -87,8 +87,6 @@ const surfacePath = (
       return `/v1/videos/${encodeURIComponent(videoId ?? "")}/content`;
   }
 };
-
-let muxServedCount = 0;
 
 const recordTunnelRequest = (input: {
   readonly path: "fleet" | "browser" | "team";
@@ -192,7 +190,7 @@ export type TTunnelDispatch = (req: Request) => Promise<Response>;
 
 /** Admission remains daemon-owned so concurrent mux tunnels share one cap. */
 export const admitMuxTunnel = (): "tunnel_busy" | null =>
-  muxServedCount >= MAX_SERVED_TUNNELS ? "tunnel_busy" : null;
+  canServeTunnel() ? null : "tunnel_busy";
 
 /**
  * Build a mux tunnel server over `dispatch`. Pure: returns a serving function
@@ -207,15 +205,14 @@ export const createMuxTunnelServer =
   (dispatch: TTunnelDispatch, transport: "rtc" | "mux" = "mux"): TServeTunnel =>
   async (open, body, signal) => {
     const startedAt = Date.now();
-    muxServedCount += 1;
-    const servingInflight = muxServedCount;
+    const servingInflight = beginServedTunnel();
     beginRequest();
     let completed = false;
     const complete = (): void => {
       if (completed) return;
       completed = true;
       signal.removeEventListener("abort", complete);
-      muxServedCount -= 1;
+      endServedTunnel();
       endRequest();
     };
     // Dispatch can still be awaiting a provider when the relay dies. Release
