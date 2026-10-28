@@ -1158,8 +1158,16 @@ export const createClaudeTuiSession = (
       currentId: () =>
         currentId(link?.hostId ?? options.sessionId) ??
         (link === null ? null : currentId(options.sessionId)),
-      // `/clear` or `/resume` in the TUI: the old conversation is over.
-      onSwitch: () => parser.completeTurn(),
+      // `/new`, `/clear` or `/resume` in the TUI: the old conversation is
+      // over. Tell the dispatcher as well as resetting the parser, so it
+      // discards its replay log and every attached browser clears before any
+      // row from the new transcript is delivered.
+      onSwitch: () => {
+        parser.completeTurn();
+        const reset: TAgentEvent = { type: "session.reset" };
+        if (drained !== null) drained.push(reset);
+        else emit(reset);
+      },
     });
 
   /** A `/model` waiting for the session to be ready and idle. */

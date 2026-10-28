@@ -267,6 +267,54 @@ export const SUBAGENT_TOOL_NAMES: ReadonlySet<string> = new Set([
   "Agent",
 ]);
 
+const BACKGROUND_SHELL_TOOL = "Bash";
+const BACKGROUND_SHELL_OUTPUT_TOOL = "BashOutput";
+
+const isBackgroundShell = (toolName: string, input: unknown): boolean =>
+  toolName === BACKGROUND_SHELL_TOOL &&
+  isRecord(input) &&
+  input.run_in_background === true;
+
+const backgroundTaskIdOf = (value: unknown): string | undefined => {
+  if (!isRecord(value)) return undefined;
+  for (const key of [
+    "taskId",
+    "task_id",
+    "shellId",
+    "shell_id",
+    "bashId",
+    "bash_id",
+    "id",
+  ]) {
+    const id = str(value[key]);
+    if (id !== undefined) return id;
+  }
+  return undefined;
+};
+
+const backgroundTaskIdFromOutput = (output: string): string | undefined =>
+  /\b(?:task|shell|bash)(?:[ _-]?id)?\s*:\s*([A-Za-z0-9_-]+)/i.exec(
+    output,
+  )?.[1] ??
+  /\bbackground(?: command| process)?(?: launched| running)?\s+(?:with )?(?:id )?([A-Za-z0-9_-]+)/i.exec(
+    output,
+  )?.[1];
+
+const isBackgroundShellLaunch = (row: TJson, output: string): boolean => {
+  const result = row.toolUseResult;
+  return (
+    (isRecord(result) && result.isAsync === true) ||
+    /\b(?:command|process) (?:is )?running in (?:the )?background\b|\bbackground (?:command|process) (?:launched|started)\b/i.test(
+      output,
+    )
+  );
+};
+
+const backgroundShellStillRunning = (output: string): boolean =>
+  /\b(?:still|is) running\b|\bnot yet (?:complete|finished)\b|\bin progress\b/i.test(
+    output,
+  );
+
 /** The launch ack Claude writes as a background subagent's tool_result. */
 const ASYNC_LAUNCH_TEXT = /^Async agent launched successfully\b/;
 /** The task id a launch ack names; its notifications carry it as task-id. */
@@ -568,16 +616,23 @@ export const createTranscriptParser = (
         taskPrompts.delete(id);
         const output = toolResultText(block.content);
         const failed = block.is_error === true;
-        // A background subagent's result is only its launch ack: the call
-        // stays in progress (marked background) until the subagent finishes.
-        if (
-          !failed &&
+        // Background subagents and `Bash` calls both first return a launch
+        // acknowledgement. Keep their original call live until its task
+        // notification or BashOutput poll says the work has stopped.
+        const isBackgroundSubagent =
           tool !== undefined &&
           SUBAGENT_TOOL_NAMES.has(tool.toolName) &&
-          isAsyncLaunchAck(row, output)
-        ) {
+          isAsyncLaunchAck(row, output);
+        const isBackgroundBash =
+          tool !== undefined &&
+          isBackgroundShell(tool.toolName, tool.input) &&
+          isBackgroundShellLaunch(row, output);
+        if (!failed && (isBackgroundSubagent || isBackgroundBash)) {
           const owner = tool.parent ?? parent;
-          const taskId = LAUNCH_AGENT_ID.exec(output)?.[1];
+          const taskId = isBackgroundSubagent
+            ? LAUNCH_AGENT_ID.exec(output)?.[1]
+            : (backgroundTaskIdOf(row.toolUseResult) ??
+              backgroundTaskIdFromOutput(output));
           if (taskId !== undefined) backgroundByTask.set(taskId, id);
           background.set(id, {
             toolName: tool.toolName,
@@ -626,6 +681,43 @@ export const createTranscriptParser = (
           },
           tool?.parent ?? parent,
         );
+        // Claude observes a background shell through `BashOutput`. Its result
+        // belongs to that poll too, but it is also the lifecycle update for the
+        // original `Bash` call the browser is showing as active.
+        if (tool?.toolName === BACKGROUND_SHELL_OUTPUT_TOOL) {
+          const taskId = backgroundTaskIdOf(tool.input);
+          const backgroundCallId =
+            taskId === undefined ? undefined : backgroundByTask.get(taskId);
+          const backgroundCall =
+            backgroundCallId === undefined
+              ? undefined
+              : background.get(backgroundCallId);
+          if (
+            backgroundCallId !== undefined &&
+            backgroundCall !== undefined &&
+            !backgroundShellStillRunning(output)
+          ) {
+            background.delete(backgroundCallId);
+            if (taskId !== undefined) backgroundByTask.delete(taskId);
+            item(
+              "item.completed",
+              backgroundCallId,
+              {
+                kind: "tool_call",
+                tool_name: backgroundCall.toolName,
+                input: backgroundCall.input,
+                status: failed ? "failed" : "completed",
+                background: true,
+                output: clip(output, args.toolOutputMax),
+                ...(failed ? { is_error: true } : {}),
+                ...(exit?.[1] === undefined
+                  ? {}
+                  : { exit_code: Number(exit[1]) }),
+              },
+              backgroundCall.parent,
+            );
+          }
+        }
       }
     }
     // A subagent's own prompt and its user rows are not turns.
@@ -730,7 +822,9 @@ export const createTranscriptParser = (
       },
       call.parent,
     );
-    if (!marker) return;
+    // Shell task notifications settle their original Bash call too, but only
+    // subagent completion is a conversational marker that can be drilled into.
+    if (!marker || !SUBAGENT_TOOL_NAMES.has(call.toolName)) return;
     item(
       "item.completed",
       `${str(row.uuid) ?? callId}:subagent-finished`,

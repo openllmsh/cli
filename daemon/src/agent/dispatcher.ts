@@ -338,6 +338,11 @@ export const createAgentDispatcher = (
     event: TAgentEvent,
     commandId?: string,
   ): void => {
+    // An in-TUI `/new` switches Claude to a fresh transcript while the host
+    // session stays connected. Its old replay window must not be offered to a
+    // later attach; retain the reset marker itself so an attaching consumer
+    // clears before receiving any new-transcript rows.
+    if (event.type === "session.reset") session.log.splice(0);
     session.seq += 1;
     session.lastActivityAt = now();
     const id = commandId ?? session.activeCommandId;

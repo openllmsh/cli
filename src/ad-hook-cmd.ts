@@ -191,6 +191,12 @@ const printable = (value: string): string =>
   // biome-ignore lint/suspicious/noControlCharactersInRegex: strips terminal escapes
   value.replace(/[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/g, "");
 
+/** Keep the tracked URL out of the visible transcript while leaving a direct,
+ * terminal-native destination for the ad's CTA. `clickUrl` was validated by
+ * `safeHttpUrl` before this point. */
+const terminalHyperlink = (url: string, text: string): string =>
+  `\x1b]8;;${url}\x1b\\${text}\x1b]8;;\x1b\\`;
+
 const renderAd = (ad: TGravityAd, origin: string): string => {
   const brand = printable(ad.brandName ?? "").trim() || "Sponsor";
   const title = printable(ad.title ?? "").trim();
@@ -198,7 +204,7 @@ const renderAd = (ad: TGravityAd, origin: string): string => {
   return [
     `Sponsored · ${brand}${title === "" ? "" : ` — ${title}`}`,
     printable(ad.adText),
-    `${cta}: ${ad.clickUrl}`,
+    terminalHyperlink(ad.clickUrl, cta),
     `Go ad-free: ${origin}/settings/plan`,
   ]
     .join("\n")
