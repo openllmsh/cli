@@ -717,7 +717,11 @@ export const createAgentDispatcher = (
               );
               return;
             }
-            if (!withCommand(session, commandId, () => sendNow()))
+            if (
+              !withCommand(session, commandId, () =>
+                sendNow({ interrupt: command.interrupt === true }),
+              )
+            )
               error(
                 state,
                 session,

@@ -1022,6 +1022,17 @@ export const createTranscriptParser = (
       // A local command's output can also be a system row
       // (`/context`, a forked skill's launch).
       if (row.type === "system" && row.subtype === "local_command") {
+        // A refused `/model` ("API error: 400 … · model not changed") lands
+        // here, not as a user row: forward it so the switch fails at once
+        // with Claude's own reason instead of waiting out the timeout.
+        const text = str(row.content)?.trim() ?? "";
+        const switched = MODEL_SET.exec(text);
+        if (switched?.[1] !== undefined)
+          emit({ type: "session.configured", model: switched[1] });
+        else if (LOCAL_COMMAND_OUTPUT.test(text))
+          args.onLocalCommandOutput?.(
+            text.replace(/<\/?local-command-(?:stdout|stderr)>/gi, "").trim(),
+          );
         onLocalCommandDone();
         return;
       }

@@ -54,9 +54,10 @@ export type TAgentEngineSession = {
   readonly send: (input: TAgentSendInput) => TAgentSendResult;
   /**
    * Deliver the queued prompts now, mid-turn (absent → the engine cannot).
-   * False when nothing is queued.
+   * `interrupt` backgrounds running shells and stops tools that can't move;
+   * without it running tools finish first. False when nothing is queued.
    */
-  readonly sendNow?: () => boolean;
+  readonly sendNow?: (options?: { readonly interrupt?: boolean }) => boolean;
   /** Resume automatic delivery after an interrupt held the queue. */
   readonly resumeQueue?: () => boolean;
   /** Cancel one queued prompt by its daemon-minted id. */

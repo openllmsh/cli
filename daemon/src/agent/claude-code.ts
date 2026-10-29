@@ -1017,10 +1017,12 @@ const TRUST_PROMPT = /trustthefilesinthisfolder|doyoutrust|itrustthisfolder/i;
 const TRUST_CURSOR_ON_NO = /❯(?:\d+\.)?No\b/;
 const DOWN_ARROW = "\x1b[B";
 /**
- * Claude Code's `chat:queueSubmit` (ctrl+x enter) and `chat:sendNow`
- * (ctrl+x ctrl+s, the byte-safe alias of ctrl+enter): queue what's in the
- * input behind the running turn, then hand the queue to the model now.
- * Plain Enter would interrupt instead under Claude's responsive mode.
+ * Claude Code's `chat:queueSubmit` (ctrl+x enter): queue what's in the input
+ * on the running turn. Claude folds it in at the next tool boundary and never
+ * stops running work. Its `chat:sendNow` (ctrl+x ctrl+s, the byte-safe alias
+ * of ctrl+enter) backgrounds running shells and INTERRUPTS what can't move
+ * (an MCP call) after a ~400ms grace — typed only when the user agreed to
+ * that. Plain Enter would interrupt too under Claude's responsive mode.
  */
 const QUEUE_SUBMIT = "\x18\r";
 const SEND_NOW = "\x18\x13";
@@ -1210,6 +1212,8 @@ export const createClaudeTuiSession = (
   let queueHeld = false;
   /** A send-now awaits readiness; queue entries remain durable until pasted. */
   let sendNowPending = false;
+  /** A pending send-now the user agreed may stop running tools. */
+  let sendNowInterrupt = false;
   /** The turn this daemon opened last (its prompt was typed by `send`). */
   let sentTurnId: string | null = null;
   /**
@@ -1868,7 +1872,7 @@ export const createClaudeTuiSession = (
       }
       return startTurn(input);
     },
-    sendNow: (): boolean => {
+    sendNow: (options): boolean => {
       if (ended || promptQueue.length === 0) return false;
       // No turn running: the normal flush, which waits out the Stop settle
       // (keys typed while Stop hooks run are dropped).
@@ -1876,13 +1880,18 @@ export const createClaudeTuiSession = (
         flushQueue();
         return true;
       }
-      // Into Claude's own queue, then its send-now. Keep entries durable until
+      // Into Claude's own queue: it joins the running turn at the next tool
+      // boundary, and running tools finish undisturbed — unless the user
+      // agreed to stop them, then Claude's send-now. Keep entries durable until
       // their paste is committed: an interrupt before readiness must not lose
       // them.
+      if (options?.interrupt === true) sendNowInterrupt = true;
       if (sendNowPending) return true;
       sendNowPending = true;
       whenReady(() => {
         sendNowPending = false;
+        const interrupt = sendNowInterrupt;
+        sendNowInterrupt = false;
         if (ended || queueHeld) return;
         const delivered: string[] = [];
         for (const entry of promptQueue) {
@@ -1907,6 +1916,7 @@ export const createClaudeTuiSession = (
           ...promptQueue.filter((entry) => !deliveredIds.has(entry.id)),
         );
         emitQueue();
+        if (!interrupt) return;
         setTimeout(() => {
           if (!ended) writeText(SEND_NOW);
         }, submitDelayMs);
