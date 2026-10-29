@@ -1163,12 +1163,22 @@ const withoutSpawnPolicy = (text: string): string =>
     text,
   );
 
-/** Input items with the spawn-policy sentences removed, or null if none had them. */
+/**
+ * Input items with the spawn-policy sentences removed from muse-bin's
+ * developer message, or null if none had them. Other roles keep the text, so
+ * a user quoting a sentence reaches the model unchanged.
+ */
 const inputWithoutSpawnPolicy = (input: unknown): unknown[] | null => {
   if (!Array.isArray(input)) return null;
   let changed = false;
   const next = input.map((item) => {
-    if (!isRecord(item) || typeof item.content !== "string") return item;
+    if (
+      !isRecord(item) ||
+      item.role !== "developer" ||
+      typeof item.content !== "string"
+    ) {
+      return item;
+    }
     const content = withoutSpawnPolicy(item.content);
     if (content === item.content) return item;
     changed = true;
