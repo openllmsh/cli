@@ -60,6 +60,7 @@ import {
   markProviderSignedOut,
   refreshUsage,
 } from "./status";
+import { deleteTeamKey, setTeamKey } from "./team-keys";
 import { convergeBinary } from "./updater";
 import { invalidateUsage } from "./usage-cache";
 
@@ -710,6 +711,51 @@ const runCommandInAccount = async (
           id: cmd.id,
           status: "done",
           result: { account_index: applied.index },
+        };
+      }
+      // Store this team's key T for team tunnels' PSK handshake. Sealed to
+      // this daemon's X25519 pubkey; written only to the 0600 team-keys store
+      // and never echoed. Status reports `{ team_id, epoch }` only.
+      case "set_team_key": {
+        const opened = openSealed(cmd.payload.sealed);
+        if (opened === null) {
+          return {
+            id: cmd.id,
+            status: "error",
+            result: { error: "could not open sealed team key" },
+          };
+        }
+        const applied = setTeamKey({
+          teamId: cmd.payload.team_id,
+          epoch: cmd.payload.epoch,
+          key: opened,
+        });
+        if (!applied.ok) {
+          return {
+            id: cmd.id,
+            status: "error",
+            result: { error: applied.error },
+          };
+        }
+        return {
+          id: cmd.id,
+          status: "done",
+          result: { team_id: cmd.payload.team_id },
+        };
+      }
+      case "delete_team_key": {
+        const applied = deleteTeamKey(cmd.payload.team_id);
+        if (!applied.ok) {
+          return {
+            id: cmd.id,
+            status: "error",
+            result: { error: applied.error },
+          };
+        }
+        return {
+          id: cmd.id,
+          status: "done",
+          result: { team_id: cmd.payload.team_id },
         };
       }
       // Control-key-signed device-sessions DISABLE. The cloud only relays the

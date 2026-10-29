@@ -22,6 +22,7 @@ import {
   LOCAL_KEY_PROVIDERS_CONTROL_CAP,
   MULTI_ACCOUNT_CONTROL_CAP,
   normalizeProviderConnection,
+  TEAM_KEY_CUSTODY_CONTROL_CAP,
   TEAM_SERVE_CAP,
 } from "@openllmsh/protocol";
 import {
@@ -84,6 +85,7 @@ import type {
   TStatusPublishTrigger,
 } from "./status-publish-coalesce";
 import { teamServeEnabled } from "./team-grant-admit";
+import { teamKeyEpochs } from "./team-keys";
 import { servedTunnelCapacity, servedTunnelLoad } from "./tunnel-capacity";
 import { cachedUsage, peekUsage } from "./usage-cache";
 import { attachVendorCliInstall } from "./vendor-cli-install";
@@ -926,6 +928,7 @@ const computeStatusFreshInner = async (
     device_sessions: deviceSessionsReport(),
     port: daemonPort(),
     sandbox: sandboxState(),
+    team_psk: teamKeyEpochs(),
     caps: currentDaemonCaps(),
     served_tunnels: {
       active: servedTunnelLoad(),
@@ -936,6 +939,7 @@ const computeStatusFreshInner = async (
       MULTI_ACCOUNT_CONTROL_CAP,
       DEVICE_SESSIONS_CONTROL_CAP,
       LOCAL_KEY_PROVIDERS_CONTROL_CAP,
+      TEAM_KEY_CUSTODY_CONTROL_CAP,
       ...(teamServeEnabled() ? [TEAM_SERVE_CAP] : []),
     ],
     connections,

@@ -114,6 +114,8 @@ export const commandLaneOf = (cmd: TDaemonCommand): TCommandLane => {
       return "global";
     case "set_local_key":
     case "set_provider_key":
+    case "set_team_key":
+    case "delete_team_key":
       return "mutation";
   }
 };
