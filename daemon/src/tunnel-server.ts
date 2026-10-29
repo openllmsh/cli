@@ -205,10 +205,11 @@ export type TTeamLegCompletionReporter = (input: {
 }) => Promise<void>;
 
 /**
- * Run a dispatched team leg and always report its completion, so the hold is
- * released rather than swept at its full amount. A provider error, a bodyless
- * response or a dispatch that throws produced no completion: it reports 0.
- * A streamed response reports its observed usage without delaying the body.
+ * Run a dispatched team leg and report its completion. A provider error or
+ * bodyless response was refused, not served: it reports 0 so the hold is
+ * released. A dispatch that throws may have reached the provider, so it
+ * reports nothing and the sweep charges the full hold. A streamed response
+ * reports its observed usage without delaying the body.
  */
 const dispatchTeamLeg = async (
   run: () => Promise<Response>,
@@ -221,13 +222,7 @@ const dispatchTeamLeg = async (
       () => {},
     );
   };
-  let response: Response;
-  try {
-    response = await run();
-  } catch (err) {
-    reportNone();
-    throw err;
-  }
+  const response = await run();
   if (!response.ok || response.body === null) {
     reportNone();
     return response;
