@@ -20,7 +20,10 @@
 import type { TTunnelSurface } from "@openllmsh/protocol";
 import { RTC_CAP, SEEDGATE_CAP, TEAM_RTC_CAP } from "@openllmsh/protocol";
 import { fleetRequest } from "@openllmsh/tunnel/fleet";
-import { createPeerLink } from "@openllmsh/tunnel/peer-link";
+import {
+  createPeerLink,
+  peerLinkFailureReasonOf,
+} from "@openllmsh/tunnel/peer-link";
 import { fleetSubscriptionPubkeyFor } from "./config";
 import { logInfo, safeDiagnosticMessage } from "./logger";
 import { getMuxPeerCaps, muxChannelTo } from "./mux-host";
@@ -165,9 +168,7 @@ const tunnelToPeerLive: TTunnelToPeer = async (args) => {
         !args.signal.aborted && preDispatchError(error) !== null,
       classifyFailure: (error) => {
         rtcFailed = true;
-        return error instanceof Error && error.message.includes("tunnel_busy")
-          ? "tunnel_busy"
-          : "transport";
+        return peerLinkFailureReasonOf(error);
       },
     },
   });
