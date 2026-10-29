@@ -44,6 +44,7 @@ import {
   modelFromRequestBody,
   teamGrantFromStreamOpen,
 } from "./team-grant-admit";
+import { reportTeamLegDispatch } from "./team-leg-dispatch";
 import { currentTeamChannelScope, withTeamGrant } from "./team-request-context";
 import {
   beginServedTunnel,
@@ -187,6 +188,11 @@ function tunneledRequest(
 
 /** The request dispatcher a mux tunnel server hands each tunneled request to. */
 export type TTunnelDispatch = (req: Request) => Promise<Response>;
+
+export type TTeamLegDispatchReporter = (input: {
+  readonly nonce: string;
+  readonly teamGrant: string;
+}) => Promise<void>;
 
 /**
  * Enough leading JSON to find the routing model without making a slow client
@@ -343,7 +349,11 @@ export const admitMuxTunnel = (): "tunnel_busy" | null =>
  * exactly as before.
  */
 export const createMuxTunnelServer =
-  (dispatch: TTunnelDispatch, transport: "rtc" | "mux" = "mux"): TServeTunnel =>
+  (
+    dispatch: TTunnelDispatch,
+    transport: "rtc" | "mux" = "mux",
+    reportDispatch: TTeamLegDispatchReporter = reportTeamLegDispatch,
+  ): TServeTunnel =>
   async (open, body, signal) => {
     const startedAt = Date.now();
     const servingInflight = beginServedTunnel();
@@ -461,6 +471,10 @@ export const createMuxTunnelServer =
               `team_${decision.reason}`,
             );
           }
+          void reportDispatch({
+            nonce: decision.grant.n,
+            teamGrant: teamToken,
+          }).catch(() => {});
           const response = await withTeamGrant(teamToken, decision.grant, () =>
             dispatch(tunneledRequest(open, buffered, signal)),
           );
@@ -490,6 +504,10 @@ export const createMuxTunnelServer =
           logWarn("tunnel", "Team grant refused.", { reason: decision.reason });
           throw new StreamResetError("unauthorized", `team_${decision.reason}`);
         }
+        void reportDispatch({
+          nonce: decision.grant.n,
+          teamGrant: teamToken,
+        });
         const response = await withTeamGrant(teamToken, decision.grant, () =>
           dispatch(
             ended
