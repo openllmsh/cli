@@ -15,11 +15,11 @@
  * changed. Grants live 30 s, so no stale grant outlives a rotation; there is
  * no previous-key fallback.
  *
- * Cross-user safety: a new relay stamps `peer_user_id` on every
+ * Cross-user safety: the relay stamps `peer_user_id` on every
  * `channel_open`. When that id differs from this daemon's bootstrap
- * `user_id`, a valid team_grant is REQUIRED. An older relay omits
- * `peer_user_id`; grant-less opens then rely on the trusted-relay
- * assumption (the relay never forwards a grant-less cross-user open).
+ * `user_id`, a valid team_grant is REQUIRED. An open without `peer_user_id`
+ * (an outdated relay) is refused with `daemon_outdated`, never assumed
+ * same-user.
  */
 
 import { providerOfModel } from "@openllmsh/protocol";

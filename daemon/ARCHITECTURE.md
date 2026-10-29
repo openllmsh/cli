@@ -813,12 +813,11 @@ silent signaling timeouts. Detail lives in
   `headers.team_grant` (→ `x-openllm-team-grant`): verified against bootstrap
   `team_grant_key` (per-contributor HMAC) for model / local `cap_tokens` /
   `teamShareable` / `OPENLLM_TEAM_SERVE` kill switch before dispatch.
-  Same-user traffic omits the grant and is unchanged. A new relay stamps
+  Same-user traffic omits the grant and is unchanged. The relay stamps
   `peer_user_id` on every `channel_open`; when that differs from bootstrap
-  `user_id`, a valid grant is REQUIRED. Cross-user safety for grant-less
-  opens (and for older relays that omit `peer_user_id`) is the relay's job
-  (trusted-relay assumption, 2026-10-26) — without a non-empty team grant the
-  relay never opens a foreign mux channel. The daemon also advertises
+  `user_id`, a valid grant is REQUIRED. A `channel_open` without
+  `peer_user_id` (an outdated relay) is refused with `daemon_outdated`, never
+  treated as same-user. The daemon also advertises
   `team_serve` on mux caps, bootstrap caps, and `control_caps` when the kill
   switch is on.
 - `device-access-verify.ts` verifies device grants signed by the account

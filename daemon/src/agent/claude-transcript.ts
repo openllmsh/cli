@@ -44,9 +44,9 @@ const SCAN_INTERVAL_MS = 2_000;
 const utf8CompleteEnd = (buf: Buffer, end: number): number => {
   if (end <= 0) return 0;
   let i = end;
-  while (i > 0 && (buf[i - 1]! & 0xc0) === 0x80) i -= 1;
+  while (i > 0 && ((buf[i - 1] ?? 0) & 0xc0) === 0x80) i -= 1;
   if (i === 0) return 0;
-  const lead = buf[i - 1]!;
+  const lead = buf[i - 1] ?? 0;
   const need = lead >= 0xf0 ? 4 : lead >= 0xe0 ? 3 : lead >= 0xc0 ? 2 : 1;
   return i - 1 + need <= end ? end : i - 1;
 };
