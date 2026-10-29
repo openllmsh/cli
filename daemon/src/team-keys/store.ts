@@ -9,6 +9,7 @@
  */
 import { existsSync, readdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
+import { TEAM_KEY_ID_PATTERN } from "@openllmsh/protocol";
 import { stateDir } from "../env";
 import { readJsonStateFile, writeJsonStateAtomic } from "../json-state-cache";
 
@@ -16,8 +17,6 @@ const STORE_VERSION = 1;
 const MAX_STORE_BYTES = 4 * 1024;
 /** T is 32 bytes; base64 of that plus slack bounds the file. */
 const MAX_KEY_LENGTH = 512;
-/** Mirrors `TeamKeyId` on the wire — the id names a file, so it must be path-safe. */
-const TEAM_ID_PATTERN = /^[A-Za-z0-9_-]{1,64}$/;
 const PERSIST_ERROR = "failed to persist team key";
 
 export type TTeamKey = {
@@ -41,7 +40,7 @@ const storeDir = (home?: string): string => join(stateDir(home), "team-keys");
 export const teamKeyStorePath = (teamId: string, home?: string): string =>
   join(storeDir(home), `${teamId}.json`);
 
-const isTeamId = (teamId: string): boolean => TEAM_ID_PATTERN.test(teamId);
+const isTeamId = (teamId: string): boolean => TEAM_KEY_ID_PATTERN.test(teamId);
 
 /** Untrusted file → key, or null when it doesn't match the expected team. */
 const parseTeamKey = (raw: unknown, teamId: string): TTeamKey | null => {
