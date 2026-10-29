@@ -1147,6 +1147,37 @@ export const MUSE_TOOLS_RETRY_NOTICE =
   "Your previous attempt called a muse.* tool, which does not exist here. Call one of the provided tools instead.";
 
 /**
+ * Sentences muse-bin adds to its developer message for `--disable-write` /
+ * `--disable-shell`. Those flags confine muse-bin's OWN tools; the caller's
+ * tools (Claude Code's `Bash`, `Write`, …) run on the caller's side, yet the
+ * model read these as "no shell at all" and refused to call them.
+ */
+export const MUSE_SPAWN_POLICY_SENTENCES = [
+  "Filesystem writes are disabled for this session. Work read-only and report findings instead of writing files.",
+  "Shell execution is disabled for this session. Plan without running commands and use the read-only tools instead.",
+] as const;
+
+const withoutSpawnPolicy = (text: string): string =>
+  MUSE_SPAWN_POLICY_SENTENCES.reduce(
+    (out, sentence) => out.replace(`${sentence}\n`, "").replace(sentence, ""),
+    text,
+  );
+
+/** Input items with the spawn-policy sentences removed, or null if none had them. */
+const inputWithoutSpawnPolicy = (input: unknown): unknown[] | null => {
+  if (!Array.isArray(input)) return null;
+  let changed = false;
+  const next = input.map((item) => {
+    if (!isRecord(item) || typeof item.content !== "string") return item;
+    const content = withoutSpawnPolicy(item.content);
+    if (content === item.content) return item;
+    changed = true;
+    return { ...item, content };
+  });
+  return changed ? next : null;
+};
+
+/**
  * The captured `/responses` body without Muse's built-in tools. The captured
  * response goes to the caller, never back to muse-bin, so a `muse.*` call
  * could not run anywhere: offering them only made the model pick a tool
@@ -1167,12 +1198,14 @@ export const withoutMuseNativeTools = (
   }
   if (!isRecord(parsed) || !Array.isArray(parsed.tools)) return null;
   const tools = parsed.tools.filter((tool) => !isMuseNativeTool(tool));
-  if (tools.length === parsed.tools.length) return null;
+  const input = inputWithoutSpawnPolicy(parsed.input);
+  if (tools.length === parsed.tools.length && input === null) return null;
   const notice = retry
     ? `${MUSE_TOOLS_NOTICE} ${MUSE_TOOLS_RETRY_NOTICE}`
     : MUSE_TOOLS_NOTICE;
   const next: Record<string, unknown> = {
     ...parsed,
+    ...(input === null ? {} : { input }),
     tools,
     instructions:
       typeof parsed.instructions === "string" && parsed.instructions !== ""
