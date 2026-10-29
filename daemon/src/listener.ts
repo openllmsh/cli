@@ -918,7 +918,11 @@ export const handleInference = async (req: Request): Promise<Response> => {
         verified &&
         parsePlan(refreshed.plan).some((entry) => {
           const provider = entry.split("/")[0] ?? "";
-          return isOAuthSlug(provider) || isLocalServerSlug(provider);
+          return (
+            isOAuthSlug(provider) ||
+            isLocalServerSlug(provider) ||
+            isLocalKeyProviderSlug(provider)
+          );
         });
       if (!hasDaemonOnlyHop) return null;
       return {

@@ -18,6 +18,7 @@ import {
   localKeyProviderPreset,
 } from "@openllmsh/protocol";
 import { classifyHopError } from "@openllmsh/wire/lib/error-class";
+import { scrubSecretText } from "@openllmsh/wire/lib/secret-scrub";
 import {
   buildUpstreamRequest,
   clientWireOf,
@@ -127,6 +128,9 @@ export const serveLocalKeyHop = async (
   const clientWire = clientWireOf(args.surface);
   const strip = hop.stripSubagentIsolation === true;
   let last: { status: number; raw: string } | null = null;
+  // A vendor (or proxy in front of it) may echo the Authorization value in
+  // an error body; scrub every slot's key before any of it leaves the daemon.
+  const slotKeys = slots.map((s) => s.key);
 
   for (const [i, slot] of slots.entries()) {
     const finalSlot = finalHop && i === slots.length - 1;
@@ -182,7 +186,7 @@ export const serveLocalKeyHop = async (
       continue;
     }
     if (!resp.ok) {
-      const raw = await resp.text().catch(() => "");
+      const raw = scrubSecretText(await resp.text().catch(() => ""), slotKeys);
       const cls = classifyHopError({
         status: resp.status,
         envelope: errorEnvelopeFrom(raw),
