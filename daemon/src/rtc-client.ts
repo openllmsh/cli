@@ -269,7 +269,8 @@ export const createRtcClient = (): TRtcClient => {
       },
     });
     clearTimers(session);
-    peerLinkFailureCache.clear(session.keyId);
+    // A mounted RTC link proves only the RTC path; keep any mux failure.
+    peerLinkFailureCache.clear(session.keyId, "rtc");
     logDebug("rtc-client", "mux mounted on data channel", {
       keyId: session.keyId,
       channelId: session.channelId,

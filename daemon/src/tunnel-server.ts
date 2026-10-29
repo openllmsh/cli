@@ -381,6 +381,10 @@ export const createMuxTunnelServer =
         // after every read (which made a fragmented upload quadratic).
         const modelScan = new Uint8Array(TEAM_MODEL_SCAN_MAX_BYTES);
         let modelScanLength = 0;
+        // Rescan only when the prefix has doubled (or the scan window is
+        // full) so a body split into many tiny frames costs linear, not
+        // quadratic, scanning.
+        let lastScannedLength = 0;
         let total = 0;
         let model: string | null = null;
         let ended = false;
@@ -409,6 +413,17 @@ export const createMuxTunnelServer =
             modelScan.set(scanChunk, modelScanLength);
             modelScanLength += scanChunk.byteLength;
           }
+          if (
+            modelScanLength >= TEAM_MODEL_SCAN_MAX_BYTES ||
+            modelScanLength >= lastScannedLength * 2
+          ) {
+            lastScannedLength = modelScanLength;
+            model = modelFromLeadingJson(
+              modelScan.subarray(0, modelScanLength),
+            );
+          }
+        }
+        if (model === null && modelScanLength > lastScannedLength) {
           model = modelFromLeadingJson(modelScan.subarray(0, modelScanLength));
         }
 
