@@ -30,6 +30,7 @@ import {
   sessionHostSpawnArgv,
   spawnSessionHost,
   waitForSessionHostSocket,
+  withDeviceSessionTitles,
 } from "../session-host";
 import { attachBrokerSession } from "./attach";
 import { codexCatalogFor } from "./codex-catalog";
@@ -372,7 +373,7 @@ const chooseRunningSession = async (args: {
   // `--attach` is an explicit override and still wins.
   if (args.vendorArgs.length > 0 && args.flags.attach === null) return null;
   const choices = buildSessionChoices(
-    discoverLiveSessionHosts(),
+    await withDeviceSessionTitles(discoverLiveSessionHosts()),
     args.cli,
     process.cwd(),
   );

@@ -202,6 +202,30 @@ const reapDirectory = (directory: string): void => {
   }
 };
 
+/**
+ * Retitle hosts with the device session list's titles (vendor history, else
+ * "New session · <CLI>") so the terminal names a session as the browser does.
+ * Lazy-imported: the CLI half carries no static daemon dependency. Any failure
+ * keeps the launch-time title.
+ */
+export const withDeviceSessionTitles = async (
+  hosts: readonly TLiveSessionHost[],
+): Promise<readonly TLiveSessionHost[]> => {
+  if (hosts.length === 0) return hosts;
+  try {
+    const { sessionHostTitles } = await import(
+      "../daemon/src/local-sessions/host-titles"
+    );
+    const titles = await sessionHostTitles(hosts);
+    return hosts.map((host) => {
+      const title = titles.get(host.id);
+      return title === undefined ? host : { ...host, title };
+    });
+  } catch {
+    return hosts;
+  }
+};
+
 export const discoverLiveSessionHosts = (): readonly TLiveSessionHost[] => {
   let entries: string[];
   try {

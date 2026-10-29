@@ -427,6 +427,11 @@ export type TTranscriptParserOptions = {
    * reports no usage.
    */
   readonly parentItemId?: string;
+  /**
+   * A slash command's output that is not a model switch (`/model` answering
+   * with an error, `/cost`'s table), its wrapper tags stripped.
+   */
+  readonly onLocalCommandOutput?: (text: string) => void;
   /** The turn id a subagent parser stamps on its items. */
   readonly turnId?: () => string | undefined;
   /** Every tool_use seen (the subagent follower tracks Task / Agent calls). */
@@ -754,6 +759,9 @@ export const createTranscriptParser = (
     // `<...>` row as a wrapper. `pasted_content` is unwrapped by normalize.
     const trimmedRaw = raw.trim();
     if (LOCAL_COMMAND_OUTPUT.test(trimmedRaw)) {
+      args.onLocalCommandOutput?.(
+        trimmedRaw.replace(/<\/?local-command-(?:stdout|stderr)>/gi, "").trim(),
+      );
       onLocalCommandDone();
       return;
     }

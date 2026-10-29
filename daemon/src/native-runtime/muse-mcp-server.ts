@@ -67,6 +67,19 @@ export const MUSE_MCP_APPROVAL_WIRE_PREFIX =
 export const museMcpApprovalWireToolName = (callerToolName: string): string =>
   `${MUSE_MCP_APPROVAL_WIRE_PREFIX}${callerToolName}`;
 
+/** Namespace of Muse's built-in tools on the wire (`muse.read_skill`). */
+/**
+ * Muse's built-in tools ride the `/responses` body as ONE namespace tool,
+ * `{type:"namespace", name:"muse", tools:[read_file, read_skill, …]}` (live
+ * capture, muse-bin 1.4.12), and come back as `muse.<member>`.
+ */
+export const MUSE_NATIVE_TOOL_NAMESPACE = "muse";
+export const MUSE_NATIVE_TOOL_PREFIX = `${MUSE_NATIVE_TOOL_NAMESPACE}.`;
+
+/** A Muse built-in (`muse.read_skill`), which only muse-bin can run. */
+export const isMuseNativeToolName = (name: string): boolean =>
+  name.startsWith(MUSE_NATIVE_TOOL_PREFIX);
+
 export type TMuseToolNameMap = {
   /** Full Meta wire name → original caller name. Contains BOTH the
    *  dot-form ({@link museMcpWireToolName}, capture/`/responses` transport)
@@ -114,6 +127,15 @@ export const mapMuseCapturedToolName = (
     return {
       ok: false,
       reason: `unknown muse MCP tool wire name: ${upstreamName}`,
+    };
+  }
+  // Muse's own native tools (`muse.read_skill`, `muse.web_search`) execute
+  // inside muse-bin, which never sees a captured response: handed to the
+  // caller they are a call to a tool it does not have.
+  if (isMuseNativeToolName(upstreamName)) {
+    return {
+      ok: false,
+      reason: `muse native tool call cannot run on the captured hop: ${upstreamName}`,
     };
   }
   if (upstreamName.startsWith("mcp__")) {
