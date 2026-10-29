@@ -5782,6 +5782,48 @@
                               "type": {
                                 "type": "string",
                                 "enum": [
+                                  "tool_addition"
+                                ]
+                              },
+                              "tool": {},
+                              "cache_control": {
+                                "anyOf": [
+                                  {
+                                    "type": "object",
+                                    "properties": {
+                                      "type": {
+                                        "type": "string",
+                                        "enum": [
+                                          "ephemeral"
+                                        ]
+                                      }
+                                    },
+                                    "required": [
+                                      "type"
+                                    ],
+                                    "additionalProperties": false
+                                  },
+                                  {
+                                    "type": "null"
+                                  },
+                                  {
+                                    "type": "null"
+                                  }
+                                ]
+                              }
+                            },
+                            "required": [
+                              "type",
+                              "tool"
+                            ],
+                            "additionalProperties": false
+                          },
+                          {
+                            "type": "object",
+                            "properties": {
+                              "type": {
+                                "type": "string",
+                                "enum": [
                                   "redacted_thinking"
                                 ]
                               },
@@ -7933,6 +7975,48 @@
                                     },
                                     "required": [
                                       "type"
+                                    ],
+                                    "additionalProperties": false
+                                  },
+                                  {
+                                    "type": "object",
+                                    "properties": {
+                                      "type": {
+                                        "type": "string",
+                                        "enum": [
+                                          "tool_addition"
+                                        ]
+                                      },
+                                      "tool": {},
+                                      "cache_control": {
+                                        "anyOf": [
+                                          {
+                                            "type": "object",
+                                            "properties": {
+                                              "type": {
+                                                "type": "string",
+                                                "enum": [
+                                                  "ephemeral"
+                                                ]
+                                              }
+                                            },
+                                            "required": [
+                                              "type"
+                                            ],
+                                            "additionalProperties": false
+                                          },
+                                          {
+                                            "type": "null"
+                                          },
+                                          {
+                                            "type": "null"
+                                          }
+                                        ]
+                                      }
+                                    },
+                                    "required": [
+                                      "type",
+                                      "tool"
                                     ],
                                     "additionalProperties": false
                                   },
@@ -29383,7 +29467,6 @@
                     "role": {
                       "type": "string",
                       "enum": [
-                        "owner",
                         "admin",
                         "member"
                       ]
@@ -29696,7 +29779,6 @@
                   "role": {
                     "type": "string",
                     "enum": [
-                      "owner",
                       "admin",
                       "member"
                     ]

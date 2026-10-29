@@ -11,6 +11,7 @@ import { resolveById } from "./clients/session-picker";
 import {
   discoverLiveSessionHosts,
   sessionHostProcessAlive,
+  withDeviceSessionTitles,
 } from "./session-host";
 
 export type TBrokerSessionRow = {
@@ -92,19 +93,23 @@ export const resolveSessionId = (
   resolveById(sessions, supplied);
 
 /** Read and validate live process-owned directories, reaping stale entries. */
-export const listSessionHosts = (): readonly TBrokerSessionRow[] =>
-  discoverLiveSessionHosts().map((session) => ({
-    id: session.id,
-    cli: session.cli,
-    title: session.title ?? "",
-    cwd: session.cwd,
-    updated_at_ms: session.startedAtMs,
-    live: true,
-    attachable: true,
-    socket_path: session.socketPath,
-    pid: session.pid,
-    process_start_time: session.processStartTime,
-  }));
+export const listSessionHosts = async (): Promise<
+  readonly TBrokerSessionRow[]
+> =>
+  (await withDeviceSessionTitles(discoverLiveSessionHosts())).map(
+    (session) => ({
+      id: session.id,
+      cli: session.cli,
+      title: session.title ?? "",
+      cwd: session.cwd,
+      updated_at_ms: session.startedAtMs,
+      live: true,
+      attachable: true,
+      socket_path: session.socketPath,
+      pid: session.pid,
+      process_start_time: session.processStartTime,
+    }),
+  );
 
 const requireSession = (
   sessions: readonly TBrokerSessionRow[],
@@ -368,7 +373,7 @@ export const runSessionsCommand = async (
     process.stderr.write(SESSIONS_USAGE);
     return 2;
   }
-  const sessions = listSessionHosts();
+  const sessions = await listSessionHosts();
   if (verb === "list") {
     process.stdout.write(formatSessionRows(sessions));
     return 0;

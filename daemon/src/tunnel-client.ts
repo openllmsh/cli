@@ -18,19 +18,40 @@
  */
 
 import type { TTunnelSurface } from "@openllmsh/protocol";
-import { RTC_CAP, SEEDGATE_CAP } from "@openllmsh/protocol";
+import { RTC_CAP, SEEDGATE_CAP, TEAM_RTC_CAP } from "@openllmsh/protocol";
 import { fleetRequest } from "@openllmsh/tunnel/fleet";
-import { createPeerLink } from "@openllmsh/tunnel/peer-link";
+import {
+  createPeerLink,
+  peerLinkFailureReasonOf,
+} from "@openllmsh/tunnel/peer-link";
 import { fleetSubscriptionPubkeyFor } from "./config";
 import { logInfo, safeDiagnosticMessage } from "./logger";
 import { getMuxPeerCaps, muxChannelTo } from "./mux-host";
 import { ensureRtcTo, getRtcMuxChannel, markRtcFailure } from "./rtc-client";
 
+/** A local transport failure that happened before a tunnel OPEN was sent. */
+export class PreDispatchTunnelError extends Error {
+  constructor(message: string, options?: ErrorOptions) {
+    super(message, options);
+    this.name = "PreDispatchTunnelError";
+  }
+}
+
 /** Local failures before OPEN can safely re-dispatch an inference request. */
-const isPreDispatchTunnelError = (error: unknown): boolean =>
-  error instanceof Error &&
-  (error.message === "channel is closed" ||
-    error.message === "stream ids exhausted");
+export const isPreDispatchTunnelError = (error: unknown): boolean =>
+  error instanceof PreDispatchTunnelError;
+
+const preDispatchError = (error: unknown): PreDispatchTunnelError | null => {
+  if (error instanceof PreDispatchTunnelError) return error;
+  if (
+    error instanceof Error &&
+    (error.message === "channel is closed" ||
+      error.message === "stream ids exhausted")
+  ) {
+    return new PreDispatchTunnelError(error.message, { cause: error });
+  }
+  return null;
+};
 
 const recordTunnelRequest = (input: {
   readonly transport: "rtc" | "mux";
@@ -67,6 +88,10 @@ export type TTunnelToPeerArgs = {
   anthropicVersion?: string | null;
   anthropicBeta?: string | null;
   userAgent?: string | null;
+  /** Per-request team grant; channel admission has its own initial grant. */
+  teamGrant?: string;
+  /** Scopes a reusable cross-user relay channel. */
+  teamId?: string;
   signal: AbortSignal;
   /** Optional transport override (harness / instrumented host). */
   transport?: TTunnelToPeer;
@@ -87,6 +112,7 @@ const tunnelToPeerLive: TTunnelToPeer = async (args) => {
     ...(args.userAgent != null
       ? { user_agent: args.userAgent.slice(0, 512) }
       : {}),
+    ...(args.teamGrant === undefined ? {} : { team_grant: args.teamGrant }),
   };
 
   const peerCaps = getMuxPeerCaps(args.keyId);
@@ -103,32 +129,46 @@ const tunnelToPeerLive: TTunnelToPeer = async (args) => {
   const link = createPeerLink({
     target: args.keyId,
     rtc: {
-      open: () => getRtcMuxChannel(args.keyId),
+      open: () => getRtcMuxChannel(args.keyId, args.teamId),
       warm: () => {
         // Fleet's cold RTC setup stays best-effort: mux is not held behind ICE.
         ensureRtcTo(args.keyId, {
           pubkey: peerPubkey ?? "",
-          hasRtc1: peerCaps?.has(RTC_CAP) ?? false,
+          hasRtc1:
+            args.teamGrant === undefined && (peerCaps?.has(RTC_CAP) ?? false),
           hasSeedgate1: peerCaps?.has(SEEDGATE_CAP) ?? false,
+          ...(args.teamGrant === undefined
+            ? {}
+            : {
+                teamGrant: args.teamGrant,
+                teamId: args.teamId,
+                hasTeamRtc1: peerCaps?.has(TEAM_RTC_CAP) ?? false,
+              }),
         });
       },
-      dial: async () => getRtcMuxChannel(args.keyId),
-      drop: () => markRtcFailure(args.keyId),
+      dial: async () => getRtcMuxChannel(args.keyId, args.teamId),
+      // Peer-link invokes `drop` only for an actual pre-dispatch failure;
+      // ordinary idle release leaves this healthy RTC session intact.
+      drop: () => markRtcFailure(args.keyId, args.teamId),
     },
     mux: {
       // `muxChannelTo` owns its channel map and joins an in-flight open.
       // Its dial result therefore carries reuse semantics without a second lookup.
       open: () => null,
-      dial: async () => muxChannelTo(args.keyId),
+      dial: async () =>
+        muxChannelTo(args.keyId, {
+          ...(args.teamId === undefined ? {} : { teamId: args.teamId }),
+          ...(args.teamGrant === undefined
+            ? {}
+            : { teamGrant: args.teamGrant }),
+        }),
     },
     policy: {
       retrySafe: (error) =>
-        !args.signal.aborted && isPreDispatchTunnelError(error),
+        !args.signal.aborted && preDispatchError(error) !== null,
       classifyFailure: (error) => {
         rtcFailed = true;
-        return error instanceof Error && error.message.includes("tunnel_busy")
-          ? "tunnel_busy"
-          : "transport";
+        return peerLinkFailureReasonOf(error);
       },
     },
   });
@@ -165,9 +205,12 @@ const tunnelToPeerLive: TTunnelToPeer = async (args) => {
         ? error
         : new DOMException("Aborted", "AbortError");
     }
+    const preDispatch = preDispatchError(error);
+    if (preDispatch !== null) throw preDispatch;
     if (error instanceof Error && error.message === "peer link unavailable") {
-      throw new Error(
+      throw new PreDispatchTunnelError(
         "Device transport unavailable. Peer has neither RTC nor mux — update OpenLLM on the peer.",
+        { cause: error },
       );
     }
     throw error instanceof Error ? error : new Error(String(error));

@@ -294,15 +294,11 @@ export const stopTeamPlanWarmRefresh = (): void => {
 /** Current recently served team pair count (tests / diagnostics). */
 export const warmTeamPlanSize = (): number => warmTeamPlans.size;
 
-/** Drop the team working set and its timer (tests / shutdown). */
-export const clearWarmTeamPlans = (): void => {
-  warmTeamPlans.clear();
-  stopTeamPlanWarmRefresh();
-};
-
-/** Drop everything (bootstrap refresh / key rotation). */
+/** Drop every cached plan and the demand-driven team-plan working set. */
 export const clearPlanCache = (): void => {
   cacheGeneration += 1;
   cache.clear();
   inFlight.clear();
+  warmTeamPlans.clear();
+  stopTeamPlanWarmRefresh();
 };

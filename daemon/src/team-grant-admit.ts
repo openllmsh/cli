@@ -15,11 +15,11 @@
  * changed. Grants live 30 s, so no stale grant outlives a rotation; there is
  * no previous-key fallback.
  *
- * Cross-user safety: a new relay stamps `peer_user_id` on every
+ * Cross-user safety: the relay stamps `peer_user_id` on every
  * `channel_open`. When that id differs from this daemon's bootstrap
- * `user_id`, a valid team_grant is REQUIRED. An older relay omits
- * `peer_user_id`; grant-less opens then rely on the trusted-relay
- * assumption (the relay never forwards a grant-less cross-user open).
+ * `user_id`, a valid team_grant is REQUIRED. An open without `peer_user_id`
+ * (an outdated relay) is refused with `daemon_outdated`, never assumed
+ * same-user.
  */
 
 import { providerOfModel } from "@openllmsh/protocol";
@@ -66,7 +66,8 @@ export type TTeamGrantAdmitReason =
   | "wrong_user"
   | "wrong_model"
   | "not_shareable"
-  | "over_cap";
+  | "over_cap"
+  | "replayed";
 
 export type TTeamGrantAdmitResult =
   | { readonly ok: true; readonly grant: TTeamGrant }
@@ -112,6 +113,8 @@ export const createTeamGrantAdmit = (
      */
     requestModel: string | null | undefined,
     reserveTokens: number,
+    /** Consume the nonce after a successful per-stream OPEN admission. */
+    consumeNonce?: boolean,
   ) => Promise<TTeamGrantAdmitResult>;
 } => {
   const now = deps.now ?? (() => Date.now());
@@ -124,6 +127,18 @@ export const createTeamGrantAdmit = (
   const verify = deps.verify ?? verifyTeamGrant;
   const refreshKey = deps.refreshKey ?? refreshBootstrap;
   let lastRefreshAt = Number.NEGATIVE_INFINITY;
+  // Nonces are short-lived (30 s). Bound storage to their expiry and sweep on
+  // each attempted OPEN so a hostile peer cannot retain them indefinitely.
+  const consumedNonces = new Map<string, number>();
+  const consumeNonce = (nonce: string, expiry: number): boolean => {
+    const current = now();
+    for (const [entry, expiresAt] of consumedNonces) {
+      if (expiresAt <= current) consumedNonces.delete(entry);
+    }
+    if (consumedNonces.has(nonce) || consumedNonces.size >= 4096) return false;
+    consumedNonces.set(nonce, expiry);
+    return true;
+  };
 
   // Verify with the current key; on failure refresh bootstrap (rate-limited)
   // and retry once when the key changed.
@@ -157,6 +172,7 @@ export const createTeamGrantAdmit = (
       token: string,
       requestModel: string | null | undefined,
       reserveTokens: number,
+      shouldConsumeNonce = false,
     ): Promise<TTeamGrantAdmitResult> {
       if (!enabled()) return { ok: false, reason: "kill_switch" };
       const verified = await verifyWithRefresh(token);
@@ -181,6 +197,9 @@ export const createTeamGrantAdmit = (
         if (!canCharge(grant.share_id, reserveTokens, grant.cap_tokens)) {
           return { ok: false, reason: "over_cap" };
         }
+      }
+      if (shouldConsumeNonce && !consumeNonce(grant.n, grant.exp)) {
+        return { ok: false, reason: "replayed" };
       }
       return { ok: true, grant };
     },
@@ -249,7 +268,7 @@ export const admitTeamGrantForChannel = async (
   deps?: TTeamGrantAdmitDeps,
 ): Promise<TTeamGrantAdmitResult> => {
   const admit = deps === undefined ? defaultAdmit : createTeamGrantAdmit(deps);
-  const decision = await admit.admit(token, requestModel, reserveTokens);
+  const decision = await admit.admit(token, requestModel, reserveTokens, true);
   if (!decision.ok) return decision;
   const { grant } = decision;
   if (

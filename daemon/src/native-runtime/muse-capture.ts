@@ -61,7 +61,11 @@ import {
   museCaptureProxyNoProxyHosts,
 } from "./capture-loopback-proxy-guard";
 import type { TMuseToolNameMap } from "./muse-mcp-server";
-import { mapMuseCapturedToolName } from "./muse-mcp-server";
+import {
+  isMuseNativeToolName,
+  MUSE_NATIVE_TOOL_NAMESPACE,
+  mapMuseCapturedToolName,
+} from "./muse-mcp-server";
 import type { TMuseCallerTool, TMuseInputPart } from "./muse-request";
 import type {
   TMuseHostFactory,
@@ -1008,32 +1012,72 @@ export const decodeMuseUpstreamResponse = (
   );
 };
 
+/**
+ * A `muse.*` call the model made anyway (its built-in instructions still name
+ * them, though the request no longer offers them). Nothing can run it, but it
+ * must not fail the session: the call is dropped and the turn ends with this
+ * note as text, so the caller just sends the next prompt.
+ */
+export const museNativeToolNote = (name: string): string =>
+  `\n\n(Muse tried to use its built-in tool \`${name}\`, which isn't available here. Ask again and it will use your tools instead.)`;
+
+/** Per-stream state: which tool-call indexes were dropped, how many kept. */
+type TMuseRemapState = { readonly dropped: Set<number>; kept: number };
+
 const remapMuseToolCallsInChunk = (
   chunk: TChatCompletionChunk,
   nameMap: TMuseToolNameMap,
+  state: TMuseRemapState,
 ): TChatCompletionChunk => {
   let changed = false;
   const choices = chunk.choices.map((choice) => {
+    let note = "";
     const toolCalls = choice.delta.tool_calls;
-    if (!Array.isArray(toolCalls) || toolCalls.length === 0) return choice;
-    const mapped = toolCalls.map((tc) => {
-      const fn = tc.function;
-      if (fn === undefined || fn === null || typeof fn.name !== "string") {
-        return tc;
-      }
-      const result = mapMuseCapturedToolName(fn.name, nameMap);
-      if (!result.ok) {
-        throw new Error(result.reason);
-      }
-      if (result.name === fn.name) return tc;
-      changed = true;
-      return {
-        ...tc,
+    let delta = choice.delta;
+    if (Array.isArray(toolCalls) && toolCalls.length > 0) {
+      const mapped = toolCalls.flatMap((tc) => {
+        if (state.dropped.has(tc.index)) {
+          changed = true;
+          return [];
+        }
+        const fn = tc.function;
+        if (fn === undefined || fn === null || typeof fn.name !== "string") {
+          return [tc];
+        }
+        if (isMuseNativeToolName(fn.name)) {
+          state.dropped.add(tc.index);
+          note += museNativeToolNote(fn.name);
+          changed = true;
+          return [];
+        }
+        const result = mapMuseCapturedToolName(fn.name, nameMap);
+        if (!result.ok) {
+          throw new Error(result.reason);
+        }
+        state.kept += 1;
+        if (result.name === fn.name) return [tc];
+        changed = true;
         // Preserve id + argument deltas; only the return-side name is remapped.
-        function: { ...fn, name: result.name },
+        return [{ ...tc, function: { ...fn, name: result.name } }];
+      });
+      const { tool_calls: _drop, ...rest } = choice.delta;
+      delta = mapped.length > 0 ? { ...rest, tool_calls: mapped } : rest;
+    }
+    if (note !== "") {
+      delta = {
+        ...delta,
+        content: `${typeof delta.content === "string" ? delta.content : ""}${note}`,
       };
-    });
-    return { ...choice, delta: { ...choice.delta, tool_calls: mapped } };
+    }
+    // Every call dropped: the turn ends as text, not an empty tool round.
+    const finish =
+      choice.finish_reason === "tool_calls" &&
+      state.kept === 0 &&
+      state.dropped.size > 0
+        ? "stop"
+        : choice.finish_reason;
+    if (finish !== choice.finish_reason) changed = true;
+    return { ...choice, delta, finish_reason: finish };
   });
   if (!changed) return chunk;
   return { ...chunk, choices };
@@ -1041,8 +1085,9 @@ const remapMuseToolCallsInChunk = (
 
 /**
  * Return-side stream transform: Meta `mcp__openllm_muse_client_tools.<leaf>`
- * → caller tool name. Preserves call ids and argument fragments. Unknown
- * names under our MCP wire prefix refuse the stream (no blind stripping).
+ * → caller tool name. Preserves call ids and argument fragments. A `muse.*`
+ * built-in call is dropped with a text note ({@link museNativeToolNote});
+ * unknown names under our MCP wire prefix refuse the stream.
  */
 export const mapMuseCaptureChunkToolNames = (
   chunks: ReadableStream<TChatCompletionChunk>,
@@ -1052,13 +1097,14 @@ export const mapMuseCaptureChunkToolNames = (
   // `chunks.cancel()` on a stream that already has an active reader (the one
   // `start()` acquires) rejects with "Cannot cancel a locked ReadableStream".
   const reader = chunks.getReader();
+  const state: TMuseRemapState = { dropped: new Set(), kept: 0 };
   return new ReadableStream<TChatCompletionChunk>({
     async start(controller) {
       try {
         for (;;) {
           const { value, done } = await reader.read();
           if (done) break;
-          controller.enqueue(remapMuseToolCallsInChunk(value, nameMap));
+          controller.enqueue(remapMuseToolCallsInChunk(value, nameMap, state));
         }
         controller.close();
       } catch (err) {
@@ -1079,10 +1125,226 @@ export type TMuseCaptureFetch = (
   init?: RequestInit,
 ) => Promise<Response>;
 
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === "object" && value !== null && !Array.isArray(value);
+
+/** Muse's built-in namespace (or a stray `muse.*` function). */
+const isMuseNativeTool = (tool: unknown): boolean =>
+  isRecord(tool) &&
+  typeof tool.name === "string" &&
+  (tool.type === "namespace"
+    ? tool.name === MUSE_NATIVE_TOOL_NAMESPACE
+    : isMuseNativeToolName(tool.name));
+
 /**
- * Upstream sender for Muse capture. Marks accepted on HTTP ok WITHOUT reading
- * the body, then returns the live body stream — buffering would defeat TTFT
- * and aborting the session signal at dispatch-complete would cancel the body.
+ * Appended to the request's instructions: Muse's own system prompt still
+ * names its built-ins (`muse.read_file`), which are removed below.
+ */
+export const MUSE_TOOLS_NOTICE =
+  "Muse built-in tools (muse.*) are unavailable in this session. Use only the tools provided in this request.";
+/** Added on a retry after the model called a `muse.*` tool anyway. */
+export const MUSE_TOOLS_RETRY_NOTICE =
+  "Your previous attempt called a muse.* tool, which does not exist here. Call one of the provided tools instead.";
+
+/**
+ * Sentences muse-bin adds to its developer message for `--disable-write` /
+ * `--disable-shell`. Those flags confine muse-bin's OWN tools; the caller's
+ * tools (Claude Code's `Bash`, `Write`, …) run on the caller's side, yet the
+ * model read these as "no shell at all" and refused to call them.
+ */
+export const MUSE_SPAWN_POLICY_SENTENCES = [
+  "Filesystem writes are disabled for this session. Work read-only and report findings instead of writing files.",
+  "Shell execution is disabled for this session. Plan without running commands and use the read-only tools instead.",
+] as const;
+
+const withoutSpawnPolicy = (text: string): string =>
+  MUSE_SPAWN_POLICY_SENTENCES.reduce(
+    (out, sentence) => out.replace(`${sentence}\n`, "").replace(sentence, ""),
+    text,
+  );
+
+/**
+ * Input items with the spawn-policy sentences removed from muse-bin's
+ * developer message, or null if none had them. Other roles keep the text, so
+ * a user quoting a sentence reaches the model unchanged.
+ */
+const inputWithoutSpawnPolicy = (input: unknown): unknown[] | null => {
+  if (!Array.isArray(input)) return null;
+  let changed = false;
+  const next = input.map((item) => {
+    if (
+      !isRecord(item) ||
+      item.role !== "developer" ||
+      typeof item.content !== "string"
+    ) {
+      return item;
+    }
+    const content = withoutSpawnPolicy(item.content);
+    if (content === item.content) return item;
+    changed = true;
+    return { ...item, content };
+  });
+  return changed ? next : null;
+};
+
+/**
+ * The captured `/responses` body without Muse's built-in tools. The captured
+ * response goes to the caller, never back to muse-bin, so a `muse.*` call
+ * could not run anywhere: offering them only made the model pick a tool
+ * nobody executes. The caller's own tools (our MCP server's) and hosted
+ * tools (`web_search`) stay, so the model calls those instead, and the
+ * instructions say so. Anything that is not a JSON body with a `tools` array
+ * passes through untouched.
+ */
+export const withoutMuseNativeTools = (
+  body: string,
+  retry = false,
+): string | null => {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(body);
+  } catch {
+    return null;
+  }
+  if (!isRecord(parsed) || !Array.isArray(parsed.tools)) return null;
+  const tools = parsed.tools.filter((tool) => !isMuseNativeTool(tool));
+  const input = inputWithoutSpawnPolicy(parsed.input);
+  if (tools.length === parsed.tools.length && input === null) return null;
+  const notice = retry
+    ? `${MUSE_TOOLS_NOTICE} ${MUSE_TOOLS_RETRY_NOTICE}`
+    : MUSE_TOOLS_NOTICE;
+  const next: Record<string, unknown> = {
+    ...parsed,
+    ...(input === null ? {} : { input }),
+    tools,
+    instructions:
+      typeof parsed.instructions === "string" && parsed.instructions !== ""
+        ? `${parsed.instructions}\n\n${notice}`
+        : notice,
+  };
+  // A forced choice of a removed tool would name a tool that is gone.
+  const choice = parsed.tool_choice;
+  if (
+    isRecord(choice) &&
+    typeof choice.name === "string" &&
+    isMuseNativeToolName(choice.name)
+  )
+    next.tool_choice = "auto";
+  if (tools.length === 0) {
+    delete next.tools;
+    delete next.tool_choice;
+    delete next.parallel_tool_calls;
+  }
+  return JSON.stringify(next);
+};
+
+/** Re-sends after a reply that opened with a `muse.*` call. */
+const MUSE_STRAY_TOOL_RETRIES = 2;
+/** Bytes held back while deciding what a reply opens with. */
+const MUSE_PEEK_MAX_BYTES = 256 * 1024;
+
+const strippedRequest = async (
+  request: Request,
+  retry: boolean,
+): Promise<Request> => {
+  if (request.body === null) return request;
+  const body = withoutMuseNativeTools(await request.clone().text(), retry);
+  if (body === null) return request;
+  const headers = new Headers(request.headers);
+  headers.delete("content-length");
+  return new Request(request.url, { method: request.method, headers, body });
+};
+
+/** What a `/responses` SSE event says about how the reply opens. */
+const openingOf = (data: string): "stray" | "clean" | "unknown" => {
+  let event: unknown;
+  try {
+    event = JSON.parse(data);
+  } catch {
+    return "unknown";
+  }
+  if (!isRecord(event) || typeof event.type !== "string") return "unknown";
+  if (event.type === "response.output_item.added" && isRecord(event.item)) {
+    const item = event.item;
+    if (item.type === "reasoning") return "unknown";
+    if (item.type === "function_call" && typeof item.name === "string") {
+      const name =
+        typeof item.namespace === "string"
+          ? `${item.namespace}.${item.name}`
+          : item.name;
+      return isMuseNativeToolName(name) ? "stray" : "clean";
+    }
+    return "clean";
+  }
+  if (
+    event.type.startsWith("response.output_text") ||
+    event.type === "response.completed" ||
+    event.type === "response.failed" ||
+    event.type === "response.incomplete"
+  )
+    return "clean";
+  return "unknown";
+};
+
+/**
+ * Forward a reply, holding only its opening. Resolves `stray` (reply
+ * cancelled, nothing forwarded) when it opens with a `muse.*` call, else
+ * `passed` once the whole reply was forwarded.
+ */
+const forwardUnlessStray = async (
+  reader: ReadableStreamDefaultReader<Uint8Array>,
+  controller: ReadableStreamDefaultController<Uint8Array>,
+  peek: boolean,
+): Promise<"stray" | "passed"> => {
+  const held: Uint8Array[] = [];
+  const decoder = new TextDecoder();
+  let text = "";
+  let size = 0;
+  let verdict: "stray" | "clean" | "unknown" = peek ? "unknown" : "clean";
+  for (;;) {
+    const next = await reader.read();
+    if (next.done) break;
+    if (verdict !== "unknown") {
+      controller.enqueue(next.value);
+      continue;
+    }
+    held.push(next.value);
+    size += next.value.byteLength;
+    text += decoder.decode(next.value, { stream: true });
+    const frames = text.split(/\r?\n\r?\n/);
+    text = frames.pop() ?? "";
+    for (const frame of frames) {
+      const data = frame
+        .split(/\r?\n/)
+        .filter((line) => line.startsWith("data:"))
+        .map((line) => line.slice(5).trimStart())
+        .join("\n");
+      if (data === "") continue;
+      verdict = openingOf(data);
+      if (verdict !== "unknown") break;
+    }
+    if (verdict === "stray") {
+      void reader.cancel().catch(() => {});
+      return "stray";
+    }
+    if (verdict === "clean" || size >= MUSE_PEEK_MAX_BYTES) {
+      verdict = "clean";
+      for (const chunk of held.splice(0)) controller.enqueue(chunk);
+    }
+  }
+  for (const chunk of held) controller.enqueue(chunk);
+  return "passed";
+};
+
+/**
+ * Upstream sender for Muse capture. Marks accepted on HTTP ok, then returns
+ * the reply as a live stream. Only the reply's opening is held: when it opens
+ * with a `muse.*` built-in call (which nothing here can run), the reply is
+ * discarded and the request re-sent with a stronger notice, so the caller —
+ * an agent loop included — only sees a reply it can act on. After
+ * {@link MUSE_STRAY_TOOL_RETRIES} the reply passes and the stream transform
+ * turns the stray call into a text note. Cancelling the returned body
+ * cancels whichever upstream reply is current.
  */
 export const createMuseCapturedDispatchSender = (args: {
   readonly session: TRequestCaptureSession;
@@ -1090,15 +1352,48 @@ export const createMuseCapturedDispatchSender = (args: {
 }): TCapturedDispatchSender => {
   const fetchImpl = args.fetchImpl ?? fetch;
   return async (request, _envelope, signal): Promise<Response> => {
-    const response = await fetchImpl(request, { signal });
-    if (response.ok) {
-      args.session.markUpstreamAccepted();
-    }
-    return new Response(response.body, {
-      status: response.status,
-      statusText: response.statusText,
-      headers: response.headers,
+    const first = await fetchImpl(await strippedRequest(request, false), {
+      signal,
     });
+    if (first.ok) args.session.markUpstreamAccepted();
+    const init = {
+      status: first.status,
+      statusText: first.statusText,
+      headers: first.headers,
+    };
+    if (!first.ok || first.body === null) return new Response(first.body, init);
+    let reader = first.body.getReader();
+    const body = new ReadableStream<Uint8Array>({
+      async start(controller) {
+        try {
+          for (let attempt = 0; ; attempt += 1) {
+            const peek = attempt < MUSE_STRAY_TOOL_RETRIES;
+            if (
+              (await forwardUnlessStray(reader, controller, peek)) === "passed"
+            )
+              break;
+            const again = await fetchImpl(
+              await strippedRequest(request, true),
+              {
+                signal,
+              },
+            );
+            if (!again.ok || again.body === null)
+              throw new Error(
+                `muse capture retry upstream HTTP ${again.status}`,
+              );
+            reader = again.body.getReader();
+          }
+          controller.close();
+        } catch (err) {
+          controller.error(err);
+        }
+      },
+      cancel(reason) {
+        void reader.cancel(reason).catch(() => {});
+      },
+    });
+    return new Response(body, init);
   };
 };
 

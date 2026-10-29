@@ -44,9 +44,9 @@ const SCAN_INTERVAL_MS = 2_000;
 const utf8CompleteEnd = (buf: Buffer, end: number): number => {
   if (end <= 0) return 0;
   let i = end;
-  while (i > 0 && (buf[i - 1]! & 0xc0) === 0x80) i -= 1;
+  while (i > 0 && ((buf[i - 1] ?? 0) & 0xc0) === 0x80) i -= 1;
   if (i === 0) return 0;
-  const lead = buf[i - 1]!;
+  const lead = buf[i - 1] ?? 0;
   const need = lead >= 0xf0 ? 4 : lead >= 0xe0 ? 3 : lead >= 0xc0 ? 2 : 1;
   return i - 1 + need <= end ? end : i - 1;
 };
@@ -427,6 +427,11 @@ export type TTranscriptParserOptions = {
    * reports no usage.
    */
   readonly parentItemId?: string;
+  /**
+   * A slash command's output that is not a model switch (`/model` answering
+   * with an error, `/cost`'s table), its wrapper tags stripped.
+   */
+  readonly onLocalCommandOutput?: (text: string) => void;
   /** The turn id a subagent parser stamps on its items. */
   readonly turnId?: () => string | undefined;
   /** Every tool_use seen (the subagent follower tracks Task / Agent calls). */
@@ -754,6 +759,9 @@ export const createTranscriptParser = (
     // `<...>` row as a wrapper. `pasted_content` is unwrapped by normalize.
     const trimmedRaw = raw.trim();
     if (LOCAL_COMMAND_OUTPUT.test(trimmedRaw)) {
+      args.onLocalCommandOutput?.(
+        trimmedRaw.replace(/<\/?local-command-(?:stdout|stderr)>/gi, "").trim(),
+      );
       onLocalCommandDone();
       return;
     }
@@ -1014,6 +1022,17 @@ export const createTranscriptParser = (
       // A local command's output can also be a system row
       // (`/context`, a forked skill's launch).
       if (row.type === "system" && row.subtype === "local_command") {
+        // A refused `/model` ("API error: 400 … · model not changed") lands
+        // here, not as a user row: forward it so the switch fails at once
+        // with Claude's own reason instead of waiting out the timeout.
+        const text = str(row.content)?.trim() ?? "";
+        const switched = MODEL_SET.exec(text);
+        if (switched?.[1] !== undefined)
+          emit({ type: "session.configured", model: switched[1] });
+        else if (LOCAL_COMMAND_OUTPUT.test(text))
+          args.onLocalCommandOutput?.(
+            text.replace(/<\/?local-command-(?:stdout|stderr)>/gi, "").trim(),
+          );
         onLocalCommandDone();
         return;
       }

@@ -75,7 +75,11 @@ import {
   noteTeamPlanServed,
   planNeedsRefresh,
 } from "./plan-cache";
-import { currentTeamGrantToken } from "./team-request-context";
+import { tryDirectTeamLeg } from "./team-leg-client";
+import {
+  currentTeamGrantFieldsOf,
+  currentTeamGrantToken,
+} from "./team-request-context";
 
 import { isBodylessVideoOp, videoOperationFor } from "./video-ops";
 import {
@@ -113,6 +117,12 @@ const parseResponsesRequest = Schema.decodeUnknownSync(ResponsesRequest);
 const parseCountTokensRequest = Schema.decodeUnknownSync(
   AnthropicCountTokensRequest,
 );
+
+/** Only ordinary text inference can use the direct team reservation leg. */
+export const isDirectTeamInferencePath = (path: string): boolean =>
+  path === "/v1/chat/completions" ||
+  path === "/v1/messages" ||
+  path === "/v1/responses";
 
 /**
  * Add CORS headers to a response WITHOUT consuming its body, so streaming
@@ -226,6 +236,24 @@ export const handleInference = async (req: Request): Promise<Response> => {
           ? "Request body too large"
           : "Body must be valid JSON or multipart/form-data",
       ),
+    );
+  }
+
+  // The tunnel's leading-byte admission scanner can see an earlier duplicate
+  // key than JSON.parse (which retains the last key). Re-bind the parsed root
+  // model to the signed team grant at the dispatch boundary.
+  const teamGrant = currentTeamGrantFieldsOf();
+  if (
+    teamGrant !== null &&
+    !isBodylessVideoOp(videoOperation) &&
+    !isMultipart &&
+    (typeof rawBody !== "object" ||
+      rawBody === null ||
+      (rawBody as { readonly model?: unknown }).model !== teamGrant.model)
+  ) {
+    return withCors(
+      req,
+      errorJson(403, "Team grant model does not match request"),
     );
   }
 
@@ -577,6 +605,27 @@ export const handleInference = async (req: Request): Promise<Response> => {
       };
     };
 
+    const forwardTeamOrOrigin = async (): Promise<Response> => {
+      // Direct team reservations dispatch only ordinary inference. All media,
+      // embeddings, and token-count surfaces retain their origin wire shape.
+      if (!isDirectTeamInferencePath(normalizedPath)) {
+        return passthroughToOrigin(req, rawBytes);
+      }
+      const model =
+        rawBody !== null &&
+        typeof rawBody === "object" &&
+        !Array.isArray(rawBody)
+          ? (rawBody as { readonly model?: unknown }).model
+          : undefined;
+      const direct = await tryDirectTeamLeg({
+        request: req,
+        body: new Uint8Array(rawBytes),
+        model,
+        surface,
+      });
+      return direct ?? passthroughToOrigin(req, rawBytes);
+    };
+
     const applyPlanFetchOutcome = async (
       outcome: TPlanFetchOutcome,
     ): Promise<Response | null> => {
@@ -595,7 +644,7 @@ export const handleInference = async (req: Request): Promise<Response> => {
         return null;
       }
       syncNormalizedJsonBytes();
-      return withCors(req, await passthroughToOrigin(req, rawBytes));
+      return withCors(req, await forwardTeamOrOrigin());
     };
 
     if (planCacheEnabled() && planCacheKey !== null) {
@@ -623,7 +672,7 @@ export const handleInference = async (req: Request): Promise<Response> => {
       } else if (planParam === null) {
         if (!embeddingsLocalFallback) {
           syncNormalizedJsonBytes();
-          return withCors(req, await passthroughToOrigin(req, rawBytes));
+          return withCors(req, await forwardTeamOrOrigin());
         }
       }
     } else if (planParam === null) {
@@ -817,7 +866,7 @@ export const handleInference = async (req: Request): Promise<Response> => {
       : videoOperation === "content"
         ? runVideoContent(walkArgs, videoId)
         : videoOperation === "cancel"
-          ? runVideoCancel(walkArgs)
+          ? runVideoCancel(walkArgs, videoId)
           : isResponsesCompact
             ? runResponsesCompact(walkArgs)
             : isCountTokens

@@ -56,6 +56,8 @@ import {
   AGENT_MAX_ATTACHMENT_BYTES,
   AGENT_MAX_LINE_BYTES,
   AGENT_MAX_QUEUED_PROMPTS,
+  AGENT_MODEL_SWITCH_DECLINED_CODE,
+  AGENT_MODEL_SWITCH_FAILED_CODE,
   AGENT_SHORT_TEXT_MAX_LENGTH,
   AGENT_SWITCH_MODEL_PATTERN,
   MEDIA_TYPES,
@@ -109,14 +111,18 @@ const READY_SETTLE_MS = 300;
  * completes it if the transcript has not within this grace.
  */
 const STOP_GRACE_MS = 3_000;
-/** After Stop, how long before typing `/model` (other Stop hooks still run). */
 /**
- * Mid-conversation, Claude asks "Switch model?" (cache re-read) with "Yes"
- * preselected. If the switch is not confirmed in the transcript by then, one
- * more Enter confirms it; with no dialog an Enter on the empty prompt is a
- * no-op. Decided from the transcript, never from the screen.
+ * Mid-conversation, Claude asks "Switch model?" (cache re-read) before a
+ * `/model` applies. The dialog is read off the screen and asked on the web;
+ * the answer is typed back. Its arrival is never guessed at with blind keys.
  */
-const MODEL_CONFIRM_MS = 1_500;
+const MODEL_DIALOG = /switchmodel\?/i;
+/**
+ * A `/model` with no transcript confirmation, no answer from the command and
+ * no dialog by then failed: the web is told instead of waiting forever.
+ */
+const MODEL_SWITCH_TIMEOUT_MS = 20_000;
+/** After Stop, how long before typing `/model` (other Stop hooks still run). */
 const STOP_SETTLE_MS = 500;
 /**
  * A slash command typed from the web that the model never sees (`/help`,
@@ -1011,10 +1017,12 @@ const TRUST_PROMPT = /trustthefilesinthisfolder|doyoutrust|itrustthisfolder/i;
 const TRUST_CURSOR_ON_NO = /❯(?:\d+\.)?No\b/;
 const DOWN_ARROW = "\x1b[B";
 /**
- * Claude Code's `chat:queueSubmit` (ctrl+x enter) and `chat:sendNow`
- * (ctrl+x ctrl+s, the byte-safe alias of ctrl+enter): queue what's in the
- * input behind the running turn, then hand the queue to the model now.
- * Plain Enter would interrupt instead under Claude's responsive mode.
+ * Claude Code's `chat:queueSubmit` (ctrl+x enter): queue what's in the input
+ * on the running turn. Claude folds it in at the next tool boundary and never
+ * stops running work. Its `chat:sendNow` (ctrl+x ctrl+s, the byte-safe alias
+ * of ctrl+enter) backgrounds running shells and INTERRUPTS what can't move
+ * (an MCP call) after a ~400ms grace — typed only when the user agreed to
+ * that. Plain Enter would interrupt too under Claude's responsive mode.
  */
 const QUEUE_SUBMIT = "\x18\r";
 const SEND_NOW = "\x18\x13";
@@ -1038,7 +1046,8 @@ type TPending =
       readonly input: unknown;
       readonly resolve: (reply: TJson | null) => void;
     }
-  | { readonly kind: "trust" };
+  | { readonly kind: "trust" }
+  | { readonly kind: "model"; readonly model: string };
 
 export type TClaudeTuiDeps = {
   readonly openLink?: TOpenPtyLink;
@@ -1056,7 +1065,7 @@ export type TClaudeTuiDeps = {
   readonly pollMs?: number;
   readonly stopGraceMs?: number;
   readonly stopSettleMs?: number;
-  readonly modelConfirmMs?: number;
+  readonly modelSwitchTimeoutMs?: number;
   readonly localCommandSettleMs?: number;
   readonly trustAnswerDelayMs?: number;
   readonly attachmentsDir?: (sessionId: string) => string;
@@ -1102,12 +1111,21 @@ export const createClaudeTuiSession = (
   let trustSeenAt = 0;
   /** Whitespace-free, ANSI-stripped recent screen text (trust detection only). */
   let recentScreen = "";
+  /** Screen text since the last `/model` was typed (its dialog only). */
+  let modelScreen = "";
+  /** The open "Switch model?" request, while it waits for the web. */
+  let modelRequestId: string | null = null;
+  let modelTimer: ReturnType<typeof setTimeout> | undefined;
 
   /** Events of the drain in progress (emitted, possibly cut, at its end). */
   let drained: TAgentEvent[] | null = null;
   /** Tool rows the PreToolUse hook already surfaced before the transcript. */
   const preToolUseIds = new Set<string>();
   const parser = createTranscriptParser({
+    // `/model` answered with anything but "Set model to": it was refused.
+    onLocalCommandOutput: (text) => {
+      if (modelInFlight) failModelSwitch(text);
+    },
     emit: (event) => {
       // The transcript supplies the full input for a live hook row. Preserve
       // its id but make it an update, so raw event consumers do not receive a
@@ -1120,7 +1138,7 @@ export const createClaudeTuiSession = (
         reconciled.type === "session.configured" &&
         reconciled.model !== undefined
       )
-        modelInFlight = false;
+        endModelSwitch();
       if (
         reconciled.type === "turn.completed" &&
         reconciled.stop_reason === LOCAL_COMMAND_STOP_REASON
@@ -1194,6 +1212,8 @@ export const createClaudeTuiSession = (
   let queueHeld = false;
   /** A send-now awaits readiness; queue entries remain durable until pasted. */
   let sendNowPending = false;
+  /** A pending send-now the user agreed may stop running tools. */
+  let sendNowInterrupt = false;
   /** The turn this daemon opened last (its prompt was typed by `send`). */
   let sentTurnId: string | null = null;
   /**
@@ -1238,19 +1258,53 @@ export const createClaudeTuiSession = (
     // Claude's own slash command, typed like any prompt (PTY input only).
     modelInFlight = true;
     modelTyping = true;
+    modelScreen = "";
     writeText(`${PASTE_START}/model ${model}${PASTE_END}`);
     setTimeout(() => {
       if (!ended) writeText("\r");
     }, submitDelayMs);
+    armModelTimeout(model);
+  };
+  /** Fail the switch unless confirmed, refused or asked by then. */
+  const armModelTimeout = (model: string): void => {
+    if (modelTimer !== undefined) clearTimeout(modelTimer);
+    modelTimer = setTimeout(() => {
+      modelTimer = undefined;
+      if (ended || !modelInFlight || modelRequestId !== null) return;
+      failModelSwitch(`Claude Code did not switch to ${model}.`);
+    }, deps.modelSwitchTimeoutMs ?? MODEL_SWITCH_TIMEOUT_MS);
+  };
+  /** The switch is over: the input is free for queued prompts again. */
+  const endModelSwitch = (): void => {
+    modelInFlight = false;
+    modelScreen = "";
+    if (modelTimer !== undefined) clearTimeout(modelTimer);
+    modelTimer = undefined;
+    if (modelRequestId !== null) {
+      pending.delete(modelRequestId);
+      emit({
+        type: "request.resolved",
+        request_id: modelRequestId,
+        decision: "cancel",
+      });
+      modelRequestId = null;
+    }
+    if (!modelTyping) return;
     setTimeout(() => {
-      if (ended) return;
-      if (modelInFlight) writeText("\r");
-      // The confirm window is over: queued prompts may go out after it.
-      setTimeout(() => {
-        modelTyping = false;
-        if (!ended) flushQueue();
-      }, submitDelayMs);
-    }, deps.modelConfirmMs ?? MODEL_CONFIRM_MS);
+      modelTyping = false;
+      if (!ended) flushQueue();
+    }, submitDelayMs);
+  };
+  const failModelSwitch = (message: string): void => {
+    if (!modelInFlight) return;
+    // Clear the typed `/model` (or a dialog) so the next prompt starts clean.
+    if (!ended) writeText(ESC);
+    endModelSwitch();
+    emit({
+      type: "runtime.error",
+      code: AGENT_MODEL_SWITCH_FAILED_CODE,
+      message: clip(message, AGENT_DETAIL_TEXT_MAX_LENGTH),
+    });
   };
 
   const transcriptPath = (): string | null => tail.path?.() ?? null;
@@ -1368,11 +1422,13 @@ export const createClaudeTuiSession = (
     if (readyMaxTimer !== undefined) clearTimeout(readyMaxTimer);
     if (pollTimer !== undefined) clearInterval(pollTimer);
     if (stopTimer !== undefined) clearTimeout(stopTimer);
+    if (modelTimer !== undefined) clearTimeout(modelTimer);
     try {
       pump();
     } catch {}
     for (const [id, request] of pending) {
-      if (request.kind !== "trust") request.resolve(null);
+      if (request.kind !== "trust" && request.kind !== "model")
+        request.resolve(null);
       emit({ type: "request.resolved", request_id: id, decision: "cancel" });
     }
     pending.clear();
@@ -1425,6 +1481,13 @@ export const createClaudeTuiSession = (
   // The ONE screen read: Claude's folder-trust dialog. Input stays held (it is
   // asked before SessionStart) until the web answers it.
   const onOutput = (bytes: Uint8Array): void => {
+    if (modelInFlight && modelRequestId === null && !ended) {
+      modelScreen = (
+        modelScreen +
+        new TextDecoder().decode(bytes).replace(ANSI, "").replace(/\s+/g, "")
+      ).slice(-4096);
+      if (MODEL_DIALOG.test(modelScreen)) openModelDialog();
+    }
     if (trustAnswered || ended || started || !link?.fresh) return;
     recentScreen = (
       recentScreen +
@@ -1441,6 +1504,25 @@ export const createClaudeTuiSession = (
       request_kind: "other",
       title: "Trust this folder?",
       detail: `Claude Code asks whether to trust the files in ${clip(options.cwd, 1024)}.`,
+    });
+  };
+
+  /** Claude asks before a switch that re-reads the cached history. */
+  const openModelDialog = (): void => {
+    const model = /\/model(\S+)/.exec(modelScreen)?.[1];
+    requestCounter += 1;
+    modelRequestId = `model${requestCounter}`;
+    trustSeenAt = Date.now();
+    pending.set(modelRequestId, { kind: "model", model: model ?? "" });
+    if (modelTimer !== undefined) clearTimeout(modelTimer);
+    modelTimer = undefined;
+    emit({
+      type: "request.opened",
+      request_id: modelRequestId,
+      request_kind: "other",
+      title: "Switch model?",
+      detail:
+        "This conversation is cached for the current model. Switching re-reads the full history, so the next response will be slower and use more tokens.",
     });
   };
 
@@ -1541,7 +1623,7 @@ export const createClaudeTuiSession = (
     });
     const timer = setTimeout(() => {
       const open = pending.get(requestId);
-      if (open === undefined || open.kind === "trust") return;
+      if (open === undefined || !("resolve" in open)) return;
       pending.delete(requestId);
       // Never auto-allow: hand the decision to Claude's native dialog.
       open.resolve(null);
@@ -1790,7 +1872,7 @@ export const createClaudeTuiSession = (
       }
       return startTurn(input);
     },
-    sendNow: (): boolean => {
+    sendNow: (options): boolean => {
       if (ended || promptQueue.length === 0) return false;
       // No turn running: the normal flush, which waits out the Stop settle
       // (keys typed while Stop hooks run are dropped).
@@ -1798,13 +1880,18 @@ export const createClaudeTuiSession = (
         flushQueue();
         return true;
       }
-      // Into Claude's own queue, then its send-now. Keep entries durable until
+      // Into Claude's own queue: it joins the running turn at the next tool
+      // boundary, and running tools finish undisturbed — unless the user
+      // agreed to stop them, then Claude's send-now. Keep entries durable until
       // their paste is committed: an interrupt before readiness must not lose
       // them.
+      if (options?.interrupt === true) sendNowInterrupt = true;
       if (sendNowPending) return true;
       sendNowPending = true;
       whenReady(() => {
         sendNowPending = false;
+        const interrupt = sendNowInterrupt;
+        sendNowInterrupt = false;
         if (ended || queueHeld) return;
         const delivered: string[] = [];
         for (const entry of promptQueue) {
@@ -1829,6 +1916,7 @@ export const createClaudeTuiSession = (
           ...promptQueue.filter((entry) => !deliveredIds.has(entry.id)),
         );
         emitQueue();
+        if (!interrupt) return;
         setTimeout(() => {
           if (!ended) writeText(SEND_NOW);
         }, submitDelayMs);
@@ -1872,6 +1960,45 @@ export const createClaudeTuiSession = (
       const request = pending.get(command.request_id);
       if (request === undefined) return false;
       pending.delete(command.request_id);
+      if (request.kind === "model") {
+        if (command.decision === undefined) {
+          pending.set(command.request_id, request);
+          return false;
+        }
+        modelRequestId = null;
+        const accept =
+          command.decision === "accept" ||
+          command.decision === "accept_for_session";
+        // "Yes, switch" is preselected; Esc is "No, go back".
+        const key = accept ? "\r" : ESC;
+        const wait = Math.max(
+          0,
+          trustSeenAt +
+            (deps.trustAnswerDelayMs ?? TRUST_ANSWER_MIN_DELAY_MS) -
+            Date.now(),
+        );
+        setTimeout(() => {
+          if (!ended) writeText(key);
+        }, wait);
+        emit({
+          type: "request.resolved",
+          request_id: command.request_id,
+          decision: accept ? "accept" : "decline",
+        });
+        if (accept) {
+          // The transcript confirms it; a failure still surfaces.
+          modelScreen = "";
+          armModelTimeout(request.model);
+        } else {
+          endModelSwitch();
+          emit({
+            type: "runtime.warning",
+            code: AGENT_MODEL_SWITCH_DECLINED_CODE,
+            message: "Model not switched.",
+          });
+        }
+        return true;
+      }
       if (request.kind === "trust") {
         // Match approval: a respond with no decision must not clear the
         // pending trust or type Esc into Claude (answers-only wire frames).

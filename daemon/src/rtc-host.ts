@@ -33,6 +33,7 @@ import {
   fingerprintFromSdp,
   maxMessageSizeFromSdp,
   negotiateRtcPayloadCap,
+  RTC_AUTH_VERSION,
   resolveIceServers,
   sdpFingerprintsMatch,
   weriftIceServers,
@@ -481,13 +482,21 @@ export const createRtcHost = (): TRtcHost => {
     }
     const inner = decodeOfferInner(opened);
     if (inner === null) {
-      logWarn(
-        "rtc-host",
-        safeDiagnosticMessage`bad fingerprint_proof (shape)`,
-        {
-          channelId: frame.channel_id,
-        },
-      );
+      logWarn("rtc-host", safeDiagnosticMessage`outdated fingerprint_proof`, {
+        channelId: frame.channel_id,
+      });
+      sendNack(frame.channel_id, "daemon_outdated");
+      return;
+    }
+    if (
+      frame.peer_user_id === undefined ||
+      frame.peer_user_id.length === 0 ||
+      frame.consumer === undefined
+    ) {
+      logWarn("rtc-host", "rtc_offer missing relay security stamps", {
+        channelId: frame.channel_id,
+      });
+      sendNack(frame.channel_id, "daemon_outdated");
       return;
     }
 
@@ -526,12 +535,12 @@ export const createRtcHost = (): TRtcHost => {
     // cannot substitute an outer grant. These offers never enter the browser
     // seed gate and cannot become a same-user fleet session.
     const ownUserId = daemonUserId();
-    const peerUserId =
-      frame.peer_user_id !== undefined && frame.peer_user_id.length > 0
-        ? frame.peer_user_id
-        : null;
-    const crossUser =
-      peerUserId !== null && ownUserId !== null && peerUserId !== ownUserId;
+    if (ownUserId === null || ownUserId.length === 0) {
+      sendNack(frame.channel_id, "daemon_outdated");
+      return;
+    }
+    const peerUserId = frame.peer_user_id;
+    const crossUser = peerUserId !== ownUserId;
     let teamGranted = false;
     let teamGrantToken: string | null = null;
     let teamScope: {
@@ -703,7 +712,7 @@ export const createRtcHost = (): TRtcHost => {
         fingerprintProof = sealTo(
           inner.epk,
           encodeAnswerInner({
-            v: 1,
+            v: RTC_AUTH_VERSION,
             n: inner.n,
             fb: inner.fb,
             fd,

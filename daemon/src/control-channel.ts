@@ -15,7 +15,12 @@ import type {
   TIceServer,
   TRelayFrame,
 } from "@openllmsh/protocol";
-import { RELAY_PROTOCOL_VERSION, RelayFrame } from "@openllmsh/protocol";
+import {
+  RELAY_PROTOCOL_VERSION,
+  RelayFrame,
+  RelayStampedChannelOpenFrame,
+  RelayStampedRtcOfferFrame,
+} from "@openllmsh/protocol";
 import { Result, Schema } from "effect";
 import { WebSocket as ReconnectingWebSocket } from "partysocket";
 import { setAuthSink } from "./auth-events";
@@ -102,6 +107,12 @@ import { createStatusPublishCoalescer } from "./status-publish-coalesce";
 import { createSupersedeBackoff, isSupersededClose } from "./supersede-backoff";
 
 const decodeFrame = Schema.decodeUnknownResult(RelayFrame);
+const decodeStampedChannelOpen = Schema.decodeUnknownResult(
+  RelayStampedChannelOpenFrame,
+);
+const decodeStampedRtcOffer = Schema.decodeUnknownResult(
+  RelayStampedRtcOfferFrame,
+);
 
 /** Full-snapshot stringify — only on a changed watcher tick / actual publish. */
 export const stringifyStatusSnapshot = (status: unknown): string =>
@@ -1265,19 +1276,39 @@ const dispatchFrame = (frame: TRelayFrame): void => {
       // inbound frame — that's how we notice a dead outbound direction).
       heartbeat.notePong();
       return;
-    case "channel_open":
-      acceptChannel(frame);
+    case "channel_open": {
+      const decoded = decodeStampedChannelOpen(frame);
+      if (Result.isFailure(decoded)) {
+        send({
+          type: "channel_open_ack",
+          channel_id: frame.channel_id,
+          ok: false,
+          error: "daemon_outdated",
+        });
+        return;
+      }
+      acceptChannel(decoded.success);
       return;
+    }
     case "channel_open_ack":
       handleChannelOpenAck(frame);
       return;
     case "channel_close":
       closeChannelFromRelay(frame);
       return;
-    case "rtc_offer":
+    case "rtc_offer": {
+      const decoded = decodeStampedRtcOffer(frame);
+      if (Result.isFailure(decoded)) {
+        send({
+          type: "rtc_nack",
+          channel_id: frame.channel_id,
+          reason: "daemon_outdated",
+        });
+        return;
+      }
       // Daemon is the responder: open seal, answer, trickle ICE.
       // Log async failures (parity with serveTunnel) — never crash the process.
-      void handleRtcOffer(frame).catch((err: unknown) => {
+      void handleRtcOffer(decoded.success).catch((err: unknown) => {
         logWarn(
           "control-channel",
           safeDiagnosticMessage`rtc_offer handler failed`,
@@ -1288,6 +1319,7 @@ const dispatchFrame = (frame: TRelayFrame): void => {
         );
       });
       return;
+    }
     case "rtc_ice":
       void handleRtcIce(frame).catch((err: unknown) => {
         logWarn(

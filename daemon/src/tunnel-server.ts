@@ -44,6 +44,11 @@ import {
   modelFromRequestBody,
   teamGrantFromStreamOpen,
 } from "./team-grant-admit";
+import { observedTeamLegTokens } from "./team-leg-body";
+import {
+  reportTeamLegCompletion,
+  reportTeamLegDispatch,
+} from "./team-leg-dispatch";
 import { currentTeamChannelScope, withTeamGrant } from "./team-request-context";
 import {
   beginServedTunnel,
@@ -187,6 +192,60 @@ function tunneledRequest(
 
 /** The request dispatcher a mux tunnel server hands each tunneled request to. */
 export type TTunnelDispatch = (req: Request) => Promise<Response>;
+
+export type TTeamLegDispatchReporter = (input: {
+  readonly nonce: string;
+  readonly teamGrant: string;
+}) => Promise<void>;
+
+export type TTeamLegCompletionReporter = (input: {
+  readonly nonce: string;
+  readonly teamGrant: string;
+  readonly actualTokens: number;
+}) => Promise<void>;
+
+/**
+ * Run a dispatched team leg and report its completion. A provider error or
+ * bodyless response was refused, not served: it reports 0 so the hold is
+ * released. A dispatch that throws may have reached the provider, so it
+ * reports nothing and the sweep charges the full hold. A streamed response
+ * reports its observed usage without delaying the body.
+ */
+const dispatchTeamLeg = async (
+  run: () => Promise<Response>,
+  grant: { readonly n: string },
+  teamGrant: string,
+  reportCompletion: TTeamLegCompletionReporter,
+): Promise<Response> => {
+  const reportNone = (): void => {
+    void reportCompletion({ nonce: grant.n, teamGrant, actualTokens: 0 }).catch(
+      () => {},
+    );
+  };
+  const response = await run();
+  if (!response.ok || response.body === null) {
+    reportNone();
+    return response;
+  }
+  const [forConsumer, forObservation] = response.body.tee();
+  const eventStream =
+    response.headers.get("content-type")?.includes("text/event-stream") ===
+    true;
+  void observedTeamLegTokens(forObservation, eventStream)
+    .then((actualTokens) =>
+      reportCompletion({
+        nonce: grant.n,
+        teamGrant,
+        actualTokens,
+      }),
+    )
+    .catch(() => {});
+  return new Response(forConsumer, {
+    status: response.status,
+    statusText: response.statusText,
+    headers: response.headers,
+  });
+};
 
 /**
  * Enough leading JSON to find the routing model without making a slow client
@@ -343,7 +402,12 @@ export const admitMuxTunnel = (): "tunnel_busy" | null =>
  * exactly as before.
  */
 export const createMuxTunnelServer =
-  (dispatch: TTunnelDispatch, transport: "rtc" | "mux" = "mux"): TServeTunnel =>
+  (
+    dispatch: TTunnelDispatch,
+    transport: "rtc" | "mux" = "mux",
+    reportDispatch: TTeamLegDispatchReporter = reportTeamLegDispatch,
+    reportCompletion: TTeamLegCompletionReporter = reportTeamLegCompletion,
+  ): TServeTunnel =>
   async (open, body, signal) => {
     const startedAt = Date.now();
     const servingInflight = beginServedTunnel();
@@ -377,6 +441,14 @@ export const createMuxTunnelServer =
       }
       if (teamToken !== null && teamChannelScope !== null) {
         const chunks: Uint8Array[] = [];
+        // Scan into one bounded buffer instead of re-concatenating all chunks
+        // after every read (which made a fragmented upload quadratic).
+        const modelScan = new Uint8Array(TEAM_MODEL_SCAN_MAX_BYTES);
+        let modelScanLength = 0;
+        // Rescan only when the prefix has doubled (or the scan window is
+        // full) so a body split into many tiny frames costs linear, not
+        // quadratic, scanning.
+        let lastScannedLength = 0;
         let total = 0;
         let model: string | null = null;
         let ended = false;
@@ -398,9 +470,25 @@ export const createMuxTunnelServer =
             throw new StreamResetError("unauthorized", "team_body_too_large");
           }
           chunks.push(next.value);
-          model = modelFromLeadingJson(
-            combineChunks(chunks, total).subarray(0, TEAM_MODEL_SCAN_MAX_BYTES),
-          );
+          const remainingScanBytes =
+            TEAM_MODEL_SCAN_MAX_BYTES - modelScanLength;
+          if (remainingScanBytes > 0) {
+            const scanChunk = next.value.subarray(0, remainingScanBytes);
+            modelScan.set(scanChunk, modelScanLength);
+            modelScanLength += scanChunk.byteLength;
+          }
+          if (
+            modelScanLength >= TEAM_MODEL_SCAN_MAX_BYTES ||
+            modelScanLength >= lastScannedLength * 2
+          ) {
+            lastScannedLength = modelScanLength;
+            model = modelFromLeadingJson(
+              modelScan.subarray(0, modelScanLength),
+            );
+          }
+        }
+        if (model === null && modelScanLength > lastScannedLength) {
+          model = modelFromLeadingJson(modelScan.subarray(0, modelScanLength));
         }
 
         if (model === null && !ended) {
@@ -437,8 +525,18 @@ export const createMuxTunnelServer =
               `team_${decision.reason}`,
             );
           }
-          const response = await withTeamGrant(teamToken, decision.grant, () =>
-            dispatch(tunneledRequest(open, buffered, signal)),
+          void reportDispatch({
+            nonce: decision.grant.n,
+            teamGrant: teamToken,
+          }).catch(() => {});
+          const response = await dispatchTeamLeg(
+            () =>
+              withTeamGrant(teamToken, decision.grant, () =>
+                dispatch(tunneledRequest(open, buffered, signal)),
+              ),
+            decision.grant,
+            teamToken,
+            reportCompletion,
           );
           recordTunnelRequest({
             path: "team",
@@ -466,16 +564,26 @@ export const createMuxTunnelServer =
           logWarn("tunnel", "Team grant refused.", { reason: decision.reason });
           throw new StreamResetError("unauthorized", `team_${decision.reason}`);
         }
-        const response = await withTeamGrant(teamToken, decision.grant, () =>
-          dispatch(
-            ended
-              ? tunneledRequest(open, combineChunks(chunks, total), signal)
-              : tunneledRequest(
-                  open,
-                  bodyWithSizeLimit(reader, chunks, total),
-                  signal,
-                ),
-          ),
+        void reportDispatch({
+          nonce: decision.grant.n,
+          teamGrant: teamToken,
+        }).catch(() => {});
+        const response = await dispatchTeamLeg(
+          () =>
+            withTeamGrant(teamToken, decision.grant, () =>
+              dispatch(
+                ended
+                  ? tunneledRequest(open, combineChunks(chunks, total), signal)
+                  : tunneledRequest(
+                      open,
+                      bodyWithSizeLimit(reader, chunks, total),
+                      signal,
+                    ),
+              ),
+            ),
+          decision.grant,
+          teamToken,
+          reportCompletion,
         );
         recordTunnelRequest({
           path: "team",

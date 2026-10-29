@@ -27,6 +27,7 @@ import {
   maxMessageSizeFromSdp,
   negotiateRtcPayloadCap,
   RTC_AUTH_NONCE_BYTES,
+  RTC_AUTH_VERSION,
   resolveIceServers,
   sdpFingerprintsMatch,
   verifyAnswerInner,
@@ -48,6 +49,9 @@ const RTC_DISCONNECT_GRACE_MS = 3_000;
 
 type TRtcClientSession = {
   readonly keyId: string;
+  /** Same-user and each team scope maintain distinct RTC admission sessions. */
+  readonly teamId: string | undefined;
+  readonly scopeKey: string;
   readonly channelId: string;
   readonly pc: RTCPeerConnection;
   readonly dc: RTCDataChannel;
@@ -93,20 +97,28 @@ export type TEnsureRtcOptions = {
   readonly pubkey: string;
   readonly hasRtc1: boolean;
   readonly hasSeedgate1: boolean;
+  /** Cross-user team admission, duplicated inside the sealed offer proof. */
+  readonly teamGrant?: string;
+  /** Team scope for this direct RTC link; omitted for same-user fleet links. */
+  readonly teamId?: string;
+  readonly hasTeamRtc1?: boolean;
 };
 
 export type TRtcClient = {
   /** Wire the control-channel sender (idempotent; re-called on reconnect). */
   readonly configureRtcClient: (options: TRtcClientOptions) => void;
   /** Mark a failed live RTC path and prevent immediate re-offers. */
-  readonly markRtcFailure: (keyId: string) => void;
+  readonly markRtcFailure: (keyId: string, teamId?: string) => void;
   /** Start a best-effort fleet RTC offer. */
   readonly ensureRtcTo: (keyId: string, options: TEnsureRtcOptions) => void;
   readonly handleRtcAnswer: (frame: TRtcAnswerFrame) => Promise<void>;
   readonly handleRtcNack: (frame: TRtcNackFrame) => void;
   readonly handleRtcClientIce: (frame: TRtcClientIceFrame) => Promise<void>;
   /** An already-open RTC mux channel; never waits for signaling. */
-  readonly getRtcMuxChannel: (keyId: string) => TMuxChannel | null;
+  readonly getRtcMuxChannel: (
+    keyId: string,
+    teamId?: string,
+  ) => TMuxChannel | null;
   /** Pending + mounted session count (status / admission diagnostics). */
   readonly rtcClientSessionCount: () => number;
   readonly resetUnmountedRtcClientSessions: () => void;
@@ -122,8 +134,11 @@ export const createRtcClient = (): TRtcClient => {
   let sendFrame: ((frame: TRelayFrame) => void) | null = null;
   /** Cloud-served ICE servers from the daemon's own channel handshake, if any. */
   let handshakeIceServers: ReadonlyArray<TIceServer> | null = null;
+  /** Indexed by the same peer scope as relay mux: same-user or keyId + teamId. */
   const sessionsByKey = new Map<string, TRtcClientSession>();
   const sessionsByChannel = new Map<string, TRtcClientSession>();
+  const scopeKeyOf = (keyId: string, teamId?: string): string =>
+    teamId === undefined ? keyId : `${keyId}\u0000${teamId}`;
 
   /** Wire the control-channel sender (idempotent; re-called on reconnect).
    *  `iceServers` carries the cloud handshake config when present. */
@@ -211,7 +226,7 @@ export const createRtcClient = (): TRtcClient => {
     if (session.closed) return;
     session.closed = true;
     clearTimers(session);
-    sessionsByKey.delete(session.keyId);
+    sessionsByKey.delete(session.scopeKey);
     sessionsByChannel.delete(session.channelId);
     try {
       session.mux?.close(reason);
@@ -223,19 +238,27 @@ export const createRtcClient = (): TRtcClient => {
     logDebug("rtc-client", "session closed", { keyId: session.keyId, reason });
   };
 
-  const cacheFailure = (keyId: string): void => {
-    peerLinkFailureCache.set(keyId, "rtc", "transport");
+  const cacheFailure = (
+    keyId: string,
+    teamId: string | undefined,
+    reason = "transport",
+  ): void => {
+    peerLinkFailureCache.set(
+      scopeKeyOf(keyId, teamId),
+      "rtc",
+      reason === "daemon_outdated" ? "daemon_outdated" : "transport",
+    );
   };
 
   /** Mark a failed live RTC path and prevent immediate re-offers for one minute. */
-  const markRtcFailure = (keyId: string): void => {
-    cacheFailure(keyId);
-    const session = sessionsByKey.get(keyId);
+  const markRtcFailure = (keyId: string, teamId?: string): void => {
+    cacheFailure(keyId, teamId);
+    const session = sessionsByKey.get(scopeKeyOf(keyId, teamId));
     if (session !== undefined) closeSession(session, "rtc_failure");
   };
 
-  const failureCached = (keyId: string): boolean =>
-    peerLinkFailureCache.has(keyId, "rtc");
+  const failureCached = (keyId: string, teamId?: string): boolean =>
+    peerLinkFailureCache.has(scopeKeyOf(keyId, teamId), "rtc");
 
   const mountMux = (session: TRtcClientSession, answerSdp: string): void => {
     if (
@@ -249,7 +272,7 @@ export const createRtcClient = (): TRtcClient => {
       MAX_PAYLOAD_BYTES,
     );
     if (maxPayloadBytes === null) {
-      markRtcFailure(session.keyId);
+      markRtcFailure(session.keyId, session.teamId);
       return;
     }
     session.mux = createChannel({
@@ -257,11 +280,12 @@ export const createRtcClient = (): TRtcClient => {
       side: "consumer",
       maxPayloadBytes,
       onClose: () => {
-        if (!session.closed) markRtcFailure(session.keyId);
+        if (!session.closed) markRtcFailure(session.keyId, session.teamId);
       },
     });
     clearTimers(session);
-    peerLinkFailureCache.clear(session.keyId);
+    // A mounted RTC link proves only the RTC path; keep any mux failure.
+    peerLinkFailureCache.clear(session.scopeKey, "rtc");
     logDebug("rtc-client", "mux mounted on data channel", {
       keyId: session.keyId,
       channelId: session.channelId,
@@ -273,20 +297,25 @@ export const createRtcClient = (): TRtcClient => {
   const ensureRtcTo = (keyId: string, options: TEnsureRtcOptions): void => {
     if (
       options.pubkey.length === 0 ||
-      !options.hasRtc1 ||
-      options.hasSeedgate1 ||
-      failureCached(keyId) ||
-      sessionsByKey.has(keyId) ||
+      !(options.hasRtc1 || options.hasTeamRtc1 === true) ||
+      (options.hasSeedgate1 && options.teamGrant === undefined) ||
+      failureCached(keyId, options.teamId) ||
+      sessionsByKey.has(scopeKeyOf(keyId, options.teamId)) ||
       sendFrame === null
     ) {
       return;
     }
-    void beginConnect(keyId, options.pubkey).catch((error: unknown) => {
+    void beginConnect(
+      keyId,
+      options.pubkey,
+      options.teamGrant,
+      options.teamId,
+    ).catch((error: unknown) => {
       logWarn("rtc-client", safeDiagnosticMessage`beginConnect rejected`, {
         keyId,
         err: error instanceof Error ? error.message : String(error),
       });
-      cacheFailure(keyId);
+      cacheFailure(keyId, options.teamId);
     });
   };
 
@@ -312,8 +341,18 @@ export const createRtcClient = (): TRtcClient => {
     for (const candidate of pending) sendIceCandidate(session, candidate);
   };
 
-  const beginConnect = async (keyId: string, pubkey: string): Promise<void> => {
-    if (sessionsByKey.has(keyId) || failureCached(keyId) || sendFrame === null)
+  const beginConnect = async (
+    keyId: string,
+    pubkey: string,
+    teamGrant?: string,
+    teamId?: string,
+  ): Promise<void> => {
+    const scopeKey = scopeKeyOf(keyId, teamId);
+    if (
+      sessionsByKey.has(scopeKey) ||
+      failureCached(keyId, teamId) ||
+      sendFrame === null
+    )
       return;
     let pc: RTCPeerConnection | null = null;
     let session: TRtcClientSession | null = null;
@@ -324,6 +363,8 @@ export const createRtcClient = (): TRtcClient => {
       const channelId = crypto.randomUUID();
       session = {
         keyId,
+        teamId,
+        scopeKey,
         channelId,
         pc,
         dc,
@@ -341,11 +382,11 @@ export const createRtcClient = (): TRtcClient => {
         iceTimer: null,
         disconnectTimer: null,
       };
-      sessionsByKey.set(keyId, session);
+      sessionsByKey.set(scopeKey, session);
       sessionsByChannel.set(channelId, session);
       session.signalingTimer = setTimeout(() => {
         if (session !== null && !session.closed && session.mux === null)
-          markRtcFailure(keyId);
+          markRtcFailure(keyId, teamId);
       }, RTC_SIGNALING_TIMEOUT_MS);
       dc.onopen = () => {
         if (session === null) return;
@@ -353,7 +394,7 @@ export const createRtcClient = (): TRtcClient => {
         // back to the local offer would under/over-size the consumer mux.
         const remoteSdp = session.pc.remoteDescription?.sdp;
         if (remoteSdp === undefined || remoteSdp.length === 0) {
-          markRtcFailure(session.keyId);
+          markRtcFailure(session.keyId, session.teamId);
           return;
         }
         mountMux(session, remoteSdp);
@@ -378,7 +419,7 @@ export const createRtcClient = (): TRtcClient => {
         if (session === null || session.closed) return;
         const connectionState = session.pc.connectionState;
         if (connectionState === "failed" || connectionState === "closed") {
-          markRtcFailure(keyId);
+          markRtcFailure(keyId, teamId);
           return;
         }
         if (connectionState === "disconnected") {
@@ -390,7 +431,7 @@ export const createRtcClient = (): TRtcClient => {
               !disconnectedSession.closed &&
               disconnectedSession.pc.connectionState === "disconnected"
             ) {
-              markRtcFailure(keyId);
+              markRtcFailure(keyId, teamId);
             }
           }, RTC_DISCONNECT_GRACE_MS);
           return;
@@ -407,17 +448,18 @@ export const createRtcClient = (): TRtcClient => {
       const sdp = pc.localDescription?.sdp ?? offer.sdp;
       const fingerprint = fingerprintFromSdp(sdp);
       if (fingerprint === null) {
-        markRtcFailure(keyId);
+        markRtcFailure(keyId, teamId);
         return;
       }
       session.fingerprint = fingerprint;
       const proof = sealTo(
         pubkey,
         encodeOfferInner({
-          v: 1,
+          v: RTC_AUTH_VERSION,
           n: session.nonce,
           fb: fingerprint,
           epk: eph.publicKeyB64,
+          ...(teamGrant === undefined ? {} : { teamGrant }),
         }),
       );
       sendFrame?.({
@@ -426,6 +468,7 @@ export const createRtcClient = (): TRtcClient => {
         key_id: keyId,
         sdp,
         fingerprint_proof: proof,
+        ...(teamGrant === undefined ? {} : { team_grant: teamGrant }),
       });
       session.offerSent = true;
       flushPendingIce(session);
@@ -435,10 +478,10 @@ export const createRtcClient = (): TRtcClient => {
         err: error instanceof Error ? error.message : String(error),
       });
       if (session !== null) {
-        markRtcFailure(keyId);
+        markRtcFailure(keyId, teamId);
         return;
       }
-      cacheFailure(keyId);
+      cacheFailure(keyId, teamId);
       if (pc !== null) {
         void pc.close().catch(() => {});
       }
@@ -461,7 +504,7 @@ export const createRtcClient = (): TRtcClient => {
     );
     const inner = opened === null ? null : decodeAnswerInner(opened);
     if (inner === null) {
-      markRtcFailure(session.keyId);
+      markRtcFailure(session.keyId, session.teamId);
       return;
     }
     const answerMatches = verifyAnswerInner(inner, {
@@ -470,7 +513,7 @@ export const createRtcClient = (): TRtcClient => {
       daemonFingerprint: inner.fd,
     });
     if (!answerMatches || !sdpFingerprintsMatch(frame.sdp, inner.fd)) {
-      markRtcFailure(session.keyId);
+      markRtcFailure(session.keyId, session.teamId);
       return;
     }
     // Accept only the first valid answer — a retransmit must not re-enter
@@ -485,10 +528,10 @@ export const createRtcClient = (): TRtcClient => {
       if (session.mux !== null) return;
       session.iceTimer = setTimeout(() => {
         if (!session.closed && session.mux === null)
-          markRtcFailure(session.keyId);
+          markRtcFailure(session.keyId, session.teamId);
       }, RTC_ICE_TIMEOUT_MS);
     } catch {
-      markRtcFailure(session.keyId);
+      markRtcFailure(session.keyId, session.teamId);
     }
   };
 
@@ -518,7 +561,13 @@ export const createRtcClient = (): TRtcClient => {
       closeSession(session, `nack_${reason}`);
       return;
     }
-    markRtcFailure(keyId);
+    if (reason === "daemon_outdated") {
+      // A current relay mux can still serve this request; suppress RTC briefly.
+      cacheFailure(keyId, session.teamId, reason);
+      closeSession(session, `nack_${reason}`);
+      return;
+    }
+    markRtcFailure(keyId, session.teamId);
   };
 
   /** Feed a trickle ICE candidate to an offerer session. Unknown channel ids no-op. */
@@ -540,9 +589,12 @@ export const createRtcClient = (): TRtcClient => {
   };
 
   /** Return an already-open RTC mux channel; never waits for signaling. */
-  const getRtcMuxChannel = (keyId: string): TMuxChannel | null => {
-    if (failureCached(keyId)) return null;
-    return sessionsByKey.get(keyId)?.mux ?? null;
+  const getRtcMuxChannel = (
+    keyId: string,
+    teamId?: string,
+  ): TMuxChannel | null => {
+    if (failureCached(keyId, teamId)) return null;
+    return sessionsByKey.get(scopeKeyOf(keyId, teamId))?.mux ?? null;
   };
 
   /** Pending + mounted session count (status diagnostics). */
@@ -559,7 +611,7 @@ export const createRtcClient = (): TRtcClient => {
   const closeAll = (): void => {
     for (const session of [...sessionsByKey.values()])
       closeSession(session, "relay_restart");
-    peerLinkFailureCache.clear();
+    peerLinkFailureCache.clearPath("rtc");
   };
 
   return {
