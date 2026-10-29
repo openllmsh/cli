@@ -1,4 +1,5 @@
 import type { TTunnelSurface } from "@openllmsh/protocol";
+import { TEAM_LEG_STREAM_DEADLINE_MS } from "@openllmsh/protocol";
 import { daemonEnv } from "./env";
 import {
   maxOutputTokensFromTeamLegBody,
@@ -32,6 +33,13 @@ const teamSurfaceOf = (
 
 const teamLegUrl = (): string =>
   `${daemonEnv().cloudOrigin}/api/daemon/team-leg`;
+
+/** Combine client cancellation with the bounded direct-leg stream lifetime. */
+export const teamLegStreamSignal = (
+  requestSignal: AbortSignal,
+  deadlineMs: number = TEAM_LEG_STREAM_DEADLINE_MS,
+): AbortSignal =>
+  AbortSignal.any([requestSignal, AbortSignal.timeout(deadlineMs)]);
 
 const apiHeaders = (): Headers =>
   new Headers({
@@ -127,6 +135,9 @@ export const tryDirectTeamLeg = async (args: {
   const target = payload?.targets[0];
   if (target === undefined) return null;
   try {
+    // This upper bound is shared with the origin sweep policy. A direct leg
+    // must finish (or abort its peer stream) before its held cap can settle.
+    const streamSignal = teamLegStreamSignal(args.request.signal);
     const response = await tunnelToPeer({
       keyId: target.device_key_id,
       teamId: target.team_id,
@@ -144,7 +155,7 @@ export const tryDirectTeamLeg = async (args: {
       anthropicVersion: args.request.headers.get("anthropic-version"),
       anthropicBeta: args.request.headers.get("anthropic-beta"),
       userAgent: args.request.headers.get("user-agent"),
-      signal: args.request.signal,
+      signal: streamSignal,
     });
     return settleResponse(response, target);
   } catch (error) {
