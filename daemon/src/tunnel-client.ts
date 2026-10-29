@@ -143,6 +143,8 @@ const tunnelToPeerLive: TTunnelToPeer = async (args) => {
         });
       },
       dial: async () => getRtcMuxChannel(args.keyId),
+      // Peer-link invokes `drop` only for an actual pre-dispatch failure;
+      // ordinary idle release leaves this healthy RTC session intact.
       drop: () => markRtcFailure(args.keyId),
     },
     mux: {
