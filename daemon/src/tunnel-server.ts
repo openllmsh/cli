@@ -44,7 +44,11 @@ import {
   modelFromRequestBody,
   teamGrantFromStreamOpen,
 } from "./team-grant-admit";
-import { reportTeamLegDispatch } from "./team-leg-dispatch";
+import { observedTeamLegTokens } from "./team-leg-body";
+import {
+  reportTeamLegCompletion,
+  reportTeamLegDispatch,
+} from "./team-leg-dispatch";
 import { currentTeamChannelScope, withTeamGrant } from "./team-request-context";
 import {
   beginServedTunnel,
@@ -193,6 +197,42 @@ export type TTeamLegDispatchReporter = (input: {
   readonly nonce: string;
   readonly teamGrant: string;
 }) => Promise<void>;
+
+export type TTeamLegCompletionReporter = (input: {
+  readonly nonce: string;
+  readonly teamGrant: string;
+  readonly actualTokens: number;
+}) => Promise<void>;
+
+/** Start supplier-only usage observation without delaying the tunneled body. */
+const observeTeamLegCompletion = (
+  response: Response,
+  grant: { readonly n: string },
+  teamGrant: string,
+  reportCompletion: TTeamLegCompletionReporter,
+): Response => {
+  // Provider errors and bodyless responses have no trustworthy observed usage;
+  // the dispatched reservation sweeps at its full amount instead.
+  if (!response.ok || response.body === null) return response;
+  const [forConsumer, forObservation] = response.body.tee();
+  const eventStream =
+    response.headers.get("content-type")?.includes("text/event-stream") ===
+    true;
+  void observedTeamLegTokens(forObservation, eventStream)
+    .then((actualTokens) =>
+      reportCompletion({
+        nonce: grant.n,
+        teamGrant,
+        actualTokens,
+      }),
+    )
+    .catch(() => {});
+  return new Response(forConsumer, {
+    status: response.status,
+    statusText: response.statusText,
+    headers: response.headers,
+  });
+};
 
 /**
  * Enough leading JSON to find the routing model without making a slow client
@@ -353,6 +393,7 @@ export const createMuxTunnelServer =
     dispatch: TTunnelDispatch,
     transport: "rtc" | "mux" = "mux",
     reportDispatch: TTeamLegDispatchReporter = reportTeamLegDispatch,
+    reportCompletion: TTeamLegCompletionReporter = reportTeamLegCompletion,
   ): TServeTunnel =>
   async (open, body, signal) => {
     const startedAt = Date.now();
@@ -475,8 +516,13 @@ export const createMuxTunnelServer =
             nonce: decision.grant.n,
             teamGrant: teamToken,
           }).catch(() => {});
-          const response = await withTeamGrant(teamToken, decision.grant, () =>
-            dispatch(tunneledRequest(open, buffered, signal)),
+          const response = observeTeamLegCompletion(
+            await withTeamGrant(teamToken, decision.grant, () =>
+              dispatch(tunneledRequest(open, buffered, signal)),
+            ),
+            decision.grant,
+            teamToken,
+            reportCompletion,
           );
           recordTunnelRequest({
             path: "team",
@@ -508,16 +554,21 @@ export const createMuxTunnelServer =
           nonce: decision.grant.n,
           teamGrant: teamToken,
         });
-        const response = await withTeamGrant(teamToken, decision.grant, () =>
-          dispatch(
-            ended
-              ? tunneledRequest(open, combineChunks(chunks, total), signal)
-              : tunneledRequest(
-                  open,
-                  bodyWithSizeLimit(reader, chunks, total),
-                  signal,
-                ),
+        const response = observeTeamLegCompletion(
+          await withTeamGrant(teamToken, decision.grant, () =>
+            dispatch(
+              ended
+                ? tunneledRequest(open, combineChunks(chunks, total), signal)
+                : tunneledRequest(
+                    open,
+                    bodyWithSizeLimit(reader, chunks, total),
+                    signal,
+                  ),
+            ),
           ),
+          decision.grant,
+          teamToken,
+          reportCompletion,
         );
         recordTunnelRequest({
           path: "team",

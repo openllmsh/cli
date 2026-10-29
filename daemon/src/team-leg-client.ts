@@ -3,7 +3,6 @@ import { TEAM_LEG_STREAM_DEADLINE_MS } from "@openllmsh/protocol";
 import { daemonEnv } from "./env";
 import {
   maxOutputTokensFromTeamLegBody,
-  observedTeamLegTokens,
   rewriteTeamLegBodyModel,
 } from "./team-leg-body";
 import { isPreDispatchTunnelError, tunnelToPeer } from "./tunnel-client";
@@ -46,62 +45,6 @@ const apiHeaders = (): Headers =>
     authorization: `Bearer ${daemonEnv().apiKey}`,
     "content-type": "application/json",
   });
-
-const settle = async (
-  nonce: string,
-  grant: string,
-  actualTokens: number,
-): Promise<void> => {
-  await fetch(teamLegUrl(), {
-    method: "PATCH",
-    headers: apiHeaders(),
-    body: JSON.stringify({
-      reservation_nonce: nonce,
-      team_grant: grant,
-      actual_tokens: actualTokens,
-    }),
-  }).catch(() => undefined);
-};
-
-const settleResponse = (
-  response: Response,
-  target: TTeamLegTarget,
-): Response => {
-  if (!response.ok || response.body === null) {
-    // OPEN reached the supplier, so this is dispatch-accounted even when its
-    // response is an error or bodyless. Never let a consumer refund it.
-    void settle(
-      target.reservation_nonce,
-      target.team_grant,
-      target.reserved_tokens,
-    );
-    return response;
-  }
-  const [forClient, forUsage] = response.body.tee();
-  const eventStream =
-    response.headers.get("content-type")?.includes("text/event-stream") ===
-    true;
-  void observedTeamLegTokens(forUsage, eventStream)
-    .then((observed) =>
-      settle(
-        target.reservation_nonce,
-        target.team_grant,
-        observed === 0 ? target.reserved_tokens : observed,
-      ),
-    )
-    .catch(() =>
-      settle(
-        target.reservation_nonce,
-        target.team_grant,
-        target.reserved_tokens,
-      ),
-    );
-  return new Response(forClient, {
-    status: response.status,
-    statusText: response.statusText,
-    headers: response.headers,
-  });
-};
 
 /**
  * Attempt one direct daemon→supplier team request. The endpoint is both the
@@ -157,19 +100,14 @@ export const tryDirectTeamLeg = async (args: {
       userAgent: args.request.headers.get("user-agent"),
       signal: streamSignal,
     });
-    return settleResponse(response, target);
+    return response;
   } catch (error) {
     // Once OPEN has been sent, retrying at origin can duplicate inference and
     // billing. Peer-link exposes this exact retry-safety classification.
     if (!isPreDispatchTunnelError(error)) {
       // Once OPEN has left this daemon the supplier may have started work.
-      // Settle the full hold before propagating the error rather than waiting
-      // for the stale-reservation sweep.
-      void settle(
-        target.reservation_nonce,
-        target.team_grant,
-        target.reserved_tokens,
-      );
+      // Its authenticated completion report, or the stale sweep, settles the
+      // reservation; consumers never report usage.
       throw error;
     }
     // Do not refund from the consumer: the supplier's fire-and-forget dispatch
