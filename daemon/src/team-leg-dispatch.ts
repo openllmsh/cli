@@ -3,6 +3,13 @@ import { daemonEnv } from "./env";
 const DISPATCH_REPORT_TIMEOUT_MS = 5_000;
 const DISPATCH_REPORT_ATTEMPTS = 2;
 
+type TDispatchReportResult = "marked" | "already_marked" | "not_found";
+
+const isDispatchReportResult = (
+  value: unknown,
+): value is TDispatchReportResult =>
+  value === "marked" || value === "already_marked" || value === "not_found";
+
 const dispatchUrl = (): string =>
   `${daemonEnv().cloudOrigin}/api/daemon/team-leg/dispatch`;
 
@@ -31,7 +38,14 @@ export const reportTeamLegDispatch = async (input: {
         }),
         signal: AbortSignal.timeout(DISPATCH_REPORT_TIMEOUT_MS),
       });
-      if (response.ok || response.status < 500) return;
+      if (response.status >= 500) continue;
+      if (!response.ok) return;
+      const body = (await response.json().catch(() => null)) as {
+        readonly result?: unknown;
+      } | null;
+      // `marked` and `already_marked` are both idempotent success. `not_found`
+      // cannot become markable on a retry, so it also ends this bounded loop.
+      if (isDispatchReportResult(body?.result)) return;
     } catch {
       // A second bounded attempt is enough for a fire-and-forget safety mark.
     }

@@ -39,14 +39,6 @@ const apiHeaders = (): Headers =>
     "content-type": "application/json",
   });
 
-const refund = async (nonce: string, grant: string): Promise<void> => {
-  await fetch(teamLegUrl(), {
-    method: "PUT",
-    headers: apiHeaders(),
-    body: JSON.stringify({ reservation_nonce: nonce, team_grant: grant }),
-  }).catch(() => undefined);
-};
-
 const settle = async (
   nonce: string,
   grant: string,
@@ -105,8 +97,9 @@ const settleResponse = (
 
 /**
  * Attempt one direct daemon→supplier team request. The endpoint is both the
- * reservation and channel-admission authority; a pre-dispatch failure refunds
- * before the caller falls back to origin.
+ * reservation and channel-admission authority. A pre-dispatch failure abandons
+ * its hold for the server-side stale sweep before falling back to origin; that
+ * avoids racing the supplier's asynchronous dispatch report.
  */
 export const tryDirectTeamLeg = async (args: {
   readonly request: Request;
@@ -168,7 +161,9 @@ export const tryDirectTeamLeg = async (args: {
       );
       throw error;
     }
-    await refund(target.reservation_nonce, target.team_grant);
+    // Do not refund from the consumer: the supplier's fire-and-forget dispatch
+    // report may be in flight. The server releases this undispatched hold after
+    // the grant expiry plus its reporting grace.
     return null;
   }
 };
