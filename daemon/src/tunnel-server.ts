@@ -204,16 +204,34 @@ export type TTeamLegCompletionReporter = (input: {
   readonly actualTokens: number;
 }) => Promise<void>;
 
-/** Start supplier-only usage observation without delaying the tunneled body. */
-const observeTeamLegCompletion = (
-  response: Response,
+/**
+ * Run a dispatched team leg and always report its completion, so the hold is
+ * released rather than swept at its full amount. A provider error, a bodyless
+ * response or a dispatch that throws produced no completion: it reports 0.
+ * A streamed response reports its observed usage without delaying the body.
+ */
+const dispatchTeamLeg = async (
+  run: () => Promise<Response>,
   grant: { readonly n: string },
   teamGrant: string,
   reportCompletion: TTeamLegCompletionReporter,
-): Response => {
-  // Provider errors and bodyless responses have no trustworthy observed usage;
-  // the dispatched reservation sweeps at its full amount instead.
-  if (!response.ok || response.body === null) return response;
+): Promise<Response> => {
+  const reportNone = (): void => {
+    void reportCompletion({ nonce: grant.n, teamGrant, actualTokens: 0 }).catch(
+      () => {},
+    );
+  };
+  let response: Response;
+  try {
+    response = await run();
+  } catch (err) {
+    reportNone();
+    throw err;
+  }
+  if (!response.ok || response.body === null) {
+    reportNone();
+    return response;
+  }
   const [forConsumer, forObservation] = response.body.tee();
   const eventStream =
     response.headers.get("content-type")?.includes("text/event-stream") ===
@@ -516,10 +534,11 @@ export const createMuxTunnelServer =
             nonce: decision.grant.n,
             teamGrant: teamToken,
           }).catch(() => {});
-          const response = observeTeamLegCompletion(
-            await withTeamGrant(teamToken, decision.grant, () =>
-              dispatch(tunneledRequest(open, buffered, signal)),
-            ),
+          const response = await dispatchTeamLeg(
+            () =>
+              withTeamGrant(teamToken, decision.grant, () =>
+                dispatch(tunneledRequest(open, buffered, signal)),
+              ),
             decision.grant,
             teamToken,
             reportCompletion,
@@ -553,19 +572,20 @@ export const createMuxTunnelServer =
         void reportDispatch({
           nonce: decision.grant.n,
           teamGrant: teamToken,
-        });
-        const response = observeTeamLegCompletion(
-          await withTeamGrant(teamToken, decision.grant, () =>
-            dispatch(
-              ended
-                ? tunneledRequest(open, combineChunks(chunks, total), signal)
-                : tunneledRequest(
-                    open,
-                    bodyWithSizeLimit(reader, chunks, total),
-                    signal,
-                  ),
+        }).catch(() => {});
+        const response = await dispatchTeamLeg(
+          () =>
+            withTeamGrant(teamToken, decision.grant, () =>
+              dispatch(
+                ended
+                  ? tunneledRequest(open, combineChunks(chunks, total), signal)
+                  : tunneledRequest(
+                      open,
+                      bodyWithSizeLimit(reader, chunks, total),
+                      signal,
+                    ),
+              ),
             ),
-          ),
           decision.grant,
           teamToken,
           reportCompletion,
