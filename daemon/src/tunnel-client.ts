@@ -126,7 +126,7 @@ const tunnelToPeerLive: TTunnelToPeer = async (args) => {
   const link = createPeerLink({
     target: args.keyId,
     rtc: {
-      open: () => getRtcMuxChannel(args.keyId),
+      open: () => getRtcMuxChannel(args.keyId, args.teamId),
       warm: () => {
         // Fleet's cold RTC setup stays best-effort: mux is not held behind ICE.
         ensureRtcTo(args.keyId, {
@@ -138,14 +138,15 @@ const tunnelToPeerLive: TTunnelToPeer = async (args) => {
             ? {}
             : {
                 teamGrant: args.teamGrant,
+                teamId: args.teamId,
                 hasTeamRtc1: peerCaps?.has(TEAM_RTC_CAP) ?? false,
               }),
         });
       },
-      dial: async () => getRtcMuxChannel(args.keyId),
+      dial: async () => getRtcMuxChannel(args.keyId, args.teamId),
       // Peer-link invokes `drop` only for an actual pre-dispatch failure;
       // ordinary idle release leaves this healthy RTC session intact.
-      drop: () => markRtcFailure(args.keyId),
+      drop: () => markRtcFailure(args.keyId, args.teamId),
     },
     mux: {
       // `muxChannelTo` owns its channel map and joins an in-flight open.
@@ -161,7 +162,7 @@ const tunnelToPeerLive: TTunnelToPeer = async (args) => {
     },
     policy: {
       retrySafe: (error) =>
-        !args.signal.aborted && isPreDispatchTunnelError(error),
+        !args.signal.aborted && preDispatchError(error) !== null,
       classifyFailure: (error) => {
         rtcFailed = true;
         return error instanceof Error && error.message.includes("tunnel_busy")

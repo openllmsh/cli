@@ -117,6 +117,12 @@ const parseCountTokensRequest = Schema.decodeUnknownSync(
   AnthropicCountTokensRequest,
 );
 
+/** Only ordinary text inference can use the direct team reservation leg. */
+export const isDirectTeamInferencePath = (path: string): boolean =>
+  path === "/v1/chat/completions" ||
+  path === "/v1/messages" ||
+  path === "/v1/responses";
+
 /**
  * Add CORS headers to a response WITHOUT consuming its body, so streaming
  * (SSE) responses keep streaming. The dashboard browser calls this
@@ -595,6 +601,11 @@ export const handleInference = async (req: Request): Promise<Response> => {
     };
 
     const forwardTeamOrOrigin = async (): Promise<Response> => {
+      // Direct team reservations dispatch only ordinary inference. All media,
+      // embeddings, and token-count surfaces retain their origin wire shape.
+      if (!isDirectTeamInferencePath(normalizedPath)) {
+        return passthroughToOrigin(req, rawBytes);
+      }
       const model =
         rawBody !== null &&
         typeof rawBody === "object" &&

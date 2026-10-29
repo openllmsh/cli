@@ -592,7 +592,7 @@ export const updateMuxPeerCaps = (
 ): void => {
   if (caps === undefined) peerCaps.delete(keyId);
   else peerCaps.set(keyId, new Set(caps));
-  peerLinkFailureCache.clear(keyId);
+  peerLinkFailureCache.clear(keyId, "mux");
 };
 
 /**
@@ -604,7 +604,7 @@ export const replaceMuxPeerCaps = (
   caps: Readonly<Record<string, readonly string[]>> | undefined,
 ): void => {
   peerCaps.clear();
-  peerLinkFailureCache.clear();
+  peerLinkFailureCache.clearPath("mux");
   if (caps === undefined) return;
   for (const [keyId, values] of Object.entries(caps))
     updateMuxPeerCaps(keyId, values);
