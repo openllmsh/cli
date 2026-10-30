@@ -21,6 +21,10 @@ type TTeamLegResponse = { readonly targets: ReadonlyArray<TTeamLegTarget> };
 const isTeamModel = (value: unknown): value is string =>
   typeof value === "string" && value.startsWith("team:");
 
+/** A plan hop served by a teammate's device (`team:<slug>/<model>`). */
+export const isTeamHop = (hop: { readonly modelId: string }): boolean =>
+  isTeamModel(hop.modelId);
+
 const teamSurfaceOf = (
   surface: TTunnelSurface,
 ): "chat_completions" | "messages" | "responses" | null =>

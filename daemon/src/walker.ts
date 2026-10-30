@@ -243,6 +243,7 @@ import { tokensFromResponse, ZERO_TOKENS } from "./native-runtime/types";
 import { runWithAccount } from "./op-context";
 import { clearPlanCache } from "./plan-cache";
 import { isClaudeCodeOriginator, resolveHopExecution } from "./sub-method";
+import { isTeamHop, tryDirectTeamLeg } from "./team-leg-client";
 import {
   currentTeamGrantFieldsOf,
   currentTeamGrantToken,
@@ -3598,6 +3599,20 @@ const walkPlan = async (
       });
       if (served === HOP_CONTINUE) continue;
       return commitSubscriptionServe(hop, served);
+    }
+    // Team hop: dial the supplier device directly. The cloud never tunnels a
+    // device-forwarded request, so forwarding would reach only API-key shares;
+    // that forward stays the fallback below.
+    if (isTeamHop(hop)) {
+      const direct = await tryDirectTeamLeg({
+        request: args.req,
+        body: new Uint8Array(args.rawBytes),
+        model: hop.modelId,
+        surface: args.surface,
+      });
+      if (direct !== null && (direct.ok || finalHop)) {
+        return withHopTrailHeaders(direct, hop);
+      }
     }
     // API-key hop: forward to the cloud pinned to this concrete model.
     const forwarded = await forwardCloudHop(hop, finalHop);

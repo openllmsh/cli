@@ -75,7 +75,7 @@ import {
   noteTeamPlanServed,
   planNeedsRefresh,
 } from "./plan-cache";
-import { tryDirectTeamLeg } from "./team-leg-client";
+import { isTeamHop, tryDirectTeamLeg } from "./team-leg-client";
 import {
   currentTeamGrantFieldsOf,
   currentTeamGrantToken,
@@ -579,6 +579,9 @@ export const handleInference = async (req: Request): Promise<Response> => {
         verified &&
         parsePlan(fetched.plan).some((entry) => {
           const provider = entry.split("/")[0] ?? "";
+          // A team hop is dialled from here (direct leg); origin would never
+          // tunnel the forwarded request to the supplier.
+          if (isTeamHop({ modelId: entry })) return true;
           return (
             isOAuthSlug(provider) ||
             isLocalServerSlug(provider) ||
