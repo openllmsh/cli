@@ -3,7 +3,9 @@
  * `launcher-resolution-cache` (tmp + rename, mode 0o600, size-capped load).
  */
 import {
+  closeSync,
   mkdirSync,
+  openSync,
   readFileSync,
   renameSync,
   rmSync,
@@ -24,16 +26,25 @@ export const writeJsonStateAtomic = (
     ? file.slice(file.lastIndexOf("/") + 1)
     : file;
   const tmp = join(dir, `.${base}.${process.pid}.${tmpSeq}.tmp`);
+  let created = false;
   try {
     mkdirSync(dir, { recursive: true, mode: 0o700 });
-    writeFileSync(tmp, JSON.stringify(body), { mode: 0o600 });
+    const fd = openSync(tmp, "wx", 0o600);
+    created = true;
+    try {
+      writeFileSync(fd, JSON.stringify(body));
+    } finally {
+      closeSync(fd);
+    }
     renameSync(tmp, file);
     return true;
   } catch {
-    try {
-      rmSync(tmp, { force: true });
-    } catch {
-      // best-effort temp cleanup
+    if (created) {
+      try {
+        rmSync(tmp, { force: true });
+      } catch {
+        // best-effort temp cleanup
+      }
     }
     return false;
   }

@@ -11,7 +11,10 @@
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import type { TLocalKeyProviderSlug } from "@openllmsh/protocol";
-import { LOCAL_KEY_PROVIDER_PRESETS } from "@openllmsh/protocol";
+import {
+  isLocalKeyProviderSlug,
+  LOCAL_KEY_PROVIDER_PRESETS,
+} from "@openllmsh/protocol";
 import { stateDir } from "../env";
 import { readJsonStateFile, writeJsonStateAtomic } from "../json-state-cache";
 
@@ -43,7 +46,10 @@ const storeDir = (home?: string): string => join(stateDir(home), "local-keys");
 export const localKeyStorePath = (
   slug: TLocalKeyProviderSlug,
   home?: string,
-): string => join(storeDir(home), `${slug}.json`);
+): string => {
+  if (!isLocalKeyProviderSlug(slug)) throw new Error("invalid provider slug");
+  return join(storeDir(home), `${slug}.json`);
+};
 
 const parseSlot = (raw: unknown): TLocalKeySlot | null => {
   if (typeof raw !== "object" || raw === null) return null;
@@ -139,6 +145,15 @@ export const setLocalKeySlot = (
   },
   home?: string,
 ): TSetLocalKeySlotResult => {
+  if (!isLocalKeyProviderSlug(slug)) {
+    return { ok: false, error: "invalid provider slug" };
+  }
+  if (
+    args.index !== undefined &&
+    (!Number.isInteger(args.index) || args.index < 0 || args.index > MAX_INDEX)
+  ) {
+    return { ok: false, error: "invalid account index" };
+  }
   const key = args.key.trim();
   if (key.length > MAX_KEY_LENGTH) {
     return { ok: false, error: "key is too long" };

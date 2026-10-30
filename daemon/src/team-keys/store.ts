@@ -88,6 +88,9 @@ export const setTeamKey = (
   home?: string,
 ): TTeamKeyWriteResult => {
   if (!isTeamId(args.teamId)) return { ok: false, error: "invalid team id" };
+  if (!Number.isSafeInteger(args.epoch) || args.epoch < 0) {
+    return { ok: false, error: "invalid team key epoch" };
+  }
   const key = args.key.trim();
   if (key.length === 0) return { ok: false, error: "team key is empty" };
   if (key.length > MAX_KEY_LENGTH) {
