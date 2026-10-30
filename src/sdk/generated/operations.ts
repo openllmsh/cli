@@ -588,6 +588,20 @@ export const API_OPERATIONS: readonly TApiOperation[] = [
     "hasBody": false
   },
   {
+    "id": "providerModels.list",
+    "method": "get",
+    "path": "/providers/{provider}/models",
+    "summary": "",
+    "tags": [
+      "providerModels"
+    ],
+    "pathParams": [
+      "provider"
+    ],
+    "queryParams": [],
+    "hasBody": false
+  },
+  {
     "id": "providersCustom.list",
     "method": "get",
     "path": "/providers/custom",
