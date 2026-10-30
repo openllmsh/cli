@@ -91,11 +91,19 @@ const parseStore = (raw: unknown): readonly TLocalKeySlot[] => {
 };
 
 /** A store we can safely rewrite: current version and an array of slots. */
-const isWellFormedStore = (raw: unknown): boolean =>
-  typeof raw === "object" &&
-  raw !== null &&
-  (raw as { version?: unknown }).version === STORE_VERSION &&
-  Array.isArray((raw as { slots?: unknown }).slots);
+const isWellFormedStore = (raw: unknown): boolean => {
+  if (typeof raw !== "object" || raw === null) return false;
+  const store = raw as { version?: unknown; slots?: unknown };
+  if (store.version !== STORE_VERSION || !Array.isArray(store.slots))
+    return false;
+  const indexes = new Set<number>();
+  for (const entry of store.slots) {
+    const slot = parseSlot(entry);
+    if (slot === null || indexes.has(slot.index)) return false;
+    indexes.add(slot.index);
+  }
+  return true;
+};
 
 /** Every stored key slot for `slug`, ascending by index. Never log the keys. */
 export const readLocalKeySlots = (
