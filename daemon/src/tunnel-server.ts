@@ -45,7 +45,7 @@ import {
   modelFromRequestBody,
   teamGrantFromStreamOpen,
 } from "./team-grant-admit";
-import { observedTeamLegTokens } from "./team-leg-body";
+import { clampTeamLegBody, observedTeamLegTokens } from "./team-leg-body";
 import {
   reportTeamLegCompletion,
   reportTeamLegDispatch,
@@ -209,11 +209,9 @@ export type TTeamLegCompletionReporter = (input: {
 }) => Promise<void>;
 
 /**
- * Run a dispatched team leg and report its completion. A provider error or
- * bodyless response was refused, not served: it reports 0 so the hold is
- * released. A dispatch that throws may have reached the provider, so it
- * reports nothing and the sweep charges the full hold. A streamed response
- * reports its observed usage without delaying the body.
+ * Run a dispatched team leg and report observed usage without delaying the
+ * body. Definite client errors report zero; ambiguous responses and thrown
+ * dispatches leave the hold for the full-charge sweep.
  */
 const dispatchTeamLeg = async (
   run: () => Promise<Response>,
@@ -228,7 +226,11 @@ const dispatchTeamLeg = async (
   };
   const response = await run();
   if (!response.ok || response.body === null) {
-    reportNone();
+    // A locally generated 5xx or bodyless success can follow a dispatched
+    // transport failure. Leave those holds for the full-charge sweep, even
+    // when a 5xx was actually returned by the provider: prefer overcharge
+    // to refunding work that may have run.
+    if (!response.ok && response.status < 500) reportNone();
     return response;
   }
   const [forConsumer, forObservation] = response.body.tee();
@@ -237,11 +239,9 @@ const dispatchTeamLeg = async (
     true;
   void observedTeamLegTokens(forObservation, eventStream)
     .then((actualTokens) =>
-      reportCompletion({
-        nonce: grant.n,
-        teamGrant,
-        actualTokens,
-      }),
+      actualTokens === null
+        ? undefined
+        : reportCompletion({ nonce: grant.n, teamGrant, actualTokens }),
     )
     .catch(() => {});
   return new Response(forConsumer, {
@@ -529,6 +529,25 @@ export const createMuxTunnelServer =
               `team_${decision.reason}`,
             );
           }
+          const directSurface =
+            open.surface === "chat_completions" ||
+            open.surface === "messages" ||
+            open.surface === "responses"
+              ? open.surface
+              : null;
+          const bounded =
+            decision.grant.direct_leg === true
+              ? directSurface === null ||
+                decision.grant.max_output_tokens === undefined
+                ? null
+                : clampTeamLegBody(
+                    buffered,
+                    directSurface,
+                    decision.grant.max_output_tokens,
+                  )
+              : buffered;
+          if (bounded === null)
+            throw new StreamResetError("unauthorized", "team_invalid_bound");
           const marked = await reportDispatch({
             nonce: decision.grant.n,
             teamGrant: teamToken,
@@ -543,7 +562,7 @@ export const createMuxTunnelServer =
           const response = await dispatchTeamLeg(
             () =>
               withTeamGrant(teamToken, decision.grant, () =>
-                dispatch(tunneledRequest(open, buffered, signal)),
+                dispatch(tunneledRequest(open, bounded, signal)),
               ),
             decision.grant,
             teamToken,
@@ -575,6 +594,35 @@ export const createMuxTunnelServer =
           logWarn("tunnel", "Team grant refused.", { reason: decision.reason });
           throw new StreamResetError("unauthorized", `team_${decision.reason}`);
         }
+        let bounded: Uint8Array | null = null;
+        if (decision.grant.direct_leg === true) {
+          if (
+            decision.grant.max_output_tokens === undefined ||
+            (open.surface !== "chat_completions" &&
+              open.surface !== "messages" &&
+              open.surface !== "responses")
+          )
+            throw new StreamResetError("unauthorized", "team_invalid_bound");
+          while (!ended) {
+            const next = await reader.read();
+            if (next.done) {
+              ended = true;
+              break;
+            }
+            total += next.value.byteLength;
+            if (total > TUNNEL_MEDIA_MAX_BODY_BYTES)
+              throw new StreamResetError("unauthorized", "team_body_too_large");
+            chunks.push(next.value);
+          }
+          const fullBody = combineChunks(chunks, total);
+          if (modelFromRequestBody(fullBody) !== decision.grant.model)
+            throw new StreamResetError("unauthorized", "team_wrong_model");
+          bounded = clampTeamLegBody(
+            fullBody,
+            open.surface,
+            decision.grant.max_output_tokens,
+          );
+        }
         const marked = await reportDispatch({
           nonce: decision.grant.n,
           teamGrant: teamToken,
@@ -590,13 +638,19 @@ export const createMuxTunnelServer =
           () =>
             withTeamGrant(teamToken, decision.grant, () =>
               dispatch(
-                ended
-                  ? tunneledRequest(open, combineChunks(chunks, total), signal)
-                  : tunneledRequest(
-                      open,
-                      bodyWithSizeLimit(reader, chunks, total),
-                      signal,
-                    ),
+                bounded !== null
+                  ? tunneledRequest(open, bounded, signal)
+                  : ended
+                    ? tunneledRequest(
+                        open,
+                        combineChunks(chunks, total),
+                        signal,
+                      )
+                    : tunneledRequest(
+                        open,
+                        bodyWithSizeLimit(reader, chunks, total),
+                        signal,
+                      ),
               ),
             ),
           decision.grant,

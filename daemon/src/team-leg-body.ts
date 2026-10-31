@@ -1,3 +1,21 @@
+import type { TOutputLimitSurface } from "@openllmsh/wire/features/output-limit-clamp";
+import { clampOutputLimitFields } from "@openllmsh/wire/features/output-limit-clamp";
+
+export const clampTeamLegBody = (
+  body: Uint8Array,
+  surface: TOutputLimitSurface,
+  limit: number,
+): Uint8Array => {
+  const parsed: unknown = JSON.parse(new TextDecoder().decode(body));
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed))
+    throw new Error("Invalid team request body");
+  return new TextEncoder().encode(
+    JSON.stringify(
+      clampOutputLimitFields(parsed as Record<string, unknown>, surface, limit),
+    ),
+  );
+};
+
 /** Read the caller's requested output budget without trusting malformed JSON. */
 export const maxOutputTokensFromTeamLegBody = (body: Uint8Array): number => {
   try {
@@ -52,9 +70,8 @@ export const rewriteTeamLegBodyModel = (
 
 type TUsage = { readonly input: number; readonly output: number };
 
-const usageOf = (value: unknown): TUsage => {
-  if (value === null || typeof value !== "object")
-    return { input: 0, output: 0 };
+const usageOf = (value: unknown): TUsage | null => {
+  if (value === null || typeof value !== "object") return null;
   const record = value as {
     readonly response?: unknown;
     readonly message?: unknown;
@@ -71,14 +88,22 @@ const usageOf = (value: unknown): TUsage => {
       ? owner
       : value;
   const usage = (usageOwner as { readonly usage?: unknown }).usage;
-  if (usage === null || typeof usage !== "object")
-    return { input: 0, output: 0 };
+  if (usage === null || typeof usage !== "object") return null;
   const data = usage as {
     readonly prompt_tokens?: unknown;
     readonly completion_tokens?: unknown;
     readonly input_tokens?: unknown;
     readonly output_tokens?: unknown;
   };
+  if (
+    ![
+      data.prompt_tokens,
+      data.completion_tokens,
+      data.input_tokens,
+      data.output_tokens,
+    ].some((value) => typeof value === "number" && Number.isFinite(value))
+  )
+    return null;
   const input =
     typeof data.prompt_tokens === "number"
       ? data.prompt_tokens
@@ -101,14 +126,16 @@ const usageOf = (value: unknown): TUsage => {
 export const observedTeamLegTokens = async (
   body: ReadableStream<Uint8Array>,
   eventStream: boolean,
-): Promise<number> => {
+): Promise<number | null> => {
   const bytes = new Uint8Array(await new Response(body).arrayBuffer());
   const text = new TextDecoder().decode(bytes);
   if (!eventStream) {
     const usage = usageOf(JSON.parse(text));
-    return usage.input + usage.output;
+    return usage === null ? null : usage.input + usage.output;
   }
-  let usage: TUsage = { input: 0, output: 0 };
+  let input = 0;
+  let output = 0;
+  let hasUsage = false;
   let complete = false;
   for (const line of text.split("\n")) {
     const value = line.trim();
@@ -126,14 +153,15 @@ export const observedTeamLegTokens = async (
     if (data.length === 0) continue;
     try {
       const next = usageOf(JSON.parse(data));
-      usage = {
-        input: Math.max(usage.input, next.input),
-        output: Math.max(usage.output, next.output),
-      };
+      if (next !== null) {
+        hasUsage = true;
+        input = Math.max(input, next.input);
+        output = Math.max(output, next.output);
+      }
     } catch {
       // A provider can interleave non-JSON SSE control frames.
     }
   }
   if (!complete) throw new Error("team stream ended before completion");
-  return usage.input + usage.output;
+  return hasUsage ? input + output : null;
 };

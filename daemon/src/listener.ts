@@ -708,6 +708,7 @@ const handleInferenceIn = async (
           : undefined;
       const direct = await tryDirectTeamLeg({
         request: req,
+        callerKey,
         body: new Uint8Array(rawBytes),
         model,
         surface,

@@ -2,6 +2,7 @@ import type { TTunnelSurface } from "@openllmsh/protocol";
 import { TEAM_LEG_STREAM_DEADLINE_MS } from "@openllmsh/protocol";
 import { daemonEnv } from "./env";
 import {
+  clampTeamLegBody,
   maxOutputTokensFromTeamLegBody,
   rewriteTeamLegBodyModel,
 } from "./team-leg-body";
@@ -44,11 +45,17 @@ export const teamLegStreamSignal = (
 ): AbortSignal =>
   AbortSignal.any([requestSignal, AbortSignal.timeout(deadlineMs)]);
 
-const apiHeaders = (): Headers =>
-  new Headers({
-    authorization: `Bearer ${daemonEnv().apiKey}`,
+const apiHeaders = (callerKey?: string): Headers => {
+  const deviceAuthorization = `Bearer ${daemonEnv().apiKey}`;
+  const headers = new Headers({
+    authorization:
+      callerKey === undefined ? deviceAuthorization : `Bearer ${callerKey}`,
     "content-type": "application/json",
   });
+  if (callerKey !== undefined)
+    headers.set("x-openllm-device-authorization", deviceAuthorization);
+  return headers;
+};
 
 /**
  * Attempt one direct daemon→supplier team request. The endpoint is both the
@@ -58,6 +65,7 @@ const apiHeaders = (): Headers =>
  */
 export const tryDirectTeamLeg = async (args: {
   readonly request: Request;
+  readonly callerKey?: string;
   readonly body: Uint8Array;
   readonly model: unknown;
   readonly surface: TTunnelSurface;
@@ -66,7 +74,7 @@ export const tryDirectTeamLeg = async (args: {
   if (!isTeamModel(args.model) || surface === null) return null;
   const reserve = await fetch(teamLegUrl(), {
     method: "POST",
-    headers: apiHeaders(),
+    headers: apiHeaders(args.callerKey),
     body: JSON.stringify({
       model: args.model,
       surface,
@@ -81,6 +89,10 @@ export const tryDirectTeamLeg = async (args: {
     .catch(() => null)) as TTeamLegResponse | null;
   const target = payload?.targets[0];
   if (target === undefined) return null;
+  const outputLimit = Math.floor(
+    target.reserved_tokens - Math.ceil(args.body.byteLength / 4),
+  );
+  if (!Number.isSafeInteger(outputLimit) || outputLimit < 1) return null;
   try {
     // This upper bound is shared with the origin sweep policy. A direct leg
     // must finish (or abort its peer stream) before its held cap can settle.
@@ -92,7 +104,11 @@ export const tryDirectTeamLeg = async (args: {
       surface,
       // The grant is bound to the supplier's concrete model; preserve the
       // original body for origin fallback but pin the direct dispatch here.
-      body: rewriteTeamLegBodyModel(args.body, target.resolved_model),
+      body: clampTeamLegBody(
+        rewriteTeamLegBodyModel(args.body, target.resolved_model),
+        surface,
+        outputLimit,
+      ),
       accept:
         (args.model as string).length > 0 &&
         args.request.headers.get("accept")?.includes("text/event-stream") ===
