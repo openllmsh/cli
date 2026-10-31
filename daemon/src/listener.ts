@@ -462,9 +462,7 @@ const handleInferenceIn = async (
       ? "team-device"
       : createHash("sha256").update(callerKey).digest("hex");
   const planCacheKey =
-    explicitAlias === null ||
-    hopGrant !== null ||
-    (direct && isResponsesCompact)
+    explicitAlias === null || hopGrant !== null || isResponsesCompact
       ? null
       : JSON.stringify([callerIdentity, mediaSurface ?? "chat", explicitAlias]);
   // Set when the cloud bound this request's plan to a cap hold; the walk then
@@ -573,7 +571,23 @@ const handleInferenceIn = async (
   // byte-identical to a directly-pointed client.
   // Soft-stale cache hits still enter this block so `loadPlan` can refresh
   // them without blocking the request on WAN.
-  if (direct && isResponsesCompact && explicitAlias === null) {
+  if (
+    isResponsesCompact &&
+    !direct &&
+    hopGrant === null &&
+    !explicitAlias?.startsWith("chatgpt/")
+  ) {
+    // Origin supplies the caller-authorized, provider-qualified hop.
+    return withCors(
+      req,
+      errorJson(
+        403,
+        "Compact requires an authorized ChatGPT model",
+        "plan_error",
+      ),
+    );
+  }
+  if (isResponsesCompact && explicitAlias === null) {
     return withCors(
       req,
       errorJson(400, "Compact requires a model", "plan_error"),
@@ -584,7 +598,6 @@ const handleInferenceIn = async (
       (planCacheEnabled() &&
         planCacheKey !== null &&
         planNeedsRefresh(planCacheKey))) &&
-    (!isResponsesCompact || direct) &&
     explicitAlias !== null
   ) {
     type TPlanFetchOutcome =
@@ -662,7 +675,7 @@ const handleInferenceIn = async (
         fetched.context_overflow_strategy ?? null;
       const fetchedHoldNonce = fetched.hold_nonce ?? null;
       const fetchedMaxOutputTokens = fetched.max_output_tokens ?? null;
-      if (direct && isResponsesCompact && fetchedHoldNonce !== null) {
+      if (isResponsesCompact && fetchedHoldNonce !== null) {
         session.adopt(
           fetchedHoldNonce,
           parsePlan(fetched.plan)[0] ?? fetched.plan,
@@ -704,6 +717,22 @@ const handleInferenceIn = async (
         });
       if (!verified || !hasDaemonOnlyHop) {
         return { kind: "passthrough" };
+      }
+      if (isResponsesCompact && !direct) {
+        const models = parsePlan(fetched.plan);
+        if (models.length !== 1 || models[0] !== explicitAlias) {
+          return {
+            kind: "response",
+            response: withCors(
+              req,
+              errorJson(
+                403,
+                "Compact plan does not match the authorized model",
+                "plan_error",
+              ),
+            ),
+          };
+        }
       }
       return {
         kind: "tuple",
@@ -763,7 +792,7 @@ const handleInferenceIn = async (
         sigParam = outcome.tuple.sigParam;
         return null;
       }
-      if (direct && isResponsesCompact) {
+      if (isResponsesCompact) {
         return withCors(
           req,
           errorJson(502, "Compact plan unavailable", "plan_error"),
@@ -1063,7 +1092,7 @@ const handleInferenceIn = async (
           : videoOperation === "cancel"
             ? runVideoCancel(walkArgs, videoId)
             : isResponsesCompact
-              ? runResponsesCompact(walkArgs, direct)
+              ? runResponsesCompact(walkArgs, true)
               : isCountTokens
                 ? runCountTokens(walkArgs)
                 : isImages
@@ -1083,7 +1112,6 @@ const handleInferenceIn = async (
   const walk = (): Promise<Response> => {
     const outcome = session.outcome;
     if (holdNonce === null || outcome === null) return walkOnce();
-    session.startWalk();
     return withHoldNonce(holdNonce, walkOnce, maxOutputTokens, outcome);
   };
   let response = await walk();
@@ -1104,7 +1132,7 @@ const handleInferenceIn = async (
   ) {
     excludedHops.push(planParam);
     await response.body?.cancel().catch(() => undefined);
-    session.finish("no_body");
+    session.finish();
     await waitForHoldRecords(holdNonce);
     const stopped = await reserveNextHop();
     if (stopped !== null) return stopped;

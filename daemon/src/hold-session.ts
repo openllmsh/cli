@@ -7,10 +7,8 @@
  *
  * - a success record with usage settled it (the walk's own record) → nothing
  *   more to send;
- * - the request ended before any provider call (superseded plan, invalid
- *   input, a non-retryable refusal) → settle the usage seen, usually 0;
- * - the client received a body whose usage never arrived, or the walk threw
- *   after it started → `usage_unknown`: the cloud charges the full hold.
+ * - otherwise send `usage_unknown`: the cloud decides whether to refund an
+ *   undispatched hold or charge a dispatched one in full.
  *
  * `handleInference` runs inside {@link withHoldSession}, whose `finally`
  * guarantees the terminal record however the handler exits; records go
@@ -26,11 +24,7 @@ type TOpenHold = {
   readonly model: string;
   readonly origin: string | null;
   readonly outcome: THoldOutcome;
-  /** The walk started: from here an exception may follow a provider call. */
-  walking: boolean;
 };
-
-export type THoldFinish = "no_body" | "delivered" | "threw";
 
 export class HoldSession {
   private hold: TOpenHold | null = null;
@@ -42,16 +36,11 @@ export class HoldSession {
 
   /** Take ownership of a hold the cloud just handed out. */
   adopt(nonce: string, model: string, origin: string | null): THoldOutcome {
-    if (this.hold !== null && this.hold.nonce !== nonce) this.finish("no_body");
+    if (this.hold !== null && this.hold.nonce !== nonce) this.finish();
     if (this.hold?.nonce === nonce) return this.hold.outcome;
     const outcome = newHoldOutcome();
-    this.hold = { nonce, model, origin, outcome, walking: false };
+    this.hold = { nonce, model, origin, outcome };
     return outcome;
-  }
-
-  /** Mark the start of the walk for the current hold. */
-  startWalk(): void {
-    if (this.hold !== null) this.hold.walking = true;
   }
 
   get open(): boolean {
@@ -68,39 +57,25 @@ export class HoldSession {
 
   /**
    * Send the current hold's terminal record unless a success record already
-   * settled it. `delivered`: the client got a body; `threw`: the handler
-   * threw. Returns the pending delivery (for one-hop-at-a-time retries).
+   * settled it. Returns the pending delivery.
    */
-  finish(how: THoldFinish): Promise<void> | null {
+  finish(): Promise<void> | null {
     const hold = this.hold;
     this.hold = null;
     if (hold === null || hold.outcome.settled) return null;
     hold.outcome.settled = true;
-    const tokensIn = hold.outcome.partialTokensIn;
-    const tokensOut = hold.outcome.partialTokensOut;
-    const usageUnknown =
-      tokensIn + tokensOut === 0 &&
-      !hold.outcome.partialUsageReported &&
-      (hold.outcome.ambiguous ||
-        how === "delivered" ||
-        (how === "threw" && hold.walking));
     const model = hold.outcome.lastModel ?? hold.model;
     const row: TDaemonRecordRequest = {
       model,
       provider: hold.outcome.lastProvider ?? model.split("/")[0] ?? "",
       status: "error",
-      tokens_in: tokensIn,
-      tokens_out: tokensOut,
+      tokens_in: 0,
+      tokens_out: 0,
       latency_ms: Date.now() - this.startedAt,
       endpoint: this.endpoint,
-      error:
-        how === "delivered"
-          ? "Response ended without a usage report"
-          : how === "threw"
-            ? "Request failed"
-            : "Hop failed",
+      error: "Request ended without a complete usage report",
       hold_nonce: hold.nonce,
-      ...(usageUnknown ? { usage_unknown: true as const } : {}),
+      usage_unknown: true,
     };
     const record = recordRequest(row, hold.origin);
     trackHoldRecord(hold.nonce, record);
@@ -117,13 +92,13 @@ export class HoldSession {
     if (!this.open) return response;
     if (!response.ok || response.body === null) {
       queueMicrotask(() => {
-        this.finish("no_body");
+        this.finish();
       });
       return response;
     }
     const later = (): void => {
       setTimeout(() => {
-        this.finish("delivered");
+        this.finish();
       }, 0);
     };
     const reader = response.body.getReader();
@@ -166,7 +141,7 @@ export const withHoldSession = async (
   try {
     response = await run();
   } catch (err) {
-    session.finish("threw");
+    session.finish();
     throw err;
   }
   return session.attach(response);
