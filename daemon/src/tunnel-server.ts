@@ -200,7 +200,7 @@ export type TTunnelDispatch = (req: Request) => Promise<Response>;
 export type TTeamLegDispatchReporter = (input: {
   readonly nonce: string;
   readonly teamGrant: string;
-}) => Promise<void>;
+}) => Promise<boolean>;
 
 export type TTeamLegCompletionReporter = (input: {
   readonly nonce: string;
@@ -529,10 +529,17 @@ export const createMuxTunnelServer =
               `team_${decision.reason}`,
             );
           }
-          void reportDispatch({
+          const marked = await reportDispatch({
             nonce: decision.grant.n,
             teamGrant: teamToken,
-          }).catch(() => {});
+          }).catch(() => false);
+          if (!marked) {
+            complete();
+            throw new StreamResetError(
+              "unauthorized",
+              "team_dispatch_unavailable",
+            );
+          }
           const response = await dispatchTeamLeg(
             () =>
               withTeamGrant(teamToken, decision.grant, () =>
@@ -568,10 +575,17 @@ export const createMuxTunnelServer =
           logWarn("tunnel", "Team grant refused.", { reason: decision.reason });
           throw new StreamResetError("unauthorized", `team_${decision.reason}`);
         }
-        void reportDispatch({
+        const marked = await reportDispatch({
           nonce: decision.grant.n,
           teamGrant: teamToken,
-        }).catch(() => {});
+        }).catch(() => false);
+        if (!marked) {
+          complete();
+          throw new StreamResetError(
+            "unauthorized",
+            "team_dispatch_unavailable",
+          );
+        }
         const response = await dispatchTeamLeg(
           () =>
             withTeamGrant(teamToken, decision.grant, () =>
