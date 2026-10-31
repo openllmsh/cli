@@ -34,7 +34,7 @@ import {
 } from "@openllmsh/tunnel";
 import { estimateBodyTokens } from "@openllmsh/wire/lib/canonical/token-estimate";
 import { Schema } from "effect";
-import { withHoldNonce } from "./access-hold-context";
+import { waitForHoldRecords, withHoldNonce } from "./access-hold-context";
 import {
   runAudioSpeechWalker,
   runAudioTranscriptionWalker,
@@ -72,6 +72,7 @@ import {
 } from "./net-error";
 import type { TPlanTuple } from "./plan-cache";
 import {
+  currentPolicyEpoch,
   loadPlanWithShared,
   lookupPlan,
   noteTeamPlanServed,
@@ -569,7 +570,9 @@ export const handleInference = async (req: Request): Promise<Response> => {
        * caller's `req.signal` — so one abort cannot fail every joined waiter.
        */
       signal: AbortSignal | undefined,
+      background = false,
     ): Promise<TPlanFetchOutcome> => {
+      const epoch = currentPolicyEpoch();
       let fetched: Awaited<ReturnType<typeof fetchPlan>> | null = null;
       try {
         fetched = await fetchPlan(
@@ -586,6 +589,7 @@ export const handleInference = async (req: Request): Promise<Response> => {
           {
             ...(hopGrant === null ? {} : { hopGrant }),
             exclude: excludedHops,
+            refresh: background,
           },
         );
       } catch (err) {
@@ -599,6 +603,19 @@ export const handleInference = async (req: Request): Promise<Response> => {
       if (fetched === null) {
         if (embeddingsLocalFallback) return { kind: "embeddings-local" };
         return { kind: "passthrough" };
+      }
+      if (epoch !== currentPolicyEpoch()) {
+        return {
+          kind: "response",
+          response: withCors(
+            req,
+            errorJson(
+              409,
+              "Plan superseded by a policy change; retry",
+              "plan_error",
+            ),
+          ),
+        };
       }
       observePolicyRevision(fetched.policy_rev);
       const fetchedContextOverflowStrategy =
@@ -699,10 +716,10 @@ export const handleInference = async (req: Request): Promise<Response> => {
       let ledFlight = false;
       const { entry, shared } = await loadPlanWithShared<TPlanFetchOutcome>(
         planCacheKey,
-        async () => {
+        async (background) => {
           ledFlight = true;
           // Shared flight: cloud timeout only (no per-request abort).
-          const outcome = await resolveFetched(undefined);
+          const outcome = await resolveFetched(undefined, background);
           // A held plan is bound to one reservation: never cache it.
           if (outcome.kind === "tuple" && outcome.holdNonce === null) {
             return { store: outcome.tuple, shared: outcome };
@@ -750,6 +767,7 @@ export const handleInference = async (req: Request): Promise<Response> => {
     if (mediaRequest === null) {
       return withCors(req, errorJson(400, "Invalid media default constraints"));
     }
+    const epoch = currentPolicyEpoch();
     let fetched: Awaited<ReturnType<typeof fetchMediaDefaultPlan>> | null =
       null;
     try {
@@ -786,6 +804,16 @@ export const handleInference = async (req: Request): Promise<Response> => {
       return withCors(
         req,
         errorJson(502, "Media default plan is unavailable", "plan_error"),
+      );
+    }
+    if (epoch !== currentPolicyEpoch()) {
+      return withCors(
+        req,
+        errorJson(
+          409,
+          "Plan superseded by a policy change; retry",
+          "plan_error",
+        ),
       );
     }
     observePolicyRevision(fetched.policy_rev);
@@ -838,6 +866,7 @@ export const handleInference = async (req: Request): Promise<Response> => {
     if (payload === null) {
       return withCors(req, errorJson(400, "Invalid video job id"));
     }
+    const epoch = currentPolicyEpoch();
     let fetched: Awaited<ReturnType<typeof fetchVideoJobPlan>> | null = null;
     try {
       fetched = await fetchVideoJobPlan(
@@ -864,6 +893,16 @@ export const handleInference = async (req: Request): Promise<Response> => {
       return withCors(
         req,
         errorJson(502, "Video job plan is unavailable", "plan_error"),
+      );
+    }
+    if (epoch !== currentPolicyEpoch()) {
+      return withCors(
+        req,
+        errorJson(
+          409,
+          "Plan superseded by a policy change; retry",
+          "plan_error",
+        ),
       );
     }
     observePolicyRevision(fetched.policy_rev);
@@ -966,6 +1005,7 @@ export const handleInference = async (req: Request): Promise<Response> => {
   ) {
     excludedHops.push(planParam);
     await response.body?.cancel().catch(() => undefined);
+    await waitForHoldRecords(holdNonce);
     const stopped = await reserveNextHop();
     if (stopped !== null) return stopped;
     response = await walk();
@@ -983,6 +1023,7 @@ export const handleInference = async (req: Request): Promise<Response> => {
     planParam !== null
   ) {
     noteTeamPlanServed(planCacheKey, async (): Promise<TPlanTuple | null> => {
+      const epoch = currentPolicyEpoch();
       let refreshed: Awaited<ReturnType<typeof fetchPlan>>;
       try {
         refreshed = await fetchPlan(
@@ -990,10 +1031,12 @@ export const handleInference = async (req: Request): Promise<Response> => {
           0,
           undefined,
           mediaSurface ?? undefined,
+          { refresh: true },
         );
       } catch {
         return null;
       }
+      if (epoch !== currentPolicyEpoch()) return null;
       observePolicyRevision(refreshed.policy_rev);
       // A held plan is bound to a reservation; it is never kept warm.
       if (refreshed.hold_nonce !== undefined) return null;

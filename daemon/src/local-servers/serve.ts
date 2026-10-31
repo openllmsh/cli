@@ -27,6 +27,7 @@ import {
   clientWireOf,
   UnsupportedContentError,
 } from "@openllmsh/wire/providers/upstream-request";
+import { currentHoldNonce, trackHoldRecord } from "../access-hold-context";
 import {
   deliverChunkStream,
   deliverJsonResponse,
@@ -199,16 +200,19 @@ export const recordLocal = (
   // Team hops: attribute the row to the consumer and charge the share cap,
   // exactly as the walker's `report` does.
   const teamGrant = currentTeamGrantToken();
-  void recordRequest(
+  const holdNonce = row.hold_nonce ?? currentHoldNonce();
+  const record = recordRequest(
     {
       ...row,
       idempotency_key: row.idempotency_key ?? crypto.randomUUID(),
       ...(row.team_grant === undefined && teamGrant !== null
         ? { team_grant: teamGrant }
         : {}),
+      ...(holdNonce === null ? {} : { hold_nonce: holdNonce }),
     },
     origin,
   );
+  if (holdNonce !== null) trackHoldRecord(holdNonce, record);
   const teamFields = currentTeamGrantFieldsOf();
   if (
     row.status === "success" &&

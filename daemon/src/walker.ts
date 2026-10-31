@@ -184,7 +184,7 @@ import {
   UnsupportedContentError,
 } from "@openllmsh/wire/providers/upstream-request";
 import { Schema } from "effect";
-import { currentHoldNonce } from "./access-hold-context";
+import { currentHoldNonce, trackHoldRecord } from "./access-hold-context";
 import { accountIndexes } from "./account-models";
 import { readRoster } from "./account-roster";
 import { AccountKeyedMap } from "./account-scope";
@@ -823,7 +823,10 @@ export const report = (
       ? { hold_nonce: holdNonce }
       : {}),
   };
-  void recordRequest(recordedRow, origin);
+  const record = recordRequest(recordedRow, origin);
+  if (recordedRow.hold_nonce !== undefined) {
+    trackHoldRecord(recordedRow.hold_nonce, record);
+  }
   // Local team cap: charge actual tokens only on success. Failed/aborted
   // hops never touch the counter (admit is a soft check).
   const teamFields = currentTeamGrantFieldsOf();

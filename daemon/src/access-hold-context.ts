@@ -17,3 +17,43 @@ export const withHoldNonce = <T>(nonce: string, run: () => T): T =>
 
 export const currentHoldNonce = (): string | null =>
   holdContext.getStore() ?? null;
+
+const pendingRecords = new Map<string, Set<Promise<void>>>();
+
+export const trackHoldRecord = (nonce: string, record: Promise<void>): void => {
+  const pending = pendingRecords.get(nonce) ?? new Set<Promise<void>>();
+  pendingRecords.set(nonce, pending);
+  pending.add(record);
+  void record.then(
+    () => {
+      pending.delete(record);
+      if (pending.size === 0 && pendingRecords.get(nonce) === pending)
+        pendingRecords.delete(nonce);
+    },
+    () => {
+      pending.delete(record);
+      if (pending.size === 0 && pendingRecords.get(nonce) === pending)
+        pendingRecords.delete(nonce);
+    },
+  );
+};
+
+export const waitForHoldRecords = async (
+  nonce: string,
+  timeoutMs = 2000,
+): Promise<void> => {
+  const pending = pendingRecords.get(nonce);
+  if (pending === undefined) return;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    await Promise.race([
+      Promise.allSettled([...pending]),
+      new Promise<void>((resolve) => {
+        timer = setTimeout(resolve, timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+    if (pendingRecords.get(nonce) === pending) pendingRecords.delete(nonce);
+  }
+};

@@ -92,6 +92,10 @@ let warmTeamPlanTimer: ReturnType<typeof setInterval> | null = null;
 
 /** Newest access-policy revision seen from bootstrap or a plan response. */
 let knownPolicyRev: string | null = null;
+let policyEpoch = 0;
+
+/** Capture before a fetch; opaque revisions have no inherent ordering. */
+export const currentPolicyEpoch = (): number => policyEpoch;
 
 /**
  * Record the key's current access-policy revision (bootstrap
@@ -104,6 +108,8 @@ let knownPolicyRev: string | null = null;
 export const observePolicyRevision = (rev: string | null): void => {
   if (rev === knownPolicyRev) return;
   knownPolicyRev = rev;
+  policyEpoch += 1;
+  inFlight.clear();
   for (const [alias, entry] of cache) {
     if (entry.policyRev !== rev) cache.delete(alias);
   }
@@ -168,7 +174,7 @@ export type TPlanLoadShared<TShared> = {
  */
 export const loadPlanWithShared = async <TShared>(
   alias: string,
-  loader: () => Promise<{
+  loader: (background: boolean) => Promise<{
     readonly store: TPlanTuple | null;
     readonly shared: TShared;
   }>,
@@ -192,7 +198,7 @@ export const loadPlanWithShared = async <TShared>(
   let op!: Promise<TInFlightShared>;
   op = Promise.resolve().then(async (): Promise<TInFlightShared> => {
     try {
-      const { store, shared } = await loader();
+      const { store, shared } = await loader(hit !== null);
       if (store === null) {
         return { entry: lookupPlan(alias), shared };
       }
@@ -326,6 +332,7 @@ export const warmTeamPlanSize = (): number => warmTeamPlans.size;
 export const clearPlanCache = (): void => {
   cacheGeneration += 1;
   // Forget the revision too: the next bootstrap or plan response sets it.
+  if (knownPolicyRev !== null) policyEpoch += 1;
   knownPolicyRev = null;
   cache.clear();
   inFlight.clear();

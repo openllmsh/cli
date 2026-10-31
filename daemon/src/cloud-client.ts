@@ -317,9 +317,11 @@ export const fetchPlan = async (
   options?: {
     readonly hopGrant?: string;
     readonly exclude?: readonly string[];
+    readonly refresh?: boolean;
   },
 ): Promise<TDaemonPlanResponse> => {
   const params = new URLSearchParams({ model });
+  if (options?.refresh) params.set("refresh", "1");
   for (const excluded of options?.exclude ?? [])
     params.append("exclude", excluded);
   if (estTokens > 0) params.set("est_tokens", String(Math.ceil(estTokens)));
