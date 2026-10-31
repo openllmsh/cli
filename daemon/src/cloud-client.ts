@@ -307,8 +307,14 @@ export const fetchBootstrap = async (): Promise<TDaemonBootstrap> => {
  * can fall back to passthrough.
  */
 /** Auth headers for a plan fetch, plus the origin's hop grant when tunneled. */
-const planHeaders = (hopGrant?: string): Headers => {
+const planHeaders = (hopGrant?: string, callerKey?: string): Headers => {
   const headers = new Headers(authHeaders());
+  if (callerKey !== undefined && hopGrant === undefined) {
+    const deviceAuthorization = headers.get("authorization");
+    if (deviceAuthorization === null) throw new NoApiKeyError();
+    headers.set("x-openllm-device-authorization", deviceAuthorization);
+    headers.set("authorization", `Bearer ${callerKey}`);
+  }
   // This daemon binds and reports cap holds; without it the cloud refuses
   // capped plans and grant redemption with daemon_outdated.
   headers.set(DAEMON_CAPS_HEADER, DAEMON_CAPS_HOLDS);
@@ -323,6 +329,7 @@ export const fetchPlan = async (
   surface?: TPlanSurface,
   options?: {
     readonly hopGrant?: string;
+    readonly callerKey?: string;
     readonly exclude?: readonly string[];
     readonly refresh?: boolean;
   },
@@ -343,7 +350,11 @@ export const fetchPlan = async (
     params.set(PLAN_SURFACE_QUERY_KEY, encodePlanSurfaceQueryValue(surface));
   const resp = await cloudFetch(
     cloudUrl(`/api/daemon/plan?${params.toString()}`),
-    { method: "GET", headers: planHeaders(options?.hopGrant), signal },
+    {
+      method: "GET",
+      headers: planHeaders(options?.hopGrant, options?.callerKey),
+      signal,
+    },
   );
   if (resp.status === 401 || resp.status === 403) {
     throw new InvalidApiKeyError(resp.status);
@@ -361,6 +372,7 @@ export const fetchMediaDefaultPlan = async (
   request: TMediaDefaultRequest,
   signal?: AbortSignal,
   hopGrant?: string,
+  callerKey?: string,
 ): Promise<TDaemonPlanResponse> => {
   const validated = decodeMediaDefault(request);
   const query = encodeMediaDefaultPlanQuery(validated);
@@ -369,7 +381,7 @@ export const fetchMediaDefaultPlan = async (
   }
   const resp = await cloudFetch(cloudUrl(`/api/daemon/plan?${query}`), {
     method: "GET",
-    headers: planHeaders(hopGrant),
+    headers: planHeaders(hopGrant, callerKey),
     signal,
   });
   if (resp.status >= 400 && resp.status < 500) {
@@ -387,6 +399,7 @@ export const fetchVideoJobPlan = async (
   request: TVideoJobPlanRequest,
   signal?: AbortSignal,
   hopGrant?: string,
+  callerKey?: string,
 ): Promise<TDaemonPlanResponse> => {
   const validated = decodeVideoJobPlan(request);
   const query = encodeVideoJobPlanQuery(validated);
@@ -395,7 +408,7 @@ export const fetchVideoJobPlan = async (
   }
   const resp = await cloudFetch(cloudUrl(`/api/daemon/plan?${query}`), {
     method: "GET",
-    headers: planHeaders(hopGrant),
+    headers: planHeaders(hopGrant, callerKey),
     signal,
   });
   if (resp.status >= 400 && resp.status < 500) {
