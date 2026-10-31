@@ -302,6 +302,13 @@ export const fetchBootstrap = async (): Promise<TDaemonBootstrap> => {
  * or executing. Throws on keyless/rejected/unreachable so the listener
  * can fall back to passthrough.
  */
+/** Auth headers for a plan fetch, plus the origin's hop grant when tunneled. */
+const planHeaders = (hopGrant?: string): Headers => {
+  const headers = new Headers(authHeaders());
+  if (hopGrant !== undefined) headers.set(HOP_GRANT_HEADER, hopGrant);
+  return headers;
+};
+
 export const fetchPlan = async (
   model: string,
   estTokens: number,
@@ -325,12 +332,9 @@ export const fetchPlan = async (
   // plan cache key and an unbumped daemon keep behaving identically.
   if (surface !== undefined)
     params.set(PLAN_SURFACE_QUERY_KEY, encodePlanSurfaceQueryValue(surface));
-  const headers = new Headers(authHeaders());
-  if (options?.hopGrant !== undefined)
-    headers.set(HOP_GRANT_HEADER, options.hopGrant);
   const resp = await cloudFetch(
     cloudUrl(`/api/daemon/plan?${params.toString()}`),
-    { method: "GET", headers, signal },
+    { method: "GET", headers: planHeaders(options?.hopGrant), signal },
   );
   if (resp.status === 401 || resp.status === 403) {
     throw new InvalidApiKeyError(resp.status);
@@ -347,6 +351,7 @@ export const fetchPlan = async (
 export const fetchMediaDefaultPlan = async (
   request: TMediaDefaultRequest,
   signal?: AbortSignal,
+  hopGrant?: string,
 ): Promise<TDaemonPlanResponse> => {
   const validated = decodeMediaDefault(request);
   const query = encodeMediaDefaultPlanQuery(validated);
@@ -355,7 +360,7 @@ export const fetchMediaDefaultPlan = async (
   }
   const resp = await cloudFetch(cloudUrl(`/api/daemon/plan?${query}`), {
     method: "GET",
-    headers: authHeaders(),
+    headers: planHeaders(hopGrant),
     signal,
   });
   if (resp.status >= 400 && resp.status < 500) {
@@ -372,6 +377,7 @@ export const fetchMediaDefaultPlan = async (
 export const fetchVideoJobPlan = async (
   request: TVideoJobPlanRequest,
   signal?: AbortSignal,
+  hopGrant?: string,
 ): Promise<TDaemonPlanResponse> => {
   const validated = decodeVideoJobPlan(request);
   const query = encodeVideoJobPlanQuery(validated);
@@ -380,7 +386,7 @@ export const fetchVideoJobPlan = async (
   }
   const resp = await cloudFetch(cloudUrl(`/api/daemon/plan?${query}`), {
     method: "GET",
-    headers: authHeaders(),
+    headers: planHeaders(hopGrant),
     signal,
   });
   if (resp.status >= 400 && resp.status < 500) {

@@ -65,6 +65,8 @@ export type TCachedPlan = {
   /** Signed context-overflow policy; null preserves bootstrap/default hop. */
   readonly contextOverflowStrategy: TContextOverflowStrategy | null;
   readonly sigParam: string | null;
+  /** Access-policy revision the cloud built this plan under. */
+  readonly policyRev: string | null;
   readonly storedAtMs: number;
 };
 
@@ -88,6 +90,28 @@ type TTeamPlanWarmEntry = {
 const warmTeamPlans = new Map<string, TTeamPlanWarmEntry>();
 let warmTeamPlanTimer: ReturnType<typeof setInterval> | null = null;
 
+/** Newest access-policy revision seen from bootstrap or a plan response. */
+let knownPolicyRev: string | null = null;
+
+/**
+ * Record the key's current access-policy revision (bootstrap
+ * `key_policy_rev`, plan `policy_rev`). Every cached plan remembers the
+ * revision it was built under and is served only while that is still the
+ * current one, so a plan cached while a key had no cap is never replayed
+ * once the cloud reports the new policy — including a plan an in-flight
+ * load stores after the change.
+ */
+export const observePolicyRevision = (rev: string | null): void => {
+  if (rev === knownPolicyRev) return;
+  knownPolicyRev = rev;
+  for (const [alias, entry] of cache) {
+    if (entry.policyRev !== rev) cache.delete(alias);
+  }
+};
+
+/** Current known policy revision (tests / diagnostics). */
+export const currentPolicyRevision = (): string | null => knownPolicyRev;
+
 /** Remember the signed tuple that served `alias` (called after every verified
  *  plan fetch while the flag is on — the newest tuple wins). */
 export const storePlan = (alias: string, tuple: TPlanTuple): void => {
@@ -108,7 +132,10 @@ export const storePlan = (alias: string, tuple: TPlanTuple): void => {
 export const lookupPlan = (alias: string): TCachedPlan | null => {
   const hit = cache.get(alias);
   if (hit === undefined) return null;
-  if (Date.now() - hit.storedAtMs >= PLAN_CACHE_TTL_MS) {
+  if (
+    hit.policyRev !== knownPolicyRev ||
+    Date.now() - hit.storedAtMs >= PLAN_CACHE_TTL_MS
+  ) {
     cache.delete(alias);
     return null;
   }
@@ -294,9 +321,12 @@ export const stopTeamPlanWarmRefresh = (): void => {
 /** Current recently served team pair count (tests / diagnostics). */
 export const warmTeamPlanSize = (): number => warmTeamPlans.size;
 
-/** Drop every cached plan and the demand-driven team-plan working set. */
+/** Drop every cached plan, the known policy revision and the demand-driven
+ *  team-plan working set. */
 export const clearPlanCache = (): void => {
   cacheGeneration += 1;
+  // Forget the revision too: the next bootstrap or plan response sets it.
+  knownPolicyRev = null;
   cache.clear();
   inFlight.clear();
   warmTeamPlans.clear();

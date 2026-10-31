@@ -184,6 +184,7 @@ import {
   UnsupportedContentError,
 } from "@openllmsh/wire/providers/upstream-request";
 import { Schema } from "effect";
+import { currentHoldNonce } from "./access-hold-context";
 import { accountIndexes } from "./account-models";
 import { readRoster } from "./account-roster";
 import { AccountKeyedMap } from "./account-scope";
@@ -498,6 +499,8 @@ export const verifyPlanSignature = (
  * signing key — the ONE check shared by the walker's 403 gate, the
  * listener's plan-cache admission, and the compact passthrough's
  * model-pin trust. True in unsigned dev mode (no key configured).
+ * `holdNonce` defaults to the request's cap hold (`access-hold-context.ts`),
+ * so every walker verifies a capped key's one-hop plan without plumbing it.
  */
 export const planSignatureOk = (
   planParam: string | null,
@@ -516,7 +519,7 @@ export const planSignatureOk = (
         pmidsParam ?? "",
         originParam ?? "",
         contextOverflowStrategy,
-        holdNonce,
+        holdNonce === undefined ? currentHoldNonce() : holdNonce,
       ),
       sigParam,
       sigKey,
@@ -803,6 +806,7 @@ export const report = (
   accountHash?: string,
 ): void => {
   const teamGrant = currentTeamGrantToken();
+  const holdNonce = currentHoldNonce();
   const recordedRow: TDaemonRecordRequest = {
     ...row,
     idempotency_key: row.idempotency_key ?? randomUUID(),
@@ -814,6 +818,9 @@ export const report = (
       : {}),
     ...(row.team_grant === undefined && teamGrant !== null
       ? { team_grant: teamGrant }
+      : {}),
+    ...(row.hold_nonce === undefined && holdNonce !== null
+      ? { hold_nonce: holdNonce }
       : {}),
   };
   void recordRequest(recordedRow, origin);

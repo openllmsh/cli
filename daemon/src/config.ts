@@ -38,7 +38,7 @@ import {
 import { daemonApiKeyId } from "./env";
 import { loadIdentityKey } from "./keypair";
 import { withoutCommandReplayContext } from "./op-context";
-import { clearPlanCache } from "./plan-cache";
+import { clearPlanCache, observePolicyRevision } from "./plan-cache";
 
 /** Empty bootstrap row for offline/seeded hosts and harnesses. */
 export const EMPTY_DAEMON_BOOTSTRAP: TDaemonBootstrap = {
@@ -46,6 +46,7 @@ export const EMPTY_DAEMON_BOOTSTRAP: TDaemonBootstrap = {
   provider_prefixes: [],
   user_fallback_groups: [],
   user_model_fallback_bindings: [],
+  key_policy_rev: null,
 };
 
 const EMPTY = EMPTY_DAEMON_BOOTSTRAP;
@@ -129,6 +130,7 @@ export const refreshBootstrap = (): Promise<boolean> =>
       // A fresh snapshot may carry new routing config — drop any cached signed
       // plans so a stale chain never outlives the config that produced it.
       clearPlanCache();
+      observePolicyRevision(next.key_policy_rev ?? null);
       // Pin the seed-gated device-access verifier when the cloud includes it.
       // A cloud-sent null never clears an existing pin (only a local
       // confirmation can). Absent (older cloud) leaves the last-known pin

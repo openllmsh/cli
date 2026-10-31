@@ -19,6 +19,7 @@ import {
   AnthropicRequest,
   ChatCompletionRequest,
   decodeVideoId,
+  HOP_GRANT_HEADER,
   ImageGenerationInput,
   ImageGenerationRequest,
   isLocalKeyProviderSlug,
@@ -33,6 +34,7 @@ import {
 } from "@openllmsh/tunnel";
 import { estimateBodyTokens } from "@openllmsh/wire/lib/canonical/token-estimate";
 import { Schema } from "effect";
+import { withHoldNonce } from "./access-hold-context";
 import {
   runAudioSpeechWalker,
   runAudioTranscriptionWalker,
@@ -73,6 +75,7 @@ import {
   loadPlanWithShared,
   lookupPlan,
   noteTeamPlanServed,
+  observePolicyRevision,
   planNeedsRefresh,
 } from "./plan-cache";
 import { isTeamHop, tryDirectTeamLeg } from "./team-leg-client";
@@ -97,6 +100,17 @@ import {
 } from "./walker";
 
 const parseAnthropicRequest = Schema.decodeUnknownSync(AnthropicRequest);
+
+/** Most hops a capped direct request reserves before giving up. */
+const MAX_CAPPED_HOP_ATTEMPTS = 4;
+
+/** Statuses worth reserving another hop for: the hop, not the request, failed. */
+const isRetryableHopStatus = (status: number): boolean =>
+  status === 401 ||
+  status === 403 ||
+  status === 408 ||
+  status === 429 ||
+  status >= 500;
 const parseOpenAIRequest = Schema.decodeUnknownSync(ChatCompletionRequest);
 const parseImageRequest = Schema.decodeUnknownSync(ImageGenerationRequest);
 const parseImageInput = Schema.decodeUnknownSync(ImageGenerationInput);
@@ -411,10 +425,22 @@ export const handleInference = async (req: Request): Promise<Response> => {
   // entry would serve an image request the chat plan it cached a moment
   // earlier. Encode the pair structurally: concatenating with a colon
   // would collide with a chat alias literally named `image:grok`.
+  // A request origin tunneled with a hop grant is bound to one cap
+  // reservation: its plan is never read from or written to the shared cache.
+  const hopGrant = req.headers.get(HOP_GRANT_HEADER);
   const planCacheKey =
-    explicitAlias === null
+    explicitAlias === null || hopGrant !== null
       ? null
       : JSON.stringify([mediaSurface ?? "chat", explicitAlias]);
+  // Set when the cloud bound this request's plan to a cap hold; the walk then
+  // runs inside `withHoldNonce` so signatures verify and records settle it.
+  let holdNonce: string | null = null;
+  // Hops a capped direct request already failed on; the cloud skips them
+  // when it reserves the next one.
+  const excludedHops: string[] = [];
+  // Set inside the explicit-model plan block: reserves the next hop for a
+  // capped direct request after the held one failed.
+  let reserveNextHop: (() => Promise<Response | null>) | null = null;
   // Never cache model-less defaults under one empty alias — selection
   // depends on surface/options and current availability. Soft-stale hits
   // are served immediately; `loadPlan` below coalesces concurrent misses
@@ -527,7 +553,11 @@ export const handleInference = async (req: Request): Promise<Response> => {
       isEmbeddings && isLocalServerSlug(explicitAlias.split("/")[0] ?? "");
 
     type TPlanFetchOutcome =
-      | { readonly kind: "tuple"; readonly tuple: TPlanTuple }
+      | {
+          readonly kind: "tuple";
+          readonly tuple: TPlanTuple;
+          readonly holdNonce: string | null;
+        }
       | { readonly kind: "passthrough" }
       | { readonly kind: "response"; readonly response: Response }
       | { readonly kind: "throw"; readonly error: unknown }
@@ -553,6 +583,10 @@ export const handleInference = async (req: Request): Promise<Response> => {
           // chat one the cloud's chat default would pick. `null` (a chat or
           // compact request) omits it and keeps the historical default.
           mediaSurface ?? undefined,
+          {
+            ...(hopGrant === null ? {} : { hopGrant }),
+            exclude: excludedHops,
+          },
         );
       } catch (err) {
         const outcome = handlePlanFetchError(err, explicitAlias, signal);
@@ -566,14 +600,17 @@ export const handleInference = async (req: Request): Promise<Response> => {
         if (embeddingsLocalFallback) return { kind: "embeddings-local" };
         return { kind: "passthrough" };
       }
+      observePolicyRevision(fetched.policy_rev);
       const fetchedContextOverflowStrategy =
         fetched.context_overflow_strategy ?? null;
+      const fetchedHoldNonce = fetched.hold_nonce ?? null;
       const verified = planSignatureOk(
         fetched.plan,
         fetched.pmids,
         fetched.origin,
         fetchedContextOverflowStrategy,
         fetched.sig,
+        fetchedHoldNonce,
       );
       const hasDaemonOnlyHop =
         verified &&
@@ -604,7 +641,9 @@ export const handleInference = async (req: Request): Promise<Response> => {
           originParam: fetched.origin,
           contextOverflowStrategy: fetchedContextOverflowStrategy,
           sigParam: fetched.sig,
+          policyRev: fetched.policy_rev,
         },
+        holdNonce: fetchedHoldNonce,
       };
     };
 
@@ -635,6 +674,7 @@ export const handleInference = async (req: Request): Promise<Response> => {
       if (outcome.kind === "throw") throw outcome.error;
       if (outcome.kind === "response") return outcome.response;
       if (outcome.kind === "tuple") {
+        holdNonce = outcome.holdNonce;
         planParam = outcome.tuple.planParam;
         pmidsParam = outcome.tuple.pmidsParam;
         originParam = outcome.tuple.originParam;
@@ -650,20 +690,33 @@ export const handleInference = async (req: Request): Promise<Response> => {
       return withCors(req, await forwardTeamOrOrigin());
     };
 
+    if (hopGrant === null) {
+      reserveNextHop = async (): Promise<Response | null> =>
+        applyPlanFetchOutcome(await resolveFetched(req.signal));
+    }
+
     if (planCacheEnabled() && planCacheKey !== null) {
+      let ledFlight = false;
       const { entry, shared } = await loadPlanWithShared<TPlanFetchOutcome>(
         planCacheKey,
         async () => {
+          ledFlight = true;
           // Shared flight: cloud timeout only (no per-request abort).
           const outcome = await resolveFetched(undefined);
-          if (outcome.kind === "tuple") {
+          // A held plan is bound to one reservation: never cache it.
+          if (outcome.kind === "tuple" && outcome.holdNonce === null) {
             return { store: outcome.tuple, shared: outcome };
           }
           return { store: null, shared: outcome };
         },
       );
       if (shared !== null) {
-        const applied = await applyPlanFetchOutcome(shared);
+        // A waiter that joined someone else's held flight reserves its own.
+        const own =
+          !ledFlight && shared.kind === "tuple" && shared.holdNonce !== null
+            ? await resolveFetched(req.signal)
+            : shared;
+        const applied = await applyPlanFetchOutcome(own);
         if (applied !== null) return applied;
       } else if (entry !== null) {
         // Soft-stale immediate serve (background refresh still running).
@@ -700,7 +753,11 @@ export const handleInference = async (req: Request): Promise<Response> => {
     let fetched: Awaited<ReturnType<typeof fetchMediaDefaultPlan>> | null =
       null;
     try {
-      fetched = await fetchMediaDefaultPlan(mediaRequest, req.signal);
+      fetched = await fetchMediaDefaultPlan(
+        mediaRequest,
+        req.signal,
+        hopGrant ?? undefined,
+      );
     } catch (err) {
       if (err instanceof MediaDefaultPlanError) {
         logWarn(
@@ -731,14 +788,17 @@ export const handleInference = async (req: Request): Promise<Response> => {
         errorJson(502, "Media default plan is unavailable", "plan_error"),
       );
     }
+    observePolicyRevision(fetched.policy_rev);
     const fetchedContextOverflowStrategy =
       fetched.context_overflow_strategy ?? null;
+    holdNonce = fetched.hold_nonce ?? null;
     const verified = planSignatureOk(
       fetched.plan,
       fetched.pmids,
       fetched.origin,
       fetchedContextOverflowStrategy,
       fetched.sig,
+      holdNonce,
     );
     if (!verified) {
       return withCors(req, errorJson(403, "invalid or missing plan signature"));
@@ -783,6 +843,7 @@ export const handleInference = async (req: Request): Promise<Response> => {
       fetched = await fetchVideoJobPlan(
         { model: payload.m, provider: payload.p },
         req.signal,
+        hopGrant ?? undefined,
       );
     } catch (err) {
       if (err instanceof MediaDefaultPlanError) {
@@ -805,14 +866,17 @@ export const handleInference = async (req: Request): Promise<Response> => {
         errorJson(502, "Video job plan is unavailable", "plan_error"),
       );
     }
+    observePolicyRevision(fetched.policy_rev);
     const fetchedContextOverflowStrategy =
       fetched.context_overflow_strategy ?? null;
+    holdNonce = fetched.hold_nonce ?? null;
     const verified = planSignatureOk(
       fetched.plan,
       fetched.pmids,
       fetched.origin,
       fetchedContextOverflowStrategy,
       fetched.sig,
+      holdNonce,
     );
     if (!verified) {
       return withCors(req, errorJson(403, "invalid or missing plan signature"));
@@ -849,47 +913,69 @@ export const handleInference = async (req: Request): Promise<Response> => {
         })
       : req;
 
-  const walkArgs = {
-    req: walkReq,
-    surface,
-    endpoint,
-    rawBody,
-    rawBytes,
-    planParam,
-    pmidsParam,
-    originParam,
-    contextOverflowStrategy,
-    sigParam,
-    startedAt,
+  const walkOnce = (): Promise<Response> => {
+    const walkArgs = {
+      req: walkReq,
+      surface,
+      endpoint,
+      rawBody,
+      rawBytes,
+      planParam,
+      pmidsParam,
+      originParam,
+      contextOverflowStrategy,
+      sigParam,
+      startedAt,
+    };
+    return videoOperation === "create"
+      ? runVideoCreate(walkArgs)
+      : videoOperation === "poll"
+        ? runVideoPoll(walkArgs, videoId)
+        : videoOperation === "content"
+          ? runVideoContent(walkArgs, videoId)
+          : videoOperation === "cancel"
+            ? runVideoCancel(walkArgs, videoId)
+            : isResponsesCompact
+              ? runResponsesCompact(walkArgs)
+              : isCountTokens
+                ? runCountTokens(walkArgs)
+                : isImages
+                  ? runImageWalker(walkArgs)
+                  : isImageEdits
+                    ? runImageEditWalker(walkArgs)
+                    : isTranscriptions
+                      ? runAudioTranscriptionWalker(walkArgs, multipart)
+                      : isSpeech
+                        ? runAudioSpeechWalker(walkArgs)
+                        : isEmbeddings
+                          ? runEmbeddings(walkArgs)
+                          : runWalker(walkArgs);
   };
-  const response = await (videoOperation === "create"
-    ? runVideoCreate(walkArgs)
-    : videoOperation === "poll"
-      ? runVideoPoll(walkArgs, videoId)
-      : videoOperation === "content"
-        ? runVideoContent(walkArgs, videoId)
-        : videoOperation === "cancel"
-          ? runVideoCancel(walkArgs, videoId)
-          : isResponsesCompact
-            ? runResponsesCompact(walkArgs)
-            : isCountTokens
-              ? runCountTokens(walkArgs)
-              : isImages
-                ? runImageWalker(walkArgs)
-                : isImageEdits
-                  ? runImageEditWalker(walkArgs)
-                  : isTranscriptions
-                    ? runAudioTranscriptionWalker(walkArgs, multipart)
-                    : isSpeech
-                      ? runAudioSpeechWalker(walkArgs)
-                      : isEmbeddings
-                        ? runEmbeddings(walkArgs)
-                        : runWalker(walkArgs));
+  const walk = (): Promise<Response> =>
+    holdNonce === null ? walkOnce() : withHoldNonce(holdNonce, walkOnce);
+  let response = await walk();
+  // A capped key's direct request holds one hop at a time. When that hop
+  // fails, reserve the next one (the failed hop's record refunds its hold)
+  // instead of giving up; origin-tunneled requests fall back on origin.
+  while (
+    holdNonce !== null &&
+    reserveNextHop !== null &&
+    planParam !== null &&
+    isRetryableHopStatus(response.status) &&
+    excludedHops.length < MAX_CAPPED_HOP_ATTEMPTS - 1
+  ) {
+    excludedHops.push(planParam);
+    await response.body?.cancel().catch(() => undefined);
+    const stopped = await reserveNextHop();
+    if (stopped !== null) return stopped;
+    response = await walk();
+  }
 
   // Only a successful team-tunnel response earns a warm slot. The refresher
   // retains just the model alias and surface; never the peer's prompt/body.
   if (
     response.ok &&
+    holdNonce === null &&
     currentTeamGrantToken() !== null &&
     planCacheEnabled() &&
     planCacheKey !== null &&
@@ -908,6 +994,9 @@ export const handleInference = async (req: Request): Promise<Response> => {
       } catch {
         return null;
       }
+      observePolicyRevision(refreshed.policy_rev);
+      // A held plan is bound to a reservation; it is never kept warm.
+      if (refreshed.hold_nonce !== undefined) return null;
       const refreshedContextOverflowStrategy =
         refreshed.context_overflow_strategy ?? null;
       const verified = planSignatureOk(
@@ -934,6 +1023,7 @@ export const handleInference = async (req: Request): Promise<Response> => {
         originParam: refreshed.origin,
         contextOverflowStrategy: refreshedContextOverflowStrategy,
         sigParam: refreshed.sig,
+        policyRev: refreshed.policy_rev,
       };
     });
   }

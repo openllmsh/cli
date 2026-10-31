@@ -79,6 +79,10 @@ const authorizeRealtimeOpenViaCloudPlan = async (
   } catch {
     return { ok: false };
   }
+  // Realtime sessions have no per-hop usage record to settle a cap hold, so
+  // a capped key (the cloud bound the plan to a hold) can't open one. The
+  // unused hold expires with the reservation sweep.
+  if (fetched.hold_nonce !== undefined) return { ok: false };
   const overflow = fetched.context_overflow_strategy ?? null;
   if (
     !planSignatureOk(
