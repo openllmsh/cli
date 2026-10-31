@@ -10,13 +10,64 @@
 
 import { AsyncLocalStorage } from "node:async_hooks";
 
-const holdContext = new AsyncLocalStorage<string>();
+type THold = {
+  readonly nonce: string;
+  /** Signed output budget of the held plan; null when the plan has none. */
+  readonly maxOutputTokens: number | null;
+};
 
-export const withHoldNonce = <T>(nonce: string, run: () => T): T =>
-  holdContext.run(nonce, run);
+const holdContext = new AsyncLocalStorage<THold>();
+
+export const withHoldNonce = <T>(
+  nonce: string,
+  run: () => T,
+  maxOutputTokens: number | null = null,
+): T => holdContext.run({ nonce, maxOutputTokens }, run);
 
 export const currentHoldNonce = (): string | null =>
-  holdContext.getStore() ?? null;
+  holdContext.getStore()?.nonce ?? null;
+
+export const currentHoldOutputLimit = (): number | null =>
+  holdContext.getStore()?.maxOutputTokens ?? null;
+
+/** Clamp every provided wire spelling before any hop encodes or forwards it. */
+export const clampHoldOutputLimit = (
+  body: unknown,
+  surface: "chat_completions" | "messages" | "responses",
+  limit: number | null,
+): unknown => {
+  if (
+    limit === null ||
+    body === null ||
+    typeof body !== "object" ||
+    Array.isArray(body)
+  )
+    return body;
+  const result: Record<string, unknown> = { ...body };
+  const keys = [
+    "max_tokens",
+    "max_completion_tokens",
+    "max_output_tokens",
+  ] as const;
+  let lowest = limit;
+  for (const key of keys) {
+    if (result[key] !== undefined && result[key] !== null) {
+      const value = result[key];
+      const clamped =
+        typeof value === "number" && Number.isFinite(value)
+          ? Math.min(value, limit)
+          : limit;
+      result[key] = clamped;
+      lowest = Math.min(lowest, clamped);
+    }
+  }
+  const target = surface === "responses" ? "max_output_tokens" : "max_tokens";
+  const hasTarget =
+    result[target] != null ||
+    (surface === "chat_completions" && result.max_completion_tokens != null);
+  if (!hasTarget) result[target] = lowest;
+  return result;
+};
 
 const pendingRecords = new Map<string, Set<Promise<void>>>();
 

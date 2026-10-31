@@ -184,7 +184,12 @@ import {
   UnsupportedContentError,
 } from "@openllmsh/wire/providers/upstream-request";
 import { Schema } from "effect";
-import { currentHoldNonce, trackHoldRecord } from "./access-hold-context";
+import {
+  clampHoldOutputLimit,
+  currentHoldNonce,
+  currentHoldOutputLimit,
+  trackHoldRecord,
+} from "./access-hold-context";
 import { accountIndexes } from "./account-models";
 import { readRoster } from "./account-roster";
 import { AccountKeyedMap } from "./account-scope";
@@ -509,6 +514,7 @@ export const planSignatureOk = (
   contextOverflowStrategy: TContextOverflowStrategy | null,
   sigParam: string | null,
   holdNonce?: string | null,
+  maxOutputTokens?: number | null,
 ): boolean => {
   const sigKey = planSigningKey();
   return (
@@ -520,6 +526,9 @@ export const planSignatureOk = (
         originParam ?? "",
         contextOverflowStrategy,
         holdNonce === undefined ? currentHoldNonce() : holdNonce,
+        maxOutputTokens === undefined
+          ? currentHoldOutputLimit()
+          : maxOutputTokens,
       ),
       sigParam,
       sigKey,
@@ -2640,6 +2649,19 @@ const walkPlan = async (
   hops: ReadonlyArray<THop>,
   contextOverflowStrategy: TContextOverflowStrategy,
 ): Promise<Response> => {
+  const limitedBody = clampHoldOutputLimit(
+    args.rawBody,
+    args.surface,
+    currentHoldOutputLimit(),
+  );
+  if (limitedBody !== args.rawBody) {
+    args = {
+      ...args,
+      rawBody: limitedBody,
+      rawBytes: new TextEncoder().encode(JSON.stringify(limitedBody))
+        .buffer as ArrayBuffer,
+    };
+  }
   walkCounter += 1;
   const walkSessionKey = `walk-${walkCounter}`;
   const hopRetryDelayMs = args.hopRetryDelayMs ?? DEFAULT_HOP_RETRY_DELAY_MS;

@@ -436,6 +436,7 @@ export const handleInference = async (req: Request): Promise<Response> => {
   // Set when the cloud bound this request's plan to a cap hold; the walk then
   // runs inside `withHoldNonce` so signatures verify and records settle it.
   let holdNonce: string | null = null;
+  let maxOutputTokens: number | null = null;
   // Hops a capped direct request already failed on; the cloud skips them
   // when it reserves the next one.
   const excludedHops: string[] = [];
@@ -558,6 +559,7 @@ export const handleInference = async (req: Request): Promise<Response> => {
           readonly kind: "tuple";
           readonly tuple: TPlanTuple;
           readonly holdNonce: string | null;
+          readonly maxOutputTokens: number | null;
         }
       | { readonly kind: "passthrough" }
       | { readonly kind: "response"; readonly response: Response }
@@ -621,6 +623,7 @@ export const handleInference = async (req: Request): Promise<Response> => {
       const fetchedContextOverflowStrategy =
         fetched.context_overflow_strategy ?? null;
       const fetchedHoldNonce = fetched.hold_nonce ?? null;
+      const fetchedMaxOutputTokens = fetched.max_output_tokens ?? null;
       const verified = planSignatureOk(
         fetched.plan,
         fetched.pmids,
@@ -628,6 +631,7 @@ export const handleInference = async (req: Request): Promise<Response> => {
         fetchedContextOverflowStrategy,
         fetched.sig,
         fetchedHoldNonce,
+        fetchedMaxOutputTokens,
       );
       const hasDaemonOnlyHop =
         verified &&
@@ -661,6 +665,7 @@ export const handleInference = async (req: Request): Promise<Response> => {
           policyRev: fetched.policy_rev,
         },
         holdNonce: fetchedHoldNonce,
+        maxOutputTokens: fetchedMaxOutputTokens,
       };
     };
 
@@ -692,6 +697,7 @@ export const handleInference = async (req: Request): Promise<Response> => {
       if (outcome.kind === "response") return outcome.response;
       if (outcome.kind === "tuple") {
         holdNonce = outcome.holdNonce;
+        maxOutputTokens = outcome.maxOutputTokens;
         planParam = outcome.tuple.planParam;
         pmidsParam = outcome.tuple.pmidsParam;
         originParam = outcome.tuple.originParam;
@@ -820,6 +826,7 @@ export const handleInference = async (req: Request): Promise<Response> => {
     const fetchedContextOverflowStrategy =
       fetched.context_overflow_strategy ?? null;
     holdNonce = fetched.hold_nonce ?? null;
+    maxOutputTokens = fetched.max_output_tokens ?? null;
     const verified = planSignatureOk(
       fetched.plan,
       fetched.pmids,
@@ -827,6 +834,7 @@ export const handleInference = async (req: Request): Promise<Response> => {
       fetchedContextOverflowStrategy,
       fetched.sig,
       holdNonce,
+      maxOutputTokens,
     );
     if (!verified) {
       return withCors(req, errorJson(403, "invalid or missing plan signature"));
@@ -909,6 +917,7 @@ export const handleInference = async (req: Request): Promise<Response> => {
     const fetchedContextOverflowStrategy =
       fetched.context_overflow_strategy ?? null;
     holdNonce = fetched.hold_nonce ?? null;
+    maxOutputTokens = fetched.max_output_tokens ?? null;
     const verified = planSignatureOk(
       fetched.plan,
       fetched.pmids,
@@ -916,6 +925,7 @@ export const handleInference = async (req: Request): Promise<Response> => {
       fetchedContextOverflowStrategy,
       fetched.sig,
       holdNonce,
+      maxOutputTokens,
     );
     if (!verified) {
       return withCors(req, errorJson(403, "invalid or missing plan signature"));
@@ -991,7 +1001,9 @@ export const handleInference = async (req: Request): Promise<Response> => {
                           : runWalker(walkArgs);
   };
   const walk = (): Promise<Response> =>
-    holdNonce === null ? walkOnce() : withHoldNonce(holdNonce, walkOnce);
+    holdNonce === null
+      ? walkOnce()
+      : withHoldNonce(holdNonce, walkOnce, maxOutputTokens);
   let response = await walk();
   // A capped key's direct request holds one hop at a time. When that hop
   // fails, reserve the next one (the failed hop's record refunds its hold)
