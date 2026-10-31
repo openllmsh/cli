@@ -11,7 +11,6 @@ import {
   aspectRatioFromDimensions,
   decodeVideoId,
   describeAllowed,
-  encodeVideoId,
   isAllowedMediaOption,
   isLocalServerSlug,
   isOAuthProviderSlug,
@@ -30,7 +29,7 @@ import {
 import { originatorHeadersFrom } from "@openllmsh/wire/lib/forwarded-headers";
 import { Schema } from "effect";
 import type { TUploadMediaDiagnostic } from "./cloud-client";
-import { uploadMedia } from "./cloud-client";
+import { signVideoJobId, uploadMedia } from "./cloud-client";
 import { errorJson } from "./cors";
 import { getDelegate } from "./delegation";
 import { passthroughToOrigin } from "./forward";
@@ -596,13 +595,23 @@ export const runVideoCreate = async (args: TWalkArgs): Promise<Response> => {
       );
     }
     const createdAt = Math.floor(Date.now() / 1000);
+    // Job ids are signed by the cloud (the daemon holds no video-id key), so
+    // a poll can't re-point this upstream job at another model.
+    const signedId = await signVideoJobId(
+      { p: hop.provider, u: requestId, m: hop.modelId, c: createdAt },
+      args.originParam,
+    ).catch(() => null);
+    if (signedId === null) {
+      return stamp(
+        errorJson(
+          502,
+          "The video job was created but could not be registered; retry later",
+          "plan_error",
+        ),
+      );
+    }
     const job: TVideoJob = {
-      id: encodeVideoId({
-        p: hop.provider,
-        u: requestId,
-        m: hop.modelId,
-        c: createdAt,
-      }),
+      id: signedId,
       object: "video",
       created_at: createdAt,
       status: "queued",

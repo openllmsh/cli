@@ -22,6 +22,7 @@ import type {
   TMediaPersistError,
   TPlanSurface,
   TRelayChannelResponse,
+  TVideoIdFields,
   TVideoJobPlanRequest,
 } from "@openllmsh/protocol";
 import {
@@ -553,6 +554,24 @@ export const recordRequest = async (
   } catch {
     // swallow — usage recording is non-critical telemetry
   }
+};
+
+/**
+ * Have the cloud sign a video job this daemon created (`/api/daemon/video-id`).
+ * Null when the cloud refuses; throws on transport failure.
+ */
+export const signVideoJobId = async (
+  fields: TVideoIdFields,
+  origin?: string | null,
+): Promise<string | null> => {
+  const resp = await cloudFetch(cloudUrl("/api/daemon/video-id", origin), {
+    method: "POST",
+    headers: authHeaders(),
+    body: JSON.stringify(fields),
+  });
+  if (!resp.ok) return null;
+  const body = (await resp.json()) as { readonly id?: unknown };
+  return typeof body.id === "string" ? body.id : null;
 };
 
 /** POST one usage record. Throws on transport failure. */

@@ -911,7 +911,13 @@ const handleInferenceIn = async (
     let fetched: Awaited<ReturnType<typeof fetchVideoJobPlan>> | null = null;
     try {
       fetched = await fetchVideoJobPlan(
-        { model: payload.m, provider: payload.p },
+        {
+          model: payload.m,
+          provider: payload.p,
+          upstream_id: payload.u,
+          created_at: payload.c,
+          sig: payload.s,
+        },
         req.signal,
         hopGrant ?? undefined,
       );
