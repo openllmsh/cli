@@ -9,6 +9,8 @@
  */
 
 import { AsyncLocalStorage } from "node:async_hooks";
+import type { TOutputLimitSurface } from "@openllmsh/wire/features/output-limit-clamp";
+import { clampOutputLimitFields } from "@openllmsh/wire/features/output-limit-clamp";
 
 /**
  * What the walk has reported for this hold. Hop paths (walker, native
@@ -92,41 +94,15 @@ export const currentHoldOutputLimit = (): number | null =>
 /** Clamp every provided wire spelling before any hop encodes or forwards it. */
 export const clampHoldOutputLimit = (
   body: unknown,
-  surface: "chat_completions" | "messages" | "responses",
+  surface: TOutputLimitSurface,
   limit: number | null,
-): unknown => {
-  if (
-    limit === null ||
-    body === null ||
-    typeof body !== "object" ||
-    Array.isArray(body)
-  )
-    return body;
-  const result: Record<string, unknown> = { ...body };
-  const keys = [
-    "max_tokens",
-    "max_completion_tokens",
-    "max_output_tokens",
-  ] as const;
-  let lowest = limit;
-  for (const key of keys) {
-    if (result[key] !== undefined && result[key] !== null) {
-      const value = result[key];
-      const clamped =
-        typeof value === "number" && Number.isFinite(value)
-          ? Math.min(value, limit)
-          : limit;
-      result[key] = clamped;
-      lowest = Math.min(lowest, clamped);
-    }
-  }
-  const target = surface === "responses" ? "max_output_tokens" : "max_tokens";
-  const hasTarget =
-    result[target] != null ||
-    (surface === "chat_completions" && result.max_completion_tokens != null);
-  if (!hasTarget) result[target] = lowest;
-  return result;
-};
+): unknown =>
+  limit === null ||
+  body === null ||
+  typeof body !== "object" ||
+  Array.isArray(body)
+    ? body
+    : clampOutputLimitFields(body as Record<string, unknown>, surface, limit);
 
 const pendingRecords = new Map<string, Set<Promise<void>>>();
 
