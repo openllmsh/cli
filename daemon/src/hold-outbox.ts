@@ -13,9 +13,8 @@
  *   kept and retried with backoff.
  *
  * The nonce is the idempotency key: the cloud finalizes a hold atomically on
- * it, so a retry after a lost response is a no-op. Entries older than the
- * cloud's hold sweep deadline are dropped — by then the sweep has charged the
- * full hold and the record can only be refused.
+ * it, so a retry after a lost response is a no-op. Keep entries until the
+ * cloud answers definitively: the sweep can run later than its deadline.
  */
 import {
   appendFileSync,
@@ -27,8 +26,6 @@ import { join } from "node:path";
 import type { TDaemonRecordRequest } from "@openllmsh/protocol";
 import { stateDir } from "./env";
 
-/** Mirrors the cloud's `HOLD_SWEEP_DELAY_MS` (one hour). */
-export const HOLD_OUTBOX_MAX_AGE_MS = 60 * 60 * 1000;
 const RETRY_BASE_MS = 2_000;
 const RETRY_MAX_MS = 60_000;
 
@@ -112,20 +109,15 @@ export const flushHoldOutbox = (): Promise<void> => {
     // Yield first so `flushing` is assigned before this body can finish.
     await Promise.resolve();
     try {
-      const now = Date.now();
       const pending = readEntries().filter(
-        (entry) =>
-          !done.has(entry.row.hold_nonce ?? "") &&
-          now - entry.queued_at < HOLD_OUTBOX_MAX_AGE_MS,
+        (entry) => !done.has(entry.row.hold_nonce ?? ""),
       );
       for (const entry of pending) {
         if (await deliver(entry)) done.add(entry.row.hold_nonce ?? "");
       }
       // Re-read: records may have been appended while delivering.
       const remaining = readEntries().filter(
-        (entry) =>
-          !done.has(entry.row.hold_nonce ?? "") &&
-          Date.now() - entry.queued_at < HOLD_OUTBOX_MAX_AGE_MS,
+        (entry) => !done.has(entry.row.hold_nonce ?? ""),
       );
       writeEntries(remaining);
       done.clear();
