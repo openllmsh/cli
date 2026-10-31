@@ -28,7 +28,10 @@ import { declaresAnthropicServerSearchTool } from "@openllmsh/wire/adapters/mess
 import { accumulateChunksToResponse } from "@openllmsh/wire/lib/streaming/accumulate";
 import { partialUsageFrom } from "@openllmsh/wire/lib/streaming/upstream-error";
 import { clientWireOf } from "@openllmsh/wire/providers/upstream-request";
-import { markHoldAmbiguous } from "../access-hold-context";
+import {
+  markHoldAmbiguous,
+  markHoldUsageReported,
+} from "../access-hold-context";
 import { cliBin, cliEnv } from "../cli-paths";
 import {
   deliverChunkStream,
@@ -875,6 +878,7 @@ export const tryServeNativeRuntime = async (
     }
     const usage = partialUsageFrom(err);
     if (usage === null) markHoldAmbiguous();
+    else markHoldUsageReported();
     params.record(
       usage === null ? ZERO_TOKENS : tokensFromResponse({ usage }),
       "error",
@@ -993,6 +997,7 @@ const serveClaudeSdkFacadeHop = async (
     if (params.signal.aborted || isClientHangUp(err)) return;
     const usage = partialUsageFrom(err);
     if (usage === null) markHoldAmbiguous();
+    else markHoldUsageReported();
     params.record(
       usage === null ? ZERO_TOKENS : tokensFromResponse({ usage }),
       "error",
@@ -1176,6 +1181,7 @@ const serveCapturedToolTurn = async (
     if (params.signal.aborted || isClientHangUp(err)) return;
     const usage = partialUsageFrom(err);
     if (usage === null) markHoldAmbiguous();
+    else markHoldUsageReported();
     params.record(
       usage === null ? ZERO_TOKENS : tokensFromResponse({ usage }),
       "error",
@@ -1303,6 +1309,7 @@ const serveCursorHop = async (
     if (params.signal.aborted || isClientHangUp(err)) return;
     const usage = partialUsageFrom(err);
     if (usage === null) markHoldAmbiguous();
+    else markHoldUsageReported();
     params.record(
       usage === null ? ZERO_TOKENS : tokensFromResponse({ usage }),
       "error",
@@ -1388,6 +1395,7 @@ const serveAntigravityHop = async (
     if (params.signal.aborted || isClientHangUp(err)) return;
     const usage = partialUsageFrom(err);
     if (usage === null) markHoldAmbiguous();
+    else markHoldUsageReported();
     params.record(
       usage === null ? ZERO_TOKENS : tokensFromResponse({ usage }),
       "error",
@@ -1501,6 +1509,7 @@ const serveMuseHop = async (
     if (params.signal.aborted || isClientHangUp(err)) return;
     const usage = partialUsageFrom(err);
     if (usage === null) markHoldAmbiguous();
+    else markHoldUsageReported();
     params.record(
       usage === null ? ZERO_TOKENS : tokensFromResponse({ usage }),
       "error",

@@ -190,6 +190,7 @@ import {
   currentHoldOutputLimit,
   holdFieldsForRecord,
   markHoldAmbiguous,
+  markHoldUsageReported,
   trackHoldRecord,
 } from "./access-hold-context";
 import { accountIndexes } from "./account-models";
@@ -1570,6 +1571,8 @@ export const serveSubscription = async (
     // not an upstream failure, so it must neither walk nor write a cooldown row.
     if (args.req.signal.aborted)
       return errorJson(499, "client aborted request");
+    if (currentHoldNonce() !== null)
+      return errorJson(502, transport.failure?.reason ?? "network error");
     return hopRetry(transport.failure?.reason ?? "network error", {
       cooldownReason: "network",
     });
@@ -1638,6 +1641,8 @@ export const serveSubscription = async (
 
   if (!resp.body) {
     markHoldAmbiguous();
+    if (currentHoldNonce() !== null)
+      return errorJson(502, "empty response body");
     return hopRetry("empty response body");
   }
 
@@ -1713,6 +1718,7 @@ export const serveSubscription = async (
     if (args.req.signal.aborted) return;
     if (isClientHangUp(err)) return;
     noteWalkerStreamTerminal({ aborted: false, hang: false });
+    if (partialUsageFrom(err) !== null) markHoldUsageReported();
     report(
       {
         ...baseRow,
@@ -1732,6 +1738,17 @@ export const serveSubscription = async (
   // recorded as an ERROR row.
   const peekedError = (error: unknown): THopServeOutcome => {
     const detail = streamFailureDetail(error);
+    if (!(streamFailureCause(error) instanceof UpstreamStreamError)) {
+      markHoldAmbiguous();
+      if (currentHoldNonce() !== null) {
+        return args.req.signal.aborted
+          ? errorJson(499, "client aborted request")
+          : errorJson(
+              502,
+              `upstream stream ended before producing output: ${detail}`,
+            );
+      }
+    }
     const cls = classifyRawResponse(
       502,
       detail,

@@ -23,6 +23,7 @@ import { clampOutputLimitFields } from "@openllmsh/wire/features/output-limit-cl
 export type THoldOutcome = {
   settled: boolean;
   ambiguous: boolean;
+  partialUsageReported: boolean;
   /** Largest usage any failed attempt reported (partial output). */
   partialTokensIn: number;
   partialTokensOut: number;
@@ -42,6 +43,7 @@ const holdContext = new AsyncLocalStorage<THold>();
 export const newHoldOutcome = (): THoldOutcome => ({
   settled: false,
   ambiguous: false,
+  partialUsageReported: false,
   partialTokensIn: 0,
   partialTokensOut: 0,
   lastModel: null,
@@ -85,6 +87,11 @@ export const holdFieldsForRecord = (row: {
     Math.max(0, Math.floor(row.tokens_out)),
   );
   return {};
+};
+
+export const markHoldUsageReported = (): void => {
+  const hold = holdContext.getStore();
+  if (hold !== undefined) hold.outcome.partialUsageReported = true;
 };
 
 export const markHoldAmbiguous = (): void => {

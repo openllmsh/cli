@@ -80,6 +80,7 @@ export class HoldSession {
     const tokensOut = hold.outcome.partialTokensOut;
     const usageUnknown =
       tokensIn + tokensOut === 0 &&
+      !hold.outcome.partialUsageReported &&
       (hold.outcome.ambiguous ||
         how === "delivered" ||
         (how === "threw" && hold.walking));
