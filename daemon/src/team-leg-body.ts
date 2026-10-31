@@ -68,7 +68,7 @@ export const rewriteTeamLegBodyModel = (
   }
 };
 
-type TUsage = { readonly input: number; readonly output: number };
+type TUsage = { readonly input: number | null; readonly output: number | null };
 
 const usageOf = (value: unknown): TUsage | null => {
   if (value === null || typeof value !== "object") return null;
@@ -95,30 +95,15 @@ const usageOf = (value: unknown): TUsage | null => {
     readonly input_tokens?: unknown;
     readonly output_tokens?: unknown;
   };
-  if (
-    ![
-      data.prompt_tokens,
-      data.completion_tokens,
-      data.input_tokens,
-      data.output_tokens,
-    ].some((value) => typeof value === "number" && Number.isFinite(value))
-  )
-    return null;
-  const input =
-    typeof data.prompt_tokens === "number"
-      ? data.prompt_tokens
-      : typeof data.input_tokens === "number"
-        ? data.input_tokens
-        : 0;
-  const output =
-    typeof data.completion_tokens === "number"
-      ? data.completion_tokens
-      : typeof data.output_tokens === "number"
-        ? data.output_tokens
-        : 0;
+  const token = (primary: unknown, alternate: unknown): number | null => {
+    const value = typeof primary === "number" ? primary : alternate;
+    return typeof value === "number" && Number.isFinite(value) && value >= 0
+      ? Math.floor(value)
+      : null;
+  };
   return {
-    input: Math.max(0, Math.floor(input)),
-    output: Math.max(0, Math.floor(output)),
+    input: token(data.prompt_tokens, data.input_tokens),
+    output: token(data.completion_tokens, data.output_tokens),
   };
 };
 
@@ -131,11 +116,12 @@ export const observedTeamLegTokens = async (
   const text = new TextDecoder().decode(bytes);
   if (!eventStream) {
     const usage = usageOf(JSON.parse(text));
-    return usage === null ? null : usage.input + usage.output;
+    return usage?.input == null || usage.output === null
+      ? null
+      : usage.input + usage.output;
   }
-  let input = 0;
-  let output = 0;
-  let hasUsage = false;
+  let input: number | null = null;
+  let output: number | null = null;
   let complete = false;
   for (const line of text.split("\n")) {
     const value = line.trim();
@@ -154,14 +140,13 @@ export const observedTeamLegTokens = async (
     try {
       const next = usageOf(JSON.parse(data));
       if (next !== null) {
-        hasUsage = true;
-        input = Math.max(input, next.input);
-        output = Math.max(output, next.output);
+        if (next.input !== null) input = Math.max(input ?? 0, next.input);
+        if (next.output !== null) output = Math.max(output ?? 0, next.output);
       }
     } catch {
       // A provider can interleave non-JSON SSE control frames.
     }
   }
   if (!complete) throw new Error("team stream ended before completion");
-  return hasUsage ? input + output : null;
+  return input === null || output === null ? null : input + output;
 };

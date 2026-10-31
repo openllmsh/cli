@@ -210,8 +210,7 @@ export type TTeamLegCompletionReporter = (input: {
 
 /**
  * Run a dispatched team leg and report observed usage without delaying the
- * body. Definite client errors report zero; ambiguous responses and thrown
- * dispatches leave the hold for the full-charge sweep.
+ * body. Errors and missing usage leave the hold for the full-charge sweep.
  */
 const dispatchTeamLeg = async (
   run: () => Promise<Response>,
@@ -219,20 +218,8 @@ const dispatchTeamLeg = async (
   teamGrant: string,
   reportCompletion: TTeamLegCompletionReporter,
 ): Promise<Response> => {
-  const reportNone = (): void => {
-    void reportCompletion({ nonce: grant.n, teamGrant, actualTokens: 0 }).catch(
-      () => {},
-    );
-  };
   const response = await run();
-  if (!response.ok || response.body === null) {
-    // A locally generated 5xx or bodyless success can follow a dispatched
-    // transport failure. Leave those holds for the full-charge sweep, even
-    // when a 5xx was actually returned by the provider: prefer overcharge
-    // to refunding work that may have run.
-    if (!response.ok && response.status < 500) reportNone();
-    return response;
-  }
+  if (!response.ok || response.body === null) return response;
   const [forConsumer, forObservation] = response.body.tee();
   const eventStream =
     response.headers.get("content-type")?.includes("text/event-stream") ===
