@@ -106,7 +106,11 @@ export type TClaudeToolServeParams = {
   readonly stripSubagentIsolation: boolean;
   readonly bin: string;
   readonly env: Record<string, string>;
-  readonly record: (tokens: TNativeTokens, status: "success" | "error") => void;
+  readonly record: (
+    tokens: TNativeTokens,
+    status: "success" | "error",
+    usageUnknown?: boolean,
+  ) => void;
   /** Optional, backward-compatible continuation capability sent by the client. */
   readonly continuationToken?: string | null;
   readonly continuationIdentity?: TToolContinuationIdentity;
@@ -220,7 +224,7 @@ export const tryServeNativeToolTurn = async (
   // usage (`result.usage`, folded to the same shape as the plain-text native
   // path); idempotent continuation replays must not record that usage again.
   if (result.replayed !== true) {
-    params.record(result.usage ?? ZERO_TOKENS, "success");
+    params.record(result.usage ?? ZERO_TOKENS, "success", result.usage == null);
   }
 
   const canonicalResp = toolTurnToResponse(result, params.providerModelId);

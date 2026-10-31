@@ -27,7 +27,11 @@ import {
   clientWireOf,
   UnsupportedContentError,
 } from "@openllmsh/wire/providers/upstream-request";
-import { holdFieldsForRecord, trackHoldRecord } from "../access-hold-context";
+import {
+  holdFieldsForRecord,
+  markHoldAmbiguous,
+  trackHoldRecord,
+} from "../access-hold-context";
 import {
   deliverChunkStream,
   deliverJsonResponse,
@@ -306,6 +310,7 @@ export const serveLocalHop = async (
   );
 
   if (resp === null) {
+    markHoldAmbiguous();
     if (args.req.signal.aborted) {
       return errorJson(499, "client aborted request");
     }
@@ -373,7 +378,18 @@ export const serveLocalHop = async (
   const strip = hop.stripSubagentIsolation === true;
 
   if (clientWantsStream && resp.body !== null) {
-    const chunks = decodeOpenaiStream(resp.body, hop.providerModelId);
+    let hasUsage = false;
+    const chunks = decodeOpenaiStream(
+      resp.body,
+      hop.providerModelId,
+    ).pipeThrough(
+      new TransformStream<TChatCompletionChunk, TChatCompletionChunk>({
+        transform: (chunk, controller): void => {
+          if (chunk.usage != null) hasUsage = true;
+          controller.enqueue(chunk);
+        },
+      }),
+    );
     return deliverChunkStream(chunks, {
       surface: args.surface,
       clientWire,
@@ -389,6 +405,7 @@ export const serveLocalHop = async (
             latency_ms: Date.now() - args.startedAt,
             endpoint: args.endpoint,
             ...tokensFromResponse(canonical),
+            ...(hasUsage ? {} : { usage_unknown: true as const }),
           },
           args.originParam,
         );
@@ -415,6 +432,7 @@ export const serveLocalHop = async (
   try {
     canonical = decodeOpenaiJson(JSON.parse(text), hop.providerModelId);
   } catch {
+    markHoldAmbiguous();
     recordLocal(
       {
         model: hop.modelId,
@@ -445,6 +463,7 @@ export const serveLocalHop = async (
       latency_ms: Date.now() - args.startedAt,
       endpoint: args.endpoint,
       ...tokensFromResponse(canonical),
+      ...(canonical.usage == null ? { usage_unknown: true as const } : {}),
     },
     args.originParam,
   );
@@ -500,6 +519,7 @@ export const serveLocalEmbeddings = async (args: {
     args.signal,
   );
   if (resp === null) {
+    markHoldAmbiguous();
     if (args.signal.aborted) {
       return errorJson(499, "client aborted request");
     }

@@ -189,6 +189,7 @@ import {
   currentHoldNonce,
   currentHoldOutputLimit,
   holdFieldsForRecord,
+  markHoldAmbiguous,
   trackHoldRecord,
 } from "./access-hold-context";
 import { accountIndexes } from "./account-models";
@@ -1564,6 +1565,7 @@ export const serveSubscription = async (
       ? await cacheProbeWrap(cacheProbe, dispatch)
       : await dispatch();
   if (resp === null) {
+    markHoldAmbiguous();
     // An inbound cancellation aborts the fetch by design. It is terminal but
     // not an upstream failure, so it must neither walk nor write a cooldown row.
     if (args.req.signal.aborted)
@@ -1634,7 +1636,10 @@ export const serveSubscription = async (
     });
   }
 
-  if (!resp.body) return hopRetry("empty response body");
+  if (!resp.body) {
+    markHoldAmbiguous();
+    return hopRetry("empty response body");
+  }
 
   // Committed. Re-encode the response to the client's wire + record a
   // metadata row. Cost is NOT computed here — the cloud recomputes it from
@@ -1669,10 +1674,30 @@ export const serveSubscription = async (
     wire === "chatgpt" && process.env.OPENLLM_DEBUG_CODEX_SSE === "1"
       ? tapCodexSseStream(resp.body, Date.now())
       : resp.body;
-  const recordTokens = (u: TNativeTokens): void => {
+  const recordTokens = (u: TNativeTokens, hasUsage = true): void => {
     if (cacheProbe !== null) cacheProbeOutcome(cacheProbe, u);
-    report({ ...baseRow, latency_ms: elapsed(), ...u }, args.originParam);
+    report(
+      {
+        ...baseRow,
+        latency_ms: elapsed(),
+        ...u,
+        ...(hasUsage ? {} : { usage_unknown: true as const }),
+      },
+      args.originParam,
+    );
   };
+  let hasStreamUsage = false;
+  const trackUsage = (
+    chunks: ReadableStream<TChatCompletionChunk>,
+  ): ReadableStream<TChatCompletionChunk> =>
+    chunks.pipeThrough(
+      new TransformStream<TChatCompletionChunk, TChatCompletionChunk>({
+        transform: (chunk, controller): void => {
+          if (chunk.usage != null) hasStreamUsage = true;
+          controller.enqueue(chunk);
+        },
+      }),
+    );
   /**
    * A committed stream that died mid-flight. The hop returned 200, so
    * `baseRow.status` is "success" — it MUST be overridden here, else a severed
@@ -1803,8 +1828,8 @@ export const serveSubscription = async (
     // Meter token usage off a tee'd canonical branch (never blocks the
     // client; accurate counts come from the final chunk's usage).
     const meter = (chunks: ReadableStream<TChatCompletionChunk>): void => {
-      void accumulateChunksToResponse(chunks, hop.providerModelId)
-        .then((r) => recordTokens(tokensFromResponse(r)))
+      void accumulateChunksToResponse(trackUsage(chunks), hop.providerModelId)
+        .then((r) => recordTokens(tokensFromResponse(r), hasStreamUsage))
         .catch(recordStreamFailure);
     };
     if (passthrough) {
@@ -1862,12 +1887,12 @@ export const serveSubscription = async (
       void peeked.chunks.cancel().catch(() => undefined);
       return hopRetry("content filter refusal");
     }
-    return deliverChunkStream(peeked.chunks, {
+    return deliverChunkStream(trackUsage(peeked.chunks), {
       surface: args.surface,
       clientWire,
       providerModelId: hop.providerModelId,
       status: resp.status,
-      onResponse: (r) => recordTokens(tokensFromResponse(r)),
+      onResponse: (r) => recordTokens(tokensFromResponse(r), hasStreamUsage),
       onError: recordStreamFailure,
       stripSubagentIsolation: hop.stripSubagentIsolation,
     });
@@ -1904,7 +1929,7 @@ export const serveSubscription = async (
     let canonical: TChatCompletionResponse;
     try {
       canonical = await accumulateChunksToResponse(
-        peeked.chunks,
+        trackUsage(peeked.chunks),
         hop.providerModelId,
       );
     } catch (err) {
@@ -1914,13 +1939,14 @@ export const serveSubscription = async (
       // line instead of a bare generic message. Recorded as an ERROR row —
       // the client receives a 502, so `statusFor(resp.status)`'s "success"
       // (from the upstream 200) would misreport the outcome.
+      markHoldAmbiguous();
       recordStreamFailure(err);
       return errorJson(
         502,
         `upstream stream failed after output began: ${streamFailureDetail(err)}`,
       );
     }
-    recordTokens(tokensFromResponse(canonical));
+    recordTokens(tokensFromResponse(canonical), hasStreamUsage);
     return deliverJsonResponse(
       canonical,
       args.surface,
@@ -1943,6 +1969,7 @@ export const serveSubscription = async (
   try {
     text = await resp.text();
   } catch (err) {
+    markHoldAmbiguous();
     recordStreamFailure(err);
     return errorJson(
       502,
@@ -1962,6 +1989,9 @@ export const serveSubscription = async (
         ...ZERO_TOKENS,
         latency_ms: elapsed(),
         error: `delivered verbatim but not metered: ${reason}`,
+        ...(currentHoldNonce() === null
+          ? {}
+          : { usage_unknown: true as const }),
       },
       args.originParam,
     );
@@ -1998,7 +2028,13 @@ export const serveSubscription = async (
   if (isCanonicalRefusal(canonical) && refusalWalks()) {
     return hopRetry("content filter refusal");
   }
-  recordTokens(tokensFromResponse(canonical));
+  recordTokens(
+    tokensFromResponse(canonical),
+    upstreamJson !== null &&
+      typeof upstreamJson === "object" &&
+      "usage" in upstreamJson &&
+      upstreamJson.usage != null,
+  );
   // Passthrough returns the upstream bytes verbatim; cross-wire re-encodes
   // through the shared delivery tail.
   return passthrough
@@ -3140,7 +3176,7 @@ const walkPlan = async (
         executionSelection,
         stripSubagentIsolation: hop.stripSubagentIsolation,
         signal: args.req.signal,
-        record: (tokens, status) =>
+        record: (tokens, status, usageUnknown) =>
           report(
             {
               model: hop.modelId,
@@ -3149,6 +3185,7 @@ const walkPlan = async (
               latency_ms: Date.now() - args.startedAt,
               endpoint: args.endpoint,
               ...tokens,
+              ...(usageUnknown ? { usage_unknown: true as const } : {}),
             },
             args.originParam,
             accountHashByProvider.get(hop.provider) ?? undefined,

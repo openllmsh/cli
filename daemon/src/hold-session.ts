@@ -80,7 +80,9 @@ export class HoldSession {
     const tokensOut = hold.outcome.partialTokensOut;
     const usageUnknown =
       tokensIn + tokensOut === 0 &&
-      (how === "delivered" || (how === "threw" && hold.walking));
+      (hold.outcome.ambiguous ||
+        how === "delivered" ||
+        (how === "threw" && hold.walking));
     const model = hold.outcome.lastModel ?? hold.model;
     const row: TDaemonRecordRequest = {
       model,
