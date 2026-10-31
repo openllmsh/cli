@@ -4134,6 +4134,7 @@ export const runCountTokens = async (args: TWalkArgs): Promise<Response> => {
  */
 export const runResponsesCompact = async (
   args: TWalkArgs,
+  requirePlan = false,
 ): Promise<Response> => {
   // A forged plan must not steer the model id: honour the plan only when
   // it verifies (same rule as `runWalker`); an invalid plan falls back to
@@ -4156,6 +4157,13 @@ export const runResponsesCompact = async (
   const compactHop = compactPlan
     .map((modelId, i) => resolveHop(modelId, compactPmids[i]))
     .find((h) => h.provider === "chatgpt");
+  if (requirePlan && (!planTrusted || compactHop === undefined)) {
+    return errorJson(
+      403,
+      "Compact requires an authorized ChatGPT route",
+      "plan_error",
+    );
+  }
   const acquired = await acquireUpstream(
     "chatgpt",
     args,

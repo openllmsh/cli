@@ -462,7 +462,9 @@ const handleInferenceIn = async (
       ? "team-device"
       : createHash("sha256").update(callerKey).digest("hex");
   const planCacheKey =
-    explicitAlias === null || hopGrant !== null
+    explicitAlias === null ||
+    hopGrant !== null ||
+    (direct && isResponsesCompact)
       ? null
       : JSON.stringify([callerIdentity, mediaSurface ?? "chat", explicitAlias]);
   // Set when the cloud bound this request's plan to a cap hold; the walk then
@@ -571,12 +573,18 @@ const handleInferenceIn = async (
   // byte-identical to a directly-pointed client.
   // Soft-stale cache hits still enter this block so `loadPlan` can refresh
   // them without blocking the request on WAN.
+  if (direct && isResponsesCompact && explicitAlias === null) {
+    return withCors(
+      req,
+      errorJson(400, "Compact requires a model", "plan_error"),
+    );
+  }
   if (
     (planParam === null ||
       (planCacheEnabled() &&
         planCacheKey !== null &&
         planNeedsRefresh(planCacheKey))) &&
-    !isResponsesCompact &&
+    (!isResponsesCompact || direct) &&
     explicitAlias !== null
   ) {
     type TPlanFetchOutcome =
@@ -598,7 +606,7 @@ const handleInferenceIn = async (
       signal: AbortSignal | undefined,
       background = false,
     ): Promise<TPlanFetchOutcome> => {
-      const epoch = currentPolicyEpoch();
+      const epoch = currentPolicyEpoch(callerIdentity);
       let fetched: Awaited<ReturnType<typeof fetchPlan>> | null = null;
       try {
         fetched = await fetchPlan(
@@ -627,7 +635,7 @@ const handleInferenceIn = async (
         return { kind: "passthrough" };
       }
       if (fetched === null) return { kind: "passthrough" };
-      if (epoch !== currentPolicyEpoch()) {
+      if (epoch !== currentPolicyEpoch(callerIdentity)) {
         // Held plans select exactly one model. Refund at the same configured
         // cloud that issued the plan, without trusting its unverified origin.
         // The session's terminal record settles it at 0 (nothing ran).
@@ -649,11 +657,29 @@ const handleInferenceIn = async (
           ),
         };
       }
-      observePolicyRevision(fetched.policy_rev);
+      observePolicyRevision(fetched.policy_rev, callerIdentity);
       const fetchedContextOverflowStrategy =
         fetched.context_overflow_strategy ?? null;
       const fetchedHoldNonce = fetched.hold_nonce ?? null;
       const fetchedMaxOutputTokens = fetched.max_output_tokens ?? null;
+      if (direct && isResponsesCompact && fetchedHoldNonce !== null) {
+        session.adopt(
+          fetchedHoldNonce,
+          parsePlan(fetched.plan)[0] ?? fetched.plan,
+          null,
+        );
+        return {
+          kind: "response",
+          response: withCors(
+            req,
+            errorJson(
+              403,
+              "Compact is unavailable for capped keys",
+              "plan_error",
+            ),
+          ),
+        };
+      }
       const verified = planSignatureOk(
         fetched.plan,
         fetched.pmids,
@@ -737,6 +763,12 @@ const handleInferenceIn = async (
         sigParam = outcome.tuple.sigParam;
         return null;
       }
+      if (direct && isResponsesCompact) {
+        return withCors(
+          req,
+          errorJson(502, "Compact plan unavailable", "plan_error"),
+        );
+      }
       syncNormalizedJsonBytes();
       return withCors(req, await forwardTeamOrOrigin());
     };
@@ -799,7 +831,7 @@ const handleInferenceIn = async (
     if (mediaRequest === null) {
       return withCors(req, errorJson(400, "Invalid media default constraints"));
     }
-    const epoch = currentPolicyEpoch();
+    const epoch = currentPolicyEpoch(callerIdentity);
     let fetched: Awaited<ReturnType<typeof fetchMediaDefaultPlan>> | null =
       null;
     try {
@@ -846,7 +878,7 @@ const handleInferenceIn = async (
         parsePlan(fetched.plan)[0] ?? fetched.plan,
         null,
       );
-    if (epoch !== currentPolicyEpoch()) {
+    if (epoch !== currentPolicyEpoch(callerIdentity)) {
       return withCors(
         req,
         errorJson(
@@ -856,7 +888,7 @@ const handleInferenceIn = async (
         ),
       );
     }
-    observePolicyRevision(fetched.policy_rev);
+    observePolicyRevision(fetched.policy_rev, callerIdentity);
     const fetchedContextOverflowStrategy =
       fetched.context_overflow_strategy ?? null;
     maxOutputTokens = fetched.max_output_tokens ?? null;
@@ -907,7 +939,7 @@ const handleInferenceIn = async (
     if (payload === null) {
       return withCors(req, errorJson(400, "Invalid video job id"));
     }
-    const epoch = currentPolicyEpoch();
+    const epoch = currentPolicyEpoch(callerIdentity);
     let fetched: Awaited<ReturnType<typeof fetchVideoJobPlan>> | null = null;
     try {
       fetched = await fetchVideoJobPlan(
@@ -950,7 +982,7 @@ const handleInferenceIn = async (
         parsePlan(fetched.plan)[0] ?? fetched.plan,
         null,
       );
-    if (epoch !== currentPolicyEpoch()) {
+    if (epoch !== currentPolicyEpoch(callerIdentity)) {
       return withCors(
         req,
         errorJson(
@@ -960,7 +992,7 @@ const handleInferenceIn = async (
         ),
       );
     }
-    observePolicyRevision(fetched.policy_rev);
+    observePolicyRevision(fetched.policy_rev, callerIdentity);
     const fetchedContextOverflowStrategy =
       fetched.context_overflow_strategy ?? null;
     maxOutputTokens = fetched.max_output_tokens ?? null;
@@ -1031,7 +1063,7 @@ const handleInferenceIn = async (
           : videoOperation === "cancel"
             ? runVideoCancel(walkArgs, videoId)
             : isResponsesCompact
-              ? runResponsesCompact(walkArgs)
+              ? runResponsesCompact(walkArgs, direct)
               : isCountTokens
                 ? runCountTokens(walkArgs)
                 : isImages
@@ -1092,7 +1124,7 @@ const handleInferenceIn = async (
     planParam !== null
   ) {
     noteTeamPlanServed(planCacheKey, async (): Promise<TPlanTuple | null> => {
-      const epoch = currentPolicyEpoch();
+      const epoch = currentPolicyEpoch(callerIdentity);
       let refreshed: Awaited<ReturnType<typeof fetchPlan>>;
       try {
         refreshed = await fetchPlan(
@@ -1105,8 +1137,8 @@ const handleInferenceIn = async (
       } catch {
         return null;
       }
-      if (epoch !== currentPolicyEpoch()) return null;
-      observePolicyRevision(refreshed.policy_rev);
+      if (epoch !== currentPolicyEpoch(callerIdentity)) return null;
+      observePolicyRevision(refreshed.policy_rev, callerIdentity);
       // A held plan is bound to a reservation; it is never kept warm.
       if (refreshed.hold_nonce !== undefined) return null;
       const refreshedContextOverflowStrategy =

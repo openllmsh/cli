@@ -90,12 +90,13 @@ type TTeamPlanWarmEntry = {
 const warmTeamPlans = new Map<string, TTeamPlanWarmEntry>();
 let warmTeamPlanTimer: ReturnType<typeof setInterval> | null = null;
 
-/** Newest access-policy revision seen from bootstrap or a plan response. */
-let knownPolicyRev: string | null = null;
-let policyEpoch = 0;
+/** Revisions belong to the caller, never to the daemon as a whole. */
+const policies = new Map<string, { rev: string | null; epoch: number }>();
+const pairedIdentity = "team-device";
 
 /** Capture before a fetch; opaque revisions have no inherent ordering. */
-export const currentPolicyEpoch = (): number => policyEpoch;
+export const currentPolicyEpoch = (identity = pairedIdentity): number =>
+  cacheGeneration + (policies.get(identity)?.epoch ?? 0);
 
 /**
  * Record the key's current access-policy revision (bootstrap
@@ -105,18 +106,37 @@ export const currentPolicyEpoch = (): number => policyEpoch;
  * once the cloud reports the new policy — including a plan an in-flight
  * load stores after the change.
  */
-export const observePolicyRevision = (rev: string | null): void => {
-  if (rev === knownPolicyRev) return;
-  knownPolicyRev = rev;
-  policyEpoch += 1;
-  inFlight.clear();
-  for (const [alias, entry] of cache) {
-    if (entry.policyRev !== rev) cache.delete(alias);
+const identityOf = (key: string): string => {
+  try {
+    const parsed: unknown = JSON.parse(key);
+    if (Array.isArray(parsed) && typeof parsed[0] === "string")
+      return parsed[0];
+  } catch {
+    // Unstructured keys belong to the paired device.
+  }
+  return pairedIdentity;
+};
+
+export const observePolicyRevision = (
+  rev: string | null,
+  identity = pairedIdentity,
+): void => {
+  const previous = policies.get(identity);
+  if ((previous?.rev ?? null) === rev) return;
+  policies.set(identity, { rev, epoch: (previous?.epoch ?? 0) + 1 });
+  for (const key of inFlight.keys()) {
+    if (identityOf(key) === identity) inFlight.delete(key);
+  }
+  for (const [key, entry] of cache) {
+    if (identityOf(key) === identity && entry.policyRev !== rev)
+      cache.delete(key);
   }
 };
 
 /** Current known policy revision (tests / diagnostics). */
-export const currentPolicyRevision = (): string | null => knownPolicyRev;
+export const currentPolicyRevision = (
+  identity = pairedIdentity,
+): string | null => policies.get(identity)?.rev ?? null;
 
 /** Remember the signed tuple that served `alias` (called after every verified
  *  plan fetch while the flag is on — the newest tuple wins). */
@@ -139,7 +159,7 @@ export const lookupPlan = (alias: string): TCachedPlan | null => {
   const hit = cache.get(alias);
   if (hit === undefined) return null;
   if (
-    hit.policyRev !== knownPolicyRev ||
+    hit.policyRev !== currentPolicyRevision(identityOf(alias)) ||
     Date.now() - hit.storedAtMs >= PLAN_CACHE_TTL_MS
   ) {
     cache.delete(alias);
@@ -331,9 +351,10 @@ export const warmTeamPlanSize = (): number => warmTeamPlans.size;
  *  team-plan working set. */
 export const clearPlanCache = (): void => {
   cacheGeneration += 1;
-  // Forget the revision too: the next bootstrap or plan response sets it.
-  if (knownPolicyRev !== null) policyEpoch += 1;
-  knownPolicyRev = null;
+  // Advance each known epoch so outstanding fetches cannot survive a clear.
+  for (const [identity, policy] of policies) {
+    policies.set(identity, { rev: null, epoch: policy.epoch + 1 });
+  }
   cache.clear();
   inFlight.clear();
   warmTeamPlans.clear();
