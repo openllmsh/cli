@@ -212,6 +212,55 @@
                                         "type": "null"
                                       }
                                     ]
+                                  },
+                                  "min_reasoning_effort": {
+                                    "anyOf": [
+                                      {
+                                        "type": "object",
+                                        "properties": {
+                                          "label": {
+                                            "type": "string"
+                                          },
+                                          "description": {
+                                            "type": "string"
+                                          },
+                                          "options": {
+                                            "type": "array",
+                                            "items": {
+                                              "type": "object",
+                                              "properties": {
+                                                "value": {
+                                                  "type": "string",
+                                                  "enum": [
+                                                    "low",
+                                                    "medium",
+                                                    "high",
+                                                    "xhigh"
+                                                  ]
+                                                },
+                                                "label": {
+                                                  "type": "string"
+                                                }
+                                              },
+                                              "required": [
+                                                "value",
+                                                "label"
+                                              ],
+                                              "additionalProperties": false
+                                            }
+                                          }
+                                        },
+                                        "required": [
+                                          "label",
+                                          "description",
+                                          "options"
+                                        ],
+                                        "additionalProperties": false
+                                      },
+                                      {
+                                        "type": "null"
+                                      }
+                                    ]
                                   }
                                 },
                                 "additionalProperties": false
@@ -14544,6 +14593,22 @@
                                             "type": "integer",
                                             "maximum": 9007199254740991,
                                             "exclusiveMinimum": 0
+                                          },
+                                          {
+                                            "type": "null"
+                                          }
+                                        ]
+                                      },
+                                      "min_reasoning_effort": {
+                                        "anyOf": [
+                                          {
+                                            "type": "string",
+                                            "enum": [
+                                              "low",
+                                              "medium",
+                                              "high",
+                                              "xhigh"
+                                            ]
                                           },
                                           {
                                             "type": "null"
@@ -54121,6 +54186,55 @@
                                         "type": "null"
                                       }
                                     ]
+                                  },
+                                  "min_reasoning_effort": {
+                                    "anyOf": [
+                                      {
+                                        "type": "object",
+                                        "properties": {
+                                          "label": {
+                                            "type": "string"
+                                          },
+                                          "description": {
+                                            "type": "string"
+                                          },
+                                          "options": {
+                                            "type": "array",
+                                            "items": {
+                                              "type": "object",
+                                              "properties": {
+                                                "value": {
+                                                  "type": "string",
+                                                  "enum": [
+                                                    "low",
+                                                    "medium",
+                                                    "high",
+                                                    "xhigh"
+                                                  ]
+                                                },
+                                                "label": {
+                                                  "type": "string"
+                                                }
+                                              },
+                                              "required": [
+                                                "value",
+                                                "label"
+                                              ],
+                                              "additionalProperties": false
+                                            }
+                                          }
+                                        },
+                                        "required": [
+                                          "label",
+                                          "description",
+                                          "options"
+                                        ],
+                                        "additionalProperties": false
+                                      },
+                                      {
+                                        "type": "null"
+                                      }
+                                    ]
                                   }
                                 },
                                 "additionalProperties": false
@@ -55740,26 +55854,33 @@
                 "type": "object",
                 "properties": {
                   "fallback_groups": {
-                    "type": "array",
-                    "items": {
-                      "type": "object",
-                      "properties": {
-                        "name": {
-                          "type": "string"
-                        },
-                        "models": {
-                          "type": "array",
-                          "items": {
-                            "type": "string"
-                          }
+                    "anyOf": [
+                      {
+                        "type": "array",
+                        "items": {
+                          "type": "object",
+                          "properties": {
+                            "name": {
+                              "type": "string"
+                            },
+                            "models": {
+                              "type": "array",
+                              "items": {
+                                "type": "string"
+                              }
+                            }
+                          },
+                          "required": [
+                            "name",
+                            "models"
+                          ],
+                          "additionalProperties": false
                         }
                       },
-                      "required": [
-                        "name",
-                        "models"
-                      ],
-                      "additionalProperties": false
-                    }
+                      {
+                        "type": "null"
+                      }
+                    ]
                   },
                   "model_fallback_bindings": {
                     "anyOf": [
@@ -55784,371 +55905,23 @@
                       },
                       {
                         "type": "null"
+                      },
+                      {
+                        "type": "null"
                       }
                     ]
                   },
                   "extra": {
-                    "type": "object",
-                    "properties": {
-                      "model_settings": {
-                        "anyOf": [
-                          {
-                            "type": "object",
-                            "additionalProperties": {
-                              "type": "object",
-                              "properties": {
-                                "service_tier": {
-                                  "anyOf": [
-                                    {
-                                      "type": "string",
-                                      "enum": [
-                                        "auto",
-                                        "default",
-                                        "flex",
-                                        "priority"
-                                      ]
-                                    },
-                                    {
-                                      "type": "null"
-                                    }
-                                  ]
-                                },
-                                "input_token_limit": {
-                                  "anyOf": [
-                                    {
-                                      "type": "integer",
-                                      "maximum": 9007199254740991,
-                                      "exclusiveMinimum": 0
-                                    },
-                                    {
-                                      "type": "null"
-                                    }
-                                  ]
-                                }
-                              },
-                              "additionalProperties": false
-                            }
-                          },
-                          {
-                            "type": "null"
-                          }
-                        ]
+                    "anyOf": [
+                      {
+                        "type": "object"
                       },
-                      "search_provider": {
-                        "anyOf": [
-                          {
-                            "type": "string"
-                          },
-                          {
-                            "type": "null"
-                          }
-                        ]
-                      },
-                      "context_overflow_strategy": {
-                        "anyOf": [
-                          {
-                            "type": "string",
-                            "enum": [
-                              "hop_to_larger_context",
-                              "compact_in_place"
-                            ]
-                          },
-                          {
-                            "type": "null"
-                          }
-                        ]
-                      },
-                      "custom_apis": {
-                        "anyOf": [
-                          {
-                            "type": "array",
-                            "items": {
-                              "type": "object",
-                              "properties": {
-                                "name": {
-                                  "type": "string"
-                                },
-                                "models": {
-                                  "type": "array",
-                                  "items": {
-                                    "type": "object",
-                                    "properties": {
-                                      "id": {
-                                        "type": "string"
-                                      },
-                                      "kind": {
-                                        "type": "string",
-                                        "enum": [
-                                          "chat_openai",
-                                          "chat_anthropic",
-                                          "embeddings",
-                                          "image_openai"
-                                        ]
-                                      },
-                                      "max_input_tokens": {
-                                        "anyOf": [
-                                          {
-                                            "type": "number"
-                                          },
-                                          {
-                                            "type": "string",
-                                            "enum": [
-                                              "Infinity",
-                                              "-Infinity",
-                                              "NaN"
-                                            ]
-                                          },
-                                          {
-                                            "type": "null"
-                                          }
-                                        ]
-                                      },
-                                      "max_output_tokens": {
-                                        "anyOf": [
-                                          {
-                                            "type": "number"
-                                          },
-                                          {
-                                            "type": "string",
-                                            "enum": [
-                                              "Infinity",
-                                              "-Infinity",
-                                              "NaN"
-                                            ]
-                                          },
-                                          {
-                                            "type": "null"
-                                          }
-                                        ]
-                                      }
-                                    },
-                                    "required": [
-                                      "id",
-                                      "kind"
-                                    ],
-                                    "additionalProperties": false
-                                  }
-                                }
-                              },
-                              "required": [
-                                "name",
-                                "models"
-                              ],
-                              "additionalProperties": false
-                            }
-                          },
-                          {
-                            "type": "null"
-                          }
-                        ]
-                      },
-                      "notification_prefs": {
-                        "anyOf": [
-                          {
-                            "type": "object",
-                            "properties": {
-                              "auth_loss_email": {
-                                "anyOf": [
-                                  {
-                                    "type": "boolean"
-                                  },
-                                  {
-                                    "type": "null"
-                                  }
-                                ]
-                              },
-                              "quota_email": {
-                                "anyOf": [
-                                  {
-                                    "type": "boolean"
-                                  },
-                                  {
-                                    "type": "null"
-                                  }
-                                ]
-                              },
-                              "daemon_idle_email": {
-                                "anyOf": [
-                                  {
-                                    "type": "boolean"
-                                  },
-                                  {
-                                    "type": "null"
-                                  }
-                                ]
-                              },
-                              "lifecycle_email": {
-                                "anyOf": [
-                                  {
-                                    "type": "boolean"
-                                  },
-                                  {
-                                    "type": "null"
-                                  }
-                                ]
-                              },
-                              "usage_alert_email": {
-                                "anyOf": [
-                                  {
-                                    "type": "boolean"
-                                  },
-                                  {
-                                    "type": "null"
-                                  }
-                                ]
-                              }
-                            },
-                            "additionalProperties": false
-                          },
-                          {
-                            "type": "null"
-                          }
-                        ]
-                      },
-                      "usage_alert_threshold_pct": {
-                        "anyOf": [
-                          {
-                            "type": "number",
-                            "enum": [
-                              50,
-                              80,
-                              90
-                            ]
-                          },
-                          {
-                            "type": "null"
-                          }
-                        ]
-                      },
-                      "subscription_providers": {
-                        "anyOf": [
-                          {
-                            "type": "array",
-                            "items": {
-                              "type": "string"
-                            }
-                          },
-                          {
-                            "type": "null"
-                          }
-                        ]
-                      },
-                      "provider_models": {
-                        "anyOf": [
-                          {
-                            "type": "object",
-                            "additionalProperties": {
-                              "type": "array",
-                              "items": {
-                                "type": "string"
-                              }
-                            }
-                          },
-                          {
-                            "type": "null"
-                          }
-                        ]
-                      },
-                      "subscription_plans": {
-                        "anyOf": [
-                          {
-                            "type": "array",
-                            "items": {
-                              "type": "object",
-                              "properties": {
-                                "provider": {
-                                  "type": "string"
-                                },
-                                "plan": {
-                                  "type": "string"
-                                },
-                                "monthly_usd": {
-                                  "anyOf": [
-                                    {
-                                      "type": "number"
-                                    },
-                                    {
-                                      "type": "string",
-                                      "enum": [
-                                        "Infinity",
-                                        "-Infinity",
-                                        "NaN"
-                                      ]
-                                    },
-                                    {
-                                      "type": "null"
-                                    }
-                                  ]
-                                }
-                              },
-                              "required": [
-                                "provider",
-                                "plan"
-                              ],
-                              "additionalProperties": false
-                            }
-                          },
-                          {
-                            "type": "null"
-                          }
-                        ]
-                      },
-                      "disabled_default_aliases": {
-                        "anyOf": [
-                          {
-                            "type": "array",
-                            "items": {
-                              "type": "string",
-                              "enum": [
-                                "ultra",
-                                "plus",
-                                "lite"
-                              ]
-                            }
-                          },
-                          {
-                            "type": "null"
-                          }
-                        ]
-                      },
-                      "public_usage_index_opt_out": {
-                        "anyOf": [
-                          {
-                            "type": "boolean"
-                          },
-                          {
-                            "type": "null"
-                          }
-                        ]
-                      },
-                      "daemon_diagnostics_opt_in": {
-                        "anyOf": [
-                          {
-                            "type": "boolean"
-                          },
-                          {
-                            "type": "null"
-                          }
-                        ]
-                      },
-                      "daemon_diagnostics_policy_generation": {
-                        "anyOf": [
-                          {
-                            "type": "string"
-                          },
-                          {
-                            "type": "null"
-                          }
-                        ]
+                      {
+                        "type": "null"
                       }
-                    },
-                    "additionalProperties": false
+                    ]
                   }
                 },
-                "required": [
-                  "fallback_groups",
-                  "extra"
-                ],
                 "additionalProperties": false
               }
             }
