@@ -27,7 +27,7 @@ import {
   clientWireOf,
   UnsupportedContentError,
 } from "@openllmsh/wire/providers/upstream-request";
-import { currentHoldNonce, trackHoldRecord } from "../access-hold-context";
+import { holdFieldsForRecord, trackHoldRecord } from "../access-hold-context";
 import {
   deliverChunkStream,
   deliverJsonResponse,
@@ -200,7 +200,8 @@ export const recordLocal = (
   // Team hops: attribute the row to the consumer and charge the share cap,
   // exactly as the walker's `report` does.
   const teamGrant = currentTeamGrantToken();
-  const holdNonce = row.hold_nonce ?? currentHoldNonce();
+  const holdNonce =
+    row.hold_nonce ?? holdFieldsForRecord(row).hold_nonce ?? null;
   const record = recordRequest(
     {
       ...row,

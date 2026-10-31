@@ -188,6 +188,7 @@ import {
   clampHoldOutputLimit,
   currentHoldNonce,
   currentHoldOutputLimit,
+  holdFieldsForRecord,
   trackHoldRecord,
 } from "./access-hold-context";
 import { accountIndexes } from "./account-models";
@@ -829,7 +830,7 @@ export const report = (
       ? { team_grant: teamGrant }
       : {}),
     ...(row.hold_nonce === undefined && holdNonce !== null
-      ? { hold_nonce: holdNonce }
+      ? holdFieldsForRecord(row)
       : {}),
   };
   const record = recordRequest(recordedRow, origin);

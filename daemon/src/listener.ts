@@ -34,7 +34,14 @@ import {
 } from "@openllmsh/tunnel";
 import { estimateBodyTokens } from "@openllmsh/wire/lib/canonical/token-estimate";
 import { Schema } from "effect";
-import { waitForHoldRecords, withHoldNonce } from "./access-hold-context";
+import type { THoldOutcome } from "./access-hold-context";
+import {
+  holdTerminalRecord,
+  newHoldOutcome,
+  trackHoldRecord,
+  waitForHoldRecords,
+  withHoldNonce,
+} from "./access-hold-context";
 import {
   runAudioSpeechWalker,
   runAudioTranscriptionWalker,
@@ -1017,10 +1024,38 @@ export const handleInference = async (req: Request): Promise<Response> => {
                           ? runEmbeddings(walkArgs)
                           : runWalker(walkArgs);
   };
-  const walk = (): Promise<Response> =>
-    holdNonce === null
+  // One outcome per held hop: hop paths log failed attempts without the nonce
+  // and the terminal record below finalizes the hold exactly once.
+  let holdOutcome: THoldOutcome = newHoldOutcome();
+  const walk = (): Promise<Response> => {
+    holdOutcome = newHoldOutcome();
+    return holdNonce === null
       ? walkOnce()
-      : withHoldNonce(holdNonce, walkOnce, maxOutputTokens);
+      : withHoldNonce(holdNonce, walkOnce, maxOutputTokens, holdOutcome);
+  };
+  const finalizeHold = (committed: boolean): void => {
+    if (holdNonce === null || planParam === null) return;
+    const row = holdTerminalRecord({
+      nonce: holdNonce,
+      outcome: holdOutcome,
+      committed,
+      fallbackModel: parsePlan(planParam)[0] ?? planParam,
+    });
+    if (row === null) return;
+    const record = recordRequest(
+      {
+        ...row,
+        status: "error",
+        latency_ms: Date.now() - startedAt,
+        endpoint,
+        error: committed
+          ? "Response ended without a usage report"
+          : "Hop failed",
+      },
+      originParam,
+    );
+    trackHoldRecord(holdNonce, record);
+  };
   let response = await walk();
   // A capped key's direct request holds one hop at a time. When that hop
   // fails, reserve the next one (the failed hop's record refunds its hold)
@@ -1030,10 +1065,14 @@ export const handleInference = async (req: Request): Promise<Response> => {
     reserveNextHop !== null &&
     planParam !== null &&
     isRetryableHopStatus(response.status) &&
+    // A failed attempt that produced output was dispatched: charge it, don't
+    // spend another hold on the same request.
+    holdOutcome.partialTokensIn + holdOutcome.partialTokensOut === 0 &&
     excludedHops.length < MAX_CAPPED_HOP_ATTEMPTS - 1
   ) {
     excludedHops.push(planParam);
     await response.body?.cancel().catch(() => undefined);
+    finalizeHold(false);
     await waitForHoldRecords(holdNonce);
     const stopped = await reserveNextHop();
     if (stopped !== null) return stopped;
@@ -1098,6 +1137,52 @@ export const handleInference = async (req: Request): Promise<Response> => {
         policyRev: refreshed.policy_rev,
       };
     });
+  }
+  if (holdNonce !== null) {
+    if (!response.ok || response.body === null) {
+      // Let the walk's own success/failure reports land first.
+      queueMicrotask(() => finalizeHold(false));
+    } else {
+      // The client is getting a body: the provider ran. Finalize when the
+      // body ends or is cancelled, unless a success record settled it.
+      const outcome = holdOutcome;
+      const nonce = holdNonce;
+      const settleLater = (): void => {
+        holdOutcome = outcome;
+        holdNonce = nonce;
+        // Stream-completion reports run on the same tick as the end of the
+        // body; give them a turn before deciding the hold is unsettled.
+        setTimeout(() => finalizeHold(true), 0);
+      };
+      const reader = response.body.getReader();
+      response = new Response(
+        new ReadableStream<Uint8Array>({
+          pull: async (controller): Promise<void> => {
+            try {
+              const { done, value } = await reader.read();
+              if (done) {
+                controller.close();
+                settleLater();
+                return;
+              }
+              controller.enqueue(value);
+            } catch (err) {
+              controller.error(err);
+              settleLater();
+            }
+          },
+          cancel: async (reason): Promise<void> => {
+            await reader.cancel(reason).catch(() => undefined);
+            settleLater();
+          },
+        }),
+        {
+          status: response.status,
+          statusText: response.statusText,
+          headers: response.headers,
+        },
+      );
+    }
   }
   return withCors(req, response);
 };
