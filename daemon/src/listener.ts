@@ -44,6 +44,7 @@ import {
   fetchPlan,
   fetchVideoJobPlan,
   MediaDefaultPlanError,
+  recordRequest,
 } from "./cloud-client";
 import { planCacheEnabled } from "./config";
 import { notePresenceActivity } from "./control-channel";
@@ -607,6 +608,22 @@ export const handleInference = async (req: Request): Promise<Response> => {
         return { kind: "passthrough" };
       }
       if (epoch !== currentPolicyEpoch()) {
+        // Held plans select exactly one model. Refund at the same configured
+        // cloud that issued the plan, without trusting its unverified origin.
+        const heldModel = parsePlan(fetched.plan)[0];
+        if (fetched.hold_nonce !== undefined && heldModel !== undefined) {
+          void recordRequest({
+            model: heldModel,
+            provider: heldModel.split("/")[0] ?? "",
+            status: "error",
+            tokens_in: 0,
+            tokens_out: 0,
+            latency_ms: Date.now() - startedAt,
+            endpoint,
+            error: "Plan superseded by a policy change",
+            hold_nonce: fetched.hold_nonce,
+          });
+        }
         return {
           kind: "response",
           response: withCors(
