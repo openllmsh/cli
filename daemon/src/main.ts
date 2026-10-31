@@ -381,13 +381,14 @@ export const main = async (): Promise<void> => {
   };
 
   // Lazy inference handler — keeps native-runtime / walker off the listen path (§3).
-  let handleInference: ((req: Request) => Promise<Response>) | null = null;
+  let handleInference: typeof import("./listener").handleInference | null =
+    null;
   const inference = async (req: Request): Promise<Response> => {
     if (handleInference === null) {
       const mod = await import("./listener");
       handleInference = mod.handleInference;
     }
-    return handleInference(req);
+    return handleInference(req, true);
   };
 
   // Agent sessions (plan: agent-sessions-replace-remote-pty). The runtime pulls

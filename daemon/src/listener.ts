@@ -9,10 +9,11 @@
  * plan from `/api/daemon/plan`, and the walker executes it. The daemon holds
  * NO routing brain of its own — the cloud resolves the chain.
  *
- * The daemon binds to 127.0.0.1 and the caller owns the machine, so there
- * is no API-key auth gate here (unlike the cloud handler).
+ * Loopback callers supply a bearer for cloud authorization; tunneled requests
+ * have already passed their transport's authorization.
  */
 
+import { createHash } from "node:crypto";
 import type { TContextOverflowStrategy } from "@openllmsh/protocol";
 import {
   AnthropicCountTokensRequest,
@@ -154,22 +155,38 @@ const withCors = (req: Request, res: Response): Response => {
   });
 };
 
-export const handleInference = async (req: Request): Promise<Response> => {
+export const handleInference = async (
+  req: Request,
+  direct = false,
+): Promise<Response> => {
   const url = new URL(req.url);
   const session = new HoldSession(
     url.pathname.replace(/^\/api(?=\/v1\/)/, ""),
     Date.now(),
   );
-  return withHoldSession(session, () => handleInferenceIn(req, session));
+  return withHoldSession(session, () =>
+    handleInferenceIn(req, session, direct),
+  );
 };
 
 const handleInferenceIn = async (
   req: Request,
   session: HoldSession,
+  direct: boolean,
 ): Promise<Response> => {
   // CORS/PNA preflight — the dashboard fetches this surface cross-origin
   // (HTTPS page → http://127.0.0.1) for subscription models.
   if (isPreflight(req)) return preflightResponse(req);
+
+  const hopGrant = direct ? null : req.headers.get(HOP_GRANT_HEADER);
+  const teamGrantToken = currentTeamGrantToken();
+  const authorization = req.headers.get("authorization");
+  const callerKey = direct
+    ? authorization?.match(/^Bearer\s+(\S+)$/i)?.[1]
+    : undefined;
+  if (direct && callerKey === undefined) {
+    return withCors(req, errorJson(401, "Missing bearer token", "auth_error"));
+  }
 
   // A client pointed DIRECTLY at the daemon port is the strongest possible
   // liveness proof — republish presence (throttled, off the response path) so
@@ -440,11 +457,14 @@ const handleInferenceIn = async (
   // would collide with a chat alias literally named `image:grok`.
   // A request origin tunneled with a hop grant is bound to one cap
   // reservation: its plan is never read from or written to the shared cache.
-  const hopGrant = req.headers.get(HOP_GRANT_HEADER);
+  const callerIdentity =
+    callerKey === undefined
+      ? "team-device"
+      : createHash("sha256").update(callerKey).digest("hex");
   const planCacheKey =
     explicitAlias === null || hopGrant !== null
       ? null
-      : JSON.stringify([mediaSurface ?? "chat", explicitAlias]);
+      : JSON.stringify([callerIdentity, mediaSurface ?? "chat", explicitAlias]);
   // Set when the cloud bound this request's plan to a cap hold; the walk then
   // runs inside `withHoldNonce` so signatures verify and records settle it.
   let holdNonce: string | null = null;
@@ -559,13 +579,6 @@ const handleInferenceIn = async (
     !isResponsesCompact &&
     explicitAlias !== null
   ) {
-    // Embeddings against an explicit `local_*` model can be served on-device
-    // without a cloud plan (local rows are device-live). Fall through to
-    // `runEmbeddings` instead of origin-passthrough when the plan is missing
-    // or not daemon-only.
-    const embeddingsLocalFallback =
-      isEmbeddings && isLocalServerSlug(explicitAlias.split("/")[0] ?? "");
-
     type TPlanFetchOutcome =
       | {
           readonly kind: "tuple";
@@ -575,8 +588,7 @@ const handleInferenceIn = async (
         }
       | { readonly kind: "passthrough" }
       | { readonly kind: "response"; readonly response: Response }
-      | { readonly kind: "throw"; readonly error: unknown }
-      | { readonly kind: "embeddings-local" };
+      | { readonly kind: "throw"; readonly error: unknown };
 
     const resolveFetched = async (
       /**
@@ -601,7 +613,7 @@ const handleInferenceIn = async (
           // compact request) omits it and keeps the historical default.
           mediaSurface ?? undefined,
           {
-            ...(hopGrant === null ? {} : { hopGrant }),
+            ...(hopGrant === null ? { callerKey } : { hopGrant }),
             exclude: excludedHops,
             refresh: background,
           },
@@ -614,10 +626,7 @@ const handleInferenceIn = async (
         }
         return { kind: "passthrough" };
       }
-      if (fetched === null) {
-        if (embeddingsLocalFallback) return { kind: "embeddings-local" };
-        return { kind: "passthrough" };
-      }
+      if (fetched === null) return { kind: "passthrough" };
       if (epoch !== currentPolicyEpoch()) {
         // Held plans select exactly one model. Refund at the same configured
         // cloud that issued the plan, without trusting its unverified origin.
@@ -668,12 +677,7 @@ const handleInferenceIn = async (
           );
         });
       if (!verified || !hasDaemonOnlyHop) {
-        // A verified plan with no daemon-only hop belongs to origin; the
-        // body-model local fallback is only for an unverifiable plan.
-        if (!embeddingsLocalFallback || verified) {
-          return { kind: "passthrough" };
-        }
-        return { kind: "embeddings-local" };
+        return { kind: "passthrough" };
       }
       return {
         kind: "tuple",
@@ -732,10 +736,6 @@ const handleInferenceIn = async (
         sigParam = outcome.tuple.sigParam;
         return null;
       }
-      if (outcome.kind === "embeddings-local") {
-        // leave planParam null — runEmbeddings serves from the body model
-        return null;
-      }
       syncNormalizedJsonBytes();
       return withCors(req, await forwardTeamOrOrigin());
     };
@@ -776,10 +776,8 @@ const handleInferenceIn = async (
         contextOverflowStrategy = entry.contextOverflowStrategy;
         sigParam = entry.sigParam;
       } else if (planParam === null) {
-        if (!embeddingsLocalFallback) {
-          syncNormalizedJsonBytes();
-          return withCors(req, await forwardTeamOrOrigin());
-        }
+        syncNormalizedJsonBytes();
+        return withCors(req, await forwardTeamOrOrigin());
       }
     } else if (planParam === null) {
       const outcome = await resolveFetched(req.signal);
@@ -808,6 +806,7 @@ const handleInferenceIn = async (
         mediaRequest,
         req.signal,
         hopGrant ?? undefined,
+        hopGrant === null ? callerKey : undefined,
       );
     } catch (err) {
       if (err instanceof MediaDefaultPlanError) {
@@ -920,6 +919,7 @@ const handleInferenceIn = async (
         },
         req.signal,
         hopGrant ?? undefined,
+        hopGrant === null ? callerKey : undefined,
       );
     } catch (err) {
       if (err instanceof MediaDefaultPlanError) {
@@ -1083,7 +1083,8 @@ const handleInferenceIn = async (
   if (
     response.ok &&
     holdNonce === null &&
-    currentTeamGrantToken() !== null &&
+    teamGrantToken !== null &&
+    callerKey === undefined &&
     planCacheEnabled() &&
     planCacheKey !== null &&
     explicitAlias !== null &&
