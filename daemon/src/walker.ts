@@ -505,6 +505,7 @@ export const planSignatureOk = (
   originParam: string | null,
   contextOverflowStrategy: TContextOverflowStrategy | null,
   sigParam: string | null,
+  holdNonce?: string | null,
 ): boolean => {
   const sigKey = planSigningKey();
   return (
@@ -515,6 +516,7 @@ export const planSignatureOk = (
         pmidsParam ?? "",
         originParam ?? "",
         contextOverflowStrategy,
+        holdNonce,
       ),
       sigParam,
       sigKey,

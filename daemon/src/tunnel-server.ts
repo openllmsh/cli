@@ -25,6 +25,7 @@ import type {
   TTunnelSurface,
 } from "@openllmsh/protocol";
 import {
+  HOP_GRANT_HEADER,
   MEDIA_PERSISTENCE_BROWSER,
   MEDIA_PERSISTENCE_REQUEST_HEADER,
   TEAM_GRANT_HEADER,
@@ -135,6 +136,9 @@ const forwardedHeaders = (open: {
   // Same-user hops omit it. See docs/plan/2026-10-26-teams.md §16.1 / §16.4.
   if (open.headers?.team_grant !== undefined) {
     headers.set(TEAM_GRANT_HEADER, open.headers.team_grant);
+  }
+  if (open.headers?.hop_grant !== undefined) {
+    headers.set(HOP_GRANT_HEADER, open.headers.hop_grant);
   }
   // Only fleet-daemon hops are tunnel-borne for the walker loop-guard.
   // Browser (or omitted consumer) leaves the header off so the selected

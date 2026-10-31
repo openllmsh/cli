@@ -33,6 +33,7 @@ import {
   encodeMediaDefaultPlanQuery,
   encodePlanSurfaceQueryValue,
   encodeVideoJobPlanQuery,
+  HOP_GRANT_HEADER,
   MediaDefaultRequest,
   MODEL_CAPABILITIES_OPEN_CAP,
   PLAN_SURFACE_QUERY_KEY,
@@ -44,6 +45,7 @@ import { Schema } from "effect";
 import { daemonEnv, deviceId } from "./env";
 import { hasIdentityConflict, setIdentityConflict } from "./identity-state";
 import { logWarn, safeDiagnosticMessage } from "./logger";
+import { clearPlanCache } from "./plan-cache";
 import { teamServeEnabled } from "./team-serve";
 
 const decodeChannel = Schema.decodeUnknownSync(RelayChannelResponse);
@@ -305,8 +307,14 @@ export const fetchPlan = async (
   estTokens: number,
   signal?: AbortSignal,
   surface?: TPlanSurface,
+  options?: {
+    readonly hopGrant?: string;
+    readonly exclude?: readonly string[];
+  },
 ): Promise<TDaemonPlanResponse> => {
   const params = new URLSearchParams({ model });
+  for (const excluded of options?.exclude ?? [])
+    params.append("exclude", excluded);
   if (estTokens > 0) params.set("est_tokens", String(Math.ceil(estTokens)));
   // The surface this request is FOR, when the listener knows it (every
   // media endpoint does — it is decided by the path). Without it the
@@ -317,9 +325,12 @@ export const fetchPlan = async (
   // plan cache key and an unbumped daemon keep behaving identically.
   if (surface !== undefined)
     params.set(PLAN_SURFACE_QUERY_KEY, encodePlanSurfaceQueryValue(surface));
+  const headers = new Headers(authHeaders());
+  if (options?.hopGrant !== undefined)
+    headers.set(HOP_GRANT_HEADER, options.hopGrant);
   const resp = await cloudFetch(
     cloudUrl(`/api/daemon/plan?${params.toString()}`),
-    { method: "GET", headers: authHeaders(), signal },
+    { method: "GET", headers, signal },
   );
   if (resp.status === 401 || resp.status === 403) {
     throw new InvalidApiKeyError(resp.status);
@@ -517,11 +528,15 @@ export const recordRequest = async (
   origin?: string | null,
 ): Promise<void> => {
   try {
-    await cloudFetch(cloudUrl("/api/daemon/requests", origin), {
-      method: "POST",
-      headers: authHeaders(),
-      body: JSON.stringify(row),
-    });
+    const response = await cloudFetch(
+      cloudUrl("/api/daemon/requests", origin),
+      {
+        method: "POST",
+        headers: authHeaders(),
+        body: JSON.stringify(row),
+      },
+    );
+    if (response.status === 409) clearPlanCache();
   } catch {
     // swallow — usage recording is non-critical telemetry
   }
