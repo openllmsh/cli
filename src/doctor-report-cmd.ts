@@ -474,7 +474,7 @@ const runOptIn = async (
     return 0;
   }
   process.stdout.write(
-    "Enabled on this machine; account-wide update pending. Uploads still require acceptance of the current analytics-cookie policy and a fresh account policy.\n",
+    "Enabled on this machine. To turn diagnostics on for your account, enable them in Settings in the browser. Uploads also require acceptance of the current analytics-cookie policy.\n",
   );
   return 0;
 };
