@@ -32,6 +32,30 @@ export const memoryProject = (cwd: string, override?: string): string => {
   return slugify(basename(cwd)) || "default";
 };
 
+/** Text the harness injects into a user-role entry, not words the user typed. */
+const SYSTEM_INJECTED_PREFIXES = [
+  "<task-notification>",
+  "[SYSTEM NOTIFICATION",
+  "<local-command-",
+  "<command-name>",
+] as const;
+
+/**
+ * True for user-role entries the user didn't write: background-task results,
+ * hook output and other system prompts. Saving these as "the user said"
+ * turns an agent's status report into a durable fact.
+ */
+const isSystemInjected = (
+  entry: Record<string, unknown>,
+  text: string,
+): boolean =>
+  entry.isMeta === true ||
+  entry.promptSource === "system" ||
+  recordOf(entry.origin)?.kind === "task-notification" ||
+  SYSTEM_INJECTED_PREFIXES.some((prefix) =>
+    text.trimStart().startsWith(prefix),
+  );
+
 const claudeEntry = (
   entry: Record<string, unknown>,
 ): TTranscriptTurn | null => {
@@ -40,7 +64,10 @@ const claudeEntry = (
   const role = message?.role ?? entry.type;
   if (role !== "user" && role !== "assistant") return null;
   const content = message?.content;
-  if (typeof content === "string") return { role, text: content };
+  if (typeof content === "string") {
+    if (role === "user" && isSystemInjected(entry, content)) return null;
+    return { role, text: content };
+  }
   if (!Array.isArray(content)) return null;
   const chunks: string[] = [];
   for (const value of content) {
@@ -53,7 +80,9 @@ const claudeEntry = (
       );
     else if (block?.type === "tool_result") chunks.push("[tool_result]");
   }
-  return { role, text: chunks.join("\n") };
+  const text = chunks.join("\n");
+  if (role === "user" && isSystemInjected(entry, text)) return null;
+  return { role, text };
 };
 
 const grokEntry = (entry: Record<string, unknown>): TTranscriptTurn | null => {
