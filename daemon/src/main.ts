@@ -59,6 +59,7 @@ import {
   sweepStaleChildrenOnBoot,
 } from "./child-supervisor";
 import { runCli } from "./cli";
+import { postRecord } from "./cloud-client";
 import { getCloudState, latestCliVersion, refreshBootstrap } from "./config";
 import { corsHeaders, isPreflight, preflightResponse } from "./cors";
 import { isSurvivableTransportError } from "./crash-policy";
@@ -73,6 +74,7 @@ import {
   stateDir,
 } from "./env";
 import { buildHealth } from "./health";
+import { flushHoldOutbox, startHoldOutbox } from "./hold-outbox";
 import { handleLocalAuth } from "./local-auth";
 import {
   handleLocalDeviceControl,
@@ -140,6 +142,9 @@ export const main = async (): Promise<void> => {
   // Runs before the sandbox so it can't be tripped by an FS-confinement bug,
   // and before the (costly) sandbox/FFI work it's meant to stop repeating.
   guardCrashLoop();
+
+  // Retry cap-hold records a previous run could not deliver.
+  startHoldOutbox(postRecord);
 
   // Converge a pre-merge two-binary install (real `openllmd` file, units that
   // exec bare `openllmd`) onto the single `openllm daemon` binary.
@@ -319,6 +324,8 @@ export const main = async (): Promise<void> => {
         // would catch it within a couple seconds anyway).
         const changed = await refreshBootstrap();
         noteBootstrapOutcome();
+        // Cap-hold records left undelivered (offline, or a previous run).
+        if (getCloudState() === "ok") void flushHoldOutbox();
         if (changed) await pushStatusIfChanged("bootstrap");
         // A bootstrap that just recovered to `ok` (boot-time unreachable, or a
         // newly-set key) is the first chance to run the device-state walk.

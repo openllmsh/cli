@@ -26,6 +26,8 @@ import type {
 } from "@openllmsh/protocol";
 import {
   DAEMON_BOOTSTRAP_CAPS_HEADER,
+  DAEMON_CAPS_HEADER,
+  DAEMON_CAPS_HOLDS,
   DAEMON_DEVICE_ID_HEADER,
   DAEMON_DEVICE_LABEL_HEADER,
   DAEMON_PLATFORM_HEADER,
@@ -43,6 +45,7 @@ import {
 } from "@openllmsh/protocol";
 import { Schema } from "effect";
 import { daemonEnv, deviceId } from "./env";
+import { enqueueHoldRecord } from "./hold-outbox";
 import { hasIdentityConflict, setIdentityConflict } from "./identity-state";
 import { logWarn, safeDiagnosticMessage } from "./logger";
 import { clearPlanCache } from "./plan-cache";
@@ -305,6 +308,9 @@ export const fetchBootstrap = async (): Promise<TDaemonBootstrap> => {
 /** Auth headers for a plan fetch, plus the origin's hop grant when tunneled. */
 const planHeaders = (hopGrant?: string): Headers => {
   const headers = new Headers(authHeaders());
+  // This daemon binds and reports cap holds; without it the cloud refuses
+  // capped plans and grant redemption with daemon_outdated.
+  headers.set(DAEMON_CAPS_HEADER, DAEMON_CAPS_HOLDS);
   if (hopGrant !== undefined) headers.set(HOP_GRANT_HEADER, hopGrant);
   return headers;
 };
@@ -530,25 +536,35 @@ export const publishIdentity = async (pubkey: string): Promise<void> => {
  * Record one `public.requests` row for a subscription hop the daemon ran
  * locally. Best-effort: a recording failure must never fail the user's
  * request (the bytes already streamed back), so callers fire-and-forget.
+ * A row carrying `hold_nonce` finalizes a cap hold and goes through the
+ * durable {@link enqueueHoldRecord} outbox instead.
  */
 export const recordRequest = async (
   row: TDaemonRecordRequest,
   origin?: string | null,
 ): Promise<void> => {
+  if (row.hold_nonce !== undefined) {
+    await enqueueHoldRecord(row, origin ?? null, postRecord);
+    return;
+  }
   try {
-    const response = await cloudFetch(
-      cloudUrl("/api/daemon/requests", origin),
-      {
-        method: "POST",
-        headers: authHeaders(),
-        body: JSON.stringify(row),
-      },
-    );
+    const response = await postRecord(row, origin ?? null);
     if (response.status === 409) clearPlanCache();
   } catch {
     // swallow — usage recording is non-critical telemetry
   }
 };
+
+/** POST one usage record. Throws on transport failure. */
+export const postRecord = (
+  row: TDaemonRecordRequest,
+  origin: string | null,
+): Promise<Response> =>
+  cloudFetch(cloudUrl("/api/daemon/requests", origin), {
+    method: "POST",
+    headers: authHeaders(),
+    body: JSON.stringify(row),
+  });
 
 /**
  * A transient cloud failure worth one retry within the two-attempt budget:

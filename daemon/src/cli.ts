@@ -343,7 +343,7 @@ export const runCli = (args: readonly string[] = userArgs()): boolean => {
       runIdentity(rest);
       break;
     case "uninstall":
-      runUninstall(rest);
+      void runUninstall(rest);
       break;
     case "completion":
       runCompletion(rest);

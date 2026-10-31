@@ -13,9 +13,9 @@ import { AsyncLocalStorage } from "node:async_hooks";
 /**
  * What the walk has reported for this hold. Hop paths (walker, native
  * runtime, local servers) report every attempt; only a success finalizes the
- * hold directly. Failures are logged without finalizing, and the listener
- * sends ONE terminal record once the walk, and any streamed body, is over
- * (`holdTerminalRecord`). That keeps a sibling-account retry, a mid-stream
+ * hold directly. Failures are logged without finalizing, and the listener's
+ * hold session sends ONE terminal record once the walk, and any streamed
+ * body, is over (`hold-session.ts`). That keeps a sibling-account retry, a mid-stream
  * failure or a client cancel from refunding work that ran.
  */
 export type THoldOutcome = {
@@ -81,41 +81,6 @@ export const holdFieldsForRecord = (row: {
     Math.max(0, Math.floor(row.tokens_out)),
   );
   return {};
-};
-
-/**
- * The one record that finalizes an unsettled hold. `committed` means the
- * client already received a response (a streamed body was returned), so the
- * provider ran; otherwise the request is dispatched only if a failed attempt
- * reported usage. Null when the hold already settled.
- */
-export const holdTerminalRecord = (args: {
-  readonly nonce: string;
-  readonly outcome: THoldOutcome;
-  readonly committed: boolean;
-  readonly fallbackModel: string;
-}): {
-  readonly model: string;
-  readonly provider: string;
-  readonly tokens_in: number;
-  readonly tokens_out: number;
-  readonly hold_nonce: string;
-  readonly dispatched: boolean;
-} | null => {
-  if (args.outcome.settled) return null;
-  args.outcome.settled = true;
-  const model = args.outcome.lastModel ?? args.fallbackModel;
-  const dispatched =
-    args.committed ||
-    args.outcome.partialTokensIn + args.outcome.partialTokensOut > 0;
-  return {
-    model,
-    provider: args.outcome.lastProvider ?? model.split("/")[0] ?? "",
-    tokens_in: args.outcome.partialTokensIn,
-    tokens_out: args.outcome.partialTokensOut,
-    hold_nonce: args.nonce,
-    dispatched,
-  };
 };
 
 export const currentHoldNonce = (): string | null =>

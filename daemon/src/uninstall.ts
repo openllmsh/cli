@@ -31,8 +31,10 @@ import {
 } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
+import { postRecord } from "./cloud-client";
 import { uninstallCompletion } from "./completion";
 import { stateDir } from "./env";
+import { drainHoldOutbox, pendingHoldRecords } from "./hold-outbox";
 import { serviceUninstall } from "./service";
 
 const out = (s: string): void => {
@@ -206,7 +208,7 @@ const keepLoginsDecision = (args: readonly string[]): boolean => {
 /**
  * Run `openllmd uninstall`. Exits the process (0 on completion, 1 on abort).
  */
-export const runUninstall = (args: readonly string[]): never => {
+export const runUninstall = async (args: readonly string[]): Promise<never> => {
   const keepable = hasLogins();
   if (!confirm(args, keepable)) {
     out("\nAborted — nothing was removed.\n");
@@ -240,7 +242,19 @@ export const runUninstall = (args: readonly string[]): never => {
       : "  ✓ PATH symlink (none owned by us)\n",
   );
 
-  // 4. Daemon state — binary, API key, keypair, sessions, logs — while leaving
+  // 4. Deliver queued cap-hold records first (bounded). Whatever stays
+  //    undelivered is charged in full by the cloud's hold sweep.
+  if (pendingHoldRecords() > 0) {
+    await drainHoldOutbox(postRecord).catch(() => undefined);
+    const left = pendingHoldRecords();
+    out(
+      left === 0
+        ? "  ✓ delivered pending usage records\n"
+        : `  ! ${left} usage record(s) could not be delivered\n`,
+    );
+  }
+
+  // 5. Daemon state — binary, API key, keypair, sessions, logs — while leaving
   //    CLI-owned entries in place. When the user opted to keep them, the
   //    subscription logins under `~/.openllm/cli` also survive.
   out(`  ✓ ${pruneState(keepLogins)}\n`);

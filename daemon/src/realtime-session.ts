@@ -39,7 +39,7 @@ import {
   REALTIME_MAX_QUEUED_EVENTS,
   REALTIME_SESSION_MAX_LIFETIME_MS,
 } from "@openllmsh/protocol";
-import { fetchPlan } from "./cloud-client";
+import { fetchPlan, recordRequest } from "./cloud-client";
 import { getDelegate, isOAuthSlug } from "./delegation";
 import { logWarn } from "./logger";
 import { parsePlan, planSignatureOk, report } from "./walker";
@@ -81,8 +81,21 @@ const authorizeRealtimeOpenViaCloudPlan = async (
   }
   // Realtime sessions have no per-hop usage record to settle a cap hold, so
   // a capped key (the cloud bound the plan to a hold) can't open one. The
-  // unused hold expires with the reservation sweep.
-  if (fetched.hold_nonce !== undefined) return { ok: false };
+  // hold is bound to this device and already dispatched: settle it at 0 now,
+  // or the sweep would charge it in full.
+  if (fetched.hold_nonce !== undefined) {
+    void recordRequest({
+      model: `${open.provider}/${open.model}`,
+      provider: open.provider,
+      status: "error",
+      tokens_in: 0,
+      tokens_out: 0,
+      latency_ms: 0,
+      error: "Realtime is not available for capped keys",
+      hold_nonce: fetched.hold_nonce,
+    });
+    return { ok: false };
+  }
   const overflow = fetched.context_overflow_strategy ?? null;
   if (
     !planSignatureOk(
