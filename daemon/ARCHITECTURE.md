@@ -118,7 +118,9 @@ daemon/
     integrations.ts         shared executor: fetch a gateway install.sh (mode=install|uninstall|state) → verify SHA-256 (fail-closed) → bash. Behind the CLI verbs + the relay's install/uninstall_integration kinds
     device-state.ts         manifest-driven probe: run each integration's `install.sh?mode=state` (`{"installed":bool,…}`) → cached DaemonStatus.integrations (stateful dashboard buttons)
     service.ts              self-managed launch agent / systemd unit (start = self-restore; stop = disable; serviceUninstall = stop + delete registration)
-    uninstall.ts            `openllm daemon uninstall` — confirm → stop+unregister → strip completion + owned PATH symlink → delete all state (credentials)
+    uninstall.ts            `openllm daemon uninstall` — confirm → stop+unregister → strip completion + owned PATH symlink → drain the hold outbox (5 s) → delete all state (credentials)
+    hold-session.ts         one capped request's hold, finalized on EVERY exit (`withHoldSession` around `handleInference`): reported usage, 0 when nothing ran, or `usage_unknown` (cloud charges the full hold) for a delivered body / thrown walk with no usage
+    hold-outbox.ts          durable 0600 JSONL outbox for records carrying `hold_nonce`: written before the POST, dropped on 2xx or a final 400/403/404/409, retried with backoff (boot + healthy bootstrap tick), entries older than the cloud's 1 h hold sweep dropped
     completion.ts           bash/zsh/fish shell completion (emit + `completion install` / `uninstallCompletion`)
     harden-binary.ts        macOS dequarantine + ad-hoc sign (shared by service + updater)
     sandbox/
@@ -270,6 +272,17 @@ walks via the same `@openllmsh/wire/lib/error-class` policy as the cloud;
 routing never depends on provider-specific status/message allow-lists. The
 walker commits on first output, after which switching models is intentionally
 unsafe. On chain exhaustion the final hop's real upstream response is preserved.
+
+**Cap holds (capped API keys).** A capped key's plan is one hop bound to a
+cloud reservation (`hold_nonce`, signed with `max_output_tokens`) that is
+created already dispatched and bound to this device's key — only this key can
+report it. Plan fetches send `x-openllm-daemon-caps: holds-v2`; a daemon
+without it is refused capped plans (`daemon_outdated`). The walk clamps output
+to the held budget (`clampOutputLimitFields`, shared with the cloud); a
+success record settles the hold, otherwise `hold-session.ts` sends exactly one
+terminal record, delivered through `hold-outbox.ts`. Video jobs this daemon
+creates are signed by the cloud (`POST /api/daemon/video-id`). Rules:
+`docs/plan/2026-10-31-hold-finalization.md`.
 
 ### Local model servers (`local-servers/`)
 
