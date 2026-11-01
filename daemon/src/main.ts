@@ -74,7 +74,12 @@ import {
   stateDir,
 } from "./env";
 import { buildHealth } from "./health";
-import { flushHoldOutbox, startHoldOutbox } from "./hold-outbox";
+import {
+  acquireHoldJournalLock,
+  flushHoldOutbox,
+  startHoldOutbox,
+} from "./hold-outbox";
+import { finishOpenHoldSessions, inferenceAdmission } from "./hold-session";
 import { handleLocalAuth } from "./local-auth";
 import {
   handleLocalDeviceControl,
@@ -159,6 +164,16 @@ export const main = async (): Promise<void> => {
   const gate = requireServiceApiKey("machine");
   if (!gate.ok) {
     process.stderr.write(gate.message);
+    process.exit(1);
+  }
+
+  try {
+    const releaseJournal = acquireHoldJournalLock();
+    process.once("exit", releaseJournal);
+  } catch (error) {
+    process.stderr.write(
+      `openllmd: ${error instanceof Error ? error.message : String(error)}\n`,
+    );
     process.exit(1);
   }
 
@@ -401,6 +416,15 @@ export const main = async (): Promise<void> => {
   // termination instead of waiting for the presence-staleness window.
   let shuttingDown = false;
   const finishShutdown = async (signal: NodeJS.Signals): Promise<void> => {
+    // Bound the entire shutdown, including a stalled journal write. The cloud
+    // hold sweep recovers any records that cannot be persisted before exit.
+    setTimeout(
+      () => process.exit(signal === "SIGINT" ? 130 : 143),
+      30_000,
+    ).unref();
+    await inferenceAdmission.stop();
+    finishOpenHoldSessions();
+    await (await import("./hold-outbox")).drainHoldJournal();
     try {
       if (controlChannel !== null) await controlChannel.stopControlChannel();
     } catch (err) {
@@ -414,10 +438,6 @@ export const main = async (): Promise<void> => {
     // Durable local session hosts are detached from this daemon. The supervisor
     // tracks only disposable children, leaving their PTYs alone.
     await drainDisposableChildren();
-    // Settle holds of requests still in flight (their streams die with us),
-    // then wait for queued settlement appends — not network delivery.
-    (await import("./hold-session")).finishOpenHoldSessions();
-    await (await import("./hold-outbox")).drainHoldJournal();
     // Queued async appends would otherwise be dropped by process.exit.
     await flushLogs();
     process.exit(signal === "SIGINT" ? 130 : 143);
@@ -665,9 +685,8 @@ export const main = async (): Promise<void> => {
     return;
   }
 
-  // Retry cap-hold records a previous run could not deliver. Only after the
-  // bind: the port is the single-instance lock, so exactly one daemon per
-  // mode owns the journal (dev has its own file — see `hold-outbox.ts`).
+  // Retry cap-hold records a previous run could not deliver. The journal's
+  // process lock was acquired before binding, independent of the port.
   startHoldOutbox(postRecord);
 
   // Ready signal at BIND time — `/whoami` and `/status` already answer. The

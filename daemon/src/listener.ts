@@ -60,7 +60,11 @@ import { corsHeaders, errorJson, isPreflight, preflightResponse } from "./cors";
 import { isOAuthSlug } from "./delegation";
 import { runEmbeddings } from "./embeddings-walker";
 import { forwardToCloud, passthroughToOrigin } from "./forward";
-import { HoldSession, withHoldSession } from "./hold-session";
+import {
+  HoldSession,
+  inferenceAdmission,
+  withHoldSession,
+} from "./hold-session";
 import { runImageEditWalker, runImageWalker } from "./image-walker";
 import { isLocalServerSlug } from "./local-servers";
 import { logWarn, safeDiagnosticMessage } from "./logger";
@@ -159,14 +163,17 @@ export const handleInference = async (
   req: Request,
   direct = false,
 ): Promise<Response> => {
-  const url = new URL(req.url);
-  const session = new HoldSession(
-    url.pathname.replace(/^\/api(?=\/v1\/)/, ""),
-    Date.now(),
-  );
-  return withHoldSession(session, () =>
-    handleInferenceIn(req, session, direct),
-  );
+  return inferenceAdmission.run(req, (admitted) => {
+    const url = new URL(admitted.url);
+    const session = new HoldSession(
+      url.pathname.replace(/^\/api(?=\/v1\/)/, ""),
+      Date.now(),
+      inferenceAdmission.signal,
+    );
+    return withHoldSession(session, () =>
+      handleInferenceIn(admitted, session, direct),
+    );
+  });
 };
 
 const handleInferenceIn = async (
@@ -635,8 +642,8 @@ const handleInferenceIn = async (
 
     const resolveFetched = async (
       /**
-       * Bound the shared single-flight to the cloud timeout only — never one
-       * caller's `req.signal` — so one abort cannot fail every joined waiter.
+       * Shared flights use the shutdown signal rather than a caller's signal,
+       * so one caller cannot abort other waiters.
        */
       signal: AbortSignal | undefined,
       background = false,
@@ -702,7 +709,6 @@ const handleInferenceIn = async (
           ),
         };
       }
-      observePolicyRevision(fetched.policy_rev, callerIdentity);
       const fetchedContextOverflowStrategy =
         fetched.context_overflow_strategy ?? null;
       const fetchedHoldNonce = fetched.hold_nonce ?? null;
@@ -734,6 +740,7 @@ const handleInferenceIn = async (
         fetchedHoldNonce,
         fetchedMaxOutputTokens,
       );
+      if (verified) observePolicyRevision(fetched.policy_rev, callerIdentity);
       const hasDaemonOnlyHop =
         verified &&
         parsePlan(fetched.plan).some((entry) => {
@@ -858,8 +865,11 @@ const handleInferenceIn = async (
         planCacheKey,
         async (background) => {
           ledFlight = true;
-          // Shared flight: cloud timeout only (no per-request abort).
-          const outcome = await resolveFetched(undefined, background);
+          // Shared across callers, but cancelled when the daemon shuts down.
+          const outcome = await resolveFetched(
+            inferenceAdmission.signal,
+            background,
+          );
           // A held plan is bound to one reservation: never cache it.
           if (
             outcome.kind === "tuple" &&
@@ -966,7 +976,6 @@ const handleInferenceIn = async (
         ),
       );
     }
-    observePolicyRevision(fetched.policy_rev, callerIdentity);
     const fetchedContextOverflowStrategy =
       fetched.context_overflow_strategy ?? null;
     maxOutputTokens = fetched.max_output_tokens ?? null;
@@ -982,6 +991,7 @@ const handleInferenceIn = async (
     if (!verified) {
       return withCors(req, errorJson(403, "invalid or missing plan signature"));
     }
+    observePolicyRevision(fetched.policy_rev, callerIdentity);
     const materialized = await materializeFromVerifiedPlan(fetched.plan);
     if (materialized !== null) return withCors(req, materialized);
     if (selectedModelFromPlan(fetched.plan) === null) {
@@ -1070,7 +1080,6 @@ const handleInferenceIn = async (
         ),
       );
     }
-    observePolicyRevision(fetched.policy_rev, callerIdentity);
     const fetchedContextOverflowStrategy =
       fetched.context_overflow_strategy ?? null;
     maxOutputTokens = fetched.max_output_tokens ?? null;
@@ -1086,6 +1095,7 @@ const handleInferenceIn = async (
     if (!verified) {
       return withCors(req, errorJson(403, "invalid or missing plan signature"));
     }
+    observePolicyRevision(fetched.policy_rev, callerIdentity);
     planParam = fetched.plan;
     pmidsParam = fetched.pmids;
     originParam = fetched.origin;
@@ -1160,6 +1170,10 @@ const handleInferenceIn = async (
   // Hop paths log failed attempts without the nonce; the session's terminal
   // record finalizes each hold exactly once (hold-session.ts).
   const walk = (): Promise<Response> => {
+    if (!session.canDispatch(req.signal, inferenceAdmission))
+      return Promise.resolve(
+        withCors(req, errorJson(503, "daemon shutting down", "unavailable")),
+      );
     if (singleCloudHop && planParam !== null) {
       // Origin authenticates the caller and owns this hop's reservation;
       // no daemon hold is used or charged for the forward.
@@ -1263,7 +1277,6 @@ const handleInferenceIn = async (
         return null;
       }
       if (epoch !== currentPolicyEpoch(callerIdentity)) return null;
-      observePolicyRevision(refreshed.policy_rev, callerIdentity);
       // A held plan is bound to a reservation; it is never kept warm.
       if (refreshed.hold_nonce !== undefined) return null;
       const refreshedContextOverflowStrategy =
@@ -1275,6 +1288,7 @@ const handleInferenceIn = async (
         refreshedContextOverflowStrategy,
         refreshed.sig,
       );
+      if (verified) observePolicyRevision(refreshed.policy_rev, callerIdentity);
       const hasDaemonOnlyHop =
         verified &&
         parsePlan(refreshed.plan).some((entry) => {

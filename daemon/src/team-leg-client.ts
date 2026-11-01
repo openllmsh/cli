@@ -2,6 +2,7 @@ import type { TTunnelSurface } from "@openllmsh/protocol";
 import { TEAM_LEG_STREAM_DEADLINE_MS } from "@openllmsh/protocol";
 import { TEAM_LEG_INPUT_SLACK_TOKENS } from "@openllmsh/tunnel/team-grant";
 import { warmCapTokenCounter } from "@openllmsh/wire/lib/canonical/token-estimate";
+import { cloudFetch } from "./cloud-client";
 import { daemonEnv } from "./env";
 import {
   clampTeamLegBody,
@@ -80,7 +81,7 @@ export const tryDirectTeamLeg = async (args: {
   // If loading fails, the caller conservatively reserves the byte bound.
   await warmCapTokenCounter().catch(() => null);
   const inputTokens = estimateTeamLegInputTokens(args.body);
-  const reserve = await fetch(teamLegUrl(), {
+  const reserve = await cloudFetch(teamLegUrl(), {
     method: "POST",
     headers: apiHeaders(args.callerKey),
     body: JSON.stringify({

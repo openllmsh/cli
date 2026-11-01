@@ -1,5 +1,13 @@
 /** Durable, nonce-idempotent delivery of cap-hold settlement records. */
-import { readFileSync } from "node:fs";
+
+import {
+  closeSync,
+  ftruncateSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  writeFileSync,
+} from "node:fs";
 import { open, readFile, rename } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import type { TDaemonRecordRequest } from "@openllmsh/protocol";
@@ -25,10 +33,76 @@ const FINAL_STATUSES = new Set([400, 403, 404, 409]);
 /**
  * One journal per daemon mode. Dev and prod share `stateDir` but bind
  * different ports and talk to different cloud origins, so each needs its own
- * file; within a mode the port bind keeps a single owner.
+ * file and an exclusive process-owned lock, independent of the port.
  */
 const outboxPath = (): string =>
   join(stateDir(), isDevMode() ? "hold-outbox.dev.jsonl" : "hold-outbox.jsonl");
+
+let lockUnavailableWarned = false;
+const withoutJournalLock = (): (() => void) => {
+  if (!lockUnavailableWarned) {
+    lockUnavailableWarned = true;
+    console.warn("hold journal: cross-process locking unavailable");
+  }
+  return () => {};
+};
+
+/** The kernel releases this lock on process death; the file itself is never removed. */
+export const acquireHoldJournalLock = (
+  libraryNames?: readonly string[],
+): (() => void) => {
+  const path = `${outboxPath()}.lock`;
+  mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+  const libraries =
+    libraryNames ??
+    (process.platform === "darwin"
+      ? ["/usr/lib/libSystem.B.dylib"]
+      : ["libc.so.6", "libc.so"]);
+  let library: {
+    symbols: { flock: (fd: number, flags: number) => number };
+    close: () => void;
+  } | null = null;
+  try {
+    const ffi: typeof import("bun:ffi") = require("bun:ffi");
+    for (const name of libraries) {
+      try {
+        library = ffi.dlopen(name, {
+          flock: {
+            args: [ffi.FFIType.i32, ffi.FFIType.i32],
+            returns: ffi.FFIType.i32,
+          },
+        });
+        break;
+      } catch {
+        /* try the next libc */
+      }
+    }
+  } catch {
+    /* FFI is unavailable */
+  }
+  if (library === null) return withoutJournalLock();
+  const fd = openSync(path, "a+", 0o600);
+  if (library.symbols.flock(fd, 2 | 4) !== 0) {
+    closeSync(fd);
+    library.close();
+    throw new Error("hold journal is owned by another daemon");
+  }
+  try {
+    ftruncateSync(fd, 0);
+    writeFileSync(fd, String(process.pid));
+  } catch (error) {
+    closeSync(fd);
+    library.close();
+    throw error;
+  }
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    closeSync(fd);
+    library.close();
+  };
+};
 
 const syncDirectory = async (path: string): Promise<void> => {
   const file = await open(dirname(path), "r");
@@ -128,15 +202,8 @@ const quarantineTail = async (path: string, tail: string): Promise<void> => {
 };
 
 /** Wait for journal operations already queued, without waiting for network delivery. */
-export const drainHoldJournal = async (timeoutMs = 3_000): Promise<void> => {
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  await Promise.race([
-    journalQueue,
-    new Promise<void>((resolve) => {
-      timer = setTimeout(resolve, timeoutMs);
-    }),
-  ]);
-  if (timer !== undefined) clearTimeout(timer);
+export const drainHoldJournal = async (): Promise<void> => {
+  await journalQueue;
 };
 
 const readJournal = async (path: string): Promise<string> => {
@@ -282,19 +349,24 @@ export const flushHoldOutbox = (): Promise<void> => {
         ),
       );
     }
-    for (const nonce of done) memory?.delete(nonce);
-    if (memory?.size === 0) volatile.delete(path);
     let remaining = true;
     try {
       if (disk !== null) {
         await journalOp(async () => {
           const keptByNonce = new Map<string, TEntry>();
-          for (const entry of [...disk, ...(appendedDuringFlush ?? [])]) {
+          const pendingMemory = volatile.get(path);
+          for (const entry of [
+            ...disk,
+            ...(appendedDuringFlush ?? []),
+            ...(pendingMemory?.values() ?? []),
+          ]) {
             const nonce = entry.row.hold_nonce ?? "";
             if (!done.has(nonce)) keptByNonce.set(nonce, entry);
           }
           const kept = [...keptByNonce.values()];
           await writeEntries(path, kept);
+          pendingMemory?.clear();
+          if (pendingMemory?.size === 0) volatile.delete(path);
           remaining = kept.length > 0 || (volatile.get(path)?.size ?? 0) > 0;
         });
       }

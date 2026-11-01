@@ -84,6 +84,7 @@ export const observeTeamResponseStream = (
   let pending = "";
   let bytes = 0;
   let overflow = false;
+  let discardingFrame = false;
   let complete = false;
   let failed = false;
   let settled = false;
@@ -123,8 +124,8 @@ export const observeTeamResponseStream = (
     }
   };
   const append = (text: string): void => {
-    if (overflow) return;
     if (!eventStream) {
+      if (overflow) return;
       bytes += encoder.encode(text).byteLength;
       if (bytes > MAX_OBSERVATION_BYTES) {
         overflow = true;
@@ -136,32 +137,31 @@ export const observeTeamResponseStream = (
     }
     // Process complete frames before applying the limit, so a large chunk of
     // small frames does not count as one retained frame.
+    const addPart = (part: string): void => {
+      if (!discardingFrame) {
+        bytes += encoder.encode(part).byteLength;
+        if (bytes > MAX_OBSERVATION_BYTES) {
+          overflow = true;
+          discardingFrame = true;
+        }
+      }
+      pending = discardingFrame
+        ? (pending.slice(-4) + part).slice(-4)
+        : pending + part;
+      if (/\r?\n\r?\n$/.test(pending.slice(-4))) {
+        if (!discardingFrame) frame(pending);
+        pending = "";
+        bytes = 0;
+        discardingFrame = false;
+      }
+    };
     let start = 0;
     for (let i = 0; i < text.length; i++) {
       if (text[i] !== "\n") continue;
-      const part = text.slice(start, i + 1);
-      bytes += encoder.encode(part).byteLength;
-      if (bytes > MAX_OBSERVATION_BYTES) {
-        overflow = true;
-        pending = "";
-        return;
-      }
-      pending += part;
+      addPart(text.slice(start, i + 1));
       start = i + 1;
-      if (/\r?\n\r?\n$/.test(pending.slice(-4))) {
-        frame(pending);
-        pending = "";
-        bytes = 0;
-      }
     }
-    const rest = text.slice(start);
-    bytes += encoder.encode(rest).byteLength;
-    if (bytes > MAX_OBSERVATION_BYTES) {
-      overflow = true;
-      pending = "";
-      return;
-    }
-    pending += rest;
+    addPart(text.slice(start));
   };
   return new ReadableStream<Uint8Array>({
     async pull(controller): Promise<void> {
@@ -170,16 +170,18 @@ export const observeTeamResponseStream = (
         if (!result.done) {
           if (
             !overflow &&
+            !eventStream &&
             bytes + result.value.byteLength > MAX_OBSERVATION_BYTES
           ) {
             overflow = true;
             pending = "";
           }
-          if (!overflow) append(decoder.decode(result.value, { stream: true }));
+          if (!overflow || eventStream)
+            append(decoder.decode(result.value, { stream: true }));
           controller.enqueue(result.value);
           return;
         }
-        if (!overflow) append(decoder.decode());
+        if (!overflow || eventStream) append(decoder.decode());
         if (!overflow && !eventStream) {
           try {
             observer.observe(JSON.parse(pending));
@@ -187,7 +189,12 @@ export const observeTeamResponseStream = (
             /* unknown usage */
           }
         }
-        if (!overflow && eventStream && !complete) onIncomplete?.();
+        if (eventStream && !complete) {
+          onIncomplete?.();
+          finish(null);
+          controller.error(new Error("team stream ended before completion"));
+          return;
+        }
         finish(
           !overflow &&
             !failed &&
