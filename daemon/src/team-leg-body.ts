@@ -85,6 +85,7 @@ export const observeTeamResponseStream = (
   let bytes = 0;
   let overflow = false;
   let complete = false;
+  let failed = false;
   let settled = false;
   const finish = (usage: TAttemptUsage | null): void => {
     if (settled) return;
@@ -101,11 +102,21 @@ export const observeTeamResponseStream = (
         value === "data: [DONE]"
       )
         complete = true;
+      if (value === "event: error") failed = true;
       if (line.startsWith("data:")) data.push(line.slice(5).replace(/^ /, ""));
     }
     if (data.length > 0) {
       try {
-        observer.observe(JSON.parse(data.join("\n")));
+        const payload: unknown = JSON.parse(data.join("\n"));
+        if (
+          payload !== null &&
+          typeof payload === "object" &&
+          !Array.isArray(payload)
+        ) {
+          const record = payload as Record<string, unknown>;
+          if ("error" in record || record.type === "error") failed = true;
+        }
+        observer.observe(payload);
       } catch {
         /* malformed event */
       }
@@ -157,11 +168,18 @@ export const observeTeamResponseStream = (
       try {
         const result = await reader.read();
         if (!result.done) {
-          append(decoder.decode(result.value, { stream: true }));
+          if (
+            !overflow &&
+            bytes + result.value.byteLength > MAX_OBSERVATION_BYTES
+          ) {
+            overflow = true;
+            pending = "";
+          }
+          if (!overflow) append(decoder.decode(result.value, { stream: true }));
           controller.enqueue(result.value);
           return;
         }
-        append(decoder.decode());
+        if (!overflow) append(decoder.decode());
         if (!overflow && !eventStream) {
           try {
             observer.observe(JSON.parse(pending));
@@ -171,7 +189,9 @@ export const observeTeamResponseStream = (
         }
         if (!overflow && eventStream && !complete) onIncomplete?.();
         finish(
-          !overflow && (!eventStream || complete) ? observer.usage() : null,
+          !overflow && !failed && (!eventStream || complete)
+            ? observer.usage()
+            : null,
         );
         controller.close();
       } catch (error) {

@@ -417,6 +417,8 @@ export const main = async (): Promise<void> => {
     // Durable local session hosts are detached from this daemon. The supervisor
     // tracks only disposable children, leaving their PTYs alone.
     await drainDisposableChildren();
+    // Wait for queued settlement appends before process.exit, but not network delivery.
+    await (await import("./hold-outbox")).drainHoldJournal();
     // Queued async appends would otherwise be dropped by process.exit.
     await flushLogs();
     process.exit(signal === "SIGINT" ? 130 : 143);

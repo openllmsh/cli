@@ -215,6 +215,12 @@ const handleInferenceIn = async (
   // paired key fills in when the caller sends none). Handled before the body
   // parse below, which assumes an inference request with a JSON body.
   if (req.method === "GET" && /^\/v1\/models(?:\/|$)/.test(normalizedPath)) {
+    if (hopGrant !== null) {
+      return withCors(
+        req,
+        errorJson(502, "Granted plan is unavailable", "plan_error"),
+      );
+    }
     return withCors(req, await passthroughToOrigin(req, new ArrayBuffer(0)));
   }
 
@@ -530,6 +536,9 @@ const handleInferenceIn = async (
     return null;
   };
 
+  const grantedPlanUnavailable = (): Response =>
+    withCors(req, errorJson(502, "Granted plan is unavailable", "plan_error"));
+
   const handlePlanFetchError = (
     err: unknown,
     label: string,
@@ -540,6 +549,15 @@ const handleInferenceIn = async (
      */
     signal?: AbortSignal,
   ): Response | "passthrough" | "throw" => {
+    if (hopGrant !== null) {
+      if (err instanceof Error && err.message === "plan fetch failed: 403") {
+        return withCors(
+          req,
+          errorJson(403, "Hop grant rejected", "access_limit"),
+        );
+      }
+      return grantedPlanUnavailable();
+    }
     const decision = planFetchFailureAction(err, signal);
     if (decision.action === "origin-error") {
       logWarn("listener", originFailureDiagnostic(decision.kind), {
@@ -773,6 +791,9 @@ const handleInferenceIn = async (
     };
 
     const forwardTeamOrOrigin = async (): Promise<Response> => {
+      // A grant binds this request to its claimed hold; never substitute the
+      // device's credential if a plan cannot be used.
+      if (hopGrant !== null) return grantedPlanUnavailable();
       // Direct team reservations dispatch only ordinary inference. All media,
       // embeddings, and token-count surfaces retain their origin wire shape.
       if (!isDirectTeamInferencePath(normalizedPath)) {

@@ -35,7 +35,7 @@ const syncDirectory = async (path: string): Promise<void> => {
 
 const syncWrite = async (
   path: string,
-  data: string,
+  data: string | Uint8Array,
   flags: string,
 ): Promise<void> => {
   const file = await open(path, flags, 0o600);
@@ -80,6 +80,59 @@ const journalOp = <T>(operation: () => Promise<T>): Promise<T> => {
   return result;
 };
 
+const MAX_QUARANTINE_BYTES = 1024 * 1024;
+
+/** Atomically retain a bounded suffix, without duplicating a crash-replayed tail. */
+const quarantineTail = async (path: string, tail: string): Promise<void> => {
+  const quarantine = `${path}.corrupt`;
+  const fragment = Buffer.from(`${tail}\n`);
+  const entry = fragment.subarray(
+    Math.max(0, fragment.length - MAX_QUARANTINE_BYTES),
+  );
+  let previous = Buffer.alloc(0);
+  let oversized = false;
+  try {
+    const file = await open(quarantine, "r");
+    try {
+      const size = (await file.stat()).size;
+      oversized = size > MAX_QUARANTINE_BYTES;
+      previous = Buffer.alloc(Math.min(size, MAX_QUARANTINE_BYTES));
+      await file.read(previous, 0, previous.length, size - previous.length);
+    } finally {
+      await file.close();
+    }
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  }
+  const duplicate =
+    previous.length >= entry.length &&
+    previous.subarray(previous.length - entry.length).equals(entry) &&
+    (previous.length === entry.length ||
+      previous[previous.length - entry.length - 1] === 10);
+  if (duplicate && !oversized) return;
+  const combined = duplicate ? previous : Buffer.concat([previous, entry]);
+  const tmp = `${quarantine}.${process.pid}.tmp`;
+  await syncWrite(
+    tmp,
+    combined.subarray(Math.max(0, combined.length - MAX_QUARANTINE_BYTES)),
+    "w",
+  );
+  await rename(tmp, quarantine);
+  await syncDirectory(path);
+};
+
+/** Wait for journal operations already queued, without waiting for network delivery. */
+export const drainHoldJournal = async (timeoutMs = 3_000): Promise<void> => {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  await Promise.race([
+    journalQueue,
+    new Promise<void>((resolve) => {
+      timer = setTimeout(resolve, timeoutMs);
+    }),
+  ]);
+  if (timer !== undefined) clearTimeout(timer);
+};
+
 const readJournal = async (path: string): Promise<string> => {
   let text: string;
   try {
@@ -95,8 +148,7 @@ const readJournal = async (path: string): Promise<string> => {
       await syncWrite(path, "\n", "a");
       text += "\n";
     } else {
-      await syncWrite(`${path}.corrupt`, `${tail}\n`, "a");
-      await syncDirectory(path);
+      await quarantineTail(path, tail);
       const file = await open(path, "r+");
       try {
         await file.truncate(Buffer.byteLength(text.slice(0, boundary)));
