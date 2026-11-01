@@ -96,29 +96,11 @@ import {
   ZERO_TOKENS,
 } from "./types";
 
-export const nativeUsageTracker = (): {
-  readonly hasUsage: () => boolean;
-  readonly attempt: () => TAttemptOutcome;
-  readonly trackUsage: (
-    chunks: ReadableStream<TChatCompletionChunk>,
-  ) => ReadableStream<TChatCompletionChunk>;
-} => {
-  let seen = false;
-  return {
-    hasUsage: () => seen,
-    // Native bridges can synthesize missing sides as zero before these chunks
-    // reach us, so observing both fields here cannot prove complete usage.
-    attempt: () => ({ sent: true, usage: null, definiteProviderError: false }),
-    trackUsage: (chunks) =>
-      chunks.pipeThrough(
-        new TransformStream<TChatCompletionChunk, TChatCompletionChunk>({
-          transform: (chunk, controller): void => {
-            if (chunk.usage != null) seen = true;
-            controller.enqueue(chunk);
-          },
-        }),
-      ),
-  };
+// Native bridges can synthesize missing usage sides as zero, so usage is unknown.
+const nativeAttempt: TAttemptOutcome = {
+  sent: true,
+  usage: null,
+  definiteProviderError: false,
 };
 
 /** Production capture sender — forward the vendor envelope unchanged once. */
@@ -520,7 +502,6 @@ export type TNativeServeParams = {
   readonly record: (
     tokens: TNativeTokens,
     status: "success" | "error",
-    usageUnknown?: boolean,
     attempt?: TAttemptOutcome,
   ) => void;
 };
@@ -858,11 +839,10 @@ export const tryServeNativeRuntime = async (
   // re-key under `hash(inbound turns + assistant response)` so the NEXT
   // request resumes it. Capture must not publish a resume handle — the builder
   // never incorporated the true assistant reply into vendor session state.
-  const { trackUsage, hasUsage, attempt } = nativeUsageTracker();
   const settle = (
     resp: Awaited<ReturnType<typeof accumulateChunksToResponse>>,
   ): void => {
-    params.record(tokensFromResponse(resp), "success", !hasUsage(), attempt());
+    params.record(tokensFromResponse(resp), "success", nativeAttempt);
     lease.commit(
       nextPrefixHash(
         params.providerModelId,
@@ -882,8 +862,7 @@ export const tryServeNativeRuntime = async (
     params.record(
       usage === null ? ZERO_TOKENS : tokensFromResponse({ usage }),
       "error",
-      undefined,
-      attempt(),
+      nativeAttempt,
     );
     lease.abandon();
   };
@@ -892,7 +871,7 @@ export const tryServeNativeRuntime = async (
 
   // ── Streaming client: the shared delivery tail (walker parity) ──────
   if (params.wantsStream) {
-    return deliverChunkStream(trackUsage(committed.chunks), {
+    return deliverChunkStream(committed.chunks, {
       surface: params.surface,
       clientWire,
       providerModelId: params.providerModelId,
@@ -906,7 +885,7 @@ export const tryServeNativeRuntime = async (
   let canonical: Awaited<ReturnType<typeof accumulateChunksToResponse>>;
   try {
     canonical = await accumulateChunksToResponse(
-      trackUsage(committed.chunks),
+      committed.chunks,
       params.providerModelId,
     );
   } catch (err) {
@@ -989,11 +968,10 @@ const serveClaudeSdkFacadeHop = async (
   }
 
   const committed = run;
-  const { trackUsage, hasUsage, attempt } = nativeUsageTracker();
   const settle = (
     resp: Awaited<ReturnType<typeof accumulateChunksToResponse>>,
   ): void => {
-    params.record(tokensFromResponse(resp), "success", !hasUsage(), attempt());
+    params.record(tokensFromResponse(resp), "success", nativeAttempt);
   };
   const fail = (err: unknown): void => {
     if (params.signal.aborted || isClientHangUp(err)) return;
@@ -1001,14 +979,13 @@ const serveClaudeSdkFacadeHop = async (
     params.record(
       usage === null ? ZERO_TOKENS : tokensFromResponse({ usage }),
       "error",
-      undefined,
-      attempt(),
+      nativeAttempt,
     );
   };
 
   const clientWire = clientWireOf(params.surface);
   if (params.wantsStream) {
-    return deliverChunkStream(trackUsage(committed.chunks), {
+    return deliverChunkStream(committed.chunks, {
       surface: params.surface,
       clientWire,
       providerModelId: params.providerModelId,
@@ -1021,7 +998,7 @@ const serveClaudeSdkFacadeHop = async (
   let canonical: Awaited<ReturnType<typeof accumulateChunksToResponse>>;
   try {
     canonical = await accumulateChunksToResponse(
-      trackUsage(committed.chunks),
+      committed.chunks,
       params.providerModelId,
     );
   } catch (err) {
@@ -1173,11 +1150,10 @@ const serveCapturedToolTurn = async (
 
   // Capture tool turns never publish a resume handle — builder never saw the
   // true assistant/tool exchange.
-  const { trackUsage, hasUsage, attempt } = nativeUsageTracker();
   const settle = (
     resp: Awaited<ReturnType<typeof accumulateChunksToResponse>>,
   ): void => {
-    params.record(tokensFromResponse(resp), "success", !hasUsage(), attempt());
+    params.record(tokensFromResponse(resp), "success", nativeAttempt);
   };
   const fail = (err: unknown): void => {
     if (params.signal.aborted || isClientHangUp(err)) return;
@@ -1185,13 +1161,12 @@ const serveCapturedToolTurn = async (
     params.record(
       usage === null ? ZERO_TOKENS : tokensFromResponse({ usage }),
       "error",
-      undefined,
-      attempt(),
+      nativeAttempt,
     );
   };
   const clientWire = clientWireOf(params.surface);
   if (params.wantsStream) {
-    return deliverChunkStream(trackUsage(run.chunks), {
+    return deliverChunkStream(run.chunks, {
       surface: params.surface,
       clientWire,
       providerModelId: params.providerModelId,
@@ -1203,7 +1178,7 @@ const serveCapturedToolTurn = async (
   let canonical: Awaited<ReturnType<typeof accumulateChunksToResponse>>;
   try {
     canonical = await accumulateChunksToResponse(
-      trackUsage(run.chunks),
+      run.chunks,
       params.providerModelId,
     );
   } catch (err) {
@@ -1301,11 +1276,10 @@ const serveCursorHop = async (
     );
   }
 
-  const { trackUsage, hasUsage, attempt } = nativeUsageTracker();
   const settle = (
     resp: Awaited<ReturnType<typeof accumulateChunksToResponse>>,
   ): void => {
-    params.record(tokensFromResponse(resp), "success", !hasUsage(), attempt());
+    params.record(tokensFromResponse(resp), "success", nativeAttempt);
   };
   const fail = (err: unknown): void => {
     if (params.signal.aborted || isClientHangUp(err)) return;
@@ -1313,13 +1287,12 @@ const serveCursorHop = async (
     params.record(
       usage === null ? ZERO_TOKENS : tokensFromResponse({ usage }),
       "error",
-      undefined,
-      attempt(),
+      nativeAttempt,
     );
   };
   const clientWire = clientWireOf(params.surface);
   if (params.wantsStream) {
-    return deliverChunkStream(trackUsage(run.chunks), {
+    return deliverChunkStream(run.chunks, {
       surface: params.surface,
       clientWire,
       providerModelId: params.providerModelId,
@@ -1331,7 +1304,7 @@ const serveCursorHop = async (
   let canonical: Awaited<ReturnType<typeof accumulateChunksToResponse>>;
   try {
     canonical = await accumulateChunksToResponse(
-      trackUsage(run.chunks),
+      run.chunks,
       params.providerModelId,
     );
   } catch (err) {
@@ -1387,11 +1360,10 @@ const serveAntigravityHop = async (
   if (run.kind === "declined") {
     return declinedOutcome(run.reason, run.cooldownReason);
   }
-  const { trackUsage, hasUsage, attempt } = nativeUsageTracker();
   const settle = (
     resp: Awaited<ReturnType<typeof accumulateChunksToResponse>>,
   ): void => {
-    params.record(tokensFromResponse(resp), "success", !hasUsage(), attempt());
+    params.record(tokensFromResponse(resp), "success", nativeAttempt);
   };
   const fail = (err: unknown): void => {
     if (params.signal.aborted || isClientHangUp(err)) return;
@@ -1399,13 +1371,12 @@ const serveAntigravityHop = async (
     params.record(
       usage === null ? ZERO_TOKENS : tokensFromResponse({ usage }),
       "error",
-      undefined,
-      attempt(),
+      nativeAttempt,
     );
   };
   const clientWire = clientWireOf(params.surface);
   if (params.wantsStream) {
-    return deliverChunkStream(trackUsage(run.chunks), {
+    return deliverChunkStream(run.chunks, {
       surface: params.surface,
       clientWire,
       providerModelId: params.providerModelId,
@@ -1417,7 +1388,7 @@ const serveAntigravityHop = async (
   let canonical: Awaited<ReturnType<typeof accumulateChunksToResponse>>;
   try {
     canonical = await accumulateChunksToResponse(
-      trackUsage(run.chunks),
+      run.chunks,
       params.providerModelId,
     );
   } catch (err) {
@@ -1501,11 +1472,10 @@ const serveMuseHop = async (
     );
   }
 
-  const { trackUsage, hasUsage, attempt } = nativeUsageTracker();
   const settle = (
     resp: Awaited<ReturnType<typeof accumulateChunksToResponse>>,
   ): void => {
-    params.record(tokensFromResponse(resp), "success", !hasUsage(), attempt());
+    params.record(tokensFromResponse(resp), "success", nativeAttempt);
   };
   const fail = (err: unknown): void => {
     if (params.signal.aborted || isClientHangUp(err)) return;
@@ -1513,13 +1483,12 @@ const serveMuseHop = async (
     params.record(
       usage === null ? ZERO_TOKENS : tokensFromResponse({ usage }),
       "error",
-      undefined,
-      attempt(),
+      nativeAttempt,
     );
   };
   const clientWire = clientWireOf(params.surface);
   if (params.wantsStream) {
-    return deliverChunkStream(trackUsage(run.chunks), {
+    return deliverChunkStream(run.chunks, {
       surface: params.surface,
       clientWire,
       providerModelId: params.providerModelId,
@@ -1531,7 +1500,7 @@ const serveMuseHop = async (
   let canonical: Awaited<ReturnType<typeof accumulateChunksToResponse>>;
   try {
     canonical = await accumulateChunksToResponse(
-      trackUsage(run.chunks),
+      run.chunks,
       params.providerModelId,
     );
   } catch (err) {

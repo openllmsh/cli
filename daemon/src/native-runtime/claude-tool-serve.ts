@@ -111,7 +111,6 @@ export type TClaudeToolServeParams = {
   readonly record: (
     tokens: TNativeTokens,
     status: "success" | "error",
-    usageUnknown?: boolean,
     attempt?: TAttemptOutcome,
   ) => void;
   /** Optional, backward-compatible continuation capability sent by the client. */
@@ -231,7 +230,6 @@ export const tryServeNativeToolTurn = async (
     params.record(
       result.usage ?? ZERO_TOKENS,
       "success",
-      result.usage == null,
       attemptFromTokens(result.usage ?? ZERO_TOKENS, false),
     );
   }

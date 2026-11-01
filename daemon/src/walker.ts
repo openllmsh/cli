@@ -3263,7 +3263,7 @@ const walkPlan = async (
         executionSelection,
         stripSubagentIsolation: hop.stripSubagentIsolation,
         signal: args.req.signal,
-        record: (tokens, status, _usageUnknown, attempt) =>
+        record: (tokens, status, attempt) =>
           report(
             {
               model: hop.modelId,
