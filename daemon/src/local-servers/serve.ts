@@ -23,6 +23,10 @@ import type {
   TAttemptOutcome,
   TAttemptUsage,
 } from "@openllmsh/wire/lib/attempt-outcome";
+import {
+  classifyAttemptOutcome,
+  isReadableProviderBody,
+} from "@openllmsh/wire/lib/attempt-outcome";
 import { classifyHopError } from "@openllmsh/wire/lib/error-class";
 import { decodeProviderEventStream } from "@openllmsh/wire/lib/streaming/provider-decode";
 import { createUsageObserver } from "@openllmsh/wire/lib/usage-observer";
@@ -181,6 +185,7 @@ export const decodeOpenaiJson = (
 
 export const localErrorUsage = (
   raw: string,
+  status: number,
 ): {
   complete: boolean;
   attempt: TAttemptOutcome;
@@ -195,7 +200,12 @@ export const localErrorUsage = (
   const usage = observer.usage();
   return {
     complete: usage !== null,
-    attempt: { sent: true, usage, definiteProviderError: false },
+    attempt: classifyAttemptOutcome(
+      true,
+      status,
+      isReadableProviderBody(raw),
+      usage,
+    ),
     tokens:
       usage === null
         ? ZERO_TOKENS
@@ -360,13 +370,17 @@ export const serveLocalHop = async (
       providerFormat: "openai",
       aborted: args.req.signal.aborted,
     });
-    const usage = localErrorUsage(raw);
+    const usage = localErrorUsage(raw, resp.status);
     const usageComplete = usage.complete;
     const advances =
       cls.kind !== "abort" &&
       !finalHop &&
       cooldownPolicyFor(cls.reason).action !== "surface";
-    if (usageComplete || (cls.kind !== "abort" && !advances)) {
+    if (
+      usageComplete ||
+      usage.attempt.definiteProviderError ||
+      (cls.kind !== "abort" && !advances)
+    ) {
       recordLocal(
         {
           model: hop.modelId,

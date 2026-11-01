@@ -197,7 +197,7 @@ export const serveLocalKeyHop = async (
         providerFormat: "openai",
         aborted: args.req.signal.aborted,
       });
-      const usage = localErrorUsage(raw);
+      const usage = localErrorUsage(raw, resp.status);
       const usageComplete = usage.complete;
       const policy =
         cls.kind === "abort" ? null : cooldownPolicyFor(cls.reason);

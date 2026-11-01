@@ -24,6 +24,109 @@ import {
 } from "./access-hold-context";
 import { recordRequest } from "./cloud-client";
 
+type TInferenceAdmission = {
+  readonly signal: AbortSignal;
+  run: (
+    request: Request,
+    handler: (request: Request) => Promise<Response>,
+  ) => Promise<Response>;
+  stop: (timeoutMs?: number) => Promise<void>;
+};
+
+/** Track inference through plan fetch and response body, including tunnel requests. */
+export const createInferenceAdmission = (): TInferenceAdmission => {
+  let stopping = false;
+  const shutdown = new AbortController();
+  const active = new Set<{
+    abort: AbortController;
+    done: Promise<void>;
+    cancel: (() => void) | null;
+  }>();
+  return {
+    signal: shutdown.signal,
+    async run(request, handler) {
+      if (stopping)
+        return new Response("daemon shutting down", { status: 503 });
+      const abort = new AbortController();
+      let finish!: () => void;
+      const done = new Promise<void>((resolve) => {
+        finish = resolve;
+      });
+      const entry = { abort, done, cancel: null as (() => void) | null };
+      active.add(entry);
+      const complete = (): void => {
+        active.delete(entry);
+        finish();
+      };
+      try {
+        const req = new Request(request, {
+          signal: AbortSignal.any([request.signal, abort.signal]),
+        });
+        const response = await handler(req);
+        if (!response.body) {
+          complete();
+          return response;
+        }
+        const reader = response.body.getReader();
+        entry.cancel = () => {
+          void reader
+            .cancel()
+            .catch(() => undefined)
+            .finally(complete);
+        };
+        if (stopping) entry.cancel();
+        const body = new ReadableStream<Uint8Array>({
+          async pull(controller) {
+            try {
+              const item = await reader.read();
+              if (item.done) {
+                complete();
+                controller.close();
+              } else controller.enqueue(item.value);
+            } catch (error) {
+              complete();
+              controller.error(error);
+            }
+          },
+          async cancel(reason) {
+            try {
+              await reader.cancel(reason);
+            } finally {
+              complete();
+            }
+          },
+        });
+        return new Response(body, {
+          status: response.status,
+          statusText: response.statusText,
+          headers: response.headers,
+        });
+      } catch (error) {
+        complete();
+        throw error;
+      }
+    },
+    async stop(timeoutMs = 3_000) {
+      stopping = true;
+      shutdown.abort();
+      for (const entry of active) {
+        entry.abort.abort();
+        entry.cancel?.();
+      }
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      await Promise.race([
+        Promise.all([...active].map((entry) => entry.done)),
+        new Promise<void>((resolve) => {
+          timer = setTimeout(resolve, timeoutMs);
+        }),
+      ]);
+      if (timer !== undefined) clearTimeout(timer);
+    },
+  };
+};
+
+export const inferenceAdmission = createInferenceAdmission();
+
 type TOpenHold = {
   readonly nonce: string;
   readonly model: string;
@@ -40,19 +143,38 @@ const openSessions = new Set<HoldSession>();
  * the drain and be lost to `process.exit`, leaving the sweep to charge in full.
  */
 export const finishOpenHoldSessions = (): void => {
-  for (const session of [...openSessions]) session.finish();
+  for (const session of [...openSessions]) session.close();
 };
 
 export class HoldSession {
   private hold: TOpenHold | null = null;
+  private closed = false;
 
   constructor(
     private readonly endpoint: string,
     private readonly startedAt: number,
+    private readonly admissionSignal?: AbortSignal,
   ) {}
+
+  close(): void {
+    this.closed = true;
+    this.finish();
+  }
+
+  canDispatch(signal: AbortSignal, admission: TInferenceAdmission): boolean {
+    return !this.closed && !signal.aborted && !admission.signal.aborted;
+  }
 
   /** Take ownership of a hold the cloud just handed out. */
   adopt(nonce: string, model: string, origin: string | null): THoldOutcome {
+    if (this.closed || this.admissionSignal?.aborted) {
+      // The cloud already issued this hold. Settle it at once with no
+      // attempts (zero charge) so it is journaled, rather than dropping it
+      // for the sweep to charge in full; the request itself never dispatches.
+      this.hold = { nonce, model, origin, outcome: newHoldOutcome() };
+      this.finish();
+      throw new Error("daemon shutting down");
+    }
     if (this.hold !== null && this.hold.nonce !== nonce) this.finish();
     if (this.hold?.nonce === nonce) return this.hold.outcome;
     const outcome = newHoldOutcome();
