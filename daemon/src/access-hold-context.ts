@@ -22,11 +22,6 @@ import { clampOutputLimitFields } from "@openllmsh/wire/features/output-limit-cl
  */
 export type THoldOutcome = {
   settled: boolean;
-  ambiguous: boolean;
-  partialUsageReported: boolean;
-  /** Largest usage any failed attempt reported (partial output). */
-  partialTokensIn: number;
-  partialTokensOut: number;
   lastModel: string | null;
   lastProvider: string | null;
 };
@@ -36,16 +31,13 @@ type THold = {
   /** Signed output budget of the held plan; null when the plan has none. */
   readonly maxOutputTokens: number | null;
   readonly outcome: THoldOutcome;
+  attempted: boolean;
 };
 
 const holdContext = new AsyncLocalStorage<THold>();
 
 export const newHoldOutcome = (): THoldOutcome => ({
   settled: false,
-  ambiguous: false,
-  partialUsageReported: false,
-  partialTokensIn: 0,
-  partialTokensOut: 0,
   lastModel: null,
   lastProvider: null,
 });
@@ -55,12 +47,22 @@ export const withHoldNonce = <T>(
   run: () => T,
   maxOutputTokens: number | null = null,
   outcome: THoldOutcome = newHoldOutcome(),
-): T => holdContext.run({ nonce, maxOutputTokens, outcome }, run);
+): T =>
+  holdContext.run({ nonce, maxOutputTokens, outcome, attempted: false }, run);
+
+/** Permit a single upstream attempt in a held request. */
+export const claimHeldAttempt = (): boolean => {
+  const hold = holdContext.getStore();
+  if (hold === undefined) return true;
+  if (hold.attempted) return false;
+  hold.attempted = true;
+  return true;
+};
 
 /**
  * Decide whether a hop record may carry the hold nonce, and note what it
  * says. Success → yes (it settles the hold with real usage). Anything else →
- * no; its usage is remembered for the terminal record. Outside a hold (or for
+ * no. Outside a hold (or for
  * an already settled one) the row is returned unchanged.
  */
 export const holdFieldsForRecord = (row: {
@@ -78,25 +80,7 @@ export const holdFieldsForRecord = (row: {
     hold.outcome.settled = true;
     return { hold_nonce: hold.nonce };
   }
-  hold.outcome.partialTokensIn = Math.max(
-    hold.outcome.partialTokensIn,
-    Math.max(0, Math.floor(row.tokens_in)),
-  );
-  hold.outcome.partialTokensOut = Math.max(
-    hold.outcome.partialTokensOut,
-    Math.max(0, Math.floor(row.tokens_out)),
-  );
   return {};
-};
-
-export const markHoldUsageReported = (): void => {
-  const hold = holdContext.getStore();
-  if (hold !== undefined) hold.outcome.partialUsageReported = true;
-};
-
-export const markHoldAmbiguous = (): void => {
-  const hold = holdContext.getStore();
-  if (hold !== undefined) hold.outcome.ambiguous = true;
 };
 
 export const currentHoldNonce = (): string | null =>

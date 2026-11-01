@@ -1123,11 +1123,6 @@ const handleInferenceIn = async (
     reserveNextHop !== null &&
     planParam !== null &&
     isRetryableHopStatus(response.status) &&
-    // A failed attempt that produced output was dispatched: charge it, don't
-    // spend another hold on the same request.
-    (session.outcome?.partialTokensIn ?? 0) +
-      (session.outcome?.partialTokensOut ?? 0) ===
-      0 &&
     excludedHops.length < MAX_CAPPED_HOP_ATTEMPTS - 1
   ) {
     excludedHops.push(planParam);

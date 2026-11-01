@@ -27,11 +27,7 @@ import {
   clientWireOf,
   UnsupportedContentError,
 } from "@openllmsh/wire/providers/upstream-request";
-import {
-  holdFieldsForRecord,
-  markHoldAmbiguous,
-  trackHoldRecord,
-} from "../access-hold-context";
+import { holdFieldsForRecord, trackHoldRecord } from "../access-hold-context";
 import {
   deliverChunkStream,
   deliverJsonResponse,
@@ -310,7 +306,6 @@ export const serveLocalHop = async (
   );
 
   if (resp === null) {
-    markHoldAmbiguous();
     if (args.req.signal.aborted) {
       return errorJson(499, "client aborted request");
     }
@@ -432,7 +427,6 @@ export const serveLocalHop = async (
   try {
     canonical = decodeOpenaiJson(JSON.parse(text), hop.providerModelId);
   } catch {
-    markHoldAmbiguous();
     recordLocal(
       {
         model: hop.modelId,
@@ -519,7 +513,6 @@ export const serveLocalEmbeddings = async (args: {
     args.signal,
   );
   if (resp === null) {
-    markHoldAmbiguous();
     if (args.signal.aborted) {
       return errorJson(499, "client aborted request");
     }

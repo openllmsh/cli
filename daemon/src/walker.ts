@@ -189,8 +189,6 @@ import {
   currentHoldNonce,
   currentHoldOutputLimit,
   holdFieldsForRecord,
-  markHoldAmbiguous,
-  markHoldUsageReported,
   trackHoldRecord,
 } from "./access-hold-context";
 import { accountIndexes } from "./account-models";
@@ -1566,7 +1564,6 @@ export const serveSubscription = async (
       ? await cacheProbeWrap(cacheProbe, dispatch)
       : await dispatch();
   if (resp === null) {
-    markHoldAmbiguous();
     // An inbound cancellation aborts the fetch by design. It is terminal but
     // not an upstream failure, so it must neither walk nor write a cooldown row.
     if (args.req.signal.aborted)
@@ -1640,7 +1637,6 @@ export const serveSubscription = async (
   }
 
   if (!resp.body) {
-    markHoldAmbiguous();
     if (currentHoldNonce() !== null)
       return errorJson(502, "empty response body");
     return hopRetry("empty response body");
@@ -1718,7 +1714,6 @@ export const serveSubscription = async (
     if (args.req.signal.aborted) return;
     if (isClientHangUp(err)) return;
     noteWalkerStreamTerminal({ aborted: false, hang: false });
-    if (partialUsageFrom(err) !== null) markHoldUsageReported();
     report(
       {
         ...baseRow,
@@ -1739,7 +1734,6 @@ export const serveSubscription = async (
   const peekedError = (error: unknown): THopServeOutcome => {
     const detail = streamFailureDetail(error);
     if (!(streamFailureCause(error) instanceof UpstreamStreamError)) {
-      markHoldAmbiguous();
       if (currentHoldNonce() !== null) {
         return args.req.signal.aborted
           ? errorJson(499, "client aborted request")
@@ -1956,7 +1950,6 @@ export const serveSubscription = async (
       // line instead of a bare generic message. Recorded as an ERROR row —
       // the client receives a 502, so `statusFor(resp.status)`'s "success"
       // (from the upstream 200) would misreport the outcome.
-      markHoldAmbiguous();
       recordStreamFailure(err);
       return errorJson(
         502,
@@ -1986,7 +1979,6 @@ export const serveSubscription = async (
   try {
     text = await resp.text();
   } catch (err) {
-    markHoldAmbiguous();
     recordStreamFailure(err);
     return errorJson(
       502,
