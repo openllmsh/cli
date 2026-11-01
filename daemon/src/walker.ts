@@ -685,7 +685,23 @@ export const postWithReplayStripRetry = async (
   wire: TUpstreamWire,
   signal: AbortSignal,
   onTransportFailure?: (failure: TTransportFailure) => void,
+  attempt?: { readonly model: string; readonly provider: string },
 ): Promise<Response | null> => {
+  const accountFirst = (raw: string): void => {
+    if (attempt === undefined) return;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      parsed = undefined;
+    }
+    const usage = jsonUsage(parsed);
+    holdFieldsForRecord(
+      { ...attempt, status: "error", ...usage.tokens },
+      usage.complete,
+      true,
+    );
+  };
   const send = (b: unknown): Promise<Response | null> =>
     postUpstream(
       url,
@@ -709,8 +725,8 @@ export const postWithReplayStripRetry = async (
       .text()
       .catch(() => "");
     if (isEncryptedContentError(raw)) {
-      const retried = await send(stripResponsesEncryptedContent(body));
-      return retried ?? first;
+      accountFirst(raw);
+      return send(stripResponsesEncryptedContent(body));
     }
     return first;
   }
@@ -725,8 +741,8 @@ export const postWithReplayStripRetry = async (
       .text()
       .catch(() => "");
     if (isThinkingSignatureError(raw)) {
-      const retried = await send(stripMessagesThinkingBlocks(body));
-      return retried ?? first;
+      accountFirst(raw);
+      return send(stripMessagesThinkingBlocks(body));
     }
     return first;
   }
@@ -1592,6 +1608,7 @@ export const serveSubscription = async (
       (failure) => {
         transport.failure = failure;
       },
+      { model: hop.modelId, provider: hop.provider },
     );
   const resp =
     cacheProbe !== null
@@ -2094,6 +2111,11 @@ export const serveSubscription = async (
   // (nothing to double-spend), mirroring the streaming pre-commit peek and
   // the cloud non-stream promotion. The final hop surfaces it verbatim.
   if (isCanonicalRefusal(canonical) && refusalWalks()) {
+    const usage = jsonUsage(upstreamJson);
+    holdFieldsForRecord(
+      { ...baseRow, status: "error", ...usage.tokens },
+      usage.complete,
+    );
     return hopRetry("content filter refusal");
   }
   const usage = jsonUsage(upstreamJson);

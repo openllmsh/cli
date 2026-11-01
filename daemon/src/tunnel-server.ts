@@ -212,14 +212,27 @@ export type TTeamLegCompletionReporter = (input: {
  * Run a dispatched team leg and report observed usage without delaying the
  * body. Errors and missing usage leave the hold for the full-charge sweep.
  */
-const dispatchTeamLeg = async (
+export const dispatchTeamLeg = async (
   run: () => Promise<Response>,
   grant: { readonly n: string },
   teamGrant: string,
   reportCompletion: TTeamLegCompletionReporter,
 ): Promise<Response> => {
   const response = await run();
-  if (!response.ok || response.body === null) return response;
+  if (response.body === null) return response;
+  if (!response.ok) {
+    const observation = response.clone().body;
+    if (observation !== null) {
+      void observedTeamLegTokens(observation, false)
+        .then((actualTokens) =>
+          actualTokens === null
+            ? undefined
+            : reportCompletion({ nonce: grant.n, teamGrant, actualTokens }),
+        )
+        .catch(() => {});
+    }
+    return response;
+  }
   const [forConsumer, forObservation] = response.body.tee();
   const eventStream =
     response.headers.get("content-type")?.includes("text/event-stream") ===
