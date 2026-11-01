@@ -339,7 +339,7 @@ export const openRealtimeSession = async (
       },
       authorization.origin,
       undefined,
-      false,
+      { sent: true, usage: null, definiteProviderError: false },
     );
     handlers.onClose(code);
   };

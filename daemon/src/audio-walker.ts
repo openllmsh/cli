@@ -545,7 +545,7 @@ export const runAudioTranscriptionWalker = async (
         },
         args.originParam,
         undefined,
-        false,
+        { sent: true, usage: null, definiteProviderError: false },
       );
     };
 
@@ -1030,7 +1030,7 @@ export const runAudioSpeechWalker = async (
         },
         args.originParam,
         undefined,
-        false,
+        { sent: true, usage: null, definiteProviderError: false },
       );
     };
     if (resp === null) {

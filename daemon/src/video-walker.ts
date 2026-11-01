@@ -364,7 +364,7 @@ const reportVideo = (
     },
     args.originParam,
     undefined,
-    false,
+    { sent: true, usage: null, definiteProviderError: false },
   );
 };
 

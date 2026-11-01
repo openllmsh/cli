@@ -727,7 +727,7 @@ export const runImageWalker = async (args: TWalkArgs): Promise<Response> => {
           },
           args.originParam,
           undefined,
-          false,
+          { sent: true, usage: null, definiteProviderError: false },
         );
         lastError = new Response(body.length > 0 ? body : null, {
           status: resp.status,
@@ -804,7 +804,7 @@ export const runImageWalker = async (args: TWalkArgs): Promise<Response> => {
         },
         args.originParam,
         undefined,
-        false,
+        { sent: true, usage: null, definiteProviderError: false },
       );
       // `stream: true` changes the TRANSPORT, not the result: the same
       // persisted bytes either ride one real completion event or the
@@ -1138,7 +1138,7 @@ export const runImageEditWalker = async (
         },
         args.originParam,
         undefined,
-        false,
+        { sent: true, usage: null, definiteProviderError: false },
       );
       lastError = new Response(body.length > 0 ? body : null, {
         status: resp.status,
@@ -1209,7 +1209,7 @@ export const runImageEditWalker = async (
       },
       args.originParam,
       undefined,
-      false,
+      { sent: true, usage: null, definiteProviderError: false },
     );
     return stamp(
       new Response(JSON.stringify({ ...normalized, data: persistedItems }), {
