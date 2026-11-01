@@ -466,7 +466,7 @@ export const createMuxTunnelServer =
         throw new StreamResetError("unauthorized", "team_channel_required");
       }
       if (teamToken !== null && teamChannelScope !== null) {
-        await warmCapTokenCounter().catch(() => null);
+        await warmCapTokenCounter("admit").catch(() => null);
         const chunks: Uint8Array[] = [];
         // Scan into one bounded buffer instead of re-concatenating all chunks
         // after every read (which made a fragmented upload quadratic).
