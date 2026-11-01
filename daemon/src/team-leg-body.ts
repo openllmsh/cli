@@ -1,11 +1,11 @@
 import type { TOutputLimitSurface } from "@openllmsh/wire/features/output-limit-clamp";
 import { clampOutputLimitBytes } from "@openllmsh/wire/features/output-limit-clamp";
 import type { TAttemptUsage } from "@openllmsh/wire/lib/attempt-outcome";
+import { estimateCapInputTokens } from "@openllmsh/wire/lib/canonical/token-estimate";
 import type { TUsageProtocol } from "@openllmsh/wire/lib/usage-observer";
 import { createUsageObserver } from "@openllmsh/wire/lib/usage-observer";
 
-export const estimateTeamLegInputTokens = (body: Uint8Array): number =>
-  Math.ceil(body.byteLength / 4);
+export const estimateTeamLegInputTokens = estimateCapInputTokens;
 
 export const clampTeamLegBody = (
   body: Uint8Array,

@@ -36,6 +36,7 @@ import {
 } from "@openllmsh/protocol";
 import { StreamResetError } from "@openllmsh/tunnel/stream-reset-error";
 import type { TServeTunnel } from "@openllmsh/tunnel/streams";
+import { warmCapTokenCounter } from "@openllmsh/wire/lib/canonical/token-estimate";
 import { handleInference } from "./listener";
 import { logInfo, logWarn, safeDiagnosticMessage } from "./logger";
 import { beginRequest, endRequest } from "./self-update";
@@ -465,6 +466,7 @@ export const createMuxTunnelServer =
         throw new StreamResetError("unauthorized", "team_channel_required");
       }
       if (teamToken !== null && teamChannelScope !== null) {
+        await warmCapTokenCounter().catch(() => null);
         const chunks: Uint8Array[] = [];
         // Scan into one bounded buffer instead of re-concatenating all chunks
         // after every read (which made a fragmented upload quadratic).
@@ -554,7 +556,7 @@ export const createMuxTunnelServer =
             if (decision.grant.max_input_tokens === undefined)
               throw new StreamResetError("unauthorized", "team_invalid_bound");
             if (
-              estimateTeamLegInputTokens(buffered) >
+              estimateTeamLegInputTokens(buffered, "admit") >
               decision.grant.max_input_tokens
             )
               throw new StreamResetError(
@@ -651,7 +653,7 @@ export const createMuxTunnelServer =
           }
           const fullBody = combineChunks(chunks, total);
           if (
-            estimateTeamLegInputTokens(fullBody) >
+            estimateTeamLegInputTokens(fullBody, "admit") >
             decision.grant.max_input_tokens
           )
             throw new StreamResetError(

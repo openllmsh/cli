@@ -79,8 +79,7 @@ export { teamServeEnabled } from "./team-serve";
 
 /** Estimate tokens to reserve locally when the grant carries `cap_tokens`. */
 export const estimateTeamReserveTokens = (body: Uint8Array): number => {
-  // Cheap stand-in until origin echoes a reservation: ~4 chars/token on the
-  // UTF-8 body, floor 256 so a tiny probe still counts.
+  // The local capacity check retains a floor so a tiny probe still counts.
   const approx = estimateTeamLegInputTokens(body);
   return Math.max(256, approx);
 };
