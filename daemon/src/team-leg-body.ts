@@ -148,7 +148,7 @@ export const observeTeamResponseStream = (
       }
       pending += part;
       start = i + 1;
-      if (/\r?\n\r?\n$/.test(pending)) {
+      if (/\r?\n\r?\n$/.test(pending.slice(-4))) {
         frame(pending);
         pending = "";
         bytes = 0;
