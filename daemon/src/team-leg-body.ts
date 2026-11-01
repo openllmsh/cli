@@ -4,6 +4,9 @@ import type { TAttemptUsage } from "@openllmsh/wire/lib/attempt-outcome";
 import type { TUsageProtocol } from "@openllmsh/wire/lib/usage-observer";
 import { createUsageObserver } from "@openllmsh/wire/lib/usage-observer";
 
+export const estimateTeamLegInputTokens = (body: Uint8Array): number =>
+  Math.ceil(body.byteLength / 4);
+
 export const clampTeamLegBody = (
   body: Uint8Array,
   surface: TOutputLimitSurface,

@@ -27,6 +27,7 @@ import type { TTeamGrant } from "@openllmsh/tunnel";
 import { verifyTeamGrant } from "@openllmsh/tunnel";
 import { daemonUserId, refreshBootstrap, teamGrantKey } from "./config";
 import { daemonApiKeyId } from "./env";
+import { estimateTeamLegInputTokens } from "./team-leg-body";
 import { teamServeEnabled } from "./team-serve";
 import { teamShareable } from "./team-shareable";
 import { teamUsageCanCharge } from "./team-usage";
@@ -80,7 +81,7 @@ export { teamServeEnabled } from "./team-serve";
 export const estimateTeamReserveTokens = (body: Uint8Array): number => {
   // Cheap stand-in until origin echoes a reservation: ~4 chars/token on the
   // UTF-8 body, floor 256 so a tiny probe still counts.
-  const approx = Math.ceil(body.byteLength / 4);
+  const approx = estimateTeamLegInputTokens(body);
   return Math.max(256, approx);
 };
 

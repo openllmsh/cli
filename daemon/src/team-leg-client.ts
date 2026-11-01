@@ -3,6 +3,7 @@ import { TEAM_LEG_STREAM_DEADLINE_MS } from "@openllmsh/protocol";
 import { daemonEnv } from "./env";
 import {
   clampTeamLegBody,
+  estimateTeamLegInputTokens,
   maxOutputTokensFromTeamLegBody,
   rewriteTeamLegBodyModel,
 } from "./team-leg-body";
@@ -80,7 +81,7 @@ export const tryDirectTeamLeg = async (args: {
     body: JSON.stringify({
       model: args.model,
       surface,
-      estimated_tokens: Math.ceil(args.body.byteLength / 4),
+      estimated_tokens: estimateTeamLegInputTokens(args.body),
       max_output_tokens: maxOutputTokensFromTeamLegBody(args.body),
       ...(args.holdNonce == null ? {} : { hold_nonce: args.holdNonce }),
     }),
@@ -93,7 +94,7 @@ export const tryDirectTeamLeg = async (args: {
   const target = payload?.targets[0];
   if (target === undefined) return null;
   const outputLimit = Math.floor(
-    target.reserved_tokens - Math.ceil(args.body.byteLength / 4),
+    target.reserved_tokens - estimateTeamLegInputTokens(args.body),
   );
   if (!Number.isSafeInteger(outputLimit) || outputLimit < 1) return null;
   try {

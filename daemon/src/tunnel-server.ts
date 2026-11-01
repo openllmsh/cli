@@ -36,6 +36,7 @@ import {
 } from "@openllmsh/protocol";
 import { StreamResetError } from "@openllmsh/tunnel/stream-reset-error";
 import type { TServeTunnel } from "@openllmsh/tunnel/streams";
+import { TEAM_LEG_INPUT_SLACK_TOKENS } from "@openllmsh/tunnel/team-grant";
 import { handleInference } from "./listener";
 import { logInfo, logWarn, safeDiagnosticMessage } from "./logger";
 import { beginRequest, endRequest } from "./self-update";
@@ -45,7 +46,11 @@ import {
   modelFromRequestBody,
   teamGrantFromStreamOpen,
 } from "./team-grant-admit";
-import { clampTeamLegBody, observeTeamResponse } from "./team-leg-body";
+import {
+  clampTeamLegBody,
+  estimateTeamLegInputTokens,
+  observeTeamResponse,
+} from "./team-leg-body";
 import {
   reportTeamLegCompletion,
   reportTeamLegDispatch,
@@ -546,6 +551,18 @@ export const createMuxTunnelServer =
               `team_${decision.reason}`,
             );
           }
+          if (decision.grant.direct_leg === true) {
+            if (decision.grant.max_input_tokens === undefined)
+              throw new StreamResetError("unauthorized", "team_invalid_bound");
+            if (
+              estimateTeamLegInputTokens(buffered) >
+              decision.grant.max_input_tokens + TEAM_LEG_INPUT_SLACK_TOKENS
+            )
+              throw new StreamResetError(
+                "unauthorized",
+                "team_input_exceeds_grant",
+              );
+          }
           const directSurface =
             open.surface === "chat_completions" ||
             open.surface === "messages" ||
@@ -616,6 +633,7 @@ export const createMuxTunnelServer =
         if (decision.grant.direct_leg === true) {
           if (
             decision.grant.max_output_tokens === undefined ||
+            decision.grant.max_input_tokens === undefined ||
             (open.surface !== "chat_completions" &&
               open.surface !== "messages" &&
               open.surface !== "responses")
@@ -633,6 +651,14 @@ export const createMuxTunnelServer =
             chunks.push(next.value);
           }
           const fullBody = combineChunks(chunks, total);
+          if (
+            estimateTeamLegInputTokens(fullBody) >
+            decision.grant.max_input_tokens + TEAM_LEG_INPUT_SLACK_TOKENS
+          )
+            throw new StreamResetError(
+              "unauthorized",
+              "team_input_exceeds_grant",
+            );
           if (modelFromRequestBody(fullBody) !== decision.grant.model)
             throw new StreamResetError("unauthorized", "team_wrong_model");
           bounded = clampTeamLegBody(
