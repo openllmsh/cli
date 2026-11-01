@@ -251,6 +251,7 @@ import { tokensFromResponse, ZERO_TOKENS } from "./native-runtime/types";
 import { runWithAccount } from "./op-context";
 import { clearPlanCache } from "./plan-cache";
 import { isClaudeCodeOriginator, resolveHopExecution } from "./sub-method";
+import { observedTeamLegUsage } from "./team-leg-body";
 import { isTeamHop, tryDirectTeamLeg } from "./team-leg-client";
 import {
   currentTeamGrantFieldsOf,
@@ -328,6 +329,7 @@ const ChatGptStreamEventSchema: Schema.Schema<TChatGptStreamEvent> =
 
 export type TWalkArgs = {
   readonly req: Request;
+  readonly callerKey?: string;
   /** Fetch for local walker hops; omitted → the global fetch. */
   readonly fetchImpl?: typeof fetch;
   readonly surface: "chat_completions" | "messages" | "responses";
@@ -3706,12 +3708,56 @@ const walkPlan = async (
     // that forward stays the fallback below.
     if (isTeamHop(hop)) {
       const direct = await tryDirectTeamLeg({
+        onDispatch: beginHeldAttempt,
         request: args.req,
+        callerKey: args.callerKey,
+        holdNonce: currentHoldNonce(),
         body: new Uint8Array(args.rawBytes),
         model: hop.modelId,
         surface: args.surface,
       });
       if (direct !== null && (direct.ok || finalHop)) {
+        if (currentHoldNonce() !== null && direct.ok && direct.body !== null) {
+          const clone = direct.clone();
+          const usage =
+            clone.body === null
+              ? Promise.resolve(null)
+              : observedTeamLegUsage(
+                  clone.body,
+                  clone.headers
+                    .get("content-type")
+                    ?.includes("text/event-stream") === true,
+                ).catch(() => null);
+          const body = direct.body.pipeThrough(
+            new TransformStream<Uint8Array, Uint8Array>({
+              async flush(): Promise<void> {
+                const tokens = await usage;
+                report(
+                  {
+                    model: hop.modelId,
+                    provider: hop.provider,
+                    status: "success",
+                    tokens_in: tokens?.tokensIn ?? 0,
+                    tokens_out: tokens?.tokensOut ?? 0,
+                    latency_ms: Date.now() - args.startedAt,
+                    endpoint: args.endpoint,
+                  },
+                  args.originParam,
+                  undefined,
+                  tokens !== null,
+                );
+              },
+            }),
+          );
+          return withHopTrailHeaders(
+            new Response(body, {
+              status: direct.status,
+              statusText: direct.statusText,
+              headers: direct.headers,
+            }),
+            hop,
+          );
+        }
         return withHopTrailHeaders(direct, hop);
       }
     }

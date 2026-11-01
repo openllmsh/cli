@@ -108,17 +108,20 @@ const usageOf = (value: unknown): TUsage | null => {
 };
 
 /** Read OpenAI-shaped JSON or SSE usage; malformed/truncated streams reject. */
-export const observedTeamLegTokens = async (
+export const observedTeamLegUsage = async (
   body: ReadableStream<Uint8Array>,
   eventStream: boolean,
-): Promise<number | null> => {
+): Promise<{
+  readonly tokensIn: number;
+  readonly tokensOut: number;
+} | null> => {
   const bytes = new Uint8Array(await new Response(body).arrayBuffer());
   const text = new TextDecoder().decode(bytes);
   if (!eventStream) {
     const usage = usageOf(JSON.parse(text));
     return usage?.input == null || usage.output === null
       ? null
-      : usage.input + usage.output;
+      : { tokensIn: usage.input, tokensOut: usage.output };
   }
   let input: number | null = null;
   let output: number | null = null;
@@ -148,5 +151,15 @@ export const observedTeamLegTokens = async (
     }
   }
   if (!complete) throw new Error("team stream ended before completion");
-  return input === null || output === null ? null : input + output;
+  return input === null || output === null
+    ? null
+    : { tokensIn: input, tokensOut: output };
+};
+
+export const observedTeamLegTokens = async (
+  body: ReadableStream<Uint8Array>,
+  eventStream: boolean,
+): Promise<number | null> => {
+  const usage = await observedTeamLegUsage(body, eventStream);
+  return usage === null ? null : usage.tokensIn + usage.tokensOut;
 };

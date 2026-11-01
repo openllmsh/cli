@@ -19,6 +19,7 @@ import {
   AnthropicCountTokensRequest,
   AnthropicRequest,
   ChatCompletionRequest,
+  cooldownPolicyFor,
   decodeVideoId,
   HOP_GRANT_HEADER,
   ImageGenerationInput,
@@ -33,6 +34,10 @@ import {
   collectBoundedBytes,
   TUNNEL_MEDIA_MAX_BODY_BYTES,
 } from "@openllmsh/tunnel";
+import {
+  resolveContextOverflowStrategy,
+  shouldDemoteOnContextOverflow,
+} from "@openllmsh/wire/features/context-overflow-strategy";
 import { estimateBodyTokens } from "@openllmsh/wire/lib/canonical/token-estimate";
 import { Schema } from "effect";
 import { waitForHoldRecords, withHoldNonce } from "./access-hold-context";
@@ -46,7 +51,10 @@ import {
   fetchVideoJobPlan,
   MediaDefaultPlanError,
 } from "./cloud-client";
-import { planCacheEnabled } from "./config";
+import {
+  contextOverflowStrategy as bootstrapContextOverflowStrategy,
+  planCacheEnabled,
+} from "./config";
 import { notePresenceActivity } from "./control-channel";
 import { corsHeaders, errorJson, isPreflight, preflightResponse } from "./cors";
 import { isOAuthSlug } from "./delegation";
@@ -94,6 +102,7 @@ import {
   runVideoPoll,
 } from "./video-walker";
 import {
+  classifyPrecommitResponse,
   parsePlan,
   planSignatureOk,
   runCountTokens,
@@ -103,16 +112,6 @@ import {
 
 const parseAnthropicRequest = Schema.decodeUnknownSync(AnthropicRequest);
 
-/** Most hops a capped direct request reserves before giving up. */
-const MAX_CAPPED_HOP_ATTEMPTS = 4;
-
-/** Statuses worth reserving another hop for: the hop, not the request, failed. */
-const isRetryableHopStatus = (status: number): boolean =>
-  status === 401 ||
-  status === 403 ||
-  status === 408 ||
-  status === 429 ||
-  status >= 500;
 const parseOpenAIRequest = Schema.decodeUnknownSync(ChatCompletionRequest);
 const parseImageRequest = Schema.decodeUnknownSync(ImageGenerationRequest);
 const parseImageInput = Schema.decodeUnknownSync(ImageGenerationInput);
@@ -640,6 +639,16 @@ const handleInferenceIn = async (
           },
         );
       } catch (err) {
+        if (
+          excludedHops.length > 0 &&
+          err instanceof Error &&
+          err.message === "plan fetch failed: 410"
+        ) {
+          return {
+            kind: "response",
+            response: errorJson(410, "Plan chain exhausted", "plan_exhausted"),
+          };
+        }
         const outcome = handlePlanFetchError(err, explicitAlias, signal);
         if (outcome === "throw") return { kind: "throw", error: err };
         if (outcome !== "passthrough") {
@@ -1072,6 +1081,7 @@ const handleInferenceIn = async (
   const walkOnce = (): Promise<Response> => {
     const walkArgs = {
       req: walkReq,
+      callerKey: hopGrant === null ? callerKey : undefined,
       surface,
       endpoint,
       rawBody,
@@ -1115,6 +1125,7 @@ const handleInferenceIn = async (
     return withHoldNonce(holdNonce, walkOnce, maxOutputTokens, outcome);
   };
   let response = await walk();
+  let overflowResponse: Response | null = null;
   // A capped key's direct request holds one hop at a time. When that hop
   // fails, reserve the next one (the failed hop's record refunds its hold)
   // instead of giving up; origin-tunneled requests fall back on origin.
@@ -1122,15 +1133,55 @@ const handleInferenceIn = async (
     holdNonce !== null &&
     reserveNextHop !== null &&
     planParam !== null &&
-    isRetryableHopStatus(response.status) &&
-    excludedHops.length < MAX_CAPPED_HOP_ATTEMPTS - 1
+    !response.ok
   ) {
+    const raw = await response
+      .clone()
+      .text()
+      .catch(() => "");
+    const cls = classifyPrecommitResponse(
+      response.status,
+      raw,
+      "openai",
+      req.signal.aborted,
+    );
+    if (
+      cls.kind === "abort" ||
+      cooldownPolicyFor(cls.reason).action === "surface"
+    )
+      break;
+    const overflow = cls.reason === "context_overflow";
+    if (
+      overflow &&
+      !shouldDemoteOnContextOverflow(
+        resolveContextOverflowStrategy(
+          contextOverflowStrategy ?? bootstrapContextOverflowStrategy(),
+        ),
+      )
+    )
+      break;
+    if (excludedHops.includes(planParam)) break;
+    if (overflow && overflowResponse === null)
+      overflowResponse = new Response(raw, {
+        status: response.status,
+        statusText: response.statusText,
+        headers: response.headers,
+      });
     excludedHops.push(planParam);
-    await response.body?.cancel().catch(() => undefined);
     session.finish();
     await waitForHoldRecords(holdNonce);
     const stopped = await reserveNextHop();
-    if (stopped !== null) return stopped;
+    if (stopped !== null) {
+      if (stopped.status === 410)
+        return withCors(req, overflowResponse ?? response);
+      await response.body?.cancel().catch(() => undefined);
+      return stopped;
+    }
+    if (planParam === null || excludedHops.includes(planParam)) {
+      session.finish();
+      return withCors(req, response);
+    }
+    await response.body?.cancel().catch(() => undefined);
     response = await walk();
   }
 

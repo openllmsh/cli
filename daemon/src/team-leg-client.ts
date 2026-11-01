@@ -66,6 +66,8 @@ const apiHeaders = (callerKey?: string): Headers => {
 export const tryDirectTeamLeg = async (args: {
   readonly request: Request;
   readonly callerKey?: string;
+  readonly holdNonce?: string | null;
+  readonly onDispatch?: () => void;
   readonly body: Uint8Array;
   readonly model: unknown;
   readonly surface: TTunnelSurface;
@@ -80,6 +82,7 @@ export const tryDirectTeamLeg = async (args: {
       surface,
       estimated_tokens: Math.ceil(args.body.byteLength / 4),
       max_output_tokens: maxOutputTokensFromTeamLegBody(args.body),
+      ...(args.holdNonce == null ? {} : { hold_nonce: args.holdNonce }),
     }),
     signal: args.request.signal,
   }).catch(() => null);
@@ -120,11 +123,13 @@ export const tryDirectTeamLeg = async (args: {
       userAgent: args.request.headers.get("user-agent"),
       signal: streamSignal,
     });
+    args.onDispatch?.();
     return response;
   } catch (error) {
     // Once OPEN has been sent, retrying at origin can duplicate inference and
     // billing. Peer-link exposes this exact retry-safety classification.
     if (!isPreDispatchTunnelError(error)) {
+      args.onDispatch?.();
       // Once OPEN has left this daemon the supplier may have started work.
       // Its authenticated completion report, or the stale sweep, settles the
       // reservation; consumers never report usage.

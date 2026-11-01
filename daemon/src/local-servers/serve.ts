@@ -206,10 +206,9 @@ export const recordLocal = (
   // Team hops: attribute the row to the consumer and charge the share cap,
   // exactly as the walker's `report` does.
   const teamGrant = currentTeamGrantToken();
-  const holdNonce =
-    row.hold_nonce ??
-    holdFieldsForRecord(row, usageComplete).hold_nonce ??
-    null;
+  const holdFields =
+    row.hold_nonce === undefined ? holdFieldsForRecord(row, usageComplete) : {};
+  const holdNonce = row.hold_nonce ?? holdFields.hold_nonce ?? null;
   const record = recordRequest(
     {
       ...row,
@@ -217,7 +216,7 @@ export const recordLocal = (
       ...(row.team_grant === undefined && teamGrant !== null
         ? { team_grant: teamGrant }
         : {}),
-      ...(holdNonce === null ? {} : { hold_nonce: holdNonce }),
+      ...holdFields,
     },
     origin,
   );
