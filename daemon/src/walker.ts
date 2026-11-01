@@ -1614,7 +1614,12 @@ export const serveSubscription = async (
       errorJsonBody = undefined;
     }
     const errorUsage = jsonUsage(errorJsonBody);
-    const classifiedError = classifyAttemptOutcome(true, resp.status, readable, null);
+    const classifiedError = classifyAttemptOutcome(
+      true,
+      resp.status,
+      readable,
+      null,
+    );
     const bodySnippet = hopBodySnippet(raw);
     // No output has been committed yet. A different configured candidate may
     // accept the same canonical request regardless of this provider's status
@@ -2231,7 +2236,10 @@ const serveKimiBuiltinSearch = async (
             ...roundTokens,
           },
           classifyAttemptOutcome(
-            true, resp.status, readable, roundAttempt.usage,
+            true,
+            resp.status,
+            readable,
+            roundAttempt.usage,
           ),
         );
         return hopRetry(
@@ -2248,9 +2256,8 @@ const serveKimiBuiltinSearch = async (
       recordOnce(
         statusFor(resp.status),
         cls.kind === "transient" ? cls.reason : undefined,
-        classifyAttemptOutcome(
-          true, resp.status, readable, roundAttempt.usage,
-        ).definiteProviderError,
+        classifyAttemptOutcome(true, resp.status, readable, roundAttempt.usage)
+          .definiteProviderError,
       );
       return new Response(raw.length > 0 ? raw : null, {
         status: resp.status,
@@ -3788,8 +3795,9 @@ const walkPlan = async (
         if (currentHoldNonce() !== null && direct.ok && direct.body !== null) {
           const body = observeTeamResponseStream(
             direct.body,
-            direct.headers.get("content-type")?.includes("text/event-stream") ===
-              true,
+            direct.headers
+              .get("content-type")
+              ?.includes("text/event-stream") === true,
             args.surface === "messages" ? "anthropic" : "openai",
             (tokens) => {
               report(
