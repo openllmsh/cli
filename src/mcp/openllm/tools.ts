@@ -215,6 +215,14 @@ const AGENT_FORBIDDEN_PATHS: ReadonlySet<string> = new Set([
   // authorise itself onto the user's devices.
   "/vault/device-control",
   "/daemon/attestations",
+  // OAuth connections: what a business may do with the user's account is the
+  // user's consent, never an agent's (an agent widening or revoking one is
+  // not a delegation). Pickup and revoke are the business's own calls.
+  "/connect/grants",
+  "/connect/grants/{id}",
+  "/connect/grants/reconsent",
+  "/connect/grants/pickup",
+  "/connect/grants/revoke",
 ]);
 
 const AGENT_OPERATIONS: ReadonlyArray<TApiOperation> = API_OPERATIONS.filter(
@@ -234,6 +242,8 @@ const byToolName = new Map<string, TApiOperation>(
  *  request presenting a key with a 403. Execution stays possible via
  *  `byToolName`; this only keeps them out of ListTools. */
 const SESSION_ONLY_PATHS: ReadonlySet<string> = new Set([
+  "/connect/apps",
+  "/connect/clients/{client_id}",
   "/user/auth-methods",
   "/user/sessions",
   "/vault/handoff/pending",

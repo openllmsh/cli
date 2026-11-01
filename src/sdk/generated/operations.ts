@@ -104,6 +104,120 @@ export const API_OPERATIONS: readonly TApiOperation[] = [
     "hasBody": true
   },
   {
+    "id": "connect.listApps",
+    "method": "get",
+    "path": "/connect/apps",
+    "summary": "",
+    "tags": [
+      "connect"
+    ],
+    "pathParams": [],
+    "queryParams": [],
+    "hasBody": false
+  },
+  {
+    "id": "connect.getClient",
+    "method": "get",
+    "path": "/connect/clients/{client_id}",
+    "summary": "",
+    "tags": [
+      "connect"
+    ],
+    "pathParams": [
+      "client_id"
+    ],
+    "queryParams": [],
+    "hasBody": false
+  },
+  {
+    "id": "connect.listGrants",
+    "method": "get",
+    "path": "/connect/grants",
+    "summary": "",
+    "tags": [
+      "connect"
+    ],
+    "pathParams": [],
+    "queryParams": [],
+    "hasBody": false
+  },
+  {
+    "id": "connect.createGrant",
+    "method": "post",
+    "path": "/connect/grants",
+    "summary": "",
+    "tags": [
+      "connect"
+    ],
+    "pathParams": [],
+    "queryParams": [],
+    "hasBody": true
+  },
+  {
+    "id": "connect.revokeGrant",
+    "method": "delete",
+    "path": "/connect/grants/{id}",
+    "summary": "",
+    "tags": [
+      "connect"
+    ],
+    "pathParams": [
+      "id"
+    ],
+    "queryParams": [],
+    "hasBody": false
+  },
+  {
+    "id": "connect.updateGrant",
+    "method": "patch",
+    "path": "/connect/grants/{id}",
+    "summary": "",
+    "tags": [
+      "connect"
+    ],
+    "pathParams": [
+      "id"
+    ],
+    "queryParams": [],
+    "hasBody": true
+  },
+  {
+    "id": "connect.pickupGrant",
+    "method": "post",
+    "path": "/connect/grants/pickup",
+    "summary": "",
+    "tags": [
+      "connect"
+    ],
+    "pathParams": [],
+    "queryParams": [],
+    "hasBody": true
+  },
+  {
+    "id": "connect.reconsentGrant",
+    "method": "post",
+    "path": "/connect/grants/reconsent",
+    "summary": "",
+    "tags": [
+      "connect"
+    ],
+    "pathParams": [],
+    "queryParams": [],
+    "hasBody": true
+  },
+  {
+    "id": "connect.businessRevoke",
+    "method": "post",
+    "path": "/connect/grants/revoke",
+    "summary": "",
+    "tags": [
+      "connect"
+    ],
+    "pathParams": [],
+    "queryParams": [],
+    "hasBody": false
+  },
+  {
     "id": "cookieConsent.cookieConsent",
     "method": "post",
     "path": "/cookie-consent",
@@ -314,7 +428,7 @@ export const API_OPERATIONS: readonly TApiOperation[] = [
     "hasBody": false
   },
   {
-    "id": "keys.rename",
+    "id": "keys.update",
     "method": "patch",
     "path": "/keys/{id}",
     "summary": "",
