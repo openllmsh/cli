@@ -32,6 +32,7 @@ import {
   decodeOpenaiJson,
   decodeOpenaiStream,
   errorEnvelopeFrom,
+  hasCompleteLocalUsage,
   localErrorResponse,
   postLocal,
   recordLocal,
@@ -193,12 +194,23 @@ export const serveLocalKeyHop = async (
         providerFormat: "openai",
         aborted: args.req.signal.aborted,
       });
-      if (cls.kind === "abort") {
-        return errorJson(499, "client aborted request");
+      let canonical: TChatCompletionResponse | null = null;
+      try {
+        const json: unknown = JSON.parse(raw);
+        if (json !== null && typeof json === "object") {
+          canonical = decodeOpenaiJson(json, hop.providerModelId);
+        }
+      } catch {
+        // Unreadable usage remains unknown.
       }
-      const policy = cooldownPolicyFor(cls.reason);
-      // A request-deterministic rejection fails on every key alike.
-      if (policy.action === "surface" || finalSlot) {
+      const usageComplete = hasCompleteLocalUsage(canonical);
+      const policy =
+        cls.kind === "abort" ? null : cooldownPolicyFor(cls.reason);
+      // Record complete usage even when this account yields to a sibling.
+      if (
+        usageComplete ||
+        (cls.kind !== "abort" && (policy?.action === "surface" || finalSlot))
+      ) {
         recordLocal(
           {
             model: hop.modelId,
@@ -208,17 +220,27 @@ export const serveLocalKeyHop = async (
             endpoint: args.endpoint,
             error: `HTTP ${resp.status}`,
             account_hash: hash,
-            ...ZERO_TOKENS,
+            ...(usageComplete && canonical !== null
+              ? tokensFromResponse(canonical)
+              : ZERO_TOKENS),
           },
           args.originParam,
+          usageComplete,
         );
+      }
+      if (cls.kind === "abort") return errorJson(499, "client aborted request");
+      // A request-deterministic rejection fails on every key alike.
+      if (policy?.action === "surface" || finalSlot) {
         return localErrorResponse(resp.status, raw, args.surface);
       }
       last = { status: resp.status, raw };
       continue;
     }
 
-    const success = (canonical: TChatCompletionResponse): void => {
+    const success = (
+      canonical: TChatCompletionResponse,
+      usageComplete = false,
+    ): void => {
       recordLocal(
         {
           model: hop.modelId,
@@ -230,6 +252,7 @@ export const serveLocalKeyHop = async (
           ...tokensFromResponse(canonical),
         },
         args.originParam,
+        usageComplete,
       );
     };
     const failure = (error: string): void => {
@@ -257,7 +280,7 @@ export const serveLocalKeyHop = async (
           providerModelId: hop.providerModelId,
           status: resp.status,
           stripSubagentIsolation: strip,
-          onResponse: success,
+          onResponse: (canonical) => success(canonical),
           onError: () => failure("local key stream meter failed"),
         },
       );
@@ -277,7 +300,7 @@ export const serveLocalKeyHop = async (
           )
         : errorJson(502, "upstream response was not JSON");
     }
-    success(canonical);
+    success(canonical, hasCompleteLocalUsage(canonical));
     return deliverJsonResponse(
       canonical,
       args.surface,

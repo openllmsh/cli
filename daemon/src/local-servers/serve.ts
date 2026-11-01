@@ -182,6 +182,12 @@ export const decodeOpenaiJson = (
   model: providerModelId,
 });
 
+export const hasCompleteLocalUsage = (
+  canonical: TChatCompletionResponse | null,
+): boolean =>
+  typeof canonical?.usage?.prompt_tokens === "number" &&
+  typeof canonical?.usage?.completion_tokens === "number";
+
 export const decodeOpenaiStream = (
   body: ReadableStream<Uint8Array>,
   providerModelId: string,
@@ -363,9 +369,7 @@ export const serveLocalHop = async (
     } catch {
       // An unreadable body leaves the attempt's usage unknown.
     }
-    const usageComplete =
-      typeof canonical?.usage?.prompt_tokens === "number" &&
-      typeof canonical?.usage?.completion_tokens === "number";
+    const usageComplete = hasCompleteLocalUsage(canonical);
     const advances =
       cls.kind !== "abort" &&
       !finalHop &&
@@ -489,8 +493,7 @@ export const serveLocalHop = async (
       ...tokensFromResponse(canonical),
     },
     args.originParam,
-    typeof canonical.usage?.prompt_tokens === "number" &&
-      typeof canonical.usage?.completion_tokens === "number",
+    hasCompleteLocalUsage(canonical),
   );
   return deliverJsonResponse(
     canonical,
