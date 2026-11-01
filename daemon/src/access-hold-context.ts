@@ -117,9 +117,17 @@ export const holdFieldsForRecord = (
     if (row.status === "success" && attempt.usage !== null) {
       const { priorTokens, unknownAttempts } = holdCharge(outcome);
       outcome.settled = true;
+      // The cloud charges the row's tokens plus prior tokens. The row is the
+      // analytics view and can differ from the observed usage (e.g. a
+      // Claude message_delta revising input); carry the difference so the
+      // hold settles at what this send actually used.
+      const rowTokens =
+        Math.max(0, Math.floor(row.tokens_in)) +
+        Math.max(0, Math.floor(row.tokens_out));
+      const observedGap = Math.max(0, chargeForAttempt(attempt, 0) - rowTokens);
       return {
         hold_nonce: hold.nonce,
-        hold_prior_tokens: priorTokens,
+        hold_prior_tokens: priorTokens + observedGap,
         hold_unknown_attempts: unknownAttempts,
       };
     }
