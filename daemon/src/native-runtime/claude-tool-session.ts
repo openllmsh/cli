@@ -28,6 +28,7 @@ import type {
   TChatCompletionResponse,
   TServerSearchCall,
 } from "@openllmsh/protocol";
+import type { TAttemptUsage } from "@openllmsh/wire/lib/attempt-outcome";
 import { z } from "zod";
 import { CLAUDE_TOOL_PASSTHROUGH_SCOPE } from "../execution-identity";
 import type {
@@ -44,6 +45,7 @@ import {
 } from "./claude-tool-sdk-options";
 import type { TNativeTokens } from "./types";
 import { cleanNativeSpawnEnv, normalizeNativeTerminalResult } from "./types";
+import { anthropicAttemptUsage } from "./usage-presence";
 
 /** Idle TTL for a held (paused) query before it's force-closed. */
 const HELD_TTL_MS = 10 * 60 * 1000;
@@ -197,6 +199,7 @@ export type TToolTurnResult =
       /** This result came from an idempotent continuation retry. */
       readonly replayed?: true;
       readonly usage?: TNativeTokens;
+      readonly attemptUsage?: TAttemptUsage | null;
       readonly serverSearchCalls?: ReadonlyArray<TServerSearchCall>;
     }
   | {
@@ -205,6 +208,7 @@ export type TToolTurnResult =
       /** This result came from an idempotent continuation retry. */
       readonly replayed?: true;
       readonly usage?: TNativeTokens;
+      readonly attemptUsage?: TAttemptUsage | null;
       readonly serverSearchCalls?: ReadonlyArray<TServerSearchCall>;
     }
   | {
@@ -874,6 +878,8 @@ const drive = async (h: THeld): Promise<TToolTurnResult> => {
   let text = "";
   let toolUse: Array<{ id: string; name: string; input: unknown }> = [];
   let usage: TNativeTokens | undefined;
+  let attemptUsage: TAttemptUsage | null = null;
+  let assistantMessages = 0;
   const deadline = nowMs() + h.driveTimeoutMs;
 
   for (;;) {
@@ -940,7 +946,7 @@ const drive = async (h: THeld): Promise<TToolTurnResult> => {
           new Promise<void>((resolve) => setTimeout(resolve, 10)),
         ]);
       }
-      return pauseAndReturn(h, text, toolUse, usage);
+      return pauseAndReturn(h, text, toolUse, usage, attemptUsage);
     }
 
     const msg = step.value as
@@ -971,6 +977,13 @@ const drive = async (h: THeld): Promise<TToolTurnResult> => {
       // (the SDK carries it on each assistant message — it is not cumulative,
       // so recording per drive() call can't double-count across tool rounds).
       toolUse = [];
+      assistantMessages += 1;
+      // Multiple model completions in one drive cannot be settled from the
+      // final message alone without undercounting earlier completions.
+      attemptUsage =
+        assistantMessages === 1
+          ? anthropicAttemptUsage(msg.message?.usage)
+          : null;
       if (msg.message?.usage !== undefined) {
         usage = betaUsageToTokens(msg.message.usage);
       }
@@ -994,7 +1007,12 @@ const drive = async (h: THeld): Promise<TToolTurnResult> => {
         return { kind: "declined", reason: terminal.reason };
       }
       dropIndex(h);
-      return { kind: "final", text, usage };
+      return {
+        kind: "final",
+        text,
+        usage,
+        ...(attemptUsage === null ? {} : { attemptUsage }),
+      };
     }
     // system / partial / other frames — ignore.
   }
@@ -1005,6 +1023,7 @@ const pauseAndReturn = (
   text: string,
   toolUse: ReadonlyArray<{ id: string; name: string; input: unknown }>,
   usage: TNativeTokens | undefined,
+  attemptUsage: TAttemptUsage | null,
 ): TToolTurnResult => {
   const toolCalls: TToolCallOut[] = [];
   for (const b of toolUse) {
@@ -1039,6 +1058,7 @@ const pauseAndReturn = (
     toolCalls,
     continuationToken,
     usage,
+    ...(attemptUsage === null ? {} : { attemptUsage }),
   };
 };
 

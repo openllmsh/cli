@@ -35,6 +35,7 @@ import type { TChatCompletionChunk, TUsage } from "@openllmsh/protocol";
 import { AnthropicStreamEvent } from "@openllmsh/protocol";
 import { isRefusalChunk } from "@openllmsh/wire/lib/refusal";
 import { isMeaningfulChunk } from "@openllmsh/wire/lib/streaming/peek";
+import { createUsageObserver } from "@openllmsh/wire/lib/usage-observer";
 import {
   fromAnthropicStreamEvent,
   newAnthropicStreamState,
@@ -251,6 +252,9 @@ export const runClaudeNative = async (
   // the turn reaches the terminal with zero output and (mis)classifies as a
   // decline, surfacing the model's OWN reply text as a bogus failure reason.
   let emittedContent = false;
+  let streamUsage = createUsageObserver("anthropic", "sse");
+  let streamMessages = 0;
+  const messageUsage = createUsageObserver("anthropic", "json");
 
   /** Convert an `assistant` full-message line's `message` into one canonical
    *  chunk (content + finish + usage), or null when it carries no text. */
@@ -301,6 +305,18 @@ export const runClaudeNative = async (
         capturedSessionId = line.session_id;
       }
       if (line.type === "stream_event" && line.event !== undefined) {
+        // This bridge consumes NDJSON rather than decodeAnthropicEventStream's
+        // SSE input; observe its raw event before the same schema decode.
+        if (
+          typeof line.event === "object" &&
+          line.event !== null &&
+          "type" in line.event &&
+          line.event.type === "message_start"
+        ) {
+          streamMessages += 1;
+          streamUsage = createUsageObserver("anthropic", "sse");
+        }
+        streamUsage.observe(line.event);
         const event = decodeStreamEvent(line.event);
         if (event._tag !== "Some") continue; // unknown event shape — skip
         const chunk = fromAnthropicStreamEvent(event.value, state, {
@@ -321,6 +337,7 @@ export const runClaudeNative = async (
       if (line.type === "assistant" && !emittedContent) {
         const chunk = chunkFromAssistantLine(line.message);
         if (chunk !== null) {
+          messageUsage.observe(line.message);
           emittedContent = true;
           return chunk;
         }
@@ -448,7 +465,13 @@ export const runClaudeNative = async (
       kill();
     },
   });
-  return { kind: "committed", chunks, sessionId: () => capturedSessionId };
+  return {
+    kind: "committed",
+    chunks,
+    sessionId: () => capturedSessionId,
+    attemptUsage: () =>
+      streamMessages > 1 ? null : (messageUsage.usage() ?? streamUsage.usage()),
+  };
 };
 
 /** Split a byte stream into NDJSON lines (no trailing-newline loss). Exported

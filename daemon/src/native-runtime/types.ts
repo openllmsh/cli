@@ -26,6 +26,7 @@ import type {
   TChatCompletionRequest,
   TCooldownReason,
 } from "@openllmsh/protocol";
+import type { TAttemptUsage } from "@openllmsh/wire/lib/attempt-outcome";
 import { stateDir } from "../env";
 
 /**
@@ -373,6 +374,8 @@ export type TNativeRunResult =
        *  line; the serve adapter reads it AFTER the stream drains. Null when
        *  the runtime produced none (→ the session isn't recorded). */
       readonly sessionId: () => string | null;
+      /** Raw vendor usage, if both sides were reported for this attempt. */
+      readonly attemptUsage?: () => TAttemptUsage | null;
     }
   | {
       readonly kind: "declined";

@@ -30,6 +30,7 @@ import type {
   TUsage,
 } from "@openllmsh/protocol";
 import { codexServiceTier } from "@openllmsh/protocol";
+import type { TAttemptUsage } from "@openllmsh/wire/lib/attempt-outcome";
 import type { TSupervisedChild } from "../child-supervisor";
 import { superviseSpawn } from "../child-supervisor";
 import { spawnCwd } from "../delegation/util";
@@ -45,6 +46,7 @@ import {
 } from "./codex-web-search";
 import type { TNativeRunResult } from "./types";
 import { cleanNativeSpawnEnv, PRE_COMMIT_TIMEOUT_MS } from "./types";
+import { codexAttemptUsage } from "./usage-presence";
 
 /** Handshake / thread-start RPC budget. */
 const RPC_TIMEOUT_MS = 30_000;
@@ -81,7 +83,7 @@ type TThreadSink = {
   readonly threadId: string;
   onDelta: (text: string) => void;
   onAgentMessage: (text: string) => void;
-  onUsage: (usage: TUsage) => void;
+  onUsage: (usage: TUsage, attemptUsage: TAttemptUsage | null) => void;
   onCompleted: (status: string, errorMessage: string | null) => void;
   /** A dynamic-tool call the model made (`item/tool/call` server request) —
    *  `requestId` is the JSON-RPC id to respond to with the client's result. */
@@ -615,6 +617,7 @@ class CodexAppServerClient {
             usageFromBreakdown(
               breakdown as Parameters<typeof usageFromBreakdown>[0],
             ),
+            codexAttemptUsage(params?.tokenUsage?.last),
           );
         }
         return;
@@ -976,6 +979,7 @@ export const runCodexNative = async (
   let wake: (() => void) | null = null;
   let sawDelta = false;
   let usage: TUsage | undefined;
+  let attemptUsage: TAttemptUsage | null = null;
   let terminal: { status: string; error: string | null } | null = null;
   const push = (item: TChatCompletionChunk | "end"): void => {
     queue.push(item);
@@ -997,8 +1001,9 @@ export const runCodexNative = async (
       sawDelta = true;
       push(baseChunk({ role: "assistant", content: text }, null));
     },
-    onUsage: (u) => {
+    onUsage: (u, observed) => {
       usage = u;
+      attemptUsage = observed;
     },
     // A hosted web search completed inside the turn — ride it on the canonical
     // chunk stream so the client-wire encoders re-emit the lifecycle
@@ -1135,5 +1140,10 @@ export const runCodexNative = async (
       abort();
     },
   });
-  return { kind: "committed", chunks, sessionId: () => threadId };
+  return {
+    kind: "committed",
+    chunks,
+    sessionId: () => threadId,
+    attemptUsage: () => attemptUsage,
+  };
 };

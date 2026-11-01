@@ -842,7 +842,10 @@ export const tryServeNativeRuntime = async (
   const settle = (
     resp: Awaited<ReturnType<typeof accumulateChunksToResponse>>,
   ): void => {
-    params.record(tokensFromResponse(resp), "success", nativeAttempt);
+    params.record(tokensFromResponse(resp), "success", {
+      ...nativeAttempt,
+      usage: committed.attemptUsage?.() ?? null,
+    });
     lease.commit(
       nextPrefixHash(
         params.providerModelId,
@@ -862,7 +865,7 @@ export const tryServeNativeRuntime = async (
     params.record(
       usage === null ? ZERO_TOKENS : tokensFromResponse({ usage }),
       "error",
-      nativeAttempt,
+      { ...nativeAttempt, usage: committed.attemptUsage?.() ?? null },
     );
     lease.abandon();
   };
