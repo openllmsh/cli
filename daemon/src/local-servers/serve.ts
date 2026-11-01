@@ -173,12 +173,6 @@ export const decodeOpenaiJson = (
   model: providerModelId,
 });
 
-export const hasCompleteLocalUsage = (
-  canonical: TChatCompletionResponse | null,
-): boolean =>
-  typeof canonical?.usage?.prompt_tokens === "number" &&
-  typeof canonical?.usage?.completion_tokens === "number";
-
 export const localErrorUsage = (
   raw: string,
 ): {
