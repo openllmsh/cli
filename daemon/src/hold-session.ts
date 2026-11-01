@@ -56,10 +56,6 @@ export class HoldSession {
     return this.hold?.outcome ?? null;
   }
 
-  get nonce(): string | null {
-    return this.hold?.nonce ?? null;
-  }
-
   /**
    * Send the current hold's terminal record unless a success record already
    * settled it. Returns the pending delivery.

@@ -190,7 +190,6 @@ import {
   currentHoldNonce,
   currentHoldOutputLimit,
   holdFieldsForRecord,
-  trackHoldRecord,
 } from "./access-hold-context";
 import { accountIndexes } from "./account-models";
 import { readRoster } from "./account-roster";
@@ -212,7 +211,6 @@ import {
   isClientHangUp,
   sseResponseForClient,
 } from "./client-encode";
-import { recordRequest } from "./cloud-client";
 import {
   activeExecutionSelection,
   activeExecutionSelectionOverrides,
@@ -250,14 +248,10 @@ import type { TNativeTokens } from "./native-runtime/types";
 import { tokensFromResponse, ZERO_TOKENS } from "./native-runtime/types";
 import { runWithAccount } from "./op-context";
 import { clearPlanCache } from "./plan-cache";
+import { recordAttempt } from "./record-attempt";
 import { isClaudeCodeOriginator, resolveHopExecution } from "./sub-method";
 import { observedTeamLegUsage } from "./team-leg-body";
 import { isTeamHop, tryDirectTeamLeg } from "./team-leg-client";
-import {
-  currentTeamGrantFieldsOf,
-  currentTeamGrantToken,
-} from "./team-request-context";
-import { teamUsageCharge } from "./team-usage";
 import type { TTunnelToPeer } from "./tunnel-client";
 import { tunnelToPeer } from "./tunnel-client";
 import {
@@ -835,7 +829,6 @@ const jsonUsage = (
 ): {
   readonly tokens: typeof ZERO_TOKENS;
   readonly complete: boolean;
-  readonly present: boolean;
 } => {
   const value =
     raw !== null && typeof raw === "object" && "usage" in raw
@@ -854,7 +847,6 @@ const jsonUsage = (
       tokens_out: typeof output === "number" ? output : 0,
     },
     complete: typeof input === "number" && typeof output === "number",
-    present: usage !== undefined,
   };
 };
 
@@ -865,44 +857,17 @@ export const report = (
   usageComplete: boolean,
   definiteProviderError = false,
 ): void => {
-  const teamGrant = currentTeamGrantToken();
-  const holdNonce = currentHoldNonce();
-  const recordedRow: TDaemonRecordRequest = {
-    ...row,
-    idempotency_key: row.idempotency_key ?? randomUUID(),
-    // A dialled account's hash is often known only as the 3rd argument (native
-    // success, hop failure). Merge it when the row omitted it so every recorded
-    // attempt — success and failure — carries `account_hash`.
-    ...(row.account_hash === undefined && accountHash !== undefined
-      ? { account_hash: accountHash }
-      : {}),
-    ...(row.team_grant === undefined && teamGrant !== null
-      ? { team_grant: teamGrant }
-      : {}),
-    ...(row.hold_nonce === undefined && holdNonce !== null
-      ? holdFieldsForRecord(row, usageComplete, definiteProviderError)
-      : {}),
-  };
-  const record = recordRequest(recordedRow, origin);
-  if (recordedRow.hold_nonce !== undefined) {
-    trackHoldRecord(recordedRow.hold_nonce, record);
-  }
-  // Local team cap: charge actual tokens only on success. Failed/aborted
-  // hops never touch the counter (admit is a soft check).
-  const teamFields = currentTeamGrantFieldsOf();
-  if (
-    recordedRow.status === "success" &&
-    teamFields !== null &&
-    teamFields.cap_tokens !== undefined
-  ) {
-    const actual = Math.max(
-      0,
-      Math.floor(recordedRow.tokens_in) + Math.floor(recordedRow.tokens_out),
-    );
-    if (actual > 0) {
-      teamUsageCharge(teamFields.share_id, actual, teamFields.cap_tokens);
-    }
-  }
+  const recordedRow = recordAttempt(
+    {
+      ...row,
+      ...(row.account_hash === undefined && accountHash !== undefined
+        ? { account_hash: accountHash }
+        : {}),
+    },
+    origin,
+    usageComplete,
+    definiteProviderError,
+  );
   if (
     recordedRow.status !== "success" ||
     !isOAuthSlug(recordedRow.provider) ||
@@ -1746,11 +1711,7 @@ export const serveSubscription = async (
     wire === "chatgpt" && process.env.OPENLLM_DEBUG_CODEX_SSE === "1"
       ? tapCodexSseStream(resp.body, Date.now())
       : resp.body;
-  const recordTokens = (
-    u: TNativeTokens,
-    hasUsage: boolean,
-    usageComplete: boolean,
-  ): void => {
+  const recordTokens = (u: TNativeTokens, usageComplete: boolean): void => {
     if (cacheProbe !== null) cacheProbeOutcome(cacheProbe, u);
     report(
       {
@@ -1763,20 +1724,6 @@ export const serveSubscription = async (
       usageComplete,
     );
   };
-  // Decoders can synthesize missing token counts, so canonical stream usage
-  // alone cannot prove completeness for a hold.
-  let hasStreamUsage = false;
-  const trackUsage = (
-    chunks: ReadableStream<TChatCompletionChunk>,
-  ): ReadableStream<TChatCompletionChunk> =>
-    chunks.pipeThrough(
-      new TransformStream<TChatCompletionChunk, TChatCompletionChunk>({
-        transform: (chunk, controller): void => {
-          if (chunk.usage != null) hasStreamUsage = true;
-          controller.enqueue(chunk);
-        },
-      }),
-    );
   /**
    * A committed stream that died mid-flight. The hop returned 200, so
    * `baseRow.status` is "success" — it MUST be overridden here, else a severed
@@ -1913,8 +1860,8 @@ export const serveSubscription = async (
     // Meter token usage off a tee'd canonical branch (never blocks the
     // client; accurate counts come from the final chunk's usage).
     const meter = (chunks: ReadableStream<TChatCompletionChunk>): void => {
-      void accumulateChunksToResponse(trackUsage(chunks), hop.providerModelId)
-        .then((r) => recordTokens(tokensFromResponse(r), hasStreamUsage, false))
+      void accumulateChunksToResponse(chunks, hop.providerModelId)
+        .then((r) => recordTokens(tokensFromResponse(r), false))
         .catch(recordStreamFailure);
     };
     if (passthrough) {
@@ -1972,13 +1919,12 @@ export const serveSubscription = async (
       void peeked.chunks.cancel().catch(() => undefined);
       return hopRetry("content filter refusal");
     }
-    return deliverChunkStream(trackUsage(peeked.chunks), {
+    return deliverChunkStream(peeked.chunks, {
       surface: args.surface,
       clientWire,
       providerModelId: hop.providerModelId,
       status: resp.status,
-      onResponse: (r) =>
-        recordTokens(tokensFromResponse(r), hasStreamUsage, false),
+      onResponse: (r) => recordTokens(tokensFromResponse(r), false),
       onError: recordStreamFailure,
       stripSubagentIsolation: hop.stripSubagentIsolation,
     });
@@ -2015,7 +1961,7 @@ export const serveSubscription = async (
     let canonical: TChatCompletionResponse;
     try {
       canonical = await accumulateChunksToResponse(
-        trackUsage(peeked.chunks),
+        peeked.chunks,
         hop.providerModelId,
       );
     } catch (err) {
@@ -2033,7 +1979,7 @@ export const serveSubscription = async (
     }
     // Canonical streaming adapters may synthesize missing counts; don't settle
     // a hold without observing both fields on the raw provider stream.
-    recordTokens(tokensFromResponse(canonical), hasStreamUsage, false);
+    recordTokens(tokensFromResponse(canonical), false);
     return deliverJsonResponse(
       canonical,
       args.surface,
@@ -2119,7 +2065,7 @@ export const serveSubscription = async (
     return hopRetry("content filter refusal");
   }
   const usage = jsonUsage(upstreamJson);
-  recordTokens(tokensFromResponse(canonical), usage.present, usage.complete);
+  recordTokens(tokensFromResponse(canonical), usage.complete);
   // Passthrough returns the upstream bytes verbatim; cross-wire re-encodes
   // through the shared delivery tail.
   return passthrough

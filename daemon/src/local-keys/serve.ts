@@ -11,10 +11,7 @@
  * surface the last error (final).
  */
 import { createHash } from "node:crypto";
-import type {
-  TChatCompletionChunk,
-  TChatCompletionResponse,
-} from "@openllmsh/protocol";
+import type { TChatCompletionResponse } from "@openllmsh/protocol";
 import {
   cooldownPolicyFor,
   isLocalKeyProviderSlug,
@@ -37,8 +34,10 @@ import {
   errorEnvelopeFrom,
   hasCompleteLocalUsage,
   localErrorResponse,
+  localErrorUsage,
   postLocal,
   recordLocal,
+  trackLocalStreamUsage,
 } from "../local-servers/serve";
 import { tokensFromResponse, ZERO_TOKENS } from "../native-runtime/types";
 import { readLocalKeySlots } from "./store";
@@ -197,16 +196,8 @@ export const serveLocalKeyHop = async (
         providerFormat: "openai",
         aborted: args.req.signal.aborted,
       });
-      let canonical: TChatCompletionResponse | null = null;
-      try {
-        const json: unknown = JSON.parse(raw);
-        if (json !== null && typeof json === "object") {
-          canonical = decodeOpenaiJson(json, hop.providerModelId);
-        }
-      } catch {
-        // Unreadable usage remains unknown.
-      }
-      const usageComplete = hasCompleteLocalUsage(canonical);
+      const usage = localErrorUsage(raw, hop.providerModelId);
+      const usageComplete = usage.complete;
       const policy =
         cls.kind === "abort" ? null : cooldownPolicyFor(cls.reason);
       // Record complete usage even when this account yields to a sibling.
@@ -223,9 +214,7 @@ export const serveLocalKeyHop = async (
             endpoint: args.endpoint,
             error: `HTTP ${resp.status}`,
             account_hash: hash,
-            ...(usageComplete && canonical !== null
-              ? tokensFromResponse(canonical)
-              : ZERO_TOKENS),
+            ...usage.tokens,
           },
           args.originParam,
           usageComplete,
@@ -275,29 +264,18 @@ export const serveLocalKeyHop = async (
     };
 
     if (clientWantsStream && resp.body !== null) {
-      let hasInputUsage = false;
-      let hasOutputUsage = false;
+      const usage = trackLocalStreamUsage();
       const chunks = decodeOpenaiStream(
         resp.body,
         hop.providerModelId,
-      ).pipeThrough(
-        new TransformStream<TChatCompletionChunk, TChatCompletionChunk>({
-          transform: (chunk, controller): void => {
-            hasInputUsage ||= typeof chunk.usage?.prompt_tokens === "number";
-            hasOutputUsage ||=
-              typeof chunk.usage?.completion_tokens === "number";
-            controller.enqueue(chunk);
-          },
-        }),
-      );
+      ).pipeThrough(usage.stream);
       return deliverChunkStream(chunks, {
         surface: args.surface,
         clientWire,
         providerModelId: hop.providerModelId,
         status: resp.status,
         stripSubagentIsolation: strip,
-        onResponse: (canonical) =>
-          success(canonical, hasInputUsage && hasOutputUsage),
+        onResponse: (canonical) => success(canonical, usage.complete()),
         onError: () => failure("local key stream meter failed"),
       });
     }

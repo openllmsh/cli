@@ -9,7 +9,6 @@
 import type {
   TChatCompletionChunk,
   TChatCompletionResponse,
-  TDaemonRecordRequest,
   TErrorEnvelope,
   TModelCaps,
   TModelSettings,
@@ -27,24 +26,15 @@ import {
   clientWireOf,
   UnsupportedContentError,
 } from "@openllmsh/wire/providers/upstream-request";
-import {
-  beginHeldAttempt,
-  holdFieldsForRecord,
-  trackHoldRecord,
-} from "../access-hold-context";
+import { beginHeldAttempt } from "../access-hold-context";
 import {
   deliverChunkStream,
   deliverJsonResponse,
   type TClientSurface,
 } from "../client-encode";
-import { recordRequest } from "../cloud-client";
 import { errorJson } from "../cors";
 import { tokensFromResponse, ZERO_TOKENS } from "../native-runtime/types";
-import {
-  currentTeamGrantFieldsOf,
-  currentTeamGrantToken,
-} from "../team-request-context";
-import { teamUsageCharge } from "../team-usage";
+import { recordAttempt } from "../record-attempt";
 import { localServerForModel, preflightLocalPort } from "./discover";
 import { localKeyForPort } from "./keys";
 
@@ -188,6 +178,50 @@ export const hasCompleteLocalUsage = (
   typeof canonical?.usage?.prompt_tokens === "number" &&
   typeof canonical?.usage?.completion_tokens === "number";
 
+export const localErrorUsage = (
+  raw: string,
+  providerModelId: string,
+): {
+  complete: boolean;
+  tokens: ReturnType<typeof tokensFromResponse>;
+} => {
+  let canonical: TChatCompletionResponse | null = null;
+  try {
+    const json: unknown = JSON.parse(raw);
+    if (json !== null && typeof json === "object") {
+      canonical = decodeOpenaiJson(json, providerModelId);
+    }
+  } catch {
+    // An unreadable body leaves the attempt's usage unknown.
+  }
+  const complete = hasCompleteLocalUsage(canonical);
+  return {
+    complete,
+    tokens:
+      complete && canonical !== null
+        ? tokensFromResponse(canonical)
+        : ZERO_TOKENS,
+  };
+};
+
+export const trackLocalStreamUsage = (): {
+  stream: TransformStream<TChatCompletionChunk, TChatCompletionChunk>;
+  complete: () => boolean;
+} => {
+  let input = false;
+  let output = false;
+  return {
+    stream: new TransformStream({
+      transform: (chunk, controller): void => {
+        input ||= typeof chunk.usage?.prompt_tokens === "number";
+        output ||= typeof chunk.usage?.completion_tokens === "number";
+        controller.enqueue(chunk);
+      },
+    }),
+    complete: () => input && output,
+  };
+};
+
 export const decodeOpenaiStream = (
   body: ReadableStream<Uint8Array>,
   providerModelId: string,
@@ -202,46 +236,7 @@ export const decodeOpenaiStream = (
     { providerModelId },
   );
 
-export const recordLocal = (
-  row: Omit<TDaemonRecordRequest, "idempotency_key"> & {
-    readonly idempotency_key?: string;
-  },
-  origin: string | null,
-  usageComplete = false,
-): void => {
-  // Team hops: attribute the row to the consumer and charge the share cap,
-  // exactly as the walker's `report` does.
-  const teamGrant = currentTeamGrantToken();
-  const holdFields =
-    row.hold_nonce === undefined ? holdFieldsForRecord(row, usageComplete) : {};
-  const holdNonce = row.hold_nonce ?? holdFields.hold_nonce ?? null;
-  const record = recordRequest(
-    {
-      ...row,
-      idempotency_key: row.idempotency_key ?? crypto.randomUUID(),
-      ...(row.team_grant === undefined && teamGrant !== null
-        ? { team_grant: teamGrant }
-        : {}),
-      ...holdFields,
-    },
-    origin,
-  );
-  if (holdNonce !== null) trackHoldRecord(holdNonce, record);
-  const teamFields = currentTeamGrantFieldsOf();
-  if (
-    row.status === "success" &&
-    teamFields !== null &&
-    teamFields.cap_tokens !== undefined
-  ) {
-    const actual = Math.max(
-      0,
-      Math.floor(row.tokens_in) + Math.floor(row.tokens_out),
-    );
-    if (actual > 0) {
-      teamUsageCharge(teamFields.share_id, actual, teamFields.cap_tokens);
-    }
-  }
-};
+export const recordLocal = recordAttempt;
 
 /**
  * Serve one local-server hop. Returns a Response on commit / terminal
@@ -360,16 +355,8 @@ export const serveLocalHop = async (
       providerFormat: "openai",
       aborted: args.req.signal.aborted,
     });
-    let canonical: TChatCompletionResponse | null = null;
-    try {
-      const json: unknown = JSON.parse(raw);
-      if (json !== null && typeof json === "object") {
-        canonical = decodeOpenaiJson(json, hop.providerModelId);
-      }
-    } catch {
-      // An unreadable body leaves the attempt's usage unknown.
-    }
-    const usageComplete = hasCompleteLocalUsage(canonical);
+    const usage = localErrorUsage(raw, hop.providerModelId);
+    const usageComplete = usage.complete;
     const advances =
       cls.kind !== "abort" &&
       !finalHop &&
@@ -383,9 +370,7 @@ export const serveLocalHop = async (
           latency_ms: Date.now() - args.startedAt,
           endpoint: args.endpoint,
           error: `HTTP ${resp.status}`,
-          ...(usageComplete && canonical !== null
-            ? tokensFromResponse(canonical)
-            : ZERO_TOKENS),
+          ...usage.tokens,
         },
         args.originParam,
         usageComplete,
@@ -400,25 +385,11 @@ export const serveLocalHop = async (
   const strip = hop.stripSubagentIsolation === true;
 
   if (clientWantsStream && resp.body !== null) {
-    let hasUsage = false;
-    let hasInputUsage = false;
-    let hasOutputUsage = false;
+    const usage = trackLocalStreamUsage();
     const chunks = decodeOpenaiStream(
       resp.body,
       hop.providerModelId,
-    ).pipeThrough(
-      new TransformStream<TChatCompletionChunk, TChatCompletionChunk>({
-        transform: (chunk, controller): void => {
-          if (chunk.usage != null) {
-            hasUsage = true;
-            hasInputUsage ||= typeof chunk.usage.prompt_tokens === "number";
-            hasOutputUsage ||=
-              typeof chunk.usage.completion_tokens === "number";
-          }
-          controller.enqueue(chunk);
-        },
-      }),
-    );
+    ).pipeThrough(usage.stream);
     return deliverChunkStream(chunks, {
       surface: args.surface,
       clientWire,
@@ -436,7 +407,7 @@ export const serveLocalHop = async (
             ...tokensFromResponse(canonical),
           },
           args.originParam,
-          hasInputUsage && hasOutputUsage,
+          usage.complete(),
         );
       },
       onError: () => {

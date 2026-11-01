@@ -1,19 +1,12 @@
 import type { TOutputLimitSurface } from "@openllmsh/wire/features/output-limit-clamp";
-import { clampOutputLimitFields } from "@openllmsh/wire/features/output-limit-clamp";
+import { clampOutputLimitBytes } from "@openllmsh/wire/features/output-limit-clamp";
 
 export const clampTeamLegBody = (
   body: Uint8Array,
   surface: TOutputLimitSurface,
   limit: number,
 ): Uint8Array => {
-  const parsed: unknown = JSON.parse(new TextDecoder().decode(body));
-  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed))
-    throw new Error("Invalid team request body");
-  return new TextEncoder().encode(
-    JSON.stringify(
-      clampOutputLimitFields(parsed as Record<string, unknown>, surface, limit),
-    ),
-  );
+  return clampOutputLimitBytes(body, surface, limit);
 };
 
 /** Read the caller's requested output budget without trusting malformed JSON. */
