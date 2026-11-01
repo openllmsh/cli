@@ -102,7 +102,10 @@ import {
   quotaGateDecision,
 } from "@openllmsh/wire/features/quota-gate";
 import type { TAttemptOutcome } from "@openllmsh/wire/lib/attempt-outcome";
-import { classifyAttemptOutcome } from "@openllmsh/wire/lib/attempt-outcome";
+import {
+  classifyAttemptOutcome,
+  isReadableProviderBody,
+} from "@openllmsh/wire/lib/attempt-outcome";
 import type { TCountTokensCapabilityMemory } from "@openllmsh/wire/lib/canonical/count-tokens-capability";
 import {
   countTokensEndpointIdentity,
@@ -1617,7 +1620,7 @@ export const serveSubscription = async (
     const classifiedError = classifyAttemptOutcome(
       true,
       resp.status,
-      readable,
+      readable && isReadableProviderBody(raw),
       null,
     );
     const bodySnippet = hopBodySnippet(raw);
@@ -2238,7 +2241,7 @@ const serveKimiBuiltinSearch = async (
           classifyAttemptOutcome(
             true,
             resp.status,
-            readable,
+            readable && isReadableProviderBody(raw),
             roundAttempt.usage,
           ),
         );
@@ -2256,8 +2259,12 @@ const serveKimiBuiltinSearch = async (
       recordOnce(
         statusFor(resp.status),
         cls.kind === "transient" ? cls.reason : undefined,
-        classifyAttemptOutcome(true, resp.status, readable, roundAttempt.usage)
-          .definiteProviderError,
+        classifyAttemptOutcome(
+          true,
+          resp.status,
+          readable && isReadableProviderBody(raw),
+          roundAttempt.usage,
+        ).definiteProviderError,
       );
       return new Response(raw.length > 0 ? raw : null, {
         status: resp.status,
