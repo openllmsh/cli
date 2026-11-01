@@ -47693,6 +47693,16 @@
                           "wrapped_dek": {
                             "type": "string"
                           },
+                          "sealed_phrase": {
+                            "anyOf": [
+                              {
+                                "type": "string"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
                           "vault_version": {
                             "anyOf": [
                               {
@@ -47736,6 +47746,7 @@
                           "label",
                           "prf_salt",
                           "wrapped_dek",
+                          "sealed_phrase",
                           "vault_version",
                           "transports",
                           "created_at",
@@ -48596,6 +48607,18 @@
                         "type": "null"
                       }
                     ]
+                  },
+                  "sealed_phrase": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "minLength": 20,
+                        "maxLength": 512
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
                   }
                 },
                 "required": [
@@ -49062,6 +49085,30 @@
                         "enum": [
                           true
                         ]
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "sealed_phrase": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "minLength": 20,
+                        "maxLength": 512
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "vault_version": {
+                    "anyOf": [
+                      {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 9007199254740991
                       },
                       {
                         "type": "null"
