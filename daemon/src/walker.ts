@@ -102,6 +102,7 @@ import {
   quotaGateDecision,
 } from "@openllmsh/wire/features/quota-gate";
 import type { TAttemptOutcome } from "@openllmsh/wire/lib/attempt-outcome";
+import { classifyAttemptOutcome } from "@openllmsh/wire/lib/attempt-outcome";
 import type { TCountTokensCapabilityMemory } from "@openllmsh/wire/lib/canonical/count-tokens-capability";
 import {
   countTokensEndpointIdentity,
@@ -252,7 +253,7 @@ import { runWithAccount } from "./op-context";
 import { clearPlanCache } from "./plan-cache";
 import { recordAttempt } from "./record-attempt";
 import { isClaudeCodeOriginator, resolveHopExecution } from "./sub-method";
-import { observeTeamResponse } from "./team-leg-body";
+import { observeTeamResponseStream } from "./team-leg-body";
 import { isTeamHop, tryDirectTeamLeg } from "./team-leg-client";
 import type { TTunnelToPeer } from "./tunnel-client";
 import { tunnelToPeer } from "./tunnel-client";
@@ -1613,6 +1614,7 @@ export const serveSubscription = async (
       errorJsonBody = undefined;
     }
     const errorUsage = jsonUsage(errorJsonBody);
+    const classifiedError = classifyAttemptOutcome(true, resp.status, readable, null);
     const bodySnippet = hopBodySnippet(raw);
     // No output has been committed yet. A different configured candidate may
     // accept the same canonical request regardless of this provider's status
@@ -1636,7 +1638,7 @@ export const serveSubscription = async (
           status: "error",
           ...errorUsage.tokens,
         },
-        jsonAttempt(errorJsonBody, wire, readable),
+        jsonAttempt(errorJsonBody, wire, classifiedError.definiteProviderError),
       );
       return hopRetry(
         `HTTP ${resp.status}: ${bodySnippet || "upstream rejected"}`,
@@ -1673,7 +1675,7 @@ export const serveSubscription = async (
       },
       args.originParam,
       undefined,
-      jsonAttempt(errorJsonBody, wire, readable),
+      jsonAttempt(errorJsonBody, wire, classifiedError.definiteProviderError),
     );
     // Final-hop failure still cools the model — bust the plan cache so the
     // next request re-resolves instead of replaying this leader.
@@ -2228,7 +2230,9 @@ const serveKimiBuiltinSearch = async (
             status: "error",
             ...roundTokens,
           },
-          { ...roundAttempt, definiteProviderError: readable },
+          classifyAttemptOutcome(
+            true, resp.status, readable, roundAttempt.usage,
+          ),
         );
         return hopRetry(
           `HTTP ${resp.status}: ${bodySnippet || "upstream rejected"}`,
@@ -2244,7 +2248,9 @@ const serveKimiBuiltinSearch = async (
       recordOnce(
         statusFor(resp.status),
         cls.kind === "transient" ? cls.reason : undefined,
-        readable,
+        classifyAttemptOutcome(
+          true, resp.status, readable, roundAttempt.usage,
+        ).definiteProviderError,
       );
       return new Response(raw.length > 0 ? raw : null, {
         status: resp.status,
@@ -3780,37 +3786,27 @@ const walkPlan = async (
       });
       if (direct !== null && (direct.ok || finalHop)) {
         if (currentHoldNonce() !== null && direct.ok && direct.body !== null) {
-          const clone = direct.clone();
-          const usage =
-            clone.body === null
-              ? Promise.resolve(null)
-              : observeTeamResponse(
-                  clone.body,
-                  clone.headers
-                    .get("content-type")
-                    ?.includes("text/event-stream") === true,
-                  args.surface === "messages" ? "anthropic" : "openai",
-                ).catch(() => null);
-          const body = direct.body.pipeThrough(
-            new TransformStream<Uint8Array, Uint8Array>({
-              async flush(): Promise<void> {
-                const tokens = await usage;
-                report(
-                  {
-                    model: hop.modelId,
-                    provider: hop.provider,
-                    status: "success",
-                    tokens_in: tokens?.in ?? 0,
-                    tokens_out: tokens?.out ?? 0,
-                    latency_ms: Date.now() - args.startedAt,
-                    endpoint: args.endpoint,
-                  },
-                  args.originParam,
-                  undefined,
-                  { sent: true, usage: tokens, definiteProviderError: false },
-                );
-              },
-            }),
+          const body = observeTeamResponseStream(
+            direct.body,
+            direct.headers.get("content-type")?.includes("text/event-stream") ===
+              true,
+            args.surface === "messages" ? "anthropic" : "openai",
+            (tokens) => {
+              report(
+                {
+                  model: hop.modelId,
+                  provider: hop.provider,
+                  status: "success",
+                  tokens_in: tokens?.in ?? 0,
+                  tokens_out: tokens?.out ?? 0,
+                  latency_ms: Date.now() - args.startedAt,
+                  endpoint: args.endpoint,
+                },
+                args.originParam,
+                undefined,
+                { sent: true, usage: tokens, definiteProviderError: false },
+              );
+            },
           );
           return withHopTrailHeaders(
             new Response(body, {

@@ -49,7 +49,7 @@ import {
 import {
   clampTeamLegBody,
   estimateTeamLegInputTokens,
-  observeTeamResponse,
+  observeTeamResponseStream,
 } from "./team-leg-body";
 import {
   reportTeamLegCompletion,
@@ -226,47 +226,25 @@ export const dispatchTeamLeg = async (
 ): Promise<Response> => {
   const response = await run();
   if (response.body === null) return response;
-  if (!response.ok) {
-    const observation = response.clone().body;
-    if (observation !== null) {
-      void observeTeamResponse(
-        observation,
-        false,
-        surface === "messages" ? "anthropic" : "openai",
-      )
-        .then((usage) =>
-          usage === null
-            ? undefined
-            : reportCompletion({
-                nonce: grant.n,
-                teamGrant,
-                actualTokens: usage.in + usage.out,
-              }),
-        )
-        .catch(() => {});
-    }
-    return response;
-  }
-  const [forConsumer, forObservation] = response.body.tee();
   const eventStream =
+    response.ok &&
     response.headers.get("content-type")?.includes("text/event-stream") ===
-    true;
-  void observeTeamResponse(
-    forObservation,
+      true;
+  const observed = observeTeamResponseStream(
+    response.body,
     eventStream,
     surface === "messages" ? "anthropic" : "openai",
-  )
-    .then((usage) =>
-      usage === null
-        ? undefined
-        : reportCompletion({
-            nonce: grant.n,
-            teamGrant,
-            actualTokens: usage.in + usage.out,
-          }),
-    )
-    .catch(() => {});
-  return new Response(forConsumer, {
+    (usage) => {
+      if (usage !== null) {
+        void reportCompletion({
+          nonce: grant.n,
+          teamGrant,
+          actualTokens: usage.in + usage.out,
+        }).catch(() => {});
+      }
+    },
+  );
+  return new Response(observed, {
     status: response.status,
     statusText: response.statusText,
     headers: response.headers,
