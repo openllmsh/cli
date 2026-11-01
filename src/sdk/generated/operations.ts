@@ -1412,6 +1412,18 @@ export const API_OPERATIONS: readonly TApiOperation[] = [
     "hasBody": false
   },
   {
+    "id": "user.tier",
+    "method": "get",
+    "path": "/user/tier",
+    "summary": "",
+    "tags": [
+      "user"
+    ],
+    "pathParams": [],
+    "queryParams": [],
+    "hasBody": false
+  },
+  {
     "id": "v1Audio.speech",
     "method": "post",
     "path": "/v1/audio/speech",

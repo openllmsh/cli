@@ -157,7 +157,7 @@ export const fetchModelCatalog = async (
 };
 
 /**
- * The account tier for this launch, read from `/api/user`'s `tier` field. Only
+ * The account tier for this launch, read from `/api/user/tier`. Only
  * `"free"` changes launch behavior (drops the paid code-search MCP group), so
  * every failure mode — no key, non-200, missing/unknown field, timeout — returns
  * `undefined`, which the launch planner treats as PAID. Failing open keeps a
@@ -170,7 +170,9 @@ export const fetchTier = async (
 ): Promise<"free" | "trial" | "pro" | undefined> => {
   if (gateway.apiKey.length === 0) return undefined;
   try {
-    const res = await fetch(`${gateway.cloudOrigin}/api/user`, {
+    // `/api/user/tier`, not `/api/user`: a device key runs AI and holds no
+    // account.manage, which the whole account read needs.
+    const res = await fetch(`${gateway.cloudOrigin}/api/user/tier`, {
       headers: { authorization: `Bearer ${gateway.apiKey}` },
       signal: AbortSignal.timeout(CATALOG_TIMEOUT_MS),
     });
