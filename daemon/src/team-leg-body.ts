@@ -162,7 +162,6 @@ export const observeTeamResponseStream = (
           return;
         }
         append(decoder.decode());
-        if (!overflow && eventStream && pending.length > 0) frame(pending);
         if (!overflow && !eventStream) {
           try {
             observer.observe(JSON.parse(pending));

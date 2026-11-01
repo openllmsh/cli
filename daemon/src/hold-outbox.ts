@@ -1,13 +1,6 @@
 /** Durable, nonce-idempotent delivery of cap-hold settlement records. */
-import {
-  closeSync,
-  fsyncSync,
-  ftruncateSync,
-  openSync,
-  readFileSync,
-  renameSync,
-  writeFileSync,
-} from "node:fs";
+import { readFileSync } from "node:fs";
+import { open, readFile, rename } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import type { TDaemonRecordRequest } from "@openllmsh/protocol";
 import { stateDir } from "./env";
@@ -31,51 +24,96 @@ export type THoldRecordSender = (
 const FINAL_STATUSES = new Set([400, 403, 404, 409]);
 const outboxPath = (): string => join(stateDir(), "hold-outbox.jsonl");
 
-const syncDirectory = (path: string): void => {
-  const fd = openSync(dirname(path), "r");
+const syncDirectory = async (path: string): Promise<void> => {
+  const file = await open(dirname(path), "r");
   try {
-    fsyncSync(fd);
+    await file.sync();
   } finally {
-    closeSync(fd);
+    await file.close();
   }
 };
 
-const syncWrite = (path: string, data: string, flags: string): void => {
-  const fd = openSync(path, flags, 0o600);
+const syncWrite = async (
+  path: string,
+  data: string,
+  flags: string,
+): Promise<void> => {
+  const file = await open(path, flags, 0o600);
   try {
-    writeFileSync(fd, data);
-    fsyncSync(fd);
+    await file.writeFile(data);
+    await file.sync();
   } finally {
-    closeSync(fd);
+    await file.close();
   }
 };
 
-/** Preserve a torn tail before truncating it; never join it to a new record. */
-const readText = (path: string, repair: boolean): string => {
-  let text: string;
+const validTail = (tail: string): boolean => {
   try {
-    text = readFileSync(path, "utf8");
+    const value: unknown = JSON.parse(tail);
+    return typeof (value as TEntry | null)?.row?.hold_nonce === "string";
+  } catch {
+    return false;
+  }
+};
+
+/** Inspect a journal without discarding a complete unterminated record. */
+const readText = (path: string): string => {
+  try {
+    const text = readFileSync(path, "utf8");
+    if (!text || text.endsWith("\n")) return text;
+    const boundary = text.lastIndexOf("\n") + 1;
+    return validTail(text.slice(boundary)) ? text : text.slice(0, boundary);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return "";
     throw error;
   }
-  if (text.length > 0 && !text.endsWith("\n")) {
+};
+
+const repaired = new Set<string>();
+let journalQueue: Promise<void> = Promise.resolve();
+const journalOp = <T>(operation: () => Promise<T>): Promise<T> => {
+  const result = journalQueue.then(operation);
+  journalQueue = result.then(
+    () => undefined,
+    () => undefined,
+  );
+  return result;
+};
+
+const readJournal = async (path: string): Promise<string> => {
+  let text: string;
+  try {
+    text = await readFile(path, "utf8");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return "";
+    throw error;
+  }
+  if (!repaired.has(path) && text && !text.endsWith("\n")) {
     const boundary = text.lastIndexOf("\n") + 1;
-    if (repair) {
-      syncWrite(`${path}.corrupt`, `${text.slice(boundary)}\n`, "a");
-      syncDirectory(path);
-      // Truncate by byte length, not JavaScript string length.
-      const fd = openSync(path, "r+");
+    const tail = text.slice(boundary);
+    if (validTail(tail)) {
+      await syncWrite(path, "\n", "a");
+      text += "\n";
+    } else {
+      await syncWrite(`${path}.corrupt`, `${tail}\n`, "a");
+      await syncDirectory(path);
+      const file = await open(path, "r+");
       try {
-        ftruncateSync(fd, Buffer.byteLength(text.slice(0, boundary)));
-        fsyncSync(fd);
+        await file.truncate(Buffer.byteLength(text.slice(0, boundary)));
+        await file.sync();
       } finally {
-        closeSync(fd);
+        await file.close();
       }
+      text = text.slice(0, boundary);
     }
-    return text.slice(0, boundary);
   }
   return text;
+};
+
+const ensureRepaired = async (path: string): Promise<void> => {
+  if (repaired.has(path)) return;
+  await readJournal(path);
+  repaired.add(path);
 };
 
 const parseEntries = (text: string): TEntry[] => {
@@ -92,15 +130,18 @@ const parseEntries = (text: string): TEntry[] => {
   return entries;
 };
 
-const writeEntries = (path: string, entries: ReadonlyArray<TEntry>): void => {
+const writeEntries = async (
+  path: string,
+  entries: ReadonlyArray<TEntry>,
+): Promise<void> => {
   const tmp = `${path}.${process.pid}.tmp`;
-  syncWrite(
+  await syncWrite(
     tmp,
     entries.map((entry) => `${JSON.stringify(entry)}\n`).join(""),
     "w",
   );
-  renameSync(tmp, path);
-  syncDirectory(path);
+  await rename(tmp, path);
+  await syncDirectory(path);
 };
 
 // Volatile fallback is scoped by state dir, like the journal itself.
@@ -146,7 +187,11 @@ export const flushHoldOutbox = (): Promise<void> => {
     await Promise.resolve();
     let disk: TEntry[] | null = null;
     try {
-      disk = parseEntries(readText(path, true));
+      disk = await journalOp(async () => {
+        const text = await readJournal(path);
+        repaired.add(path);
+        return parseEntries(text);
+      });
     } catch (error) {
       console.error("hold outbox: cannot read journal", error);
     }
@@ -179,16 +224,19 @@ export const flushHoldOutbox = (): Promise<void> => {
     let remaining = true;
     try {
       if (disk !== null) {
-        const keptByNonce = new Map<string, TEntry>();
-        for (const entry of [...disk, ...(appendedDuringFlush ?? [])]) {
-          const nonce = entry.row.hold_nonce ?? "";
-          if (!done.has(nonce)) keptByNonce.set(nonce, entry);
-        }
-        const kept = [...keptByNonce.values()];
-        writeEntries(path, kept);
-        remaining = kept.length > 0 || (volatile.get(path)?.size ?? 0) > 0;
+        await journalOp(async () => {
+          const keptByNonce = new Map<string, TEntry>();
+          for (const entry of [...disk, ...(appendedDuringFlush ?? [])]) {
+            const nonce = entry.row.hold_nonce ?? "";
+            if (!done.has(nonce)) keptByNonce.set(nonce, entry);
+          }
+          const kept = [...keptByNonce.values()];
+          await writeEntries(path, kept);
+          remaining = kept.length > 0 || (volatile.get(path)?.size ?? 0) > 0;
+        });
       }
     } catch (error) {
+      repaired.delete(path);
       console.error("hold outbox: cannot compact journal", error);
     } finally {
       flushing = null;
@@ -211,25 +259,27 @@ export const enqueueHoldRecord = async (
   sender = send;
   const entry: TEntry = { row, origin, queued_at: Date.now() };
   const path = outboxPath();
-  try {
-    readText(path, true);
-    syncWrite(path, `${JSON.stringify(entry)}\n`, "a");
-    syncDirectory(path);
-    if (flushPath === path) appendedDuringFlush?.push(entry);
-  } catch (error) {
-    console.error(
-      "hold outbox: durable append failed; retrying in memory",
-      error,
-    );
-    let memory = volatile.get(path);
-    if (!memory) {
-      memory = new Map();
-      volatile.set(path, memory);
+  await journalOp(async () => {
+    try {
+      await ensureRepaired(path);
+      await syncWrite(path, `${JSON.stringify(entry)}\n`, "a");
+      await syncDirectory(path);
+      if (flushPath === path) appendedDuringFlush?.push(entry);
+    } catch (error) {
+      repaired.delete(path);
+      console.error(
+        "hold outbox: durable append failed; retrying in memory",
+        error,
+      );
+      let memory = volatile.get(path);
+      if (!memory) {
+        memory = new Map();
+        volatile.set(path, memory);
+      }
+      memory.set(row.hold_nonce ?? "", entry);
+      if (flushPath === path) appendedDuringFlush?.push(entry);
     }
-    memory.set(row.hold_nonce ?? "", entry);
-    // An append may have reached disk even when its sync failed.
-    if (flushPath === path) appendedDuringFlush?.push(entry);
-  }
+  });
   const active = flushing;
   if (active !== null) await active;
   await flushHoldOutbox();
@@ -263,7 +313,7 @@ export const holdOutboxBacklog = (): {
   const path = outboxPath();
   const entries = new Map<string, TEntry>();
   try {
-    for (const entry of parseEntries(readText(path, false)))
+    for (const entry of parseEntries(readText(path)))
       entries.set(entry.row.hold_nonce ?? "", entry);
   } catch (error) {
     console.error("hold outbox: cannot inspect journal", error);
