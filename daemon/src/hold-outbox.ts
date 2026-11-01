@@ -237,8 +237,13 @@ const schedule = (): void => {
 
 /** Retry the snapshot once, retaining entries appended while sending. */
 export const flushHoldOutbox = (): Promise<void> => {
-  if (flushing !== null) return flushing;
   const path = outboxPath();
+  if (flushing !== null) {
+    // An in-flight flush of another journal (the state dir changed) does not
+    // cover this one: run a fresh flush once it ends.
+    if (flushPath === path) return flushing;
+    return flushing.then(() => flushHoldOutbox());
+  }
   flushPath = path;
   appendedDuringFlush = [];
   const run = async (): Promise<void> => {
