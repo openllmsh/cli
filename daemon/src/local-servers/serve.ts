@@ -28,7 +28,7 @@ import {
   UnsupportedContentError,
 } from "@openllmsh/wire/providers/upstream-request";
 import {
-  claimHeldAttempt,
+  beginHeldAttempt,
   holdFieldsForRecord,
   trackHoldRecord,
 } from "../access-hold-context";
@@ -156,7 +156,7 @@ export const postLocal = async (
   init: RequestInit,
   inboundSignal: AbortSignal,
 ): Promise<Response | null> => {
-  if (!claimHeldAttempt()) return null;
+  beginHeldAttempt();
   const headerTimeout = new AbortController();
   const timer = setTimeout(() => {
     if (!headerTimeout.signal.aborted) {
@@ -415,7 +415,6 @@ export const serveLocalHop = async (
             latency_ms: Date.now() - args.startedAt,
             endpoint: args.endpoint,
             ...tokensFromResponse(canonical),
-            ...(hasUsage ? {} : { usage_unknown: true as const }),
           },
           args.originParam,
           hasInputUsage && hasOutputUsage,
@@ -473,7 +472,6 @@ export const serveLocalHop = async (
       latency_ms: Date.now() - args.startedAt,
       endpoint: args.endpoint,
       ...tokensFromResponse(canonical),
-      ...(canonical.usage == null ? { usage_unknown: true as const } : {}),
     },
     args.originParam,
     typeof canonical.usage?.prompt_tokens === "number" &&

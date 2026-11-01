@@ -27,7 +27,7 @@ import {
 } from "@openllmsh/wire/lib/canonical/image-sse";
 import { originatorHeadersFrom } from "@openllmsh/wire/lib/forwarded-headers";
 import { Schema } from "effect";
-import { claimHeldAttempt } from "./access-hold-context";
+import { beginHeldAttempt } from "./access-hold-context";
 import { uploadMedia } from "./cloud-client";
 import { errorJson } from "./cors";
 import { getDelegate, isOAuthSlug } from "./delegation";
@@ -111,7 +111,7 @@ export const persistImageDataItem = async (
     const inspected = inspectImageBytes(bytes);
     if (inspected !== null) contentType = inspected.mime;
   } else if (item.url !== undefined && item.url.length > 0) {
-    if (!claimHeldAttempt()) throw new Error("upstream image download failed");
+    beginHeldAttempt();
     const image = await (args.fetchImpl ?? fetch)(item.url, {
       method: "GET",
       signal: AbortSignal.timeout(30_000),

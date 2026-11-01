@@ -185,7 +185,7 @@ import {
 } from "@openllmsh/wire/providers/upstream-request";
 import { Schema } from "effect";
 import {
-  claimHeldAttempt,
+  beginHeldAttempt,
   clampHoldOutputLimit,
   currentHoldNonce,
   currentHoldOutputLimit,
@@ -647,7 +647,7 @@ export const postUpstream = async (
   init: RequestInit,
   onTransportFailure?: (failure: TTransportFailure) => void,
 ): Promise<Response | null> => {
-  if (!claimHeldAttempt()) return null;
+  beginHeldAttempt();
   try {
     return await fetch(url, init);
   } catch (err) {
@@ -1687,7 +1687,6 @@ export const serveSubscription = async (
         ...baseRow,
         latency_ms: elapsed(),
         ...u,
-        ...(hasUsage ? {} : { usage_unknown: true as const }),
       },
       args.originParam,
       undefined,
@@ -2006,9 +2005,6 @@ export const serveSubscription = async (
         ...ZERO_TOKENS,
         latency_ms: elapsed(),
         error: `delivered verbatim but not metered: ${reason}`,
-        ...(currentHoldNonce() === null
-          ? {}
-          : { usage_unknown: true as const }),
       },
       args.originParam,
       undefined,
@@ -3192,12 +3188,7 @@ const walkPlan = async (
       // capture). Pre-commit declines fall through to handrolled when
       // `methods` still allows it; otherwise fleet.
       const serveNative = args.tryServeNativeRuntime ?? tryServeNativeRuntime;
-      if (!claimHeldAttempt()) {
-        return {
-          response: errorJson(502, "native upstream unavailable"),
-          servedLocally: true,
-        };
-      }
+      beginHeldAttempt();
       const native = await serveNative({
         provider: hop.provider,
         providerModelId: hop.providerModelId,
@@ -3223,7 +3214,6 @@ const walkPlan = async (
               latency_ms: Date.now() - args.startedAt,
               endpoint: args.endpoint,
               ...tokens,
-              ...(usageUnknown ? { usage_unknown: true as const } : {}),
             },
             args.originParam,
             accountHashByProvider.get(hop.provider) ?? undefined,
@@ -4106,7 +4096,7 @@ export const runCountTokens = async (args: TWalkArgs): Promise<Response> => {
     }
     throw err;
   }
-  if (!claimHeldAttempt()) return errorJson(502, "upstream unavailable");
+  beginHeldAttempt();
   let resp: Response;
   let text: string;
   try {
@@ -4228,8 +4218,7 @@ export const runResponsesCompact = async (
           built.body as Record<string, unknown>,
         )
       : built.body;
-  if (!claimHeldAttempt())
-    return errorJson(502, "compact upstream unavailable");
+  beginHeldAttempt();
   let resp: Response;
   try {
     resp = await fetch(compactUpstreamUrl(acquired.url), {

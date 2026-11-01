@@ -24,14 +24,32 @@ export type THoldOutcome = {
   settled: boolean;
   lastModel: string | null;
   lastProvider: string | null;
+  /** Upstream sends started under this hold (retries and fallbacks count). */
+  sends: number;
+  /** Sends whose charge is known: complete usage, or a definite provider error. */
+  accounted: number;
+  /** Tokens reported by the accounted sends. */
+  accountedTokens: number;
 };
+
+/** What the hold's terminal record reports beyond its own tokens. */
+export type THoldCharge = {
+  /** Tokens reported by earlier attempts of this request. */
+  readonly priorTokens: number;
+  /** Sends with no usage evidence: each is charged the full reservation. */
+  readonly unknownAttempts: number;
+};
+
+export const holdCharge = (outcome: THoldOutcome): THoldCharge => ({
+  priorTokens: outcome.accountedTokens,
+  unknownAttempts: Math.max(0, outcome.sends - outcome.accounted),
+});
 
 type THold = {
   readonly nonce: string;
   /** Signed output budget of the held plan; null when the plan has none. */
   readonly maxOutputTokens: number | null;
   readonly outcome: THoldOutcome;
-  attempted: boolean;
 };
 
 const holdContext = new AsyncLocalStorage<THold>();
@@ -40,6 +58,9 @@ export const newHoldOutcome = (): THoldOutcome => ({
   settled: false,
   lastModel: null,
   lastProvider: null,
+  sends: 0,
+  accounted: 0,
+  accountedTokens: 0,
 });
 
 export const withHoldNonce = <T>(
@@ -47,23 +68,25 @@ export const withHoldNonce = <T>(
   run: () => T,
   maxOutputTokens: number | null = null,
   outcome: THoldOutcome = newHoldOutcome(),
-): T =>
-  holdContext.run({ nonce, maxOutputTokens, outcome, attempted: false }, run);
+): T => holdContext.run({ nonce, maxOutputTokens, outcome }, run);
 
-/** Permit a single upstream attempt in a held request. */
-export const claimHeldAttempt = (): boolean => {
+/**
+ * Count an upstream send about to start. A held request walks the same
+ * retries and fallbacks as an unheld one; every send is charged when the hold
+ * settles (docs/plan/2026-10-31-hold-finalization.md).
+ */
+export const beginHeldAttempt = (): void => {
   const hold = holdContext.getStore();
-  if (hold === undefined) return true;
-  if (hold.attempted) return false;
-  hold.attempted = true;
-  return true;
+  if (hold !== undefined) hold.outcome.sends += 1;
 };
 
 /**
- * Decide whether a hop record may carry the hold nonce, and note what it
- * says. Only a success with complete provider usage settles the hold.
- * Outside a hold (or for
- * an already settled one) the row is returned unchanged.
+ * Note what a hop record proves and decide whether it settles the hold.
+ * Complete usage is accounted at its tokens; a definite provider error (the
+ * provider's own non-2xx body was read) at 0; anything else stays unknown and
+ * is charged the full reservation. A success with complete usage settles the
+ * hold, carrying every earlier attempt's charge. Outside a hold (or for an
+ * already settled one) the row is returned unchanged.
  */
 export const holdFieldsForRecord = (
   row: {
@@ -74,14 +97,33 @@ export const holdFieldsForRecord = (
     readonly tokens_out: number;
   },
   usageComplete: boolean,
-): { readonly hold_nonce?: string } => {
+  definiteProviderError = false,
+): {
+  readonly hold_nonce?: string;
+  readonly hold_prior_tokens?: number;
+  readonly hold_unknown_attempts?: number;
+} => {
   const hold = holdContext.getStore();
   if (hold === undefined || hold.outcome.settled) return {};
-  hold.outcome.lastModel = row.model;
-  hold.outcome.lastProvider = row.provider;
-  if (row.status === "success" && usageComplete) {
-    hold.outcome.settled = true;
-    return { hold_nonce: hold.nonce };
+  const outcome = hold.outcome;
+  outcome.lastModel = row.model;
+  outcome.lastProvider = row.provider;
+  if (usageComplete) {
+    outcome.accounted += 1;
+    if (row.status === "success") {
+      const { priorTokens, unknownAttempts } = holdCharge(outcome);
+      outcome.settled = true;
+      return {
+        hold_nonce: hold.nonce,
+        hold_prior_tokens: priorTokens,
+        hold_unknown_attempts: unknownAttempts,
+      };
+    }
+    outcome.accountedTokens +=
+      Math.max(0, Math.floor(row.tokens_in)) +
+      Math.max(0, Math.floor(row.tokens_out));
+  } else if (definiteProviderError) {
+    outcome.accounted += 1;
   }
   return {};
 };

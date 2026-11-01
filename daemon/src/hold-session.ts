@@ -5,10 +5,11 @@
  * A capped plan's hold is bound to this device and already dispatched, so
  * its terminal record decides the charge:
  *
- * - a success record with usage settled it (the walk's own record) → nothing
- *   more to send;
- * - otherwise send `usage_unknown`: the cloud decides whether to refund an
- *   undispatched hold or charge a dispatched one in full.
+ * - a success record with complete usage settled it (the walk's own record,
+ *   carrying every earlier attempt's charge) → nothing more to send;
+ * - otherwise send the request's charge so far: tokens of attempts with
+ *   complete usage, and how many sends had no usage evidence (each charged
+ *   the full reservation by the cloud).
  *
  * `handleInference` runs inside {@link withHoldSession}, whose `finally`
  * guarantees the terminal record however the handler exits; records go
@@ -16,7 +17,11 @@
  */
 import type { TDaemonRecordRequest } from "@openllmsh/protocol";
 import type { THoldOutcome } from "./access-hold-context";
-import { newHoldOutcome, trackHoldRecord } from "./access-hold-context";
+import {
+  holdCharge,
+  newHoldOutcome,
+  trackHoldRecord,
+} from "./access-hold-context";
 import { recordRequest } from "./cloud-client";
 
 type TOpenHold = {
@@ -64,6 +69,7 @@ export class HoldSession {
     this.hold = null;
     if (hold === null || hold.outcome.settled) return null;
     hold.outcome.settled = true;
+    const charge = holdCharge(hold.outcome);
     const model = hold.outcome.lastModel ?? hold.model;
     const row: TDaemonRecordRequest = {
       model,
@@ -75,7 +81,8 @@ export class HoldSession {
       endpoint: this.endpoint,
       error: "Request ended without a complete usage report",
       hold_nonce: hold.nonce,
-      usage_unknown: true,
+      hold_prior_tokens: charge.priorTokens,
+      hold_unknown_attempts: charge.unknownAttempts,
     };
     const record = recordRequest(row, hold.origin);
     trackHoldRecord(hold.nonce, record);
