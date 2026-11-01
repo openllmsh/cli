@@ -31,6 +31,18 @@ type TOpenHold = {
   readonly outcome: THoldOutcome;
 };
 
+/** Sessions holding an unsettled hold, so shutdown can settle them first. */
+const openSessions = new Set<HoldSession>();
+
+/**
+ * Settle every open hold now. Shutdown calls this before draining the
+ * journal: a stream still running would otherwise queue its settlement after
+ * the drain and be lost to `process.exit`, leaving the sweep to charge in full.
+ */
+export const finishOpenHoldSessions = (): void => {
+  for (const session of [...openSessions]) session.finish();
+};
+
 export class HoldSession {
   private hold: TOpenHold | null = null;
 
@@ -45,6 +57,7 @@ export class HoldSession {
     if (this.hold?.nonce === nonce) return this.hold.outcome;
     const outcome = newHoldOutcome();
     this.hold = { nonce, model, origin, outcome };
+    openSessions.add(this);
     return outcome;
   }
 
@@ -63,6 +76,7 @@ export class HoldSession {
   finish(): Promise<void> | null {
     const hold = this.hold;
     this.hold = null;
+    openSessions.delete(this);
     if (hold === null || hold.outcome.settled) return null;
     hold.outcome.settled = true;
     const charge = holdCharge(hold.outcome);
@@ -92,7 +106,11 @@ export class HoldSession {
    * lets a success record settle the hold first.
    */
   attach(response: Response): Response {
-    if (!this.open) return response;
+    if (!this.open) {
+      // Settled elsewhere (e.g. the walker's usage record): stop tracking.
+      openSessions.delete(this);
+      return response;
+    }
     if (!response.ok || response.body === null) {
       queueMicrotask(() => {
         this.finish();

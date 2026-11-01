@@ -143,9 +143,6 @@ export const main = async (): Promise<void> => {
   // and before the (costly) sandbox/FFI work it's meant to stop repeating.
   guardCrashLoop();
 
-  // Retry cap-hold records a previous run could not deliver.
-  startHoldOutbox(postRecord);
-
   // Converge a pre-merge two-binary install (real `openllmd` file, units that
   // exec bare `openllmd`) onto the single `openllm daemon` binary.
   migrateLegacyInstall();
@@ -417,7 +414,9 @@ export const main = async (): Promise<void> => {
     // Durable local session hosts are detached from this daemon. The supervisor
     // tracks only disposable children, leaving their PTYs alone.
     await drainDisposableChildren();
-    // Wait for queued settlement appends before process.exit, but not network delivery.
+    // Settle holds of requests still in flight (their streams die with us),
+    // then wait for queued settlement appends — not network delivery.
+    (await import("./hold-session")).finishOpenHoldSessions();
     await (await import("./hold-outbox")).drainHoldJournal();
     // Queued async appends would otherwise be dropped by process.exit.
     await flushLogs();
@@ -665,6 +664,11 @@ export const main = async (): Promise<void> => {
     exitAfterDisposableDrain(1);
     return;
   }
+
+  // Retry cap-hold records a previous run could not deliver. Only after the
+  // bind: the port is the single-instance lock, so exactly one daemon per
+  // mode owns the journal (dev has its own file — see `hold-outbox.ts`).
+  startHoldOutbox(postRecord);
 
   // Ready signal at BIND time — `/whoami` and `/status` already answer. The
   // install-time launcher and test harnesses gate on this line; it used to

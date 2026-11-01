@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import { open, readFile, rename } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import type { TDaemonRecordRequest } from "@openllmsh/protocol";
-import { stateDir } from "./env";
+import { isDevMode, stateDir } from "./env";
 
 const RETRY_BASE_MS = 2_000;
 const RETRY_MAX_MS = 60_000;
@@ -22,7 +22,13 @@ export type THoldRecordSender = (
 ) => Promise<Response>;
 
 const FINAL_STATUSES = new Set([400, 403, 404, 409]);
-const outboxPath = (): string => join(stateDir(), "hold-outbox.jsonl");
+/**
+ * One journal per daemon mode. Dev and prod share `stateDir` but bind
+ * different ports and talk to different cloud origins, so each needs its own
+ * file; within a mode the port bind keeps a single owner.
+ */
+const outboxPath = (): string =>
+  join(stateDir(), isDevMode() ? "hold-outbox.dev.jsonl" : "hold-outbox.jsonl");
 
 const syncDirectory = async (path: string): Promise<void> => {
   const file = await open(dirname(path), "r");
