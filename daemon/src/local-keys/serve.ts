@@ -19,6 +19,7 @@ import {
 } from "@openllmsh/protocol";
 import { classifyHopError } from "@openllmsh/wire/lib/error-class";
 import { scrubSecretText } from "@openllmsh/wire/lib/secret-scrub";
+import { createUsageObserver } from "@openllmsh/wire/lib/usage-observer";
 import {
   buildUpstreamRequest,
   clientWireOf,
@@ -32,7 +33,6 @@ import {
   decodeOpenaiJson,
   decodeOpenaiStream,
   errorEnvelopeFrom,
-  hasCompleteLocalUsage,
   localErrorResponse,
   localErrorUsage,
   postLocal,
@@ -196,7 +196,7 @@ export const serveLocalKeyHop = async (
         providerFormat: "openai",
         aborted: args.req.signal.aborted,
       });
-      const usage = localErrorUsage(raw, hop.providerModelId);
+      const usage = localErrorUsage(raw);
       const usageComplete = usage.complete;
       const policy =
         cls.kind === "abort" ? null : cooldownPolicyFor(cls.reason);
@@ -294,7 +294,9 @@ export const serveLocalKeyHop = async (
           )
         : errorJson(502, "upstream response was not JSON");
     }
-    success(canonical, hasCompleteLocalUsage(canonical));
+    const observer = createUsageObserver("openai", "json");
+    observer.observe(canonical);
+    success(canonical, observer.usage() !== null);
     return deliverJsonResponse(
       canonical,
       args.surface,

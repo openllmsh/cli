@@ -21,6 +21,7 @@ import {
 } from "@openllmsh/protocol";
 import { classifyHopError } from "@openllmsh/wire/lib/error-class";
 import { decodeProviderEventStream } from "@openllmsh/wire/lib/streaming/provider-decode";
+import { createUsageObserver } from "@openllmsh/wire/lib/usage-observer";
 import {
   buildUpstreamRequest,
   clientWireOf,
@@ -180,27 +181,28 @@ export const hasCompleteLocalUsage = (
 
 export const localErrorUsage = (
   raw: string,
-  providerModelId: string,
 ): {
   complete: boolean;
   tokens: ReturnType<typeof tokensFromResponse>;
 } => {
-  let canonical: TChatCompletionResponse | null = null;
+  const observer = createUsageObserver("openai", "error");
   try {
-    const json: unknown = JSON.parse(raw);
-    if (json !== null && typeof json === "object") {
-      canonical = decodeOpenaiJson(json, providerModelId);
-    }
+    observer.observe(JSON.parse(raw));
   } catch {
     // An unreadable body leaves the attempt's usage unknown.
   }
-  const complete = hasCompleteLocalUsage(canonical);
+  const usage = observer.usage();
   return {
-    complete,
+    complete: usage !== null,
     tokens:
-      complete && canonical !== null
-        ? tokensFromResponse(canonical)
-        : ZERO_TOKENS,
+      usage === null
+        ? ZERO_TOKENS
+        : {
+            tokens_in: usage.in,
+            tokens_out: usage.out,
+            cached_tokens: usage.cached ?? 0,
+            cache_creation_tokens: usage.cacheCreation ?? 0,
+          },
   };
 };
 
@@ -208,17 +210,15 @@ export const trackLocalStreamUsage = (): {
   stream: TransformStream<TChatCompletionChunk, TChatCompletionChunk>;
   complete: () => boolean;
 } => {
-  let input = false;
-  let output = false;
+  const observer = createUsageObserver("openai", "sse");
   return {
     stream: new TransformStream({
       transform: (chunk, controller): void => {
-        input ||= typeof chunk.usage?.prompt_tokens === "number";
-        output ||= typeof chunk.usage?.completion_tokens === "number";
+        observer.observe(chunk);
         controller.enqueue(chunk);
       },
     }),
-    complete: () => input && output,
+    complete: () => observer.usage() !== null,
   };
 };
 
@@ -355,7 +355,7 @@ export const serveLocalHop = async (
       providerFormat: "openai",
       aborted: args.req.signal.aborted,
     });
-    const usage = localErrorUsage(raw, hop.providerModelId);
+    const usage = localErrorUsage(raw);
     const usageComplete = usage.complete;
     const advances =
       cls.kind !== "abort" &&
@@ -454,6 +454,8 @@ export const serveLocalHop = async (
         )
       : errorJson(502, "local upstream response was not JSON");
   }
+  const observer = createUsageObserver("openai", "json");
+  observer.observe(canonical);
   recordLocal(
     {
       model: hop.modelId,
@@ -464,7 +466,7 @@ export const serveLocalHop = async (
       ...tokensFromResponse(canonical),
     },
     args.originParam,
-    hasCompleteLocalUsage(canonical),
+    observer.usage() !== null,
   );
   return deliverJsonResponse(
     canonical,
