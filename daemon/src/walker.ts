@@ -101,6 +101,7 @@ import {
   GATE_STALE_CAP_MS,
   quotaGateDecision,
 } from "@openllmsh/wire/features/quota-gate";
+import type { TAttemptOutcome } from "@openllmsh/wire/lib/attempt-outcome";
 import type { TCountTokensCapabilityMemory } from "@openllmsh/wire/lib/canonical/count-tokens-capability";
 import {
   countTokensEndpointIdentity,
@@ -156,6 +157,7 @@ import {
   normalizeSchemaRefs,
   stripSchemaKeywords,
 } from "@openllmsh/wire/lib/tool-schema";
+import { createUsageObserver } from "@openllmsh/wire/lib/usage-observer";
 import { buildAnthropicToolNameMap } from "@openllmsh/wire/providers/anthropic/request";
 import { fromAnthropicResponse } from "@openllmsh/wire/providers/anthropic/response";
 import { decodeAnthropicEventStream } from "@openllmsh/wire/providers/anthropic/streaming";
@@ -692,8 +694,7 @@ export const postWithReplayStripRetry = async (
     const usage = jsonUsage(parsed);
     holdFieldsForRecord(
       { ...attempt, status: "error", ...usage.tokens },
-      usage.complete,
-      true,
+      jsonAttempt(parsed, wire, true),
     );
   };
   const send = (b: unknown): Promise<Response | null> =>
@@ -824,11 +825,20 @@ export const passthroughHeaders = (resp: Response): Headers => {
   return headers;
 };
 
+const jsonAttempt = (
+  raw: unknown,
+  wire: TUpstreamWire,
+  definiteProviderError = false,
+): TAttemptOutcome => {
+  const observer = createUsageObserver(hopFormat(wire), "json");
+  observer.observe(raw);
+  return { sent: true, usage: observer.usage(), definiteProviderError };
+};
+
 const jsonUsage = (
   raw: unknown,
 ): {
   readonly tokens: typeof ZERO_TOKENS;
-  readonly complete: boolean;
 } => {
   const value =
     raw !== null && typeof raw === "object" && "usage" in raw
@@ -846,7 +856,6 @@ const jsonUsage = (
       tokens_in: typeof input === "number" ? input : 0,
       tokens_out: typeof output === "number" ? output : 0,
     },
-    complete: typeof input === "number" && typeof output === "number",
   };
 };
 
@@ -854,7 +863,7 @@ export const report = (
   row: TDaemonRecordRequest,
   origin: string | null,
   accountHash: string | undefined,
-  usageComplete: boolean,
+  attempt: boolean | TAttemptOutcome,
   definiteProviderError = false,
 ): void => {
   const recordedRow = recordAttempt(
@@ -865,7 +874,7 @@ export const report = (
         : {}),
     },
     origin,
-    usageComplete,
+    attempt,
     definiteProviderError,
   );
   if (
@@ -1624,8 +1633,7 @@ export const serveSubscription = async (
           status: "error",
           ...errorUsage.tokens,
         },
-        errorUsage.complete,
-        readable,
+        jsonAttempt(errorJsonBody, wire, readable),
       );
       return hopRetry(
         `HTTP ${resp.status}: ${bodySnippet || "upstream rejected"}`,
@@ -1662,8 +1670,7 @@ export const serveSubscription = async (
       },
       args.originParam,
       undefined,
-      errorUsage.complete,
-      readable,
+      jsonAttempt(errorJsonBody, wire, readable),
     );
     // Final-hop failure still cools the model — bust the plan cache so the
     // next request re-resolves instead of replaying this leader.
@@ -1711,7 +1718,10 @@ export const serveSubscription = async (
     wire === "chatgpt" && process.env.OPENLLM_DEBUG_CODEX_SSE === "1"
       ? tapCodexSseStream(resp.body, Date.now())
       : resp.body;
-  const recordTokens = (u: TNativeTokens, usageComplete: boolean): void => {
+  const recordTokens = (
+    u: TNativeTokens,
+    attempt: boolean | TAttemptOutcome,
+  ): void => {
     if (cacheProbe !== null) cacheProbeOutcome(cacheProbe, u);
     report(
       {
@@ -1721,7 +1731,7 @@ export const serveSubscription = async (
       },
       args.originParam,
       undefined,
-      usageComplete,
+      attempt,
     );
   };
   /**
@@ -2060,12 +2070,11 @@ export const serveSubscription = async (
     const usage = jsonUsage(upstreamJson);
     holdFieldsForRecord(
       { ...baseRow, status: "error", ...usage.tokens },
-      usage.complete,
+      jsonAttempt(upstreamJson, wire),
     );
     return hopRetry("content filter refusal");
   }
-  const usage = jsonUsage(upstreamJson);
-  recordTokens(tokensFromResponse(canonical), usage.complete);
+  recordTokens(tokensFromResponse(canonical), jsonAttempt(upstreamJson, wire));
   // Passthrough returns the upstream bytes verbatim; cross-wire re-encodes
   // through the shared delivery tail.
   return passthrough
@@ -2113,8 +2122,10 @@ const serveKimiBuiltinSearch = async (
   const executed: TServerSearchCall[] = [];
   const totals = { ...ZERO_TOKENS };
   let roundUsage = jsonUsage(undefined);
+  let roundAttempt = jsonAttempt(undefined, wire);
   const addTokens = (raw: unknown): void => {
     roundUsage = jsonUsage(raw);
+    roundAttempt = jsonAttempt(raw, wire);
     totals.tokens_in += roundUsage.tokens.tokens_in;
     totals.tokens_out += roundUsage.tokens.tokens_out;
   };
@@ -2140,12 +2151,12 @@ const serveKimiBuiltinSearch = async (
       },
       args.originParam,
       undefined,
-      roundUsage.complete,
-      definiteProviderError,
+      { ...roundAttempt, definiteProviderError },
     );
 
   for (let round = 0; ; round++) {
     roundUsage = jsonUsage(undefined);
+    roundAttempt = jsonAttempt(undefined, wire);
     const resp = await postWithReplayStripRetry(
       acquired.url,
       acquired.headers,
@@ -2205,8 +2216,7 @@ const serveKimiBuiltinSearch = async (
             status: "error",
             ...roundUsage.tokens,
           },
-          roundUsage.complete,
-          readable,
+          { ...roundAttempt, definiteProviderError: readable },
         );
         return hopRetry(
           `HTTP ${resp.status}: ${bodySnippet || "upstream rejected"}`,
@@ -2317,7 +2327,7 @@ const serveKimiBuiltinSearch = async (
         status: "error",
         ...roundUsage.tokens,
       },
-      roundUsage.complete,
+      roundAttempt,
     );
 
     // Echo round: report each server-executed search (query is opaque to

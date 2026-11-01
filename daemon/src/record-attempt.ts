@@ -1,4 +1,5 @@
 import type { TDaemonRecordRequest } from "@openllmsh/protocol";
+import type { TAttemptOutcome } from "@openllmsh/wire/lib/attempt-outcome";
 import { holdFieldsForRecord, trackHoldRecord } from "./access-hold-context";
 import { recordRequest } from "./cloud-client";
 import {
@@ -10,7 +11,7 @@ import { teamUsageCharge } from "./team-usage";
 export const recordAttempt = (
   row: TDaemonRecordRequest,
   origin: string | null,
-  usageComplete = false,
+  attempt: TAttemptOutcome | boolean = false,
   definiteProviderError = false,
 ): TDaemonRecordRequest => {
   // Team hops: attribute the row to the consumer and charge the share cap,
@@ -18,7 +19,21 @@ export const recordAttempt = (
   const teamGrant = currentTeamGrantToken();
   const holdFields =
     row.hold_nonce === undefined
-      ? holdFieldsForRecord(row, usageComplete, definiteProviderError)
+      ? holdFieldsForRecord(
+          row,
+          typeof attempt === "boolean"
+            ? {
+                sent: true,
+                usage: attempt
+                  ? {
+                      in: Math.max(0, Math.floor(row.tokens_in)),
+                      out: Math.max(0, Math.floor(row.tokens_out)),
+                    }
+                  : null,
+                definiteProviderError,
+              }
+            : attempt,
+        )
       : {};
   const holdNonce = row.hold_nonce ?? holdFields.hold_nonce ?? null;
   const recordedRow: TDaemonRecordRequest = {

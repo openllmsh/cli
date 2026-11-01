@@ -11,6 +11,8 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import type { TOutputLimitSurface } from "@openllmsh/wire/features/output-limit-clamp";
 import { clampOutputLimitFields } from "@openllmsh/wire/features/output-limit-clamp";
+import type { TAttemptOutcome } from "@openllmsh/wire/lib/attempt-outcome";
+import { chargeForAttempt } from "@openllmsh/wire/lib/attempt-outcome";
 
 /**
  * What the walk has reported for this hold. Hop paths (walker, native
@@ -96,8 +98,7 @@ export const holdFieldsForRecord = (
     readonly tokens_in: number;
     readonly tokens_out: number;
   },
-  usageComplete: boolean,
-  definiteProviderError = false,
+  attempt: TAttemptOutcome,
 ): {
   readonly hold_nonce?: string;
   readonly hold_prior_tokens?: number;
@@ -108,9 +109,12 @@ export const holdFieldsForRecord = (
   const outcome = hold.outcome;
   outcome.lastModel = row.model;
   outcome.lastProvider = row.provider;
-  if (usageComplete) {
+  if (
+    attempt.sent &&
+    (attempt.usage !== null || attempt.definiteProviderError)
+  ) {
     outcome.accounted += 1;
-    if (row.status === "success") {
+    if (row.status === "success" && attempt.usage !== null) {
       const { priorTokens, unknownAttempts } = holdCharge(outcome);
       outcome.settled = true;
       return {
@@ -119,11 +123,7 @@ export const holdFieldsForRecord = (
         hold_unknown_attempts: unknownAttempts,
       };
     }
-    outcome.accountedTokens +=
-      Math.max(0, Math.floor(row.tokens_in)) +
-      Math.max(0, Math.floor(row.tokens_out));
-  } else if (definiteProviderError) {
-    outcome.accounted += 1;
+    outcome.accountedTokens += chargeForAttempt(attempt, 0);
   }
   return {};
 };
