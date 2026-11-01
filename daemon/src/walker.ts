@@ -814,11 +814,40 @@ export const passthroughHeaders = (resp: Response): Headers => {
   return headers;
 };
 
+const jsonUsage = (
+  raw: unknown,
+): {
+  readonly tokens: typeof ZERO_TOKENS;
+  readonly complete: boolean;
+  readonly present: boolean;
+} => {
+  const value =
+    raw !== null && typeof raw === "object" && "usage" in raw
+      ? raw.usage
+      : undefined;
+  const usage =
+    value !== null && typeof value === "object"
+      ? (value as Record<string, unknown>)
+      : undefined;
+  const input = usage?.input_tokens ?? usage?.prompt_tokens;
+  const output = usage?.output_tokens ?? usage?.completion_tokens;
+  return {
+    tokens: {
+      ...ZERO_TOKENS,
+      tokens_in: typeof input === "number" ? input : 0,
+      tokens_out: typeof output === "number" ? output : 0,
+    },
+    complete: typeof input === "number" && typeof output === "number",
+    present: usage !== undefined,
+  };
+};
+
 export const report = (
   row: TDaemonRecordRequest,
   origin: string | null,
   accountHash: string | undefined,
   usageComplete: boolean,
+  definiteProviderError = false,
 ): void => {
   const teamGrant = currentTeamGrantToken();
   const holdNonce = currentHoldNonce();
@@ -835,7 +864,7 @@ export const report = (
       ? { team_grant: teamGrant }
       : {}),
     ...(row.hold_nonce === undefined && holdNonce !== null
-      ? holdFieldsForRecord(row, usageComplete)
+      ? holdFieldsForRecord(row, usageComplete, definiteProviderError)
       : {}),
   };
   const record = recordRequest(recordedRow, origin);
@@ -1578,7 +1607,18 @@ export const serveSubscription = async (
     });
   }
   if (!resp.ok) {
-    const raw = await resp.text().catch(() => "");
+    let readable = true;
+    const raw = await resp.text().catch(() => {
+      readable = false;
+      return "";
+    });
+    let errorJsonBody: unknown;
+    try {
+      errorJsonBody = JSON.parse(raw);
+    } catch {
+      errorJsonBody = undefined;
+    }
+    const errorUsage = jsonUsage(errorJsonBody);
     const bodySnippet = hopBodySnippet(raw);
     // No output has been committed yet. A different configured candidate may
     // accept the same canonical request regardless of this provider's status
@@ -1595,6 +1635,16 @@ export const serveSubscription = async (
       // ADDITIONAL fact a recovery pass consults before bypassing a transient
       // cooldown.
       const recoverAtMs = retryAfterRecoverAtMs(resp);
+      holdFieldsForRecord(
+        {
+          model: hop.modelId,
+          provider: hop.provider,
+          status: "error",
+          ...errorUsage.tokens,
+        },
+        errorUsage.complete,
+        readable,
+      );
       return hopRetry(
         `HTTP ${resp.status}: ${bodySnippet || "upstream rejected"}`,
         {
@@ -1620,7 +1670,7 @@ export const serveSubscription = async (
         model: hop.modelId,
         provider: hop.provider,
         status: statusFor(resp.status),
-        ...ZERO_TOKENS,
+        ...errorUsage.tokens,
         latency_ms: Date.now() - args.startedAt,
         endpoint: args.endpoint,
         error: `HTTP ${resp.status}: ${bodySnippet || "upstream rejected"}`,
@@ -1630,7 +1680,8 @@ export const serveSubscription = async (
       },
       args.originParam,
       undefined,
-      false,
+      errorUsage.complete,
+      readable,
     );
     // Final-hop failure still cools the model — bust the plan cache so the
     // next request re-resolves instead of replaying this leader.
@@ -2045,23 +2096,8 @@ export const serveSubscription = async (
   if (isCanonicalRefusal(canonical) && refusalWalks()) {
     return hopRetry("content filter refusal");
   }
-  const rawUsage =
-    upstreamJson !== null &&
-    typeof upstreamJson === "object" &&
-    "usage" in upstreamJson
-      ? upstreamJson.usage
-      : undefined;
-  const usage =
-    rawUsage !== null && typeof rawUsage === "object"
-      ? (rawUsage as Record<string, unknown>)
-      : undefined;
-  recordTokens(
-    tokensFromResponse(canonical),
-    usage !== undefined,
-    usage !== undefined &&
-      typeof (usage.input_tokens ?? usage.prompt_tokens) === "number" &&
-      typeof (usage.output_tokens ?? usage.completion_tokens) === "number",
-  );
+  const usage = jsonUsage(upstreamJson);
+  recordTokens(tokensFromResponse(canonical), usage.present, usage.complete);
   // Passthrough returns the upstream bytes verbatim; cross-wire re-encodes
   // through the shared delivery tail.
   return passthrough
@@ -2108,18 +2144,16 @@ const serveKimiBuiltinSearch = async (
   body = { ...body, stream: false };
   const executed: TServerSearchCall[] = [];
   const totals = { ...ZERO_TOKENS };
+  let roundUsage = jsonUsage(undefined);
   const addTokens = (raw: unknown): void => {
-    const usage =
-      raw !== null && typeof raw === "object"
-        ? (raw as { readonly usage?: Record<string, unknown> }).usage
-        : undefined;
-    if (usage === undefined) return;
-    totals.tokens_in += Number(usage.prompt_tokens ?? 0) || 0;
-    totals.tokens_out += Number(usage.completion_tokens ?? 0) || 0;
+    roundUsage = jsonUsage(raw);
+    totals.tokens_in += roundUsage.tokens.tokens_in;
+    totals.tokens_out += roundUsage.tokens.tokens_out;
   };
   const recordOnce = (
     status: TRequestStatus,
     cooldownReason?: TCooldownReason,
+    definiteProviderError = false,
   ): void =>
     report(
       {
@@ -2134,14 +2168,16 @@ const serveKimiBuiltinSearch = async (
         ...(acquired.accountHash !== null
           ? { account_hash: acquired.accountHash }
           : {}),
-        ...totals,
+        ...(currentHoldNonce() !== null ? roundUsage.tokens : totals),
       },
       args.originParam,
       undefined,
-      false,
+      roundUsage.complete,
+      definiteProviderError,
     );
 
   for (let round = 0; ; round++) {
+    roundUsage = jsonUsage(undefined);
     const resp = await postWithReplayStripRetry(
       acquired.url,
       acquired.headers,
@@ -2165,7 +2201,16 @@ const serveKimiBuiltinSearch = async (
       );
     }
     if (!resp.ok) {
-      const raw = await resp.text().catch(() => "");
+      let readable = true;
+      const raw = await resp.text().catch(() => {
+        readable = false;
+        return "";
+      });
+      try {
+        addTokens(JSON.parse(raw));
+      } catch {
+        /* no reported usage */
+      }
       const bodySnippet = hopBodySnippet(raw);
       const cls = classifyPrecommitResponse(
         resp.status,
@@ -2185,6 +2230,16 @@ const serveKimiBuiltinSearch = async (
           status: resp.status,
           headers: passthroughHeaders(resp),
         });
+        holdFieldsForRecord(
+          {
+            model: hop.modelId,
+            provider: hop.provider,
+            status: "error",
+            ...roundUsage.tokens,
+          },
+          roundUsage.complete,
+          readable,
+        );
         return hopRetry(
           `HTTP ${resp.status}: ${bodySnippet || "upstream rejected"}`,
           {
@@ -2199,6 +2254,7 @@ const serveKimiBuiltinSearch = async (
       recordOnce(
         statusFor(resp.status),
         cls.kind === "transient" ? cls.reason : undefined,
+        readable,
       );
       return new Response(raw.length > 0 ? raw : null, {
         status: resp.status,
@@ -2283,6 +2339,18 @@ const serveKimiBuiltinSearch = async (
             hop.stripSubagentIsolation,
           );
     }
+
+    // The next send is a separate attempt; retain this round's evidence without
+    // settling the hold before the search loop has finished.
+    holdFieldsForRecord(
+      {
+        model: hop.modelId,
+        provider: hop.provider,
+        status: "error",
+        ...roundUsage.tokens,
+      },
+      roundUsage.complete,
+    );
 
     // Echo round: report each server-executed search (query is opaque to
     // this box) and feed the arguments back verbatim.
