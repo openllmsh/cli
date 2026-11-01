@@ -354,25 +354,41 @@ export const serveLocalHop = async (
       providerFormat: "openai",
       aborted: args.req.signal.aborted,
     });
-    if (cls.kind === "abort") {
-      return errorJson(499, "client aborted request");
+    let canonical: TChatCompletionResponse | null = null;
+    try {
+      const json: unknown = JSON.parse(raw);
+      if (json !== null && typeof json === "object") {
+        canonical = decodeOpenaiJson(json, hop.providerModelId);
+      }
+    } catch {
+      // An unreadable body leaves the attempt's usage unknown.
     }
-    const policy = cooldownPolicyFor(cls.reason);
-    if (!finalHop && policy.action !== "surface") {
-      return null;
+    const usageComplete =
+      typeof canonical?.usage?.prompt_tokens === "number" &&
+      typeof canonical?.usage?.completion_tokens === "number";
+    const advances =
+      cls.kind !== "abort" &&
+      !finalHop &&
+      cooldownPolicyFor(cls.reason).action !== "surface";
+    if (usageComplete || (cls.kind !== "abort" && !advances)) {
+      recordLocal(
+        {
+          model: hop.modelId,
+          provider: hop.provider,
+          status: "error",
+          latency_ms: Date.now() - args.startedAt,
+          endpoint: args.endpoint,
+          error: `HTTP ${resp.status}`,
+          ...(usageComplete && canonical !== null
+            ? tokensFromResponse(canonical)
+            : ZERO_TOKENS),
+        },
+        args.originParam,
+        usageComplete,
+      );
     }
-    recordLocal(
-      {
-        model: hop.modelId,
-        provider: hop.provider,
-        status: "error",
-        latency_ms: Date.now() - args.startedAt,
-        endpoint: args.endpoint,
-        error: `HTTP ${resp.status}`,
-        ...ZERO_TOKENS,
-      },
-      args.originParam,
-    );
+    if (cls.kind === "abort") return errorJson(499, "client aborted request");
+    if (advances) return null;
     return localErrorResponse(resp.status, raw, args.surface);
   }
 
