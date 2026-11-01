@@ -108,6 +108,7 @@ export const forwardToCloud = async (
   bodyBytes: ArrayBuffer,
   pinnedModel: string,
   origin?: string | null,
+  callerKey?: string,
 ): Promise<Response> => {
   const url = new URL(inbound.url);
   // Forward to the deployment that SIGNED the plan so a single daemon serves
@@ -120,7 +121,7 @@ export const forwardToCloud = async (
   const target = `${base}${url.pathname}`;
   const headers = new Headers(inbound.headers);
   headers.delete(MEDIA_PERSISTENCE_REQUEST_HEADER);
-  headers.set("authorization", `Bearer ${daemonEnv().apiKey}`);
+  headers.set("authorization", `Bearer ${callerKey ?? daemonEnv().apiKey}`);
   // Lock the cloud to the exact concrete model the local chain picked, so
   // the cloud doesn't re-run its own alias/fallback resolution.
   headers.set("x-openllm-pin-model", pinnedModel);

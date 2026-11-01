@@ -59,7 +59,7 @@ import { notePresenceActivity } from "./control-channel";
 import { corsHeaders, errorJson, isPreflight, preflightResponse } from "./cors";
 import { isOAuthSlug } from "./delegation";
 import { runEmbeddings } from "./embeddings-walker";
-import { passthroughToOrigin } from "./forward";
+import { forwardToCloud, passthroughToOrigin } from "./forward";
 import { HoldSession, withHoldSession } from "./hold-session";
 import { runImageEditWalker, runImageWalker } from "./image-walker";
 import { isLocalServerSlug } from "./local-servers";
@@ -468,6 +468,9 @@ const handleInferenceIn = async (
   // runs inside `withHoldNonce` so signatures verify and records settle it.
   let holdNonce: string | null = null;
   let maxOutputTokens: number | null = null;
+  // A single cloud hop can be a capped plan without a daemon hold: origin
+  // reserves and settles its own hold when the pinned request arrives.
+  let singleCloudHop = false;
   // Hops a capped direct request already failed on; the cloud skips them
   // when it reserves the next one.
   const excludedHops: string[] = [];
@@ -605,6 +608,7 @@ const handleInferenceIn = async (
           readonly tuple: TPlanTuple;
           readonly holdNonce: string | null;
           readonly maxOutputTokens: number | null;
+          readonly singleCloudHop: boolean;
         }
       | { readonly kind: "passthrough" }
       | { readonly kind: "response"; readonly response: Response }
@@ -724,7 +728,14 @@ const handleInferenceIn = async (
             isLocalKeyProviderSlug(provider)
           );
         });
-      if (!verified || !hasDaemonOnlyHop) {
+      const singleCloud =
+        verified &&
+        !hasDaemonOnlyHop &&
+        direct &&
+        hopGrant === null &&
+        !isResponsesCompact &&
+        parsePlan(fetched.plan).length === 1;
+      if (!verified || (!hasDaemonOnlyHop && !singleCloud)) {
         return { kind: "passthrough" };
       }
       if (isResponsesCompact && !direct) {
@@ -755,6 +766,7 @@ const handleInferenceIn = async (
         },
         holdNonce: fetchedHoldNonce,
         maxOutputTokens: fetchedMaxOutputTokens,
+        singleCloudHop: singleCloud,
       };
     };
 
@@ -787,6 +799,7 @@ const handleInferenceIn = async (
       if (outcome.kind === "response") return outcome.response;
       if (outcome.kind === "tuple") {
         holdNonce = outcome.holdNonce;
+        singleCloudHop = outcome.singleCloudHop;
         if (holdNonce !== null)
           session.adopt(
             holdNonce,
@@ -825,7 +838,11 @@ const handleInferenceIn = async (
           // Shared flight: cloud timeout only (no per-request abort).
           const outcome = await resolveFetched(undefined, background);
           // A held plan is bound to one reservation: never cache it.
-          if (outcome.kind === "tuple" && outcome.holdNonce === null) {
+          if (
+            outcome.kind === "tuple" &&
+            outcome.holdNonce === null &&
+            !outcome.singleCloudHop
+          ) {
             return { store: outcome.tuple, shared: outcome };
           }
           return { store: null, shared: outcome };
@@ -1120,6 +1137,17 @@ const handleInferenceIn = async (
   // Hop paths log failed attempts without the nonce; the session's terminal
   // record finalizes each hold exactly once (hold-session.ts).
   const walk = (): Promise<Response> => {
+    if (singleCloudHop && planParam !== null) {
+      // Origin authenticates the caller and owns this hop's reservation;
+      // no daemon hold is used or charged for the forward.
+      return forwardToCloud(
+        walkReq,
+        rawBytes,
+        planParam,
+        originParam,
+        callerKey,
+      );
+    }
     const outcome = session.outcome;
     if (holdNonce === null || outcome === null) return walkOnce();
     return withHoldNonce(holdNonce, walkOnce, maxOutputTokens, outcome);
@@ -1130,7 +1158,7 @@ const handleInferenceIn = async (
   // fails, reserve the next one (the failed hop's record refunds its hold)
   // instead of giving up; origin-tunneled requests fall back on origin.
   while (
-    holdNonce !== null &&
+    (holdNonce !== null || singleCloudHop) &&
     reserveNextHop !== null &&
     planParam !== null &&
     !response.ok
@@ -1169,7 +1197,7 @@ const handleInferenceIn = async (
       });
     excludedHops.push(planParam);
     session.finish();
-    await waitForHoldRecords(holdNonce);
+    if (holdNonce !== null) await waitForHoldRecords(holdNonce);
     const stopped = await reserveNextHop();
     if (stopped !== null) {
       if (stopped.status === 410)
