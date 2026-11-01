@@ -45,7 +45,7 @@ import {
   modelFromRequestBody,
   teamGrantFromStreamOpen,
 } from "./team-grant-admit";
-import { clampTeamLegBody, observedTeamLegTokens } from "./team-leg-body";
+import { clampTeamLegBody, observeTeamResponse } from "./team-leg-body";
 import {
   reportTeamLegCompletion,
   reportTeamLegDispatch,
@@ -217,17 +217,26 @@ export const dispatchTeamLeg = async (
   grant: { readonly n: string },
   teamGrant: string,
   reportCompletion: TTeamLegCompletionReporter,
+  surface: TTunnelSurface = "chat_completions",
 ): Promise<Response> => {
   const response = await run();
   if (response.body === null) return response;
   if (!response.ok) {
     const observation = response.clone().body;
     if (observation !== null) {
-      void observedTeamLegTokens(observation, false)
-        .then((actualTokens) =>
-          actualTokens === null
+      void observeTeamResponse(
+        observation,
+        false,
+        surface === "messages" ? "anthropic" : "openai",
+      )
+        .then((usage) =>
+          usage === null
             ? undefined
-            : reportCompletion({ nonce: grant.n, teamGrant, actualTokens }),
+            : reportCompletion({
+                nonce: grant.n,
+                teamGrant,
+                actualTokens: usage.in + usage.out,
+              }),
         )
         .catch(() => {});
     }
@@ -237,11 +246,19 @@ export const dispatchTeamLeg = async (
   const eventStream =
     response.headers.get("content-type")?.includes("text/event-stream") ===
     true;
-  void observedTeamLegTokens(forObservation, eventStream)
-    .then((actualTokens) =>
-      actualTokens === null
+  void observeTeamResponse(
+    forObservation,
+    eventStream,
+    surface === "messages" ? "anthropic" : "openai",
+  )
+    .then((usage) =>
+      usage === null
         ? undefined
-        : reportCompletion({ nonce: grant.n, teamGrant, actualTokens }),
+        : reportCompletion({
+            nonce: grant.n,
+            teamGrant,
+            actualTokens: usage.in + usage.out,
+          }),
     )
     .catch(() => {});
   return new Response(forConsumer, {
@@ -567,6 +584,7 @@ export const createMuxTunnelServer =
             decision.grant,
             teamToken,
             reportCompletion,
+            open.surface,
           );
           recordTunnelRequest({
             path: "team",
@@ -656,6 +674,7 @@ export const createMuxTunnelServer =
           decision.grant,
           teamToken,
           reportCompletion,
+          open.surface,
         );
         recordTunnelRequest({
           path: "team",

@@ -1,5 +1,8 @@
 import type { TOutputLimitSurface } from "@openllmsh/wire/features/output-limit-clamp";
 import { clampOutputLimitBytes } from "@openllmsh/wire/features/output-limit-clamp";
+import type { TAttemptUsage } from "@openllmsh/wire/lib/attempt-outcome";
+import type { TUsageProtocol } from "@openllmsh/wire/lib/usage-observer";
+import { createUsageObserver } from "@openllmsh/wire/lib/usage-observer";
 
 export const clampTeamLegBody = (
   body: Uint8Array,
@@ -61,98 +64,31 @@ export const rewriteTeamLegBodyModel = (
   }
 };
 
-type TUsage = { readonly input: number | null; readonly output: number | null };
-
-const usageOf = (value: unknown): TUsage | null => {
-  if (value === null || typeof value !== "object") return null;
-  const record = value as {
-    readonly response?: unknown;
-    readonly message?: unknown;
-  };
-  const response = record.response;
-  const owner =
-    response !== null &&
-    typeof response === "object" &&
-    !Array.isArray(response)
-      ? response
-      : record.message;
-  const usageOwner =
-    owner !== null && typeof owner === "object" && !Array.isArray(owner)
-      ? owner
-      : value;
-  const usage = (usageOwner as { readonly usage?: unknown }).usage;
-  if (usage === null || typeof usage !== "object") return null;
-  const data = usage as {
-    readonly prompt_tokens?: unknown;
-    readonly completion_tokens?: unknown;
-    readonly input_tokens?: unknown;
-    readonly output_tokens?: unknown;
-  };
-  const token = (primary: unknown, alternate: unknown): number | null => {
-    const value = typeof primary === "number" ? primary : alternate;
-    return typeof value === "number" && Number.isFinite(value) && value >= 0
-      ? Math.floor(value)
-      : null;
-  };
-  return {
-    input: token(data.prompt_tokens, data.input_tokens),
-    output: token(data.completion_tokens, data.output_tokens),
-  };
-};
-
-/** Read OpenAI-shaped JSON or SSE usage; malformed/truncated streams reject. */
-export const observedTeamLegUsage = async (
+/** Observe a team response; incomplete streams must not settle the hold. */
+export const observeTeamResponse = async (
   body: ReadableStream<Uint8Array>,
   eventStream: boolean,
-): Promise<{
-  readonly tokensIn: number;
-  readonly tokensOut: number;
-} | null> => {
-  const bytes = new Uint8Array(await new Response(body).arrayBuffer());
-  const text = new TextDecoder().decode(bytes);
-  if (!eventStream) {
-    const usage = usageOf(JSON.parse(text));
-    return usage?.input == null || usage.output === null
-      ? null
-      : { tokensIn: usage.input, tokensOut: usage.output };
-  }
-  let input: number | null = null;
-  let output: number | null = null;
-  let complete = false;
-  for (const line of text.split("\n")) {
-    const value = line.trim();
+  protocol: TUsageProtocol,
+): Promise<TAttemptUsage | null> => {
+  const text = await new Response(body).text();
+  const observer = createUsageObserver(protocol, eventStream ? "sse" : "json");
+  if (eventStream) {
     if (
-      value === "event: message_stop" ||
-      value === "event: response.completed"
+      !text.split("\n").some((line) => {
+        const value = line.trim();
+        return (
+          value === "event: message_stop" ||
+          value === "event: response.completed" ||
+          value === "data: [DONE]"
+        );
+      })
     )
-      complete = true;
-    if (!value.startsWith("data:")) continue;
-    const data = value.slice(5).trim();
-    if (data === "[DONE]") {
-      complete = true;
-      continue;
-    }
-    if (data.length === 0) continue;
-    try {
-      const next = usageOf(JSON.parse(data));
-      if (next !== null) {
-        if (next.input !== null) input = Math.max(input ?? 0, next.input);
-        if (next.output !== null) output = Math.max(output ?? 0, next.output);
-      }
-    } catch {
-      // A provider can interleave non-JSON SSE control frames.
-    }
+      throw new Error("team stream ended before completion");
+    await observer.observeStream(
+      new Response(text).body as ReadableStream<Uint8Array>,
+    );
+  } else {
+    observer.observe(JSON.parse(text));
   }
-  if (!complete) throw new Error("team stream ended before completion");
-  return input === null || output === null
-    ? null
-    : { tokensIn: input, tokensOut: output };
-};
-
-export const observedTeamLegTokens = async (
-  body: ReadableStream<Uint8Array>,
-  eventStream: boolean,
-): Promise<number | null> => {
-  const usage = await observedTeamLegUsage(body, eventStream);
-  return usage === null ? null : usage.tokensIn + usage.tokensOut;
+  return observer.usage();
 };

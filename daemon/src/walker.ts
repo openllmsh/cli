@@ -250,7 +250,7 @@ import { runWithAccount } from "./op-context";
 import { clearPlanCache } from "./plan-cache";
 import { recordAttempt } from "./record-attempt";
 import { isClaudeCodeOriginator, resolveHopExecution } from "./sub-method";
-import { observedTeamLegUsage } from "./team-leg-body";
+import { observeTeamResponse } from "./team-leg-body";
 import { isTeamHop, tryDirectTeamLeg } from "./team-leg-client";
 import type { TTunnelToPeer } from "./tunnel-client";
 import { tunnelToPeer } from "./tunnel-client";
@@ -3758,11 +3758,12 @@ const walkPlan = async (
           const usage =
             clone.body === null
               ? Promise.resolve(null)
-              : observedTeamLegUsage(
+              : observeTeamResponse(
                   clone.body,
                   clone.headers
                     .get("content-type")
                     ?.includes("text/event-stream") === true,
+                  args.surface === "messages" ? "anthropic" : "openai",
                 ).catch(() => null);
           const body = direct.body.pipeThrough(
             new TransformStream<Uint8Array, Uint8Array>({
@@ -3773,8 +3774,8 @@ const walkPlan = async (
                     model: hop.modelId,
                     provider: hop.provider,
                     status: "success",
-                    tokens_in: tokens?.tokensIn ?? 0,
-                    tokens_out: tokens?.tokensOut ?? 0,
+                    tokens_in: tokens?.in ?? 0,
+                    tokens_out: tokens?.out ?? 0,
                     latency_ms: Date.now() - args.startedAt,
                     endpoint: args.endpoint,
                   },
