@@ -36,7 +36,6 @@ import {
 } from "@openllmsh/protocol";
 import { StreamResetError } from "@openllmsh/tunnel/stream-reset-error";
 import type { TServeTunnel } from "@openllmsh/tunnel/streams";
-import { TEAM_LEG_INPUT_SLACK_TOKENS } from "@openllmsh/tunnel/team-grant";
 import { handleInference } from "./listener";
 import { logInfo, logWarn, safeDiagnosticMessage } from "./logger";
 import { beginRequest, endRequest } from "./self-update";
@@ -556,7 +555,7 @@ export const createMuxTunnelServer =
               throw new StreamResetError("unauthorized", "team_invalid_bound");
             if (
               estimateTeamLegInputTokens(buffered) >
-              decision.grant.max_input_tokens + TEAM_LEG_INPUT_SLACK_TOKENS
+              decision.grant.max_input_tokens
             )
               throw new StreamResetError(
                 "unauthorized",
@@ -653,7 +652,7 @@ export const createMuxTunnelServer =
           const fullBody = combineChunks(chunks, total);
           if (
             estimateTeamLegInputTokens(fullBody) >
-            decision.grant.max_input_tokens + TEAM_LEG_INPUT_SLACK_TOKENS
+            decision.grant.max_input_tokens
           )
             throw new StreamResetError(
               "unauthorized",
