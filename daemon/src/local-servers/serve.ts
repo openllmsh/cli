@@ -27,7 +27,11 @@ import {
   clientWireOf,
   UnsupportedContentError,
 } from "@openllmsh/wire/providers/upstream-request";
-import { holdFieldsForRecord, trackHoldRecord } from "../access-hold-context";
+import {
+  claimHeldAttempt,
+  holdFieldsForRecord,
+  trackHoldRecord,
+} from "../access-hold-context";
 import {
   deliverChunkStream,
   deliverJsonResponse,
@@ -152,6 +156,7 @@ export const postLocal = async (
   init: RequestInit,
   inboundSignal: AbortSignal,
 ): Promise<Response | null> => {
+  if (!claimHeldAttempt()) return null;
   const headerTimeout = new AbortController();
   const timer = setTimeout(() => {
     if (!headerTimeout.signal.aborted) {
@@ -196,12 +201,15 @@ export const recordLocal = (
     readonly idempotency_key?: string;
   },
   origin: string | null,
+  usageComplete = false,
 ): void => {
   // Team hops: attribute the row to the consumer and charge the share cap,
   // exactly as the walker's `report` does.
   const teamGrant = currentTeamGrantToken();
   const holdNonce =
-    row.hold_nonce ?? holdFieldsForRecord(row).hold_nonce ?? null;
+    row.hold_nonce ??
+    holdFieldsForRecord(row, usageComplete).hold_nonce ??
+    null;
   const record = recordRequest(
     {
       ...row,
@@ -374,13 +382,20 @@ export const serveLocalHop = async (
 
   if (clientWantsStream && resp.body !== null) {
     let hasUsage = false;
+    let hasInputUsage = false;
+    let hasOutputUsage = false;
     const chunks = decodeOpenaiStream(
       resp.body,
       hop.providerModelId,
     ).pipeThrough(
       new TransformStream<TChatCompletionChunk, TChatCompletionChunk>({
         transform: (chunk, controller): void => {
-          if (chunk.usage != null) hasUsage = true;
+          if (chunk.usage != null) {
+            hasUsage = true;
+            hasInputUsage ||= typeof chunk.usage.prompt_tokens === "number";
+            hasOutputUsage ||=
+              typeof chunk.usage.completion_tokens === "number";
+          }
           controller.enqueue(chunk);
         },
       }),
@@ -403,6 +418,7 @@ export const serveLocalHop = async (
             ...(hasUsage ? {} : { usage_unknown: true as const }),
           },
           args.originParam,
+          hasInputUsage && hasOutputUsage,
         );
       },
       onError: () => {
@@ -460,6 +476,8 @@ export const serveLocalHop = async (
       ...(canonical.usage == null ? { usage_unknown: true as const } : {}),
     },
     args.originParam,
+    typeof canonical.usage?.prompt_tokens === "number" &&
+      typeof canonical.usage?.completion_tokens === "number",
   );
   return deliverJsonResponse(
     canonical,

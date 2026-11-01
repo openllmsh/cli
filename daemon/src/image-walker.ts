@@ -27,6 +27,7 @@ import {
 } from "@openllmsh/wire/lib/canonical/image-sse";
 import { originatorHeadersFrom } from "@openllmsh/wire/lib/forwarded-headers";
 import { Schema } from "effect";
+import { claimHeldAttempt } from "./access-hold-context";
 import { uploadMedia } from "./cloud-client";
 import { errorJson } from "./cors";
 import { getDelegate, isOAuthSlug } from "./delegation";
@@ -110,6 +111,7 @@ export const persistImageDataItem = async (
     const inspected = inspectImageBytes(bytes);
     if (inspected !== null) contentType = inspected.mime;
   } else if (item.url !== undefined && item.url.length > 0) {
+    if (!claimHeldAttempt()) throw new Error("upstream image download failed");
     const image = await (args.fetchImpl ?? fetch)(item.url, {
       method: "GET",
       signal: AbortSignal.timeout(30_000),
@@ -726,6 +728,8 @@ export const runImageWalker = async (args: TWalkArgs): Promise<Response> => {
               : {}),
           },
           args.originParam,
+          undefined,
+          false,
         );
         lastError = new Response(body.length > 0 ? body : null, {
           status: resp.status,
@@ -801,6 +805,8 @@ export const runImageWalker = async (args: TWalkArgs): Promise<Response> => {
             : {}),
         },
         args.originParam,
+        undefined,
+        false,
       );
       // `stream: true` changes the TRANSPORT, not the result: the same
       // persisted bytes either ride one real completion event or the
@@ -1133,6 +1139,8 @@ export const runImageEditWalker = async (
             : {}),
         },
         args.originParam,
+        undefined,
+        false,
       );
       lastError = new Response(body.length > 0 ? body : null, {
         status: resp.status,
@@ -1202,6 +1210,8 @@ export const runImageEditWalker = async (
           : {}),
       },
       args.originParam,
+      undefined,
+      false,
     );
     return stamp(
       new Response(JSON.stringify({ ...normalized, data: persistedItems }), {

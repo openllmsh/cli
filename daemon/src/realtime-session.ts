@@ -39,6 +39,7 @@ import {
   REALTIME_MAX_QUEUED_EVENTS,
   REALTIME_SESSION_MAX_LIFETIME_MS,
 } from "@openllmsh/protocol";
+import { claimHeldAttempt } from "./access-hold-context";
 import { fetchPlan, recordRequest } from "./cloud-client";
 import { getDelegate, isOAuthSlug } from "./delegation";
 import { logWarn } from "./logger";
@@ -337,6 +338,8 @@ export const openRealtimeSession = async (
           : {}),
       },
       authorization.origin,
+      undefined,
+      false,
     );
     handlers.onClose(code);
   };
@@ -398,6 +401,10 @@ export const openRealtimeSession = async (
     }
   };
 
+  if (!claimHeldAttempt()) {
+    release();
+    return { ok: false, refused: "realtime_refused" };
+  }
   try {
     upstream = upstreamFactory(
       cred.url,

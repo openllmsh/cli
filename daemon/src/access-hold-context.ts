@@ -61,22 +61,25 @@ export const claimHeldAttempt = (): boolean => {
 
 /**
  * Decide whether a hop record may carry the hold nonce, and note what it
- * says. Success → yes (it settles the hold with real usage). Anything else →
- * no. Outside a hold (or for
+ * says. Only a success with complete provider usage settles the hold.
+ * Outside a hold (or for
  * an already settled one) the row is returned unchanged.
  */
-export const holdFieldsForRecord = (row: {
-  readonly status: string;
-  readonly model: string;
-  readonly provider: string;
-  readonly tokens_in: number;
-  readonly tokens_out: number;
-}): { readonly hold_nonce?: string } => {
+export const holdFieldsForRecord = (
+  row: {
+    readonly status: string;
+    readonly model: string;
+    readonly provider: string;
+    readonly tokens_in: number;
+    readonly tokens_out: number;
+  },
+  usageComplete: boolean,
+): { readonly hold_nonce?: string } => {
   const hold = holdContext.getStore();
   if (hold === undefined || hold.outcome.settled) return {};
   hold.outcome.lastModel = row.model;
   hold.outcome.lastProvider = row.provider;
-  if (row.status === "success") {
+  if (row.status === "success" && usageComplete) {
     hold.outcome.settled = true;
     return { hold_nonce: hold.nonce };
   }

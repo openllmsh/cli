@@ -516,6 +516,7 @@ export type TNativeServeParams = {
     tokens: TNativeTokens,
     status: "success" | "error",
     usageUnknown?: boolean,
+    usageComplete?: boolean,
   ) => void;
 };
 
@@ -856,7 +857,8 @@ export const tryServeNativeRuntime = async (
   const settle = (
     resp: Awaited<ReturnType<typeof accumulateChunksToResponse>>,
   ): void => {
-    params.record(tokensFromResponse(resp), "success", !hasUsage());
+    // Native usage currently loses per-side presence, so it cannot settle a hold.
+    params.record(tokensFromResponse(resp), "success", !hasUsage(), false);
     lease.commit(
       nextPrefixHash(
         params.providerModelId,
@@ -985,7 +987,8 @@ const serveClaudeSdkFacadeHop = async (
   const settle = (
     resp: Awaited<ReturnType<typeof accumulateChunksToResponse>>,
   ): void => {
-    params.record(tokensFromResponse(resp), "success", !hasUsage());
+    // Native usage currently loses per-side presence, so it cannot settle a hold.
+    params.record(tokensFromResponse(resp), "success", !hasUsage(), false);
   };
   const fail = (err: unknown): void => {
     if (params.signal.aborted || isClientHangUp(err)) return;
@@ -1167,7 +1170,8 @@ const serveCapturedToolTurn = async (
   const settle = (
     resp: Awaited<ReturnType<typeof accumulateChunksToResponse>>,
   ): void => {
-    params.record(tokensFromResponse(resp), "success", !hasUsage());
+    // Native usage currently loses per-side presence, so it cannot settle a hold.
+    params.record(tokensFromResponse(resp), "success", !hasUsage(), false);
   };
   const fail = (err: unknown): void => {
     if (params.signal.aborted || isClientHangUp(err)) return;
@@ -1293,7 +1297,8 @@ const serveCursorHop = async (
   const settle = (
     resp: Awaited<ReturnType<typeof accumulateChunksToResponse>>,
   ): void => {
-    params.record(tokensFromResponse(resp), "success", !hasUsage());
+    // Native usage currently loses per-side presence, so it cannot settle a hold.
+    params.record(tokensFromResponse(resp), "success", !hasUsage(), false);
   };
   const fail = (err: unknown): void => {
     if (params.signal.aborted || isClientHangUp(err)) return;
@@ -1377,7 +1382,8 @@ const serveAntigravityHop = async (
   const settle = (
     resp: Awaited<ReturnType<typeof accumulateChunksToResponse>>,
   ): void => {
-    params.record(tokensFromResponse(resp), "success", !hasUsage());
+    // Native usage currently loses per-side presence, so it cannot settle a hold.
+    params.record(tokensFromResponse(resp), "success", !hasUsage(), false);
   };
   const fail = (err: unknown): void => {
     if (params.signal.aborted || isClientHangUp(err)) return;
@@ -1489,7 +1495,8 @@ const serveMuseHop = async (
   const settle = (
     resp: Awaited<ReturnType<typeof accumulateChunksToResponse>>,
   ): void => {
-    params.record(tokensFromResponse(resp), "success", !hasUsage());
+    // Native usage currently loses per-side presence, so it cannot settle a hold.
+    params.record(tokensFromResponse(resp), "success", !hasUsage(), false);
   };
   const fail = (err: unknown): void => {
     if (params.signal.aborted || isClientHangUp(err)) return;

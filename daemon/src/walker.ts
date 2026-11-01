@@ -185,6 +185,7 @@ import {
 } from "@openllmsh/wire/providers/upstream-request";
 import { Schema } from "effect";
 import {
+  claimHeldAttempt,
   clampHoldOutputLimit,
   currentHoldNonce,
   currentHoldOutputLimit,
@@ -646,6 +647,7 @@ export const postUpstream = async (
   init: RequestInit,
   onTransportFailure?: (failure: TTransportFailure) => void,
 ): Promise<Response | null> => {
+  if (!claimHeldAttempt()) return null;
   try {
     return await fetch(url, init);
   } catch (err) {
@@ -813,7 +815,8 @@ export const passthroughHeaders = (resp: Response): Headers => {
 export const report = (
   row: TDaemonRecordRequest,
   origin: string | null,
-  accountHash?: string,
+  accountHash: string | undefined,
+  usageComplete: boolean,
 ): void => {
   const teamGrant = currentTeamGrantToken();
   const holdNonce = currentHoldNonce();
@@ -830,7 +833,7 @@ export const report = (
       ? { team_grant: teamGrant }
       : {}),
     ...(row.hold_nonce === undefined && holdNonce !== null
-      ? holdFieldsForRecord(row)
+      ? holdFieldsForRecord(row, usageComplete)
       : {}),
   };
   const record = recordRequest(recordedRow, origin);
@@ -1568,8 +1571,6 @@ export const serveSubscription = async (
     // not an upstream failure, so it must neither walk nor write a cooldown row.
     if (args.req.signal.aborted)
       return errorJson(499, "client aborted request");
-    if (currentHoldNonce() !== null)
-      return errorJson(502, transport.failure?.reason ?? "network error");
     return hopRetry(transport.failure?.reason ?? "network error", {
       cooldownReason: "network",
     });
@@ -1626,6 +1627,8 @@ export const serveSubscription = async (
         ...(accountHash !== null ? { account_hash: accountHash } : {}),
       },
       args.originParam,
+      undefined,
+      false,
     );
     // Final-hop failure still cools the model — bust the plan cache so the
     // next request re-resolves instead of replaying this leader.
@@ -1637,8 +1640,6 @@ export const serveSubscription = async (
   }
 
   if (!resp.body) {
-    if (currentHoldNonce() !== null)
-      return errorJson(502, "empty response body");
     return hopRetry("empty response body");
   }
 
@@ -1675,7 +1676,11 @@ export const serveSubscription = async (
     wire === "chatgpt" && process.env.OPENLLM_DEBUG_CODEX_SSE === "1"
       ? tapCodexSseStream(resp.body, Date.now())
       : resp.body;
-  const recordTokens = (u: TNativeTokens, hasUsage = true): void => {
+  const recordTokens = (
+    u: TNativeTokens,
+    hasUsage: boolean,
+    usageComplete: boolean,
+  ): void => {
     if (cacheProbe !== null) cacheProbeOutcome(cacheProbe, u);
     report(
       {
@@ -1685,8 +1690,12 @@ export const serveSubscription = async (
         ...(hasUsage ? {} : { usage_unknown: true as const }),
       },
       args.originParam,
+      undefined,
+      usageComplete,
     );
   };
+  // Decoders can synthesize missing token counts, so canonical stream usage
+  // alone cannot prove completeness for a hold.
   let hasStreamUsage = false;
   const trackUsage = (
     chunks: ReadableStream<TChatCompletionChunk>,
@@ -1723,6 +1732,8 @@ export const serveSubscription = async (
         error: `upstream stream failed after output began: ${streamFailureDetail(err)}`,
       },
       args.originParam,
+      undefined,
+      false,
     );
   };
 
@@ -1733,16 +1744,6 @@ export const serveSubscription = async (
   // recorded as an ERROR row.
   const peekedError = (error: unknown): THopServeOutcome => {
     const detail = streamFailureDetail(error);
-    if (!(streamFailureCause(error) instanceof UpstreamStreamError)) {
-      if (currentHoldNonce() !== null) {
-        return args.req.signal.aborted
-          ? errorJson(499, "client aborted request")
-          : errorJson(
-              502,
-              `upstream stream ended before producing output: ${detail}`,
-            );
-      }
-    }
     const cls = classifyRawResponse(
       502,
       detail,
@@ -1786,6 +1787,8 @@ export const serveSubscription = async (
           error: `upstream stream ended before producing output: ${detail}`,
         },
         args.originParam,
+        undefined,
+        false,
       );
       return hopRetry(detail, {
         status: 502,
@@ -1803,6 +1806,8 @@ export const serveSubscription = async (
         error: `upstream stream ended before producing output: ${detail}`,
       },
       args.originParam,
+      undefined,
+      false,
     );
     return errorJson(
       502,
@@ -1840,7 +1845,7 @@ export const serveSubscription = async (
     // client; accurate counts come from the final chunk's usage).
     const meter = (chunks: ReadableStream<TChatCompletionChunk>): void => {
       void accumulateChunksToResponse(trackUsage(chunks), hop.providerModelId)
-        .then((r) => recordTokens(tokensFromResponse(r), hasStreamUsage))
+        .then((r) => recordTokens(tokensFromResponse(r), hasStreamUsage, false))
         .catch(recordStreamFailure);
     };
     if (passthrough) {
@@ -1903,7 +1908,8 @@ export const serveSubscription = async (
       clientWire,
       providerModelId: hop.providerModelId,
       status: resp.status,
-      onResponse: (r) => recordTokens(tokensFromResponse(r), hasStreamUsage),
+      onResponse: (r) =>
+        recordTokens(tokensFromResponse(r), hasStreamUsage, false),
       onError: recordStreamFailure,
       stripSubagentIsolation: hop.stripSubagentIsolation,
     });
@@ -1956,7 +1962,9 @@ export const serveSubscription = async (
         `upstream stream failed after output began: ${streamFailureDetail(err)}`,
       );
     }
-    recordTokens(tokensFromResponse(canonical), hasStreamUsage);
+    // Canonical streaming adapters may synthesize missing counts; don't settle
+    // a hold without observing both fields on the raw provider stream.
+    recordTokens(tokensFromResponse(canonical), hasStreamUsage, false);
     return deliverJsonResponse(
       canonical,
       args.surface,
@@ -2003,6 +2011,8 @@ export const serveSubscription = async (
           : { usage_unknown: true as const }),
       },
       args.originParam,
+      undefined,
+      false,
     );
   let upstreamJson: unknown;
   try {
@@ -2037,12 +2047,22 @@ export const serveSubscription = async (
   if (isCanonicalRefusal(canonical) && refusalWalks()) {
     return hopRetry("content filter refusal");
   }
+  const rawUsage =
+    upstreamJson !== null &&
+    typeof upstreamJson === "object" &&
+    "usage" in upstreamJson
+      ? upstreamJson.usage
+      : undefined;
+  const usage =
+    rawUsage !== null && typeof rawUsage === "object"
+      ? (rawUsage as Record<string, unknown>)
+      : undefined;
   recordTokens(
     tokensFromResponse(canonical),
-    upstreamJson !== null &&
-      typeof upstreamJson === "object" &&
-      "usage" in upstreamJson &&
-      upstreamJson.usage != null,
+    usage !== undefined,
+    usage !== undefined &&
+      typeof (usage.input_tokens ?? usage.prompt_tokens) === "number" &&
+      typeof (usage.output_tokens ?? usage.completion_tokens) === "number",
   );
   // Passthrough returns the upstream bytes verbatim; cross-wire re-encodes
   // through the shared delivery tail.
@@ -2119,6 +2139,8 @@ const serveKimiBuiltinSearch = async (
         ...totals,
       },
       args.originParam,
+      undefined,
+      false,
     );
 
   for (let round = 0; ; round++) {
@@ -2796,6 +2818,7 @@ const walkPlan = async (
       // Ambient account map — multi-account dials run inside `runWithAccount`,
       // so this is the dialled slot's hash (null/absent for single-account).
       accountHashByProvider.get(hop.provider) ?? undefined,
+      false,
     );
     // Another local account of this provider can still serve the model: the
     // failure cooled only this account, so the plan stays valid.
@@ -3169,6 +3192,12 @@ const walkPlan = async (
       // capture). Pre-commit declines fall through to handrolled when
       // `methods` still allows it; otherwise fleet.
       const serveNative = args.tryServeNativeRuntime ?? tryServeNativeRuntime;
+      if (!claimHeldAttempt()) {
+        return {
+          response: errorJson(502, "native upstream unavailable"),
+          servedLocally: true,
+        };
+      }
       const native = await serveNative({
         provider: hop.provider,
         providerModelId: hop.providerModelId,
@@ -3185,7 +3214,7 @@ const walkPlan = async (
         executionSelection,
         stripSubagentIsolation: hop.stripSubagentIsolation,
         signal: args.req.signal,
-        record: (tokens, status, usageUnknown) =>
+        record: (tokens, status, usageUnknown, usageComplete) =>
           report(
             {
               model: hop.modelId,
@@ -3198,6 +3227,7 @@ const walkPlan = async (
             },
             args.originParam,
             accountHashByProvider.get(hop.provider) ?? undefined,
+            usageComplete ?? false,
           ),
       });
       if (native instanceof Response) {
@@ -4076,6 +4106,7 @@ export const runCountTokens = async (args: TWalkArgs): Promise<Response> => {
     }
     throw err;
   }
+  if (!claimHeldAttempt()) return errorJson(502, "upstream unavailable");
   let resp: Response;
   let text: string;
   try {
@@ -4197,6 +4228,8 @@ export const runResponsesCompact = async (
           built.body as Record<string, unknown>,
         )
       : built.body;
+  if (!claimHeldAttempt())
+    return errorJson(502, "compact upstream unavailable");
   let resp: Response;
   try {
     resp = await fetch(compactUpstreamUrl(acquired.url), {

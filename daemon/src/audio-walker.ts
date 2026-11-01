@@ -544,6 +544,8 @@ export const runAudioTranscriptionWalker = async (
             : {}),
         },
         args.originParam,
+        undefined,
+        false,
       );
     };
 
@@ -1027,6 +1029,8 @@ export const runAudioSpeechWalker = async (
             : {}),
         },
         args.originParam,
+        undefined,
+        false,
       );
     };
     if (resp === null) {

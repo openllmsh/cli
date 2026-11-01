@@ -110,6 +110,7 @@ export type TClaudeToolServeParams = {
     tokens: TNativeTokens,
     status: "success" | "error",
     usageUnknown?: boolean,
+    usageComplete?: boolean,
   ) => void;
   /** Optional, backward-compatible continuation capability sent by the client. */
   readonly continuationToken?: string | null;
@@ -224,7 +225,13 @@ export const tryServeNativeToolTurn = async (
   // usage (`result.usage`, folded to the same shape as the plain-text native
   // path); idempotent continuation replays must not record that usage again.
   if (result.replayed !== true) {
-    params.record(result.usage ?? ZERO_TOKENS, "success", result.usage == null);
+    // Native usage currently loses per-side presence, so it cannot settle a hold.
+    params.record(
+      result.usage ?? ZERO_TOKENS,
+      "success",
+      result.usage == null,
+      false,
+    );
   }
 
   const canonicalResp = toolTurnToResponse(result, params.providerModelId);
