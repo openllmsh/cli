@@ -11,7 +11,10 @@
  * surface the last error (final).
  */
 import { createHash } from "node:crypto";
-import type { TChatCompletionResponse } from "@openllmsh/protocol";
+import type {
+  TChatCompletionChunk,
+  TChatCompletionResponse,
+} from "@openllmsh/protocol";
 import {
   cooldownPolicyFor,
   isLocalKeyProviderSlug,
@@ -272,18 +275,31 @@ export const serveLocalKeyHop = async (
     };
 
     if (clientWantsStream && resp.body !== null) {
-      return deliverChunkStream(
-        decodeOpenaiStream(resp.body, hop.providerModelId),
-        {
-          surface: args.surface,
-          clientWire,
-          providerModelId: hop.providerModelId,
-          status: resp.status,
-          stripSubagentIsolation: strip,
-          onResponse: (canonical) => success(canonical),
-          onError: () => failure("local key stream meter failed"),
-        },
+      let hasInputUsage = false;
+      let hasOutputUsage = false;
+      const chunks = decodeOpenaiStream(
+        resp.body,
+        hop.providerModelId,
+      ).pipeThrough(
+        new TransformStream<TChatCompletionChunk, TChatCompletionChunk>({
+          transform: (chunk, controller): void => {
+            hasInputUsage ||= typeof chunk.usage?.prompt_tokens === "number";
+            hasOutputUsage ||=
+              typeof chunk.usage?.completion_tokens === "number";
+            controller.enqueue(chunk);
+          },
+        }),
       );
+      return deliverChunkStream(chunks, {
+        surface: args.surface,
+        clientWire,
+        providerModelId: hop.providerModelId,
+        status: resp.status,
+        stripSubagentIsolation: strip,
+        onResponse: (canonical) =>
+          success(canonical, hasInputUsage && hasOutputUsage),
+        onError: () => failure("local key stream meter failed"),
+      });
     }
 
     const text = await resp.text().catch(() => "");

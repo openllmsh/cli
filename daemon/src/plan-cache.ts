@@ -96,7 +96,7 @@ const pairedIdentity = "team-device";
 
 /** Capture before a fetch; opaque revisions have no inherent ordering. */
 export const currentPolicyEpoch = (identity = pairedIdentity): number =>
-  cacheGeneration + (policies.get(identity)?.epoch ?? 0);
+  policies.get(identity)?.epoch ?? 0;
 
 /**
  * Record the key's current access-policy revision (bootstrap
@@ -122,8 +122,12 @@ export const observePolicyRevision = (
   identity = pairedIdentity,
 ): void => {
   const previous = policies.get(identity);
-  if ((previous?.rev ?? null) === rev) return;
-  policies.set(identity, { rev, epoch: (previous?.epoch ?? 0) + 1 });
+  if (previous === undefined) {
+    policies.set(identity, { rev, epoch: 0 });
+    return;
+  }
+  if (previous.rev === rev) return;
+  policies.set(identity, { rev, epoch: previous.epoch + 1 });
   for (const key of inFlight.keys()) {
     if (identityOf(key) === identity) inFlight.delete(key);
   }
@@ -347,14 +351,10 @@ export const stopTeamPlanWarmRefresh = (): void => {
 /** Current recently served team pair count (tests / diagnostics). */
 export const warmTeamPlanSize = (): number => warmTeamPlans.size;
 
-/** Drop every cached plan, the known policy revision and the demand-driven
- *  team-plan working set. */
+/** Drop every cached plan and the demand-driven team-plan working set. The
+ *  observed policy remains known independently of the cache. */
 export const clearPlanCache = (): void => {
   cacheGeneration += 1;
-  // Advance each known epoch so outstanding fetches cannot survive a clear.
-  for (const [identity, policy] of policies) {
-    policies.set(identity, { rev: null, epoch: policy.epoch + 1 });
-  }
   cache.clear();
   inFlight.clear();
   warmTeamPlans.clear();

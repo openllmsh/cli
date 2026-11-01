@@ -28,7 +28,6 @@ import {
 } from "@openllmsh/protocol";
 import { originatorHeadersFrom } from "@openllmsh/wire/lib/forwarded-headers";
 import { Schema } from "effect";
-import { beginHeldAttempt } from "./access-hold-context";
 import type { TUploadMediaDiagnostic } from "./cloud-client";
 import { signVideoJobId, uploadMedia } from "./cloud-client";
 import { errorJson } from "./cors";
@@ -389,7 +388,6 @@ const getStatus = async (
   upstream: TVideoUpstream,
   payload: TVideoIdPayload,
 ): Promise<Response | TXaiVideoStatus> => {
-  beginHeldAttempt();
   let resp: Response;
   try {
     resp = await (args.fetchImpl ?? fetch)(
@@ -701,7 +699,6 @@ export const runVideoContent = async (
   if (typeof contentUrl !== "string" || contentUrl.length === 0) {
     return errorJson(502, "Completed video has no downloadable content URL");
   }
-  beginHeldAttempt();
   let content: Response;
   try {
     // NOT tied to `args.req.signal`: the client (e.g. the browser tool) cancels
@@ -836,7 +833,6 @@ export const runVideoCancel = async (
   if (payload instanceof Response) return payload;
   const followed = await followVideoJob(args, payload);
   if (!(followed instanceof Response)) {
-    beginHeldAttempt();
     await fetch(`${followed.url}/videos/${encodeURIComponent(payload.u)}`, {
       method: "DELETE",
       headers: upstreamHeaders(followed.headers),
