@@ -83,6 +83,7 @@ import {
 import type { TPlanTuple } from "./plan-cache";
 import {
   currentPolicyEpoch,
+  currentPolicyRevision,
   loadPlanWithShared,
   lookupPlan,
   noteTeamPlanServed,
@@ -762,7 +763,8 @@ const handleInferenceIn = async (
           originParam: fetched.origin,
           contextOverflowStrategy: fetchedContextOverflowStrategy,
           sigParam: fetched.sig,
-          policyRev: fetched.policy_rev,
+          policyRev:
+            fetched.policy_rev ?? currentPolicyRevision(callerIdentity),
         },
         holdNonce: fetchedHoldNonce,
         maxOutputTokens: fetchedMaxOutputTokens,
@@ -1269,7 +1271,8 @@ const handleInferenceIn = async (
         originParam: refreshed.origin,
         contextOverflowStrategy: refreshedContextOverflowStrategy,
         sigParam: refreshed.sig,
-        policyRev: refreshed.policy_rev,
+        policyRev:
+          refreshed.policy_rev ?? currentPolicyRevision(callerIdentity),
       };
     });
   }

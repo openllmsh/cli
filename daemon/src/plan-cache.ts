@@ -118,9 +118,11 @@ const identityOf = (key: string): string => {
 };
 
 export const observePolicyRevision = (
-  rev: string | null,
+  rev: string | null | undefined,
   identity = pairedIdentity,
 ): void => {
+  // A plan without a revision says nothing about the policy: keep the known one.
+  if (rev === undefined) return;
   const previous = policies.get(identity);
   if (previous === undefined) {
     policies.set(identity, { rev, epoch: 0 });
