@@ -119,8 +119,8 @@ daemon/
     device-state.ts         manifest-driven probe: run each integration's `install.sh?mode=state` (`{"installed":bool,…}`) → cached DaemonStatus.integrations (stateful dashboard buttons)
     service.ts              self-managed launch agent / systemd unit (start = self-restore; stop = disable; serviceUninstall = stop + delete registration)
     uninstall.ts            `openllm daemon uninstall` — confirm → stop+unregister → strip completion + owned PATH symlink → drain the hold outbox (5 s) → delete all state (credentials)
-    hold-session.ts         one capped request's hold, finalized on EVERY exit (`withHoldSession` around `handleInference`): reported usage, 0 when nothing ran, or `usage_unknown` (cloud charges the full hold) for a delivered body / thrown walk with no usage
-    hold-outbox.ts          durable 0600 JSONL outbox for records carrying `hold_nonce`: written before the POST, dropped on 2xx or a final 400/403/404/409, retried with backoff (boot + healthy bootstrap tick), entries older than the cloud's 1 h hold sweep dropped
+    hold-session.ts         one capped request's hold, finalized on EVERY exit (`withHoldSession` around `handleInference`): reported usage plus prior tokens and unknown-attempt count
+    hold-outbox.ts          durable 0600 JSONL outbox for records carrying `hold_nonce`: written before the POST, dropped on 2xx or a final 400/403/404/409, retried with backoff (boot + healthy bootstrap tick); retained until a definitive response, even beyond the cloud's 1 h sweep deadline
     completion.ts           bash/zsh/fish shell completion (emit + `completion install` / `uninstallCompletion`)
     harden-binary.ts        macOS dequarantine + ad-hoc sign (shared by service + updater)
     sandbox/
