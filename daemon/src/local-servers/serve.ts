@@ -151,6 +151,8 @@ export const postLocal = async (
   init: RequestInit,
   inboundSignal: AbortSignal,
 ): Promise<Response | null> => {
+  // A request cancelled before we dial never reached the server: not a send.
+  if (inboundSignal.aborted) return null;
   beginHeldAttempt();
   const headerTimeout = new AbortController();
   const timer = setTimeout(() => {
