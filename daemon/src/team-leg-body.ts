@@ -191,7 +191,7 @@ export const observeTeamResponseStream = (
         finish(
           !overflow &&
             !failed &&
-            (!eventStream || (complete && pending.length === 0))
+            (!eventStream || (complete && pending.trim().length === 0))
             ? observer.usage()
             : null,
         );
