@@ -167,8 +167,14 @@ export class HoldSession {
 
   /** Take ownership of a hold the cloud just handed out. */
   adopt(nonce: string, model: string, origin: string | null): THoldOutcome {
-    if (this.closed || this.admissionSignal?.aborted)
+    if (this.closed || this.admissionSignal?.aborted) {
+      // The cloud already issued this hold. Settle it at once with no
+      // attempts (zero charge) so it is journaled, rather than dropping it
+      // for the sweep to charge in full; the request itself never dispatches.
+      this.hold = { nonce, model, origin, outcome: newHoldOutcome() };
+      this.finish();
       throw new Error("daemon shutting down");
+    }
     if (this.hold !== null && this.hold.nonce !== nonce) this.finish();
     if (this.hold?.nonce === nonce) return this.hold.outcome;
     const outcome = newHoldOutcome();
