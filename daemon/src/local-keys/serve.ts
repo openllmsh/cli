@@ -17,6 +17,7 @@ import {
   isLocalKeyProviderSlug,
   localKeyProviderPreset,
 } from "@openllmsh/protocol";
+import type { TAttemptOutcome } from "@openllmsh/wire/lib/attempt-outcome";
 import { classifyHopError } from "@openllmsh/wire/lib/error-class";
 import { scrubSecretText } from "@openllmsh/wire/lib/secret-scrub";
 import { createUsageObserver } from "@openllmsh/wire/lib/usage-observer";
@@ -217,7 +218,7 @@ export const serveLocalKeyHop = async (
             ...usage.tokens,
           },
           args.originParam,
-          usageComplete,
+          usage.attempt,
         );
       }
       if (cls.kind === "abort") return errorJson(499, "client aborted request");
@@ -231,7 +232,7 @@ export const serveLocalKeyHop = async (
 
     const success = (
       canonical: TChatCompletionResponse,
-      usageComplete = false,
+      attempt: TAttemptOutcome,
     ): void => {
       recordLocal(
         {
@@ -244,10 +245,13 @@ export const serveLocalKeyHop = async (
           ...tokensFromResponse(canonical),
         },
         args.originParam,
-        usageComplete,
+        attempt,
       );
     };
-    const failure = (error: string): void => {
+    const failure = (
+      error: string,
+      usage: TAttemptOutcome["usage"] = null,
+    ): void => {
       recordLocal(
         {
           model: hop.modelId,
@@ -260,6 +264,7 @@ export const serveLocalKeyHop = async (
           ...ZERO_TOKENS,
         },
         args.originParam,
+        { sent: true, usage, definiteProviderError: false },
       );
     };
 
@@ -275,8 +280,13 @@ export const serveLocalKeyHop = async (
         providerModelId: hop.providerModelId,
         status: resp.status,
         stripSubagentIsolation: strip,
-        onResponse: (canonical) => success(canonical, usage.complete()),
-        onError: () => failure("local key stream meter failed"),
+        onResponse: (canonical) =>
+          success(canonical, {
+            sent: true,
+            usage: usage.usage(),
+            definiteProviderError: false,
+          }),
+        onError: () => failure("local key stream meter failed", usage.usage()),
       });
     }
 
@@ -296,7 +306,11 @@ export const serveLocalKeyHop = async (
     }
     const observer = createUsageObserver("openai", "json");
     observer.observe(canonical);
-    success(canonical, observer.usage() !== null);
+    success(canonical, {
+      sent: true,
+      usage: observer.usage(),
+      definiteProviderError: false,
+    });
     return deliverJsonResponse(
       canonical,
       args.surface,

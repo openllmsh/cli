@@ -25,6 +25,7 @@ import type {
 } from "@openllmsh/protocol";
 import { formatActiveExecutionToken } from "@openllmsh/protocol";
 import { declaresAnthropicServerSearchTool } from "@openllmsh/wire/adapters/messages/request";
+import type { TAttemptOutcome } from "@openllmsh/wire/lib/attempt-outcome";
 import { accumulateChunksToResponse } from "@openllmsh/wire/lib/streaming/accumulate";
 import { partialUsageFrom } from "@openllmsh/wire/lib/streaming/upstream-error";
 import { clientWireOf } from "@openllmsh/wire/providers/upstream-request";
@@ -97,6 +98,7 @@ import {
 
 export const nativeUsageTracker = (): {
   readonly hasUsage: () => boolean;
+  readonly attempt: () => TAttemptOutcome;
   readonly trackUsage: (
     chunks: ReadableStream<TChatCompletionChunk>,
   ) => ReadableStream<TChatCompletionChunk>;
@@ -104,6 +106,9 @@ export const nativeUsageTracker = (): {
   let seen = false;
   return {
     hasUsage: () => seen,
+    // Native bridges can synthesize missing sides as zero before these chunks
+    // reach us, so observing both fields here cannot prove complete usage.
+    attempt: () => ({ sent: true, usage: null, definiteProviderError: false }),
     trackUsage: (chunks) =>
       chunks.pipeThrough(
         new TransformStream<TChatCompletionChunk, TChatCompletionChunk>({
@@ -516,7 +521,7 @@ export type TNativeServeParams = {
     tokens: TNativeTokens,
     status: "success" | "error",
     usageUnknown?: boolean,
-    usageComplete?: boolean,
+    attempt?: TAttemptOutcome,
   ) => void;
 };
 
@@ -853,12 +858,11 @@ export const tryServeNativeRuntime = async (
   // re-key under `hash(inbound turns + assistant response)` so the NEXT
   // request resumes it. Capture must not publish a resume handle — the builder
   // never incorporated the true assistant reply into vendor session state.
-  const { trackUsage, hasUsage } = nativeUsageTracker();
+  const { trackUsage, hasUsage, attempt } = nativeUsageTracker();
   const settle = (
     resp: Awaited<ReturnType<typeof accumulateChunksToResponse>>,
   ): void => {
-    // Native usage currently loses per-side presence, so it cannot settle a hold.
-    params.record(tokensFromResponse(resp), "success", !hasUsage(), false);
+    params.record(tokensFromResponse(resp), "success", !hasUsage(), attempt());
     lease.commit(
       nextPrefixHash(
         params.providerModelId,
@@ -878,6 +882,8 @@ export const tryServeNativeRuntime = async (
     params.record(
       usage === null ? ZERO_TOKENS : tokensFromResponse({ usage }),
       "error",
+      undefined,
+      attempt(),
     );
     lease.abandon();
   };
@@ -983,12 +989,11 @@ const serveClaudeSdkFacadeHop = async (
   }
 
   const committed = run;
-  const { trackUsage, hasUsage } = nativeUsageTracker();
+  const { trackUsage, hasUsage, attempt } = nativeUsageTracker();
   const settle = (
     resp: Awaited<ReturnType<typeof accumulateChunksToResponse>>,
   ): void => {
-    // Native usage currently loses per-side presence, so it cannot settle a hold.
-    params.record(tokensFromResponse(resp), "success", !hasUsage(), false);
+    params.record(tokensFromResponse(resp), "success", !hasUsage(), attempt());
   };
   const fail = (err: unknown): void => {
     if (params.signal.aborted || isClientHangUp(err)) return;
@@ -996,6 +1001,8 @@ const serveClaudeSdkFacadeHop = async (
     params.record(
       usage === null ? ZERO_TOKENS : tokensFromResponse({ usage }),
       "error",
+      undefined,
+      attempt(),
     );
   };
 
@@ -1166,12 +1173,11 @@ const serveCapturedToolTurn = async (
 
   // Capture tool turns never publish a resume handle — builder never saw the
   // true assistant/tool exchange.
-  const { trackUsage, hasUsage } = nativeUsageTracker();
+  const { trackUsage, hasUsage, attempt } = nativeUsageTracker();
   const settle = (
     resp: Awaited<ReturnType<typeof accumulateChunksToResponse>>,
   ): void => {
-    // Native usage currently loses per-side presence, so it cannot settle a hold.
-    params.record(tokensFromResponse(resp), "success", !hasUsage(), false);
+    params.record(tokensFromResponse(resp), "success", !hasUsage(), attempt());
   };
   const fail = (err: unknown): void => {
     if (params.signal.aborted || isClientHangUp(err)) return;
@@ -1179,6 +1185,8 @@ const serveCapturedToolTurn = async (
     params.record(
       usage === null ? ZERO_TOKENS : tokensFromResponse({ usage }),
       "error",
+      undefined,
+      attempt(),
     );
   };
   const clientWire = clientWireOf(params.surface);
@@ -1293,12 +1301,11 @@ const serveCursorHop = async (
     );
   }
 
-  const { trackUsage, hasUsage } = nativeUsageTracker();
+  const { trackUsage, hasUsage, attempt } = nativeUsageTracker();
   const settle = (
     resp: Awaited<ReturnType<typeof accumulateChunksToResponse>>,
   ): void => {
-    // Native usage currently loses per-side presence, so it cannot settle a hold.
-    params.record(tokensFromResponse(resp), "success", !hasUsage(), false);
+    params.record(tokensFromResponse(resp), "success", !hasUsage(), attempt());
   };
   const fail = (err: unknown): void => {
     if (params.signal.aborted || isClientHangUp(err)) return;
@@ -1306,6 +1313,8 @@ const serveCursorHop = async (
     params.record(
       usage === null ? ZERO_TOKENS : tokensFromResponse({ usage }),
       "error",
+      undefined,
+      attempt(),
     );
   };
   const clientWire = clientWireOf(params.surface);
@@ -1378,12 +1387,11 @@ const serveAntigravityHop = async (
   if (run.kind === "declined") {
     return declinedOutcome(run.reason, run.cooldownReason);
   }
-  const { trackUsage, hasUsage } = nativeUsageTracker();
+  const { trackUsage, hasUsage, attempt } = nativeUsageTracker();
   const settle = (
     resp: Awaited<ReturnType<typeof accumulateChunksToResponse>>,
   ): void => {
-    // Native usage currently loses per-side presence, so it cannot settle a hold.
-    params.record(tokensFromResponse(resp), "success", !hasUsage(), false);
+    params.record(tokensFromResponse(resp), "success", !hasUsage(), attempt());
   };
   const fail = (err: unknown): void => {
     if (params.signal.aborted || isClientHangUp(err)) return;
@@ -1391,6 +1399,8 @@ const serveAntigravityHop = async (
     params.record(
       usage === null ? ZERO_TOKENS : tokensFromResponse({ usage }),
       "error",
+      undefined,
+      attempt(),
     );
   };
   const clientWire = clientWireOf(params.surface);
@@ -1491,12 +1501,11 @@ const serveMuseHop = async (
     );
   }
 
-  const { trackUsage, hasUsage } = nativeUsageTracker();
+  const { trackUsage, hasUsage, attempt } = nativeUsageTracker();
   const settle = (
     resp: Awaited<ReturnType<typeof accumulateChunksToResponse>>,
   ): void => {
-    // Native usage currently loses per-side presence, so it cannot settle a hold.
-    params.record(tokensFromResponse(resp), "success", !hasUsage(), false);
+    params.record(tokensFromResponse(resp), "success", !hasUsage(), attempt());
   };
   const fail = (err: unknown): void => {
     if (params.signal.aborted || isClientHangUp(err)) return;
@@ -1504,6 +1513,8 @@ const serveMuseHop = async (
     params.record(
       usage === null ? ZERO_TOKENS : tokensFromResponse({ usage }),
       "error",
+      undefined,
+      attempt(),
     );
   };
   const clientWire = clientWireOf(params.surface);

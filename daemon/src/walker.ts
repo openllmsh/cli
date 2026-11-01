@@ -863,8 +863,7 @@ export const report = (
   row: TDaemonRecordRequest,
   origin: string | null,
   accountHash: string | undefined,
-  attempt: boolean | TAttemptOutcome,
-  definiteProviderError = false,
+  attempt: TAttemptOutcome,
 ): void => {
   const recordedRow = recordAttempt(
     {
@@ -875,7 +874,6 @@ export const report = (
     },
     origin,
     attempt,
-    definiteProviderError,
   );
   if (
     recordedRow.status !== "success" ||
@@ -1050,6 +1048,7 @@ export const decodeUpstreamStream = (
   body: ReadableStream<Uint8Array>,
   providerModelId: string,
   toolNameMap?: ReadonlyMap<string, string>,
+  onEvent?: (event: unknown) => void,
 ): ReadableStream<TChatCompletionChunk> => {
   const options = {
     providerModelId,
@@ -1058,13 +1057,14 @@ export const decodeUpstreamStream = (
       : {}),
   };
   if (wire === "anthropic") {
-    return decodeAnthropicEventStream(body, options);
+    return decodeAnthropicEventStream(body, options, onEvent);
   }
   if (wire === "chatgpt") {
     return decodeProviderEventStream(
       body,
       {
         eventSchema: ChatGptStreamEventSchema,
+        onEvent,
         initialState: newChatGptStreamState,
         eventToChunk: chatGptEventToChunk,
         isTerminalEvent: isChatGptResponsesTerminalEvent,
@@ -1077,6 +1077,7 @@ export const decodeUpstreamStream = (
     body,
     {
       eventSchema: ChatCompletionChunk,
+      onEvent,
       initialState: () => ({}),
       eventToChunk: (event: TChatCompletionChunk) => event,
     },
@@ -1718,10 +1719,13 @@ export const serveSubscription = async (
     wire === "chatgpt" && process.env.OPENLLM_DEBUG_CODEX_SSE === "1"
       ? tapCodexSseStream(resp.body, Date.now())
       : resp.body;
-  const recordTokens = (
-    u: TNativeTokens,
-    attempt: boolean | TAttemptOutcome,
-  ): void => {
+  const streamObserver = createUsageObserver(hopFormat(wire), "sse");
+  const streamAttempt = (): TAttemptOutcome => ({
+    sent: true,
+    usage: streamObserver.usage(),
+    definiteProviderError: false,
+  });
+  const recordTokens = (u: TNativeTokens, attempt: TAttemptOutcome): void => {
     if (cacheProbe !== null) cacheProbeOutcome(cacheProbe, u);
     report(
       {
@@ -1759,7 +1763,7 @@ export const serveSubscription = async (
       },
       args.originParam,
       undefined,
-      false,
+      streamAttempt(),
     );
   };
 
@@ -1814,7 +1818,7 @@ export const serveSubscription = async (
         },
         args.originParam,
         undefined,
-        false,
+        { sent: true, usage: null, definiteProviderError: false },
       );
       return hopRetry(detail, {
         status: 502,
@@ -1833,7 +1837,7 @@ export const serveSubscription = async (
       },
       args.originParam,
       undefined,
-      false,
+      { sent: true, usage: null, definiteProviderError: false },
     );
     return errorJson(
       502,
@@ -1871,7 +1875,7 @@ export const serveSubscription = async (
     // client; accurate counts come from the final chunk's usage).
     const meter = (chunks: ReadableStream<TChatCompletionChunk>): void => {
       void accumulateChunksToResponse(chunks, hop.providerModelId)
-        .then((r) => recordTokens(tokensFromResponse(r), false))
+        .then((r) => recordTokens(tokensFromResponse(r), streamAttempt()))
         .catch(recordStreamFailure);
     };
     if (passthrough) {
@@ -1885,7 +1889,13 @@ export const serveSubscription = async (
       // stream. The client branch stays byte-verbatim either way.
       const [toClient, toMeter] = upstreamBody.tee();
       const peeked = await peekFirstChunk(
-        decodeUpstreamStream(wire, toMeter, hop.providerModelId, toolNameMap),
+        decodeUpstreamStream(
+          wire,
+          toMeter,
+          hop.providerModelId,
+          toolNameMap,
+          streamObserver.observe,
+        ),
         isMeaningfulChunk,
         // The meter's decoded view is LOSSY (schema-unknown frames are
         // dropped): an empty decode of a byte-verbatim passthrough must
@@ -1920,6 +1930,7 @@ export const serveSubscription = async (
         upstreamBody,
         hop.providerModelId,
         toolNameMap,
+        streamObserver.observe,
       ),
       isMeaningfulChunk,
       { isRefusal: isRefusalChunk },
@@ -1934,7 +1945,7 @@ export const serveSubscription = async (
       clientWire,
       providerModelId: hop.providerModelId,
       status: resp.status,
-      onResponse: (r) => recordTokens(tokensFromResponse(r), false),
+      onResponse: (r) => recordTokens(tokensFromResponse(r), streamAttempt()),
       onError: recordStreamFailure,
       stripSubagentIsolation: hop.stripSubagentIsolation,
     });
@@ -1959,6 +1970,7 @@ export const serveSubscription = async (
         upstreamBody,
         hop.providerModelId,
         toolNameMap,
+        streamObserver.observe,
       ),
       isMeaningfulChunk,
       { isRefusal: isRefusalChunk },
@@ -1987,9 +1999,7 @@ export const serveSubscription = async (
         `upstream stream failed after output began: ${streamFailureDetail(err)}`,
       );
     }
-    // Canonical streaming adapters may synthesize missing counts; don't settle
-    // a hold without observing both fields on the raw provider stream.
-    recordTokens(tokensFromResponse(canonical), false);
+    recordTokens(tokensFromResponse(canonical), streamAttempt());
     return deliverJsonResponse(
       canonical,
       args.surface,
@@ -2034,7 +2044,7 @@ export const serveSubscription = async (
       },
       args.originParam,
       undefined,
-      false,
+      { sent: true, usage: null, definiteProviderError: false },
     );
   let upstreamJson: unknown;
   try {
@@ -2121,13 +2131,13 @@ const serveKimiBuiltinSearch = async (
   body = { ...body, stream: false };
   const executed: TServerSearchCall[] = [];
   const totals = { ...ZERO_TOKENS };
-  let roundUsage = jsonUsage(undefined);
+  let roundTokens = { ...ZERO_TOKENS };
   let roundAttempt = jsonAttempt(undefined, wire);
   const addTokens = (raw: unknown): void => {
-    roundUsage = jsonUsage(raw);
+    roundTokens = jsonUsage(raw).tokens;
     roundAttempt = jsonAttempt(raw, wire);
-    totals.tokens_in += roundUsage.tokens.tokens_in;
-    totals.tokens_out += roundUsage.tokens.tokens_out;
+    totals.tokens_in += roundTokens.tokens_in;
+    totals.tokens_out += roundTokens.tokens_out;
   };
   const recordOnce = (
     status: TRequestStatus,
@@ -2147,7 +2157,7 @@ const serveKimiBuiltinSearch = async (
         ...(acquired.accountHash !== null
           ? { account_hash: acquired.accountHash }
           : {}),
-        ...(currentHoldNonce() !== null ? roundUsage.tokens : totals),
+        ...(currentHoldNonce() !== null ? roundTokens : totals),
       },
       args.originParam,
       undefined,
@@ -2155,7 +2165,7 @@ const serveKimiBuiltinSearch = async (
     );
 
   for (let round = 0; ; round++) {
-    roundUsage = jsonUsage(undefined);
+    roundTokens = { ...ZERO_TOKENS };
     roundAttempt = jsonAttempt(undefined, wire);
     const resp = await postWithReplayStripRetry(
       acquired.url,
@@ -2214,7 +2224,7 @@ const serveKimiBuiltinSearch = async (
             model: hop.modelId,
             provider: hop.provider,
             status: "error",
-            ...roundUsage.tokens,
+            ...roundTokens,
           },
           { ...roundAttempt, definiteProviderError: readable },
         );
@@ -2325,7 +2335,7 @@ const serveKimiBuiltinSearch = async (
         model: hop.modelId,
         provider: hop.provider,
         status: "error",
-        ...roundUsage.tokens,
+        ...roundTokens,
       },
       roundAttempt,
     );
@@ -2862,7 +2872,7 @@ const walkPlan = async (
       // Ambient account map — multi-account dials run inside `runWithAccount`,
       // so this is the dialled slot's hash (null/absent for single-account).
       accountHashByProvider.get(hop.provider) ?? undefined,
-      false,
+      { sent: true, usage: null, definiteProviderError: false },
     );
     // Another local account of this provider can still serve the model: the
     // failure cooled only this account, so the plan stays valid.
@@ -3253,7 +3263,7 @@ const walkPlan = async (
         executionSelection,
         stripSubagentIsolation: hop.stripSubagentIsolation,
         signal: args.req.signal,
-        record: (tokens, status, usageUnknown, usageComplete) =>
+        record: (tokens, status, _usageUnknown, attempt) =>
           report(
             {
               model: hop.modelId,
@@ -3265,7 +3275,11 @@ const walkPlan = async (
             },
             args.originParam,
             accountHashByProvider.get(hop.provider) ?? undefined,
-            usageComplete ?? false,
+            attempt ?? {
+              sent: true,
+              usage: null,
+              definiteProviderError: false,
+            },
           ),
       });
       if (native instanceof Response) {
@@ -3791,7 +3805,7 @@ const walkPlan = async (
                   },
                   args.originParam,
                   undefined,
-                  tokens !== null,
+                  { sent: true, usage: tokens, definiteProviderError: false },
                 );
               },
             }),

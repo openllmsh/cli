@@ -13,10 +13,12 @@
 
 import type { TChatCompletionRequest } from "@openllmsh/protocol";
 import { TOOL_SESSION_HEADER } from "@openllmsh/protocol";
+import type { TAttemptOutcome } from "@openllmsh/wire/lib/attempt-outcome";
 import { responseToChunkStream } from "@openllmsh/wire/lib/streaming/response-stream";
 import { clientWireOf } from "@openllmsh/wire/providers/upstream-request";
 import { deliverJsonResponse, sseResponseForClient } from "../client-encode";
 import { lookupCatalogEntry } from "../config";
+import { attemptFromTokens } from "../record-attempt";
 import type { TToolContinuationIdentity } from "./claude-tool-continuation";
 import type { TClientTool, TIteratorFactory } from "./claude-tool-session";
 import {
@@ -110,7 +112,7 @@ export type TClaudeToolServeParams = {
     tokens: TNativeTokens,
     status: "success" | "error",
     usageUnknown?: boolean,
-    usageComplete?: boolean,
+    attempt?: TAttemptOutcome,
   ) => void;
   /** Optional, backward-compatible continuation capability sent by the client. */
   readonly continuationToken?: string | null;
@@ -230,7 +232,7 @@ export const tryServeNativeToolTurn = async (
       result.usage ?? ZERO_TOKENS,
       "success",
       result.usage == null,
-      false,
+      attemptFromTokens(result.usage ?? ZERO_TOKENS, false),
     );
   }
 

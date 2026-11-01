@@ -8,33 +8,31 @@ import {
 } from "./team-request-context";
 import { teamUsageCharge } from "./team-usage";
 
+export const attemptFromTokens = (
+  tokens: Pick<TDaemonRecordRequest, "tokens_in" | "tokens_out">,
+  complete: boolean,
+  definiteProviderError = false,
+): TAttemptOutcome => ({
+  sent: true,
+  usage: complete
+    ? {
+        in: Math.max(0, Math.floor(tokens.tokens_in)),
+        out: Math.max(0, Math.floor(tokens.tokens_out)),
+      }
+    : null,
+  definiteProviderError,
+});
+
 export const recordAttempt = (
   row: TDaemonRecordRequest,
   origin: string | null,
-  attempt: TAttemptOutcome | boolean = false,
-  definiteProviderError = false,
+  attempt: TAttemptOutcome,
 ): TDaemonRecordRequest => {
   // Team hops: attribute the row to the consumer and charge the share cap,
   // exactly as the walker's `report` does.
   const teamGrant = currentTeamGrantToken();
   const holdFields =
-    row.hold_nonce === undefined
-      ? holdFieldsForRecord(
-          row,
-          typeof attempt === "boolean"
-            ? {
-                sent: true,
-                usage: attempt
-                  ? {
-                      in: Math.max(0, Math.floor(row.tokens_in)),
-                      out: Math.max(0, Math.floor(row.tokens_out)),
-                    }
-                  : null,
-                definiteProviderError,
-              }
-            : attempt,
-        )
-      : {};
+    row.hold_nonce === undefined ? holdFieldsForRecord(row, attempt) : {};
   const holdNonce = row.hold_nonce ?? holdFields.hold_nonce ?? null;
   const recordedRow: TDaemonRecordRequest = {
     ...row,

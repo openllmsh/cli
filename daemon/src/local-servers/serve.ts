@@ -19,6 +19,10 @@ import {
   isLocalServerSlug,
   LOCAL_REQUIRES_DAEMON_ERROR_CODE,
 } from "@openllmsh/protocol";
+import type {
+  TAttemptOutcome,
+  TAttemptUsage,
+} from "@openllmsh/wire/lib/attempt-outcome";
 import { classifyHopError } from "@openllmsh/wire/lib/error-class";
 import { decodeProviderEventStream } from "@openllmsh/wire/lib/streaming/provider-decode";
 import { createUsageObserver } from "@openllmsh/wire/lib/usage-observer";
@@ -177,6 +181,7 @@ export const localErrorUsage = (
   raw: string,
 ): {
   complete: boolean;
+  attempt: TAttemptOutcome;
   tokens: ReturnType<typeof tokensFromResponse>;
 } => {
   const observer = createUsageObserver("openai", "error");
@@ -188,6 +193,7 @@ export const localErrorUsage = (
   const usage = observer.usage();
   return {
     complete: usage !== null,
+    attempt: { sent: true, usage, definiteProviderError: false },
     tokens:
       usage === null
         ? ZERO_TOKENS
@@ -203,6 +209,7 @@ export const localErrorUsage = (
 export const trackLocalStreamUsage = (): {
   stream: TransformStream<TChatCompletionChunk, TChatCompletionChunk>;
   complete: () => boolean;
+  usage: () => TAttemptUsage | null;
 } => {
   const observer = createUsageObserver("openai", "sse");
   return {
@@ -213,6 +220,7 @@ export const trackLocalStreamUsage = (): {
       },
     }),
     complete: () => observer.usage() !== null,
+    usage: observer.usage,
   };
 };
 
@@ -323,6 +331,7 @@ export const serveLocalHop = async (
           ...ZERO_TOKENS,
         },
         args.originParam,
+        { sent: true, usage: null, definiteProviderError: false },
       );
       return errorJson(502, "local upstream network error");
     }
@@ -367,7 +376,7 @@ export const serveLocalHop = async (
           ...usage.tokens,
         },
         args.originParam,
-        usageComplete,
+        usage.attempt,
       );
     }
     if (cls.kind === "abort") return errorJson(499, "client aborted request");
@@ -401,7 +410,7 @@ export const serveLocalHop = async (
             ...tokensFromResponse(canonical),
           },
           args.originParam,
-          usage.complete(),
+          { sent: true, usage: usage.usage(), definiteProviderError: false },
         );
       },
       onError: () => {
@@ -416,6 +425,7 @@ export const serveLocalHop = async (
             ...ZERO_TOKENS,
           },
           args.originParam,
+          { sent: true, usage: usage.usage(), definiteProviderError: false },
         );
       },
     });
@@ -437,6 +447,7 @@ export const serveLocalHop = async (
         ...ZERO_TOKENS,
       },
       args.originParam,
+      { sent: true, usage: null, definiteProviderError: false },
     );
     // Never echo the raw non-JSON body: clients expect a surface-shaped
     // envelope, and the upstream text is not a useful contract.
@@ -460,7 +471,7 @@ export const serveLocalHop = async (
       ...tokensFromResponse(canonical),
     },
     args.originParam,
-    observer.usage() !== null,
+    { sent: true, usage: observer.usage(), definiteProviderError: false },
   );
   return deliverJsonResponse(
     canonical,
