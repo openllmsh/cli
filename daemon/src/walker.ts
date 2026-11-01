@@ -645,6 +645,8 @@ export const postUpstream = async (
   init: RequestInit,
   onTransportFailure?: (failure: TTransportFailure) => void,
 ): Promise<Response | null> => {
+  // A request cancelled before we dial never reached the provider: not a send.
+  if (init.signal?.aborted === true) return null;
   beginHeldAttempt();
   try {
     return await fetch(url, init);
@@ -4203,7 +4205,8 @@ export const runCountTokens = async (args: TWalkArgs): Promise<Response> => {
     }
     throw err;
   }
-  beginHeldAttempt();
+  // Already cancelled: the fetch below rejects without sending.
+  if (!args.req.signal.aborted) beginHeldAttempt();
   let resp: Response;
   let text: string;
   try {
@@ -4325,7 +4328,8 @@ export const runResponsesCompact = async (
           built.body as Record<string, unknown>,
         )
       : built.body;
-  beginHeldAttempt();
+  // Already cancelled: the fetch below rejects without sending.
+  if (!args.req.signal.aborted) beginHeldAttempt();
   let resp: Response;
   try {
     resp = await fetch(compactUpstreamUrl(acquired.url), {
