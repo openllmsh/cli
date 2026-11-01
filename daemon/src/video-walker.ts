@@ -597,17 +597,29 @@ export const runVideoCreate = async (args: TWalkArgs): Promise<Response> => {
       );
     }
     const createdAt = Math.floor(Date.now() / 1000);
+    reportVideo(
+      args,
+      hop.provider,
+      hop.modelId,
+      resp.status,
+      upstream.accountHash,
+    );
     // Job ids are signed by the cloud (the daemon holds no video-id key), so
     // a poll can't re-point this upstream job at another model.
-    const signedId = await signVideoJobId(
-      { p: hop.provider, u: requestId, m: hop.modelId, c: createdAt },
-      args.originParam,
-    ).catch(() => null);
+    const fields = {
+      p: hop.provider,
+      u: requestId,
+      m: hop.modelId,
+      c: createdAt,
+    };
+    const signedId =
+      (await signVideoJobId(fields, args.originParam).catch(() => null)) ??
+      (await signVideoJobId(fields, args.originParam).catch(() => null));
     if (signedId === null) {
       return stamp(
         errorJson(
           502,
-          "The video job was created but could not be registered; retry later",
+          "The video job was created but could not be registered; it cannot be polled",
           "plan_error",
         ),
       );
@@ -632,13 +644,6 @@ export const runVideoCreate = async (args: TWalkArgs): Promise<Response> => {
       ...(request.seconds !== undefined ? { seconds: request.seconds } : {}),
       ...(request.size !== undefined ? { size: request.size } : {}),
     };
-    reportVideo(
-      args,
-      hop.provider,
-      hop.modelId,
-      resp.status,
-      upstream.accountHash,
-    );
     return stamp(responseJson(job), hop.modelId);
   }
   return stamp(
