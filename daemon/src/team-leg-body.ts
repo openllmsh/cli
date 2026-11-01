@@ -189,7 +189,9 @@ export const observeTeamResponseStream = (
         }
         if (!overflow && eventStream && !complete) onIncomplete?.();
         finish(
-          !overflow && !failed && (!eventStream || complete)
+          !overflow &&
+            !failed &&
+            (!eventStream || (complete && pending.length === 0))
             ? observer.usage()
             : null,
         );
