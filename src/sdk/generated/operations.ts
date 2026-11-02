@@ -218,6 +218,18 @@ export const API_OPERATIONS: readonly TApiOperation[] = [
     "hasBody": false
   },
   {
+    "id": "connect.listHistory",
+    "method": "get",
+    "path": "/connect/history",
+    "summary": "",
+    "tags": [
+      "connect"
+    ],
+    "pathParams": [],
+    "queryParams": [],
+    "hasBody": false
+  },
+  {
     "id": "cookieConsent.cookieConsent",
     "method": "post",
     "path": "/cookie-consent",
