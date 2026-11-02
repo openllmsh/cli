@@ -140,7 +140,11 @@ Config: `OPENLLM_CLOUD_ORIGIN` / `OPENLLM_API_KEY` env (the same contract the
 MCP mapping + hooks carry), falling back to the SHARED `~/.openllm/.env` (the
 same file the daemon boots from — one pairing covers every tool), falling back
 to the compile-time cloud-origin bake. Product setup mode is
-`OPENLLM_SETUP_MODE=full|minimal` (default `full`, persisted in that env file):
+`OPENLLM_SETUP_MODE=full|minimal` (persisted in that env file). The curl
+installer (`install.sh`) asks Full vs Minimal on a controlling tty when neither
+an explicit `--minimal` / `OPENLLM_SETUP_MODE` nor a saved mode is present
+(Enter → Full; EOF/cancel aborts with no vendor consent); headless keeps the
+silent Full default, and updates / re-runs with a saved mode never prompt.
 **full** is ordinary vendor provisioning + daemon startup; **minimal** keeps
 client launches cloud-directed and never implicitly starts a local daemon
 (`clients/gateway.ts` skips the loopback probe unless `OPENLLM_GATEWAY=local`).

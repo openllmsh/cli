@@ -40,14 +40,25 @@
 #   OPENLLM_VENDOR_WAIT_SEC      max seconds to wait for vendor installers (default 600)
 #   OPENLLM_ONLY_VENDOR_CLIS     comma-separated subscription slugs to provision
 #                                (e.g. claude_code,chatgpt); unset = all vendors
-#   OPENLLM_SETUP_MODE           product setup mode: `full` (default) or `minimal`.
-#                                Full authenticates, provisions missing vendor CLIs,
-#                                and starts the daemon when a key is available.
-#                                Minimal authenticates only — no vendor install and
-#                                no daemon start; later `openllm <client>` launches
-#                                stay cloud-directed. Persisted into the env file so
-#                                subsequent launches honor it. Distinct from
+#   OPENLLM_SETUP_MODE           product setup mode: `full` or `minimal`.
+#                                Explicit value / `--minimal` bypasses the
+#                                interactive chooser. Full authenticates,
+#                                provisions missing vendor CLIs, and starts the
+#                                daemon when a key is available. Minimal
+#                                authenticates only — no vendor install and no
+#                                daemon start; later `openllm <client>` launches
+#                                stay cloud-directed. Persisted into the env file
+#                                so subsequent launches honor it. Distinct from
 #                                OPENLLM_INSTALL_MODE (install vs update).
+#                                On a fresh interactive install with no saved
+#                                mode, the installer asks Full vs Minimal on the
+#                                controlling tty (Enter → Full). Headless /
+#                                non-interactive installs keep the silent Full
+#                                default and never hang. An update, or a re-run
+#                                that already has OPENLLM_SETUP_MODE in the env
+#                                file, never prompts — the saved mode is
+#                                preserved. EOF / cancel aborts before any
+#                                mode-dependent persistence or vendor install.
 #   --minimal                    same as OPENLLM_SETUP_MODE=minimal (for
 #                                `curl …/install | bash -s -- --minimal`)
 #
@@ -104,16 +115,59 @@ for arg in "$@"; do
   esac
 done
 
-# Can we prompt the human running this install? A piped `curl … | bash` leaves
-# the script's own stdin as the download stream, but the user's terminal is still
-# addressable as /dev/tty. `openllm start`'s credential gate reads the key from
-# /dev/tty yet decides interactivity from stdin/stderr being TTYs — so we only
-# hand off to it when stderr is a real terminal AND /dev/tty is openable. In a
-# non-interactive install (CI, a pipe with no terminal) this is false and we fall
-# back to printing the manual `openllm start` next step.
+# The terminal the human is on. A piped `curl … | bash` leaves the script's own
+# stdin as the download stream; answers must come from this path, never stdin.
+installer_tty() {
+  printf '%s' /dev/tty
+}
+
+# Can we prompt the human running this install? `openllm login`'s credential gate
+# reads the key from the controlling tty yet decides interactivity from
+# stdin/stderr being TTYs — so we only hand off when stderr is a real terminal
+# AND the controlling tty is openable. In a non-interactive install (CI, a pipe
+# with no terminal) this is false and we fall back to printing the manual
+# `openllm login` next step.
 has_controlling_tty() {
+  local tty
+  tty="$(installer_tty)"
   [ -t 2 ] || return 1
-  { true < /dev/tty; } 2>/dev/null
+  { true < "$tty"; } 2>/dev/null
+}
+
+# Ask Full vs Minimal on the controlling tty. Empty Enter → full. EOF / cancel
+# → nonzero so the caller aborts before persistence or vendor consent. Prompts
+# go to stderr (visible under curl|bash); the answer is read from installer_tty.
+prompt_setup_mode() {
+  local tty reply normalized
+  tty="$(installer_tty)"
+  echo >&2
+  echo "Choose installation setup:" >&2
+  echo "  Full     install supported vendor CLIs and start the local daemon" >&2
+  echo "  Minimal  OpenLLM only — no vendor CLIs and no daemon" >&2
+  while true; do
+    printf "Setup [Full/Minimal] (default Full): " >&2
+    if ! IFS= read -r reply <"$tty"; then
+      echo >&2
+      return 1
+    fi
+    reply="$(trim_whitespace "$reply")"
+    normalized="$(printf '%s' "$reply" | tr '[:upper:]' '[:lower:]')"
+    case "$normalized" in
+      ""|f|full)
+        SETUP_MODE=full
+        break
+        ;;
+      m|min|minimal)
+        SETUP_MODE=minimal
+        break
+        ;;
+      *)
+        echo "Please enter Full or Minimal (Enter accepts Full)." >&2
+        ;;
+    esac
+  done
+  echo "  using $SETUP_MODE setup" >&2
+  return 0
 }
 
 # Bash strings cannot contain NUL bytes: command substitution and shell variables
@@ -413,17 +467,25 @@ case "$INSTALL_MODE" in
   install|update) ;;
   *) die "OPENLLM_INSTALL_MODE must be 'install' or 'update'" ;;
 esac
-# Product setup mode. Explicit env / --minimal wins. On a fresh install the
-# default is `full`. On update, an absent explicit value preserves whatever is
-# already in the env file (and leaves the CLI's own default of `full` if the
-# file never had one) so a binary update never flips modes.
+# Product setup mode. Explicit env / --minimal wins and never prompts. A saved
+# OPENLLM_SETUP_MODE in the env file is preserved on re-run / update (no prompt,
+# no unexpected reset). On a fresh install with no saved mode: interactive
+# terminals ask Full vs Minimal (Enter → Full) before any mode-dependent work;
+# headless keeps the silent Full default and never hangs. Update with no prior
+# value leaves the mode unset so we do not invent one.
 if [ -n "${OPENLLM_SETUP_MODE:-}" ]; then
   SETUP_MODE_EXPLICIT=1
   SETUP_MODE="$(trim_whitespace "$OPENLLM_SETUP_MODE")"
 else
   SETUP_MODE="$(trim_whitespace "$(env_file_value OPENLLM_SETUP_MODE || true)")"
   if [ -z "$SETUP_MODE" ] && [ "$INSTALL_MODE" != update ]; then
-    SETUP_MODE=full
+    if has_controlling_tty; then
+      if ! prompt_setup_mode; then
+        die "setup cancelled — re-run and choose Full or Minimal (or pass --minimal / OPENLLM_SETUP_MODE=…)"
+      fi
+    else
+      SETUP_MODE=full
+    fi
   fi
 fi
 case "$SETUP_MODE" in

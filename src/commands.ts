@@ -308,7 +308,8 @@ export const helpText = (version: string): string => {
     { left: "OPENLLM_API_KEY", right: "your sk-llm-... API key" },
     {
       left: "OPENLLM_SETUP_MODE",
-      right: "full (default) or minimal — persist in ~/.openllm/.env",
+      right:
+        "full or minimal — persist in ~/.openllm/.env; installer asks when unset (Enter→full)",
     },
     {
       left: "OPENLLM_GATEWAY",
