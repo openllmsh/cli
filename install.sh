@@ -1267,12 +1267,13 @@ vendor_cli_build_json() {
 
 # List direct children of a pid (macOS + Linux). Bash 3.2 portable.
 vendor_cli_children() {
-  local root="$1"
+  local root="$1" pid ppid
   # `ps -axo` works on Darwin; `-eo` on Linux. Prefer axo, fall back.
+  # `read` already splits IFS whitespace — do NOT per-line `printf|tr` (that
+  # forks ~2N subshells per walk; nested stop_tree on a busy host then spends
+  # seconds in ps post-processing and can hang installer timeout finalization).
   (ps -axo pid=,ppid= 2>/dev/null || ps -eo pid=,ppid= 2>/dev/null || true) \
     | while read -r pid ppid; do
-        pid="$(printf '%s' "$pid" | tr -d '[:space:]')"
-        ppid="$(printf '%s' "$ppid" | tr -d '[:space:]')"
         [ "$ppid" = "$root" ] && [ -n "$pid" ] && printf '%s\n' "$pid"
       done
 }
