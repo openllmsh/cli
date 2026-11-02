@@ -1232,24 +1232,31 @@ vendor_cli_reap_tree() {
   done
 }
 
-# Persist a terminal progress record from the PARENT before reaping a worker.
+# Persist a terminal progress record from the PARENT after reaping a worker.
 # A timed-out parent can kill the worker before its on_signal trap finishes
 # nested-child cleanup (~0.75s) and writes interrupted — without this, the
-# JSON can be left forever at stage=installing.
+# JSON can be left forever at stage=installing. Reason MUST stay on the wire
+# enum (`installer_failed` | `interrupted` | `detection_timeout`); wall-clock
+# timeout is reported separately on stderr / exit status, not as a new reason.
 vendor_cli_mark_interrupted() {
-  local slug="$1" pid="${2:-}" reason="${3:-interrupted}"
+  local slug="$1" pid="${2:-}"
   local file attempt started json now
   file="$(vendor_cli_state_dir)/${slug}.json"
   [ -f "$file" ] || return 1
+  # Another installer may have replaced this provider's attempt while we
+  # reaped. Never finalize a record that no longer belongs to this worker.
+  if [ -n "$pid" ] && [ "$(vendor_cli_read_num_field "$file" pid || true)" != "$pid" ]; then
+    return 1
+  fi
   attempt="$(vendor_cli_read_field "$file" attempt_id || true)"
   started="$(vendor_cli_read_num_field "$file" started_at_ms || true)"
   [ -n "$attempt" ] || return 1
   [ -n "$started" ] || started="$(vendor_cli_now_ms)"
   now="$(vendor_cli_now_ms)"
   if [ -n "$pid" ]; then
-    json="$(vendor_cli_build_json "$attempt" "$slug" interrupted "$started" "$now" "$reason" "$pid" "$(vendor_cli_process_start "$pid" || true)")"
+    json="$(vendor_cli_build_json "$attempt" "$slug" interrupted "$started" "$now" interrupted "$pid" "$(vendor_cli_process_start "$pid" || true)")"
   else
-    json="$(vendor_cli_build_json "$attempt" "$slug" interrupted "$started" "$now" "$reason")"
+    json="$(vendor_cli_build_json "$attempt" "$slug" interrupted "$started" "$now" interrupted)"
   fi
   vendor_cli_write_state "$slug" "$json"
 }
@@ -1654,6 +1661,10 @@ provision_clis() {
   fi
   local spec name cmd slug dest url failed=0 pid
   local pids=()
+  # Parallel pid↔slug ownership for timeout finalization. Never glob the state
+  # dir on timeout — that would rewrite unrelated/stale/sibling records.
+  local owned_pids=()
+  local owned_slugs=()
   for spec in "${specs[@]}"; do
     IFS='|' read -r name cmd slug dest url <<<"$spec"
     vendor_cli_selected "$slug" || continue
@@ -1668,7 +1679,11 @@ provision_clis() {
       continue
     fi
     if launch_vendor_cli_install "$name" "$cmd" "$slug" "$dest" "$url" "$run_path" "$curl_bin"; then
-      [ -z "$VENDOR_LAST_PID" ] || pids+=("$VENDOR_LAST_PID")
+      if [ -n "$VENDOR_LAST_PID" ]; then
+        pids+=("$VENDOR_LAST_PID")
+        owned_pids+=("$VENDOR_LAST_PID")
+        owned_slugs+=("$slug")
+      fi
     else
       failed=1
     fi
@@ -1683,7 +1698,11 @@ provision_clis() {
   if [ -f "$OPENLLM_DIR/antigravity-enabled" ] && vendor_cli_selected antigravity; then
     VENDOR_LAST_PID=""
     if provision_antigravity "$run_path" "$curl_bin"; then
-      [ -z "$VENDOR_LAST_PID" ] || pids+=("$VENDOR_LAST_PID")
+      if [ -n "$VENDOR_LAST_PID" ]; then
+        pids+=("$VENDOR_LAST_PID")
+        owned_pids+=("$VENDOR_LAST_PID")
+        owned_slugs+=("antigravity")
+      fi
     else
       failed=1
     fi
@@ -1725,27 +1744,20 @@ provision_clis() {
     done
   fi
   if [ "$timed_out" = 1 ]; then
-    # Reap workers first, then persist timed_out as the PARENT's final write.
-    # Doing mark-before-reap lets a slow on_signal overwrite timed_out with a
-    # generic interrupted; doing mark-after-wait wins the last write and also
-    # covers the case where on_signal never finishes (left at installing).
-    for pid in "${pids[@]}"; do
-      vendor_cli_reap_tree "$pid"
-      wait "$pid" 2>/dev/null || true
+    # Reap only the workers THIS provision_clis owns, then persist wire-valid
+    # `interrupted` for those that were still live at the deadline. Unrelated
+    # preexisting / sibling records in the state dir are left untouched.
+    local idx=0 own_pid own_slug
+    while [ "$idx" -lt "${#owned_pids[@]}" ]; do
+      own_pid="${owned_pids[$idx]}"
+      own_slug="${owned_slugs[$idx]}"
+      if kill -0 "$own_pid" 2>/dev/null; then
+        vendor_cli_reap_tree "$own_pid"
+        wait "$own_pid" 2>/dev/null || true
+        vendor_cli_mark_interrupted "$own_slug" "$own_pid" || true
+      fi
+      idx=$((idx + 1))
     done
-    local state_dir slug_file slug_name
-    state_dir="$(vendor_cli_state_dir)"
-    if [ -d "$state_dir" ]; then
-      for slug_file in "$state_dir"/*.json; do
-        [ -f "$slug_file" ] || continue
-        slug_name="$(basename "$slug_file" .json)"
-        case "$(vendor_cli_read_field "$slug_file" stage || true)" in
-          installing|interrupted)
-            vendor_cli_mark_interrupted "$slug_name" "" timed_out || true
-            ;;
-        esac
-      done
-    fi
     echo "  Vendor CLIs: install timed out after ${wait_sec}s — see $OPENLLM_DIR/cli-install.log" >&2
     return 2
   fi
