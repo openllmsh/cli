@@ -32461,6 +32461,9 @@
                     "id": {
                       "type": "string"
                     },
+                    "user_code": {
+                      "type": "string"
+                    },
                     "label": {
                       "type": "string"
                     },
@@ -32502,17 +32505,29 @@
                     },
                     "expires_at": {
                       "type": "string"
+                    },
+                    "confirm_number": {
+                      "anyOf": [
+                        {
+                          "type": "string"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
                     }
                   },
                   "required": [
                     "id",
+                    "user_code",
                     "label",
                     "caller_pubkey",
                     "caller_location",
                     "caller_user_agent",
                     "status",
                     "created_at",
-                    "expires_at"
+                    "expires_at",
+                    "confirm_number"
                   ],
                   "additionalProperties": false
                 }
@@ -32936,11 +32951,22 @@
                     },
                     "id": {
                       "type": "string"
+                    },
+                    "confirm_number": {
+                      "anyOf": [
+                        {
+                          "type": "string"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
                     }
                   },
                   "required": [
                     "ok",
-                    "id"
+                    "id",
+                    "confirm_number"
                   ],
                   "additionalProperties": false
                 }
