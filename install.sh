@@ -1274,18 +1274,18 @@ launch_vendor_cli_install() {
   VENDOR_LAST_PID=""
 
   if ! vendor_cli_acquire_lock "$slug"; then
-    echo "  $name CLI: installer already running — skipping duplicate."
+    echo "  $name CLI: installer already running — skipping duplicate; retry after it completes."
     echo "$name CLI: duplicate launch skipped (live lock)." \
       >>"$OPENLLM_DIR/cli-install.log" 2>/dev/null || true
-    return 0
+    return 1
   fi
 
   if vendor_cli_active_worker "$slug"; then
-    echo "  $name CLI: installer already running — skipping duplicate."
+    echo "  $name CLI: installer already running — skipping duplicate; retry after it completes."
     echo "$name CLI: duplicate launch skipped (live worker)." \
       >>"$OPENLLM_DIR/cli-install.log" 2>/dev/null || true
     vendor_cli_release_lock "$slug"
-    return 0
+    return 1
   fi
 
   # A previous installing record whose worker is dead: mark interrupted before
