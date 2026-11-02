@@ -427,8 +427,16 @@ const readJsonBounded = async <T>(
       offset += chunk.byteLength;
     }
     try {
-      const body = JSON.parse(new TextDecoder().decode(bytes)) as T;
-      return { kind: "ok", body };
+      const parsed: unknown = JSON.parse(new TextDecoder().decode(bytes));
+      // A `null`/array/scalar body would throw on field access below and skip
+      // cancelAuth — treat it like any other malformed body.
+      if (
+        typeof parsed !== "object" ||
+        parsed === null ||
+        Array.isArray(parsed)
+      )
+        return { kind: "invalid" };
+      return { kind: "ok", body: parsed as T };
     } catch {
       return { kind: "invalid" };
     }
