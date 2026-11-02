@@ -137,16 +137,24 @@ has_controlling_tty() {
 # Ask Full vs Minimal on the controlling tty. Empty Enter → full. EOF / cancel
 # → nonzero so the caller aborts before persistence or vendor consent. Prompts
 # go to stderr (visible under curl|bash); the answer is read from installer_tty.
+# FD 9 is opened ONCE for the whole retry loop (bash 3.2-safe fixed FD — macOS
+# ships 3.2; `{fd}` alloc needs bash 4+). Reopening a regular file (hermetic
+# mock tty) on each iteration would re-read the first invalid line forever;
+# a real /dev/tty stays correct either way.
 prompt_setup_mode() {
   local tty reply normalized
   tty="$(installer_tty)"
+  if ! exec 9<"$tty"; then
+    return 1
+  fi
+  trap 'exec 9<&- 2>/dev/null || true; trap - RETURN' RETURN
   echo >&2
   echo "Choose installation setup:" >&2
   echo "  Full     install supported vendor CLIs and start the local daemon" >&2
   echo "  Minimal  OpenLLM only — no vendor CLIs and no daemon" >&2
   while true; do
     printf "Setup [Full/Minimal] (default Full): " >&2
-    if ! IFS= read -r reply <"$tty"; then
+    if ! IFS= read -r reply <&9; then
       echo >&2
       return 1
     fi
