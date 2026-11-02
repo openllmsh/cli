@@ -30517,10 +30517,14 @@
                   "properties": {
                     "sealed": {
                       "type": "string"
+                    },
+                    "grant_id": {
+                      "type": "string"
                     }
                   },
                   "required": [
-                    "sealed"
+                    "sealed",
+                    "grant_id"
                   ],
                   "additionalProperties": false
                 }
