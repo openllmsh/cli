@@ -307,8 +307,17 @@ export const helpText = (version: string): string => {
     },
     { left: "OPENLLM_API_KEY", right: "your sk-llm-... API key" },
     {
+      left: "OPENLLM_SETUP_MODE",
+      right: "full (default) or minimal — persist in ~/.openllm/.env",
+    },
+    {
       left: "OPENLLM_GATEWAY",
       right: "force local or cloud (default: local when the daemon is up)",
+    },
+    {
+      left: "OPENLLM_INSTALL_MISSING_CLIENT",
+      right:
+        "set to 1 to auto-install a missing client in non-interactive runs",
     },
   ]);
   return `openllm v${version}  —  the OpenLLM CLI (also ollm)

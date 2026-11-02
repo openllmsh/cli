@@ -69,10 +69,16 @@ packages/cli/
     │   ├── raycast.ts    #   the always-on apply/uninstall/status
     │   ├── chatgpt.ts    #   ChatGPT Mac app: launcher install, app-server shim, uninstall
     │   ├── mac-launcher.ts # logic-free /Applications launcher .app builder
-    │   ├── gateway.ts    #   per-launch local-vs-cloud resolution (fast /status probe on the env file's OPENLLM_DAEMON_PORT, else OPENLLM_CLOUD_ORIGIN; .dev.env in dev; no -r flag)
+    │   ├── gateway.ts    #   per-launch local-vs-cloud resolution (fast /status probe on the env file's OPENLLM_DAEMON_PORT, else OPENLLM_CLOUD_ORIGIN; minimal setup skips the probe and stays cloud; .dev.env in dev; no -r flag)
+    │   ├── install-client.ts # interactive / OPENLLM_INSTALL_MISSING_CLIENT=1 install of one missing client
     │   └── hooks.ts      #   embedded hook scripts
     ├── session-host.ts   # durable session-host discovery and spawning
     ├── sessions-cmd.ts   # `sessions list|attach|kill` management command
+    ├── login-cmd.ts      # `openllm login` — browser OAuth handover or explicit API-key entry
+    ├── cli-auth-login.ts # create/poll/claim against /api/cli/auth/*; persists sk-llm only
+    ├── config-cmd.ts     # `openllm config --json` (origin, env file, port, setupMode)
+    ├── setup-mode.ts     # OPENLLM_SETUP_MODE=full|minimal (persisted in ~/.openllm/.env)
+    ├── onboarding.ts     # interactive credential gate (OAuth default; --api-key paste)
     ├── uninstall-cmd.ts  # teardown (reverses always-on clients first)
     ├── doctor-cmd.ts     # report/scrub pre-runtime-merge leftovers
     ├── commands.ts       # SSOT of the command surface (help + completion derive)
@@ -112,7 +118,9 @@ packages/cli/
 | `openllm daemon …` | the daemon half — boot / `start` / `stop` / `status` / `logs` / … |
 | `openllm sessions [list\|attach\|kill]` | list, attach to, or kill durable local sessions (`attach` requires an id) |
 | `openllm status` | mirror of `openllm daemon status` — runs the daemon half in a child process |
-| `openllm auth <providers\|status\|usage\|refresh\|login\|submit-code\|cancel\|logout> …` | local provider auth, delegated to the running daemon through `openllm daemon auth`; `--json` for agents, runtime provider/method discovery |
+| `openllm login […]` | OpenLLM account sign-in: browser OAuth handover by default (prints `/cli/authorize/<id>`, opens when possible, claims a sealed `sk-llm` — no OAuth tokens retained); `--api-key` / `--key` / piped stdin for explicit key entry. See `docs/plan/2026-11-01-cli-install-onboarding.md`. |
+| `openllm config --json` | resolved cloud origin, env-file path, daemon port, and product `setupMode` (`full`\|`minimal`) |
+| `openllm auth <providers\|status\|usage\|refresh\|login\|submit-code\|cancel\|logout> …` | local **vendor** provider auth, delegated to the running daemon through `openllm daemon auth`; `--json` for agents, runtime provider/method discovery — distinct from `openllm login` |
 | `openllm version` | print this CLI version only (`openllm vX.Y.Z`); `-v`/`--version` are the same. Combined daemon diagnostics stay on `status`/`doctor` |
 
 **Launch setup guard:** session clients, Hermes sticky launch/install, Raycast
@@ -131,7 +139,15 @@ status, uninstall and existing-session management do not run the guard.
 Config: `OPENLLM_CLOUD_ORIGIN` / `OPENLLM_API_KEY` env (the same contract the
 MCP mapping + hooks carry), falling back to the SHARED `~/.openllm/.env` (the
 same file the daemon boots from — one pairing covers every tool), falling back
-to the compile-time cloud-origin bake.
+to the compile-time cloud-origin bake. Product setup mode is
+`OPENLLM_SETUP_MODE=full|minimal` (default `full`, persisted in that env file):
+**full** is ordinary vendor provisioning + daemon startup; **minimal** keeps
+client launches cloud-directed and never implicitly starts a local daemon
+(`clients/gateway.ts` skips the loopback probe unless `OPENLLM_GATEWAY=local`).
+Mode switches do not stop or delete an already-running daemon. A missing client
+under interactive launch asks before installing only that client
+(`clients/install-client.ts`); non-interactive runs print the install command
+and fail unless `OPENLLM_INSTALL_MISSING_CLIENT=1`.
 
 ### Local provider authentication
 
