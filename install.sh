@@ -1,10 +1,13 @@
 #!/usr/bin/env bash
 # OpenLLM installer — installs the single `openllm` binary (the CLI, plus the
-# `ollm` alias, AND the local daemon as `openllm daemon`). A daemon service starts only when a usable
-# API key is already supplied or persisted. For a keyless install the script does
-# not reimplement onboarding — on a controlling terminal it hands straight off to
-# `openllm start` (whose credential gate prompts on /dev/tty); with no terminal it
-# just prints the `openllm start` next step and exits zero.
+# `ollm` alias, AND the local daemon as `openllm daemon`). Ordered setup:
+# binary → OpenLLM authentication (or reuse a usable credential) → full-mode
+# vendor CLI provisioning → daemon start. Minimal mode authenticates only.
+# On a controlling terminal a keyless install runs `openllm login` (OAuth by
+# default, or `--api-key` paste) and continues the same run after success.
+# Headless / non-interactive installs never hang: they accept an explicit key
+# or print `openllm login` and exit nonzero without provisioning vendors or
+# starting the daemon.
 #
 #   curl -fsSL https://www.openllm.sh/install | bash
 #
@@ -32,7 +35,8 @@
 #                          probed or changed)
 #   OPENLLM_SKIP_SHELL_SETUP     set to skip `openllm setup` + completion install
 #                                (PATH symlinks / shell rc / completion stay untouched)
-#   OPENLLM_SKIP_VENDOR_CLIS     set to skip background vendor CLI provisioning
+#   OPENLLM_SKIP_VENDOR_CLIS     set to skip vendor CLI provisioning
+#   OPENLLM_INSTALL_VENDOR_CLIS  set to 1 to authorize vendor installation without a terminal
 #   OPENLLM_ONLY_VENDOR_CLIS     comma-separated subscription slugs to provision
 #                                (e.g. claude_code,chatgpt); unset = all vendors
 #   OPENLLM_SETUP_MODE           product setup mode: `full` (default) or `minimal`.
@@ -413,10 +417,11 @@ esac
 if [ -n "${OPENLLM_SETUP_MODE:-}" ]; then
   SETUP_MODE_EXPLICIT=1
   SETUP_MODE="$(trim_whitespace "$OPENLLM_SETUP_MODE")"
-elif [ "$INSTALL_MODE" = update ]; then
-  SETUP_MODE="$(trim_whitespace "$(env_file_lookup OPENLLM_SETUP_MODE || true)")"
 else
-  SETUP_MODE=full
+  SETUP_MODE="$(trim_whitespace "$(env_file_value OPENLLM_SETUP_MODE || true)")"
+  if [ -z "$SETUP_MODE" ] && [ "$INSTALL_MODE" != update ]; then
+    SETUP_MODE=full
+  fi
 fi
 case "$SETUP_MODE" in
   "" )
@@ -747,72 +752,37 @@ if [ -n "$SUPPLIED_ANCHOR" ]; then
 fi
 SUPPLIED_ANCHOR=""
 
-# --- start the service -----------------------------------------------------
-# `openllm daemon start` owns service registration (launchd / systemd user unit,
-# restart-on-crash, boot start, linger). With no persisted key the script never
-# prompts inline — it either hands off to the gated `openllm start` on a
-# controlling terminal (closing banner) or leaves no unpaired service behind.
-reconcile_keyless_service() {
-  # Older installers registered a daemon before the user had a usable key. Do
-  # not merely skip `start` on upgrade: stop, disable, and remove that stale
-  # registration so it cannot respawn later with an unpaired configuration.
-  case "$OS" in
-    darwin)
-      local label="sh.openllm.daemon"
-      local target="gui/${UID}/${label}"
-      launchctl bootout "$target" >/dev/null 2>&1 || true
-      launchctl disable "$target" >/dev/null 2>&1 || true
-      rm -f "$HOME/Library/LaunchAgents/${label}.plist"
-      ;;
-    linux)
-      systemctl --user disable --now openllmd.service >/dev/null 2>&1 || true
-      rm -f "$HOME/.config/systemd/user/openllmd.service"
-      systemctl --user daemon-reload >/dev/null 2>&1 || true
-      ;;
-  esac
+# --- authenticate before vendor install / daemon start ---------------------
+# Ordered setup: binary first (already done), then OpenLLM authentication /
+# reuse of a usable credential, then (full mode only) vendor provisioning and
+# daemon startup. Minimal mode authenticates only.
+# Re-read the shared env after `openllm login` so a successful auth continues
+# the same installer run without requiring a second command.
+refresh_api_key_from_env() {
+  local refreshed
+  refreshed="$(trim_whitespace "$(env_file_lookup OPENLLM_API_KEY || true)")"
+  if [ -n "$refreshed" ] && is_usable_api_key "$refreshed"; then
+    API_KEY="$refreshed"
+    export OPENLLM_API_KEY="$refreshed"
+  else
+    API_KEY=""
+  fi
 }
 
-if [ "$SETUP_MODE" = minimal ]; then
-  # Minimal setup never starts or restarts the daemon as a side effect of
-  # install/update. An already-running daemon is left alone — mode switch does
-  # not stop it. Keyless first install still reconciles unpaired registrations.
-  if [ -z "$API_KEY" ] && [ "$INSTALL_MODE" != update ]; then
-    reconcile_keyless_service
-  elif [ "$INSTALL_MODE" = update ]; then
-    echo "OpenLLM updated (minimal setup; daemon left as-is)."
-  else
-    echo "Minimal setup — daemon not started. Run \`openllm daemon start\` later if you want this machine to serve."
+AUTH_ATTEMPTED=0
+AUTH_FAILED=0
+if [ -z "$API_KEY" ] && [ "$INSTALL_MODE" != update ]; then
+  # Authenticate via `openllm login` when a controlling terminal is available.
+  # Never hang headlessly or disturb an existing daemon when no key is saved.
+  if has_controlling_tty && [ -x "$BIN_DIR/openllm" ]; then
+    AUTH_ATTEMPTED=1
+    echo
+    if "$BIN_DIR/openllm" login --no-restart < /dev/tty; then
+      refresh_api_key_from_env
+    else
+      AUTH_FAILED=1
+    fi
   fi
-elif [ -n "$API_KEY" ]; then
-  if [ "$INSTALL_MODE" = update ]; then
-    # Only bounce the daemon when the binary actually changed. `restart` (and
-    # even `start`) stop-then-start the running service, so an unconditional
-    # restart would needlessly interrupt an already-current daemon on every
-    # `openllm update` — the common no-op case. Credentials are already
-    # persisted, so the restart never prompts.
-    case " $INSTALLED_COMPONENTS " in
-      *" openllm "*)
-        echo "Restarting the daemon to pick up the new binary..."
-        "$BIN_DIR/openllm" daemon restart || die "daemon restart failed — run '$BIN_DIR/openllm daemon status' to diagnose"
-        ;;
-      *)
-        echo "  daemon already current — no restart needed"
-        ;;
-    esac
-  else
-    echo "Starting the daemon..."
-    "$BIN_DIR/openllm" daemon start || die "daemon start failed — run '$BIN_DIR/openllm daemon status' to diagnose"
-  fi
-elif [ "$INSTALL_MODE" = update ]; then
-  # Keyless update: converge binaries + config only. Never register/start an
-  # unpaired daemon, and never tear down an existing service — that is a
-  # first-install reconciliation, not an update action.
-  echo "OpenLLM updated (no API key configured; daemon left as-is)."
-else
-  # Keyless first install: clear any stale unpaired registration now. The closing
-  # banner then either runs the interactive credential gate (`openllm start` on a
-  # controlling terminal) or prints the manual next step — see below.
-  reconcile_keyless_service
 fi
 
 # --- provision the vendor subscription CLIs (background) -------------------
@@ -825,6 +795,8 @@ fi
 # (see cli-install.ts) — symlink self-heal is separate and needs no write grant
 # on the host CLI dirs. Fully best-effort: guarded so a slow/failed vendor
 # install never fails the daemon install, and logged to ~/.openllm/cli-install.log.
+# Full setup only, and only AFTER authentication succeeds (or a usable key was
+# already present). Minimal / update / keyless installs never reach here.
 #
 # Progress is tracked in per-provider JSON under
 # `$OPENLLM_DIR/vendor-cli-install/<slug>.json` (protocol subscription slugs).
@@ -1261,6 +1233,7 @@ launch_vendor_cli_install() {
   local installer_fn="${8:-}"
   local attempt_id started json worker_pid worker_start file
   local worker_pid_file handshake_file
+  VENDOR_LAST_PID=""
 
   if ! vendor_cli_acquire_lock "$slug"; then
     echo "  $name CLI: installer already running — skipping duplicate."
@@ -1302,10 +1275,10 @@ launch_vendor_cli_install() {
     echo "$name CLI: state write failed before launch — skipped." \
       >>"$OPENLLM_DIR/cli-install.log" 2>/dev/null || true
     vendor_cli_release_lock "$slug"
-    return 0
+    return 1
   fi
 
-  echo "  $name CLI: installing in the background…"
+  echo "  $name CLI: installing…"
   # Handshake/pid files are attempt-scoped. A completed older worker must not
   # `rm` a newer attempt's handshake (provider-only paths caused that race).
   worker_pid_file="$(vendor_cli_state_dir)/.${slug}.${attempt_id}.worker_pid"
@@ -1393,6 +1366,7 @@ launch_vendor_cli_install() {
       write_progress failed installer_failed "$rc"
     fi
     vendor_cli_cleanup_attempt_files "$worker_pid_file" "$handshake_file"
+    exit "$rc"
   ) >>"$OPENLLM_DIR/cli-install.log" 2>&1 &
   worker_pid=$!
 
@@ -1427,6 +1401,7 @@ launch_vendor_cli_install() {
     return 0
   }
   vendor_cli_release_lock "$slug"
+  VENDOR_LAST_PID="$worker_pid"
 }
 
 # ── Google Antigravity (official ACP agent, latest release) ─────────────────
@@ -1625,7 +1600,8 @@ provision_clis() {
     echo "  Vendor CLIs: curl not found — install them by hand from their official installers." >&2
     return 0
   fi
-  local spec name cmd slug dest url
+  local spec name cmd slug dest url failed=0 pid
+  local pids=()
   for spec in "${specs[@]}"; do
     IFS='|' read -r name cmd slug dest url <<<"$spec"
     vendor_cli_selected "$slug" || continue
@@ -1639,7 +1615,11 @@ provision_clis() {
         >>"$OPENLLM_DIR/cli-install.log" 2>/dev/null || true
       continue
     fi
-    launch_vendor_cli_install "$name" "$cmd" "$slug" "$dest" "$url" "$run_path" "$curl_bin" || true
+    if launch_vendor_cli_install "$name" "$cmd" "$slug" "$dest" "$url" "$run_path" "$curl_bin"; then
+      [ -z "$VENDOR_LAST_PID" ] || pids+=("$VENDOR_LAST_PID")
+    else
+      failed=1
+    fi
   done
   # Antigravity is behind a kill switch (off by default — not yet reliable).
   # `OPENLLM_ANTIGRAVITY=1` opts in and writes the marker the daemon reads
@@ -1649,20 +1629,101 @@ provision_clis() {
     0) rm -f "$OPENLLM_DIR/antigravity-enabled" 2>/dev/null || true ;;
   esac
   if [ -f "$OPENLLM_DIR/antigravity-enabled" ] && vendor_cli_selected antigravity; then
-    provision_antigravity "$run_path" "$curl_bin" || true
+    VENDOR_LAST_PID=""
+    if provision_antigravity "$run_path" "$curl_bin"; then
+      [ -z "$VENDOR_LAST_PID" ] || pids+=("$VENDOR_LAST_PID")
+    else
+      failed=1
+    fi
   fi
+  if [ "${#pids[@]}" -gt 0 ]; then
+    for pid in "${pids[@]}"; do
+      wait "$pid" || failed=1
+    done
+  fi
+  [ "$failed" = 0 ]
 }
 # `|| true` + the subshell/background jobs keep this off the `set -euo
 # pipefail` path — a vendor install can never abort the daemon install.
 # Background jobs outlive this script. Skipped on a manual update: rerunning
 # every vendor's installer is a first-install action the user didn't ask for.
-if [ "$INSTALL_MODE" != update ]; then
-  # OPENLLM_SKIP_VENDOR_CLIS — install only the openllm binary; skip background
-  # vendor CLI downloads (claude / codex / kimi / grok / cursor-agent / muse).
-  if [ -z "${OPENLLM_SKIP_VENDOR_CLIS:-}" ]; then
-    provision_clis || true
+# Also skipped without a usable API key — authentication comes first.
+VENDOR_PROVISIONED=0
+VENDOR_FAILED=0
+if [ "$INSTALL_MODE" != update ] && [ "$SETUP_MODE" != minimal ] && [ -n "$API_KEY" ] && [ -z "${OPENLLM_SKIP_VENDOR_CLIS:-}" ]; then
+  if has_controlling_tty || [ "${OPENLLM_INSTALL_VENDOR_CLIS:-}" = 1 ]; then
+    VENDOR_PROVISIONED=1
+    if ! provision_clis; then
+      VENDOR_FAILED=1
+      echo "Warning: vendor CLI installation failed; see $OPENLLM_DIR/cli-install.log and rerun the installer." >&2
+    fi
+  else
+    echo "Vendor CLIs were not installed: rerun interactively or set OPENLLM_INSTALL_VENDOR_CLIS=1 to authorize installation." >&2
+    VENDOR_FAILED=1
   fi
 fi
+
+# --- start / reconcile the service (after auth + vendors) ------------------
+# `openllm daemon start` owns service registration (launchd / systemd user unit,
+# restart-on-crash, boot start, linger). Full setup only starts once a usable
+# key exists. Minimal setup never starts or restarts as a side effect; an
+# already-running daemon is left alone on a mode switch.
+DAEMON_STARTED=0
+DAEMON_START_FAILED=0
+if [ "$SETUP_MODE" = minimal ]; then
+  if [ "$INSTALL_MODE" = update ]; then
+    echo "OpenLLM updated (minimal setup; daemon left as-is)."
+  elif [ -n "$API_KEY" ]; then
+    echo "Minimal setup — daemon not started. Run \`openllm daemon start\` later if you want this machine to serve."
+  fi
+elif [ -n "$API_KEY" ]; then
+  if [ "$INSTALL_MODE" = update ]; then
+    # Only bounce the daemon when the binary actually changed. Credentials are
+    # already persisted, so the restart never prompts.
+    case " $INSTALLED_COMPONENTS " in
+      *" openllm "*)
+        echo "Restarting the daemon to pick up the new binary..."
+        if "$BIN_DIR/openllm" daemon restart; then
+          DAEMON_STARTED=1
+        else
+          DAEMON_START_FAILED=1
+          echo "Warning: daemon restart failed — run '$BIN_DIR/openllm daemon status' to diagnose" >&2
+        fi
+        ;;
+      *)
+        echo "  daemon already current — no restart needed"
+        ;;
+    esac
+  else
+    echo "Starting the daemon..."
+    if "$BIN_DIR/openllm" daemon start; then
+      DAEMON_STARTED=1
+    else
+      DAEMON_START_FAILED=1
+      echo "Warning: daemon start failed — run '$BIN_DIR/openllm daemon status' to diagnose" >&2
+    fi
+  fi
+elif [ "$INSTALL_MODE" = update ]; then
+  # Keyless update: converge binaries + config only. Never register/start an
+  # unpaired daemon, and never tear down an existing service — that is a
+  # first-install reconciliation, not an update action.
+  echo "OpenLLM updated (no API key configured; daemon left as-is)."
+fi
+
+print_auth_next_steps() {
+  cat <<EOF
+
+OpenLLM needs an API key before setup can finish.
+Sign in at $ORIGIN/sign-in.
+New users will receive a key during onboarding. Already have an account? Open Keys after signing in.
+Then run: openllm login
+EOF
+  if [ "$SETUP_MODE" != minimal ]; then
+    cat <<EOF
+After authentication, start the daemon with: openllm daemon start
+EOF
+  fi
+}
 
 if [ "$INSTALL_MODE" = update ]; then
   # A manual update did no shell wiring or vendor provisioning — keep the closing
@@ -1675,7 +1736,8 @@ OpenLLM is up to date.
   openllm --help           everything else
 EOF
 elif [ "$SETUP_MODE" = minimal ]; then
-  cat <<EOF
+  if [ -n "$API_KEY" ]; then
+    cat <<EOF
 
 OpenLLM is installed (minimal setup).
 
@@ -1688,29 +1750,20 @@ Open a new shell (or source your rc) so \`openllm\` and \`ollm\` are on PATH.
 Minimal setup does not install vendor CLIs or start the daemon. A missing
 client will offer to install just that CLI when you run it.
 EOF
-  if [ -z "$API_KEY" ]; then
-    if has_controlling_tty && [ -x "$BIN_DIR/openllm" ]; then
-      # Minimal auth only — never `openllm start` (that registers the daemon).
-      echo
-      if ! "$BIN_DIR/openllm" login < /dev/tty; then
-        cat <<EOF
+  else
+    if [ "$AUTH_ATTEMPTED" = 1 ] && [ "$AUTH_FAILED" = 1 ]; then
+      cat <<EOF
 
 No API key saved yet. Finish authentication any time with: openllm login
 (Sign in at $ORIGIN/sign-in to get a key.)
 EOF
-      fi
     else
-      cat <<EOF
-
-OpenLLM needs an API key before clients can run.
-Sign in at $ORIGIN/sign-in.
-New users will receive a key during onboarding. Already have an account? Open Keys after signing in.
-Then run: openllm login
-EOF
+      print_auth_next_steps
     fi
   fi
 else
-  cat <<EOF
+  if [ -n "$API_KEY" ] && [ "$DAEMON_START_FAILED" = 0 ] && [ "$VENDOR_FAILED" = 0 ]; then
+    cat <<EOF
 
 OpenLLM is installed.
 
@@ -1720,43 +1773,47 @@ OpenLLM is installed.
   openllm --help           everything else
 
 Open a new shell (or source your rc) so \`openllm\` and \`ollm\` are on PATH.
-Any missing vendor CLIs are installing in the background
-(see ~/.openllm/cli-install.log). Open the dashboard's Providers tab to
-connect each vendor once its CLI is ready.
 EOF
-  if [ -z "$API_KEY" ]; then
-    if has_controlling_tty && [ -x "$BIN_DIR/openllm" ]; then
-      # Single-step onboarding: hand straight to the gated `openllm start` instead
-      # of asking the user to run a second command. Its credential gate prints the
-      # sign-in guidance, reads the key hidden from /dev/tty, validates the format
-      # (reprompting on a bad paste), persists it, then registers + starts the
-      # service. We bind the child's stdin to /dev/tty so the gate sees an
-      # interactive terminal even though this script's own stdin is the curl pipe.
-      #
-      # A cancel (Ctrl-C / empty paste) or any nonzero exit must NOT fail the
-      # install — the binaries and config are already in place; we just point the
-      # user back at the start command. `set -e` is suppressed by the `if`.
-      echo
-      if ! "$BIN_DIR/openllm" start < /dev/tty; then
-        # `openllm start` already printed the specific reason to the terminal
-        # (key cancelled, save failed, or a service-registration error). Do NOT
-        # re-attribute every nonzero exit to a missing key — the failure may be
-        # operational. Stay cause-neutral and point back at the one command that
-        # finishes setup.
-        cat <<EOF
-
-The daemon isn't running yet. Finish setup any time with: openllm start
-(If you still need an API key, sign in at $ORIGIN/sign-in.)
+    if [ "$VENDOR_PROVISIONED" = 1 ]; then
+      cat <<EOF
+Vendor CLI provisioning finished (see ~/.openllm/cli-install.log).
+Open the dashboard's Providers tab to connect your vendor accounts.
 EOF
-      fi
     else
       cat <<EOF
-
-OpenLLM needs an API key before it can start.
-Sign in at $ORIGIN/sign-in.
-New users will receive a key during onboarding. Already have an account? Open Keys after signing in.
-Then run: openllm start
+Vendor CLIs were not provisioned this run. Open the dashboard's Providers
+tab to connect each vendor, or rerun the installer after authentication.
 EOF
+    fi
+  elif [ -n "$API_KEY" ] && [ "$DAEMON_START_FAILED" = 0 ]; then
+    echo "OpenLLM setup is incomplete: vendor CLI provisioning did not finish. Rerun the installer to retry."
+  elif [ -n "$API_KEY" ] && [ "$DAEMON_START_FAILED" = 1 ]; then
+    cat <<EOF
+
+OpenLLM is installed, but the daemon did not start.
+
+  openllm daemon start     finish daemon setup
+  openllm daemon status    diagnose the failure
+  openllm --help           everything else
+
+Open a new shell (or source your rc) so \`openllm\` and \`ollm\` are on PATH.
+EOF
+  else
+    if [ "$AUTH_ATTEMPTED" = 1 ] && [ "$AUTH_FAILED" = 1 ]; then
+      cat <<EOF
+
+Authentication did not finish. The OpenLLM binary is installed; finish
+setup any time with: openllm login
+Then start the daemon with: openllm daemon start
+(Sign in at $ORIGIN/sign-in if you still need an API key.)
+EOF
+    else
+      print_auth_next_steps
     fi
   fi
 fi
+
+# The binary + config are already in place. Incomplete auth / vendor / daemon
+# steps are reported above with actionable next commands; keep exit zero so a
+# cancelled or headless partial install does not undo that work. Callers that
+# need a hard gate should check for OPENLLM_API_KEY / daemon status themselves.
