@@ -255,6 +255,62 @@ const fetchBounded = async (
   }
 };
 
+const abortOutcome = <T>(
+  caller: AbortSignal | undefined,
+): Extract<TBodyOutcome<T>, { readonly kind: "aborted" | "timeout" }> =>
+  caller?.aborted ? { kind: "aborted" } : { kind: "timeout" };
+
+/** Best-effort cancel that must not hang the login loop. */
+const cancelReaderBestEffort = (
+  reader: ReadableStreamDefaultReader<Uint8Array>,
+): void => {
+  try {
+    void reader.cancel().catch(() => {});
+  } catch {
+    // ignore
+  }
+};
+
+const raceAgainstAbort = <T>(
+  work: Promise<T>,
+  signal: AbortSignal,
+  caller: AbortSignal | undefined,
+): Promise<
+  | { readonly kind: "value"; readonly value: T }
+  | Extract<TBodyOutcome<unknown>, { readonly kind: "aborted" | "timeout" }>
+> => {
+  if (signal.aborted) return Promise.resolve(abortOutcome(caller));
+  return new Promise((resolve) => {
+    let settled = false;
+    const onAbort = (): void => {
+      if (settled) return;
+      settled = true;
+      signal.removeEventListener("abort", onAbort);
+      resolve(abortOutcome(caller));
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
+    work.then(
+      (value) => {
+        if (settled) return;
+        settled = true;
+        signal.removeEventListener("abort", onAbort);
+        resolve({ kind: "value", value });
+      },
+      (error: unknown) => {
+        if (settled) return;
+        settled = true;
+        signal.removeEventListener("abort", onAbort);
+        if (caller?.aborted || isAbortError(error)) {
+          resolve(abortOutcome(caller));
+          return;
+        }
+        // Surface as timeout-equivalent failure for the body reader.
+        resolve(abortOutcome(caller));
+      },
+    );
+  });
+};
+
 const readJsonBounded = async <T>(
   res: Response,
   deadlineMs: number,
@@ -274,9 +330,7 @@ const readJsonBounded = async <T>(
   }
   const { signal, cleanup } = combineAbortSignals(caller, budget);
   try {
-    if (signal.aborted) {
-      return caller?.aborted ? { kind: "aborted" } : { kind: "timeout" };
-    }
+    if (signal.aborted) return abortOutcome(caller);
     const reader = res.body?.getReader();
     if (reader === undefined) {
       // No stream (tests / synthetic Response) — still race json() against budget.
@@ -284,43 +338,28 @@ const readJsonBounded = async <T>(
         (body): TBodyOutcome<T> => ({ kind: "ok", body: body as T }),
         (): TBodyOutcome<T> => ({ kind: "invalid" }),
       );
-      const abortPromise = new Promise<TBodyOutcome<T>>((resolve) => {
-        if (signal.aborted) {
-          resolve(caller?.aborted ? { kind: "aborted" } : { kind: "timeout" });
-          return;
-        }
-        signal.addEventListener(
-          "abort",
-          () =>
-            resolve(
-              caller?.aborted ? { kind: "aborted" } : { kind: "timeout" },
-            ),
-          { once: true },
-        );
-      });
-      return await Promise.race([jsonPromise, abortPromise]);
+      const raced = await raceAgainstAbort(jsonPromise, signal, caller);
+      if (raced.kind !== "value") return raced;
+      return raced.value;
     }
     const chunks: Uint8Array[] = [];
     let total = 0;
     while (true) {
       if (signal.aborted) {
-        try {
-          await reader.cancel();
-        } catch {
-          // ignore
-        }
-        return caller?.aborted ? { kind: "aborted" } : { kind: "timeout" };
+        cancelReaderBestEffort(reader);
+        return abortOutcome(caller);
       }
-      const { done, value } = await reader.read();
+      const raced = await raceAgainstAbort(reader.read(), signal, caller);
+      if (raced.kind !== "value") {
+        cancelReaderBestEffort(reader);
+        return raced;
+      }
+      const { done, value } = raced.value;
       if (done) break;
       if (value !== undefined) {
         total += value.byteLength;
         if (total > maxBytes) {
-          try {
-            await reader.cancel();
-          } catch {
-            // ignore
-          }
+          cancelReaderBestEffort(reader);
           return { kind: "invalid" };
         }
         chunks.push(value);
@@ -339,9 +378,7 @@ const readJsonBounded = async <T>(
       return { kind: "invalid" };
     }
   } catch (error) {
-    if (caller?.aborted || isAbortError(error)) {
-      return caller?.aborted ? { kind: "aborted" } : { kind: "timeout" };
-    }
+    if (caller?.aborted || isAbortError(error)) return abortOutcome(caller);
     return { kind: "invalid" };
   } finally {
     cleanup();
