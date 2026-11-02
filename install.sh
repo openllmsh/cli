@@ -147,7 +147,7 @@ prompt_setup_mode() {
   if ! exec 9<"$tty"; then
     return 1
   fi
-  trap 'exec 9<&- 2>/dev/null || true; trap - RETURN' RETURN
+  trap 'exec 9<&-; trap - RETURN' RETURN
   echo >&2
   echo "Choose installation setup:" >&2
   echo "  Full     install supported vendor CLIs and start the local daemon" >&2
