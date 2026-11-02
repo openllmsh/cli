@@ -143,6 +143,17 @@ const cancelAuth = async (
   }
 };
 
+/** Transient claim statuses that are safe to retry against the same auth. */
+export const isRetryableCliAuthClaimStatus = (status: number): boolean =>
+  status === 429 || status === 502 || status === 503;
+
+const isAbortError = (error: unknown): boolean => {
+  if (error === undefined || error === null || typeof error !== "object")
+    return false;
+  const name = "name" in error ? error.name : undefined;
+  return name === "AbortError" || name === "TimeoutError";
+};
+
 const parseSealed = (raw: string): TCliAuthSealed | null => {
   try {
     const value: unknown = JSON.parse(raw);
@@ -320,81 +331,119 @@ export const runCliAuthLogin = async (
           return { ok: false, message: "[openllm] authorization expired.\n" };
         }
         if (status === "approved") {
-          let claimRes: Response;
-          try {
-            claimRes = await fetchImpl(
-              `${base}/api/cli/auth/${encodeURIComponent(id)}/claim`,
-              {
-                method: "POST",
-                headers: {
-                  "content-type": "application/json",
-                  accept: "application/json",
+          // Claim is same-caller idempotent until original expiry. Retry
+          // transient network / 429 / 502 / 503 against THIS auth only —
+          // never recreate. Abort during claim cancels and reports
+          // cancellation; terminal failures best-effort cancel.
+          while (now() < deadline) {
+            if (signal?.aborted) {
+              await cancelAuth(base, id, pollToken, resolved);
+              return { ok: false, message: "[openllm] login cancelled.\n" };
+            }
+            let claimRes: Response;
+            try {
+              claimRes = await fetchImpl(
+                `${base}/api/cli/auth/${encodeURIComponent(id)}/claim`,
+                {
+                  method: "POST",
+                  headers: {
+                    "content-type": "application/json",
+                    accept: "application/json",
+                  },
+                  body: JSON.stringify({ poll_token: pollToken }),
+                  signal,
                 },
-                body: JSON.stringify({ poll_token: pollToken }),
-                signal,
-              },
-            );
-          } catch {
-            return {
-              ok: false,
-              message: "[openllm] could not claim the key (network error).\n",
-            };
-          }
-          if (!claimRes.ok) {
-            return {
-              ok: false,
-              message: `[openllm] could not claim the key (${claimRes.status}).\n`,
-            };
-          }
-          const claimed = await readJson<TClaimed>(claimRes);
-          if (
-            !claimed.ok ||
-            typeof claimed.body.user_id !== "string" ||
-            claimed.body.user_id.length === 0 ||
-            typeof claimed.body.sealed !== "string"
-          ) {
-            return {
-              ok: false,
-              message: "[openllm] could not claim the key (bad response).\n",
-            };
-          }
-          const sealed = parseSealed(claimed.body.sealed);
-          if (sealed === null) {
-            return {
-              ok: false,
-              message:
-                "[openllm] claimed payload was not a valid sealed key.\n",
-            };
-          }
-          let plaintext: Uint8Array;
-          try {
-            plaintext = await openCliAuthSealed(
-              {
-                userId: claimed.body.user_id,
-                authorizationId: id,
-                recipientPublicKeyB64: pair.publicKeyB64,
-              },
-              sealed,
-              pair.privateKey,
-            );
-          } catch {
-            return {
-              ok: false,
-              message: "[openllm] could not open the sealed key.\n",
-            };
-          }
-          try {
-            const apiKey = new TextDecoder().decode(plaintext);
-            if (!isUsableOpenllmApiKey(apiKey)) {
+              );
+            } catch (error) {
+              if (signal?.aborted || isAbortError(error)) {
+                await cancelAuth(base, id, pollToken, resolved);
+                return { ok: false, message: "[openllm] login cancelled.\n" };
+              }
+              if (now() + CLI_AUTH_POLL_MS >= deadline) {
+                await cancelAuth(base, id, pollToken, resolved);
+                return {
+                  ok: false,
+                  message:
+                    "[openllm] could not claim the key (network error).\n",
+                };
+              }
+              await sleep(CLI_AUTH_POLL_MS);
+              continue;
+            }
+            if (!claimRes.ok) {
+              if (isRetryableCliAuthClaimStatus(claimRes.status)) {
+                if (now() + CLI_AUTH_POLL_MS >= deadline) {
+                  await cancelAuth(base, id, pollToken, resolved);
+                  return {
+                    ok: false,
+                    message: `[openllm] could not claim the key (${claimRes.status}).\n`,
+                  };
+                }
+                await sleep(CLI_AUTH_POLL_MS);
+                continue;
+              }
+              await cancelAuth(base, id, pollToken, resolved);
               return {
                 ok: false,
-                message: "[openllm] claimed key format is invalid.\n",
+                message: `[openllm] could not claim the key (${claimRes.status}).\n`,
               };
             }
-            return { ok: true, apiKey: apiKey.trim() };
-          } finally {
-            zero(plaintext);
+            const claimed = await readJson<TClaimed>(claimRes);
+            if (
+              !claimed.ok ||
+              typeof claimed.body.user_id !== "string" ||
+              claimed.body.user_id.length === 0 ||
+              typeof claimed.body.sealed !== "string"
+            ) {
+              await cancelAuth(base, id, pollToken, resolved);
+              return {
+                ok: false,
+                message: "[openllm] could not claim the key (bad response).\n",
+              };
+            }
+            const sealed = parseSealed(claimed.body.sealed);
+            if (sealed === null) {
+              await cancelAuth(base, id, pollToken, resolved);
+              return {
+                ok: false,
+                message:
+                  "[openllm] claimed payload was not a valid sealed key.\n",
+              };
+            }
+            let plaintext: Uint8Array;
+            try {
+              plaintext = await openCliAuthSealed(
+                {
+                  userId: claimed.body.user_id,
+                  authorizationId: id,
+                  recipientPublicKeyB64: pair.publicKeyB64,
+                },
+                sealed,
+                pair.privateKey,
+              );
+            } catch {
+              await cancelAuth(base, id, pollToken, resolved);
+              return {
+                ok: false,
+                message: "[openllm] could not open the sealed key.\n",
+              };
+            }
+            try {
+              const apiKey = new TextDecoder().decode(plaintext);
+              if (!isUsableOpenllmApiKey(apiKey)) {
+                await cancelAuth(base, id, pollToken, resolved);
+                return {
+                  ok: false,
+                  message: "[openllm] claimed key format is invalid.\n",
+                };
+              }
+              return { ok: true, apiKey: apiKey.trim() };
+            } finally {
+              zero(plaintext);
+            }
           }
+          await cancelAuth(base, id, pollToken, resolved);
+          return { ok: false, message: "[openllm] authorization timed out.\n" };
         }
       }
     }
