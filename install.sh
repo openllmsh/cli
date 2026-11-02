@@ -35,8 +35,18 @@
 #   OPENLLM_SKIP_VENDOR_CLIS     set to skip background vendor CLI provisioning
 #   OPENLLM_ONLY_VENDOR_CLIS     comma-separated subscription slugs to provision
 #                                (e.g. claude_code,chatgpt); unset = all vendors
+#   OPENLLM_SETUP_MODE           product setup mode: `full` (default) or `minimal`.
+#                                Full authenticates, provisions missing vendor CLIs,
+#                                and starts the daemon when a key is available.
+#                                Minimal authenticates only — no vendor install and
+#                                no daemon start; later `openllm <client>` launches
+#                                stay cloud-directed. Persisted into the env file so
+#                                subsequent launches honor it. Distinct from
+#                                OPENLLM_INSTALL_MODE (install vs update).
+#   --minimal                    same as OPENLLM_SETUP_MODE=minimal (for
+#                                `curl …/install | bash -s -- --minimal`)
 #
-# This is the ONLY shell installer. It also background-provisions
+# This is the ONLY shell installer. In full mode it also background-provisions
 # any missing vendor subscription CLIs (claude / codex / kimi / grok / cursor-agent / muse) via each
 # vendor's official installer — skip if already present. Google Antigravity has no
 # installer script, so the latest official ACP agent release (resolved from the
@@ -60,6 +70,10 @@ ENV_FILE="${OPENLLM_DAEMON_ENV_FILE:-$OPENLLM_DIR/.env}"
 # shell/PATH/completion edits, and no teardown of an existing healthy service.
 # (Validated in preflight, once `die` is defined.)
 INSTALL_MODE="${OPENLLM_INSTALL_MODE:-install}"
+# Product setup mode (`full`|`minimal`). Distinct from INSTALL_MODE. Resolved
+# after argv parse + env-file helpers exist — see below.
+SETUP_MODE=""
+SETUP_MODE_EXPLICIT=0
 # Space-delimited list of components whose on-disk bytes were actually replaced
 # this run (see install_component). Update mode reads it to skip a pointless
 # daemon restart when nothing changed.
@@ -69,9 +83,18 @@ has_command() { command -v "$1" >/dev/null 2>&1; }
 
 die() { echo "Error: $*" >&2; exit 1; }
 
-# Reject unknown installer options so a mistyped flag never silently no-ops.
+# Accept `--minimal`; reject every other option so a mistyped flag never
+# silently no-ops. `curl … | bash -s -- --minimal` is the documented path.
 for arg in "$@"; do
-  die "unknown installer option: $arg"
+  case "$arg" in
+    --minimal)
+      OPENLLM_SETUP_MODE=minimal
+      SETUP_MODE_EXPLICIT=1
+      ;;
+    *)
+      die "unknown installer option: $arg"
+      ;;
+  esac
 done
 
 # Can we prompt the human running this install? A piped `curl … | bash` leaves
@@ -383,6 +406,30 @@ case "$INSTALL_MODE" in
   install|update) ;;
   *) die "OPENLLM_INSTALL_MODE must be 'install' or 'update'" ;;
 esac
+# Product setup mode. Explicit env / --minimal wins. On a fresh install the
+# default is `full`. On update, an absent explicit value preserves whatever is
+# already in the env file (and leaves the CLI's own default of `full` if the
+# file never had one) so a binary update never flips modes.
+if [ -n "${OPENLLM_SETUP_MODE:-}" ]; then
+  SETUP_MODE_EXPLICIT=1
+  SETUP_MODE="$(trim_whitespace "$OPENLLM_SETUP_MODE")"
+elif [ "$INSTALL_MODE" = update ]; then
+  SETUP_MODE="$(trim_whitespace "$(env_file_lookup OPENLLM_SETUP_MODE || true)")"
+else
+  SETUP_MODE=full
+fi
+case "$SETUP_MODE" in
+  "" )
+    # Update with no prior value — leave unset so we do not invent one.
+    ;;
+  full|minimal) ;;
+  *) die "OPENLLM_SETUP_MODE must be 'full' or 'minimal'" ;;
+esac
+# Minimal install implies no vendor provisioning and no daemon start for this
+# run. An explicit OPENLLM_SKIP_VENDOR_CLIS remains honored for full installs.
+if [ "$SETUP_MODE" = minimal ]; then
+  OPENLLM_SKIP_VENDOR_CLIS=1
+fi
 case "$(uname -s)" in
   Darwin) OS="darwin" ;;
   Linux)  OS="linux" ;;
@@ -610,7 +657,10 @@ write_env_file() {
   : > "$tmp"
   # Keep unrelated lines byte-for-byte, but replace every installer-owned key with
   # one canonical occurrence. An ignored invalid persisted key is therefore removed.
-  local wrote_origin=0 wrote_port=0 wrote_key=0 wrote_device=0 wrote_anchor=0
+  local wrote_origin=0 wrote_port=0 wrote_key=0 wrote_device=0 wrote_anchor=0 wrote_setup=0
+  # Only rewrite setup mode when we have a resolved value to persist. An update
+  # with no prior/explicit mode leaves any existing line (or its absence) alone.
+  local desired_setup="$SETUP_MODE"
   if [ -f "$ENV_FILE" ]; then
     while IFS= read -r line || [ -n "$line" ]; do
       key="${line%%=*}"
@@ -630,6 +680,17 @@ write_env_file() {
         OPENLLM_DEVICE_ID)
           if [ -n "$current_device" ] && [ "$wrote_device" = 0 ]; then printf 'OPENLLM_DEVICE_ID=%s\n' "$current_device" >> "$tmp"; wrote_device=1; fi
           ;;
+        OPENLLM_SETUP_MODE)
+          if [ -n "$desired_setup" ] && [ "$wrote_setup" = 0 ]; then
+            printf 'OPENLLM_SETUP_MODE=%s\n' "$desired_setup" >> "$tmp"
+            wrote_setup=1
+          elif [ -z "$desired_setup" ]; then
+            # Preserve the existing line byte-for-byte on an update that did not
+            # resolve a mode (neither explicit nor previously present after trim).
+            printf '%s\n' "$line" >> "$tmp"
+            wrote_setup=1
+          fi
+          ;;
         *) printf '%s\n' "$line" >> "$tmp" ;;
       esac
     done < "$ENV_FILE"
@@ -639,6 +700,7 @@ write_env_file() {
   [ -z "$desired_key" ] || [ "$wrote_key" = 1 ] || printf 'OPENLLM_API_KEY=%s\n' "$desired_key" >> "$tmp"
   [ -z "$current_device" ] || [ "$wrote_device" = 1 ] || printf 'OPENLLM_DEVICE_ID=%s\n' "$current_device" >> "$tmp"
   [ -z "$desired_anchor" ] || [ "$wrote_anchor" = 1 ] || printf 'OPENLLM_DEVICE_ANCHOR=%s\n' "$desired_anchor" >> "$tmp"
+  [ -z "$desired_setup" ] || [ "$wrote_setup" = 1 ] || printf 'OPENLLM_SETUP_MODE=%s\n' "$desired_setup" >> "$tmp"
   chmod 0600 "$tmp"
   # Abort with a clear error if the atomic replace fails — never fall through to
   # announce success (or set API_KEY) on a config that was not written. The
@@ -710,7 +772,18 @@ reconcile_keyless_service() {
   esac
 }
 
-if [ -n "$API_KEY" ]; then
+if [ "$SETUP_MODE" = minimal ]; then
+  # Minimal setup never starts or restarts the daemon as a side effect of
+  # install/update. An already-running daemon is left alone — mode switch does
+  # not stop it. Keyless first install still reconciles unpaired registrations.
+  if [ -z "$API_KEY" ] && [ "$INSTALL_MODE" != update ]; then
+    reconcile_keyless_service
+  elif [ "$INSTALL_MODE" = update ]; then
+    echo "OpenLLM updated (minimal setup; daemon left as-is)."
+  else
+    echo "Minimal setup — daemon not started. Run \`openllm daemon start\` later if you want this machine to serve."
+  fi
+elif [ -n "$API_KEY" ]; then
   if [ "$INSTALL_MODE" = update ]; then
     # Only bounce the daemon when the binary actually changed. `restart` (and
     # even `start`) stop-then-start the running service, so an unconditional
@@ -1601,6 +1674,41 @@ OpenLLM is up to date.
   openllm status           daemon service + run state
   openllm --help           everything else
 EOF
+elif [ "$SETUP_MODE" = minimal ]; then
+  cat <<EOF
+
+OpenLLM is installed (minimal setup).
+
+  openllm claude           run Claude Code through the cloud origin
+  ollm codex               (short alias) run Codex through OpenLLM
+  openllm daemon start     optional — make this machine a local supplier
+  openllm --help           everything else
+
+Open a new shell (or source your rc) so \`openllm\` and \`ollm\` are on PATH.
+Minimal setup does not install vendor CLIs or start the daemon. A missing
+client will offer to install just that CLI when you run it.
+EOF
+  if [ -z "$API_KEY" ]; then
+    if has_controlling_tty && [ -x "$BIN_DIR/openllm" ]; then
+      # Minimal auth only — never `openllm start` (that registers the daemon).
+      echo
+      if ! "$BIN_DIR/openllm" login < /dev/tty; then
+        cat <<EOF
+
+No API key saved yet. Finish authentication any time with: openllm login
+(Sign in at $ORIGIN/sign-in to get a key.)
+EOF
+      fi
+    else
+      cat <<EOF
+
+OpenLLM needs an API key before clients can run.
+Sign in at $ORIGIN/sign-in.
+New users will receive a key during onboarding. Already have an account? Open Keys after signing in.
+Then run: openllm login
+EOF
+    fi
+  fi
 else
   cat <<EOF
 
