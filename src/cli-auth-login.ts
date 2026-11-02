@@ -565,6 +565,7 @@ export const runCliAuthLogin = async (
     poll_token: pollToken,
     authorize_url: authorizeUrl,
   } = createdBody.body;
+  let safeAuthorizeUrl: string;
   try {
     const url = new URL(authorizeUrl, base);
     if (
@@ -576,6 +577,9 @@ export const runCliAuthLogin = async (
       url.password !== ""
     )
       throw new Error("invalid URL");
+    // Print/open the validated canonical href — never the raw server string
+    // (relative paths, surrounding whitespace).
+    safeAuthorizeUrl = url.href;
   } catch {
     return {
       ok: false,
@@ -583,9 +587,9 @@ export const runCliAuthLogin = async (
     };
   }
   write(
-    `Open this link to authorize this CLI (works on another device too):\n  ${authorizeUrl}\n`,
+    `Open this link to authorize this CLI (works on another device too):\n  ${safeAuthorizeUrl}\n`,
   );
-  const opened = await openUrl(authorizeUrl);
+  const opened = await openUrl(safeAuthorizeUrl);
   if (!opened) openUrlHint(resolved);
   write("Waiting for approval…\n");
 

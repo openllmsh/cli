@@ -8,6 +8,7 @@
  */
 
 import { spawn } from "node:child_process";
+import type { Readable } from "node:stream";
 import type { TClient, TClientCurlInstall, TClientId } from "./registry";
 import { CLIENTS } from "./registry";
 
@@ -150,17 +151,33 @@ const defaultConfirm = async (message: string): Promise<boolean> => {
   return /^(y|yes)$/i.test(line.trim());
 };
 
-const readConfirmLine = async (): Promise<string> =>
+/**
+ * Read one confirm line from a readable stream (defaults to `process.stdin`).
+ * Stdin end/error, Ctrl-C, and Ctrl-D all settle as a decline (`"n"`), once,
+ * with every listener removed.
+ */
+export const readConfirmLine = async (
+  stdin: Readable = process.stdin,
+): Promise<string> =>
   new Promise<string>((resolve) => {
-    const stdin = process.stdin;
+    let settled = false;
     let buffer = "";
     const finish = (value: string): void => {
+      if (settled) return;
+      settled = true;
       stdin.off("data", onData);
+      stdin.off("end", onDecline);
+      stdin.off("error", onDecline);
       stdin.pause();
       resolve(value);
     };
-    const onData = (chunk: Buffer): void => {
-      for (const byte of chunk) {
+    const onDecline = (): void => {
+      process.stderr.write("\n");
+      finish("n");
+    };
+    const onData = (chunk: Buffer | string): void => {
+      const bytes = typeof chunk === "string" ? Buffer.from(chunk) : chunk;
+      for (const byte of bytes) {
         if (byte === 0x03 || byte === 0x04) {
           process.stderr.write("\n");
           finish("n");
@@ -180,6 +197,8 @@ const readConfirmLine = async (): Promise<string> =>
     };
     stdin.resume();
     stdin.on("data", onData);
+    stdin.on("end", onDecline);
+    stdin.on("error", onDecline);
   });
 
 const manualGuidance = (client: TClient, command: string | null): string => {
