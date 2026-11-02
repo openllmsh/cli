@@ -61639,6 +61639,16 @@
                                       }
                                     ]
                                   },
+                                  "inlineSystemMessages": {
+                                    "anyOf": [
+                                      {
+                                        "type": "boolean"
+                                      },
+                                      {
+                                        "type": "null"
+                                      }
+                                    ]
+                                  },
                                   "upstreamAcceptsResponseFormat": {
                                     "anyOf": [
                                       {
