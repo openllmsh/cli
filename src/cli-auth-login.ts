@@ -161,9 +161,14 @@ const defaultOpenUrl = async (url: string): Promise<boolean> => {
       stdio: "ignore",
       detached: true,
     });
-    proc.on("error", () => {});
+    // A missing opener (headless Linux, SSH) fails async via `error`, not a
+    // throw — wait for spawn/error so the "open it on another device" hint shows.
+    const started = await new Promise<boolean>((resolve) => {
+      proc.once("spawn", () => resolve(true));
+      proc.once("error", () => resolve(false));
+    });
     proc.unref();
-    return true;
+    return started;
   } catch {
     return false;
   }
