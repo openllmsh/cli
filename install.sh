@@ -53,12 +53,16 @@
 #                                On a fresh interactive install with no saved
 #                                mode, the installer asks Full vs Minimal on the
 #                                controlling tty (Enter → Full). Headless /
-#                                non-interactive installs keep the silent Full
-#                                default and never hang. An update, or a re-run
-#                                that already has OPENLLM_SETUP_MODE in the env
-#                                file, never prompts — the saved mode is
-#                                preserved. EOF / cancel aborts before any
-#                                mode-dependent persistence or vendor install.
+#                                non-interactive installs (CI, scripts, no
+#                                controlling tty) keep the silent Minimal
+#                                default and never hang — callers that want Full
+#                                must set OPENLLM_SETUP_MODE=full (and
+#                                OPENLLM_INSTALL_VENDOR_CLIS=1 to authorize
+#                                vendors). An update, or a re-run that already
+#                                has OPENLLM_SETUP_MODE in the env file, never
+#                                prompts — the saved mode is preserved. EOF /
+#                                cancel aborts before any mode-dependent
+#                                persistence or vendor install.
 #   --minimal                    same as OPENLLM_SETUP_MODE=minimal (for
 #                                `curl …/install | bash -s -- --minimal`)
 #
@@ -479,8 +483,8 @@ esac
 # OPENLLM_SETUP_MODE in the env file is preserved on re-run / update (no prompt,
 # no unexpected reset). On a fresh install with no saved mode: interactive
 # terminals ask Full vs Minimal (Enter → Full) before any mode-dependent work;
-# headless keeps the silent Full default and never hangs. Update with no prior
-# value leaves the mode unset so we do not invent one.
+# headless keeps the silent Minimal default and never hangs. Update with no
+# prior value leaves the mode unset so we do not invent one.
 if [ -n "${OPENLLM_SETUP_MODE:-}" ]; then
   SETUP_MODE_EXPLICIT=1
   SETUP_MODE="$(trim_whitespace "$OPENLLM_SETUP_MODE")"
@@ -492,7 +496,7 @@ else
         die "setup cancelled — re-run and choose Full or Minimal (or pass --minimal / OPENLLM_SETUP_MODE=…)"
       fi
     else
-      SETUP_MODE=full
+      SETUP_MODE=minimal
     fi
   fi
 fi

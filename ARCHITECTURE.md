@@ -143,8 +143,11 @@ to the compile-time cloud-origin bake. Product setup mode is
 `OPENLLM_SETUP_MODE=full|minimal` (persisted in that env file). The curl
 installer (`install.sh`) asks Full vs Minimal on a controlling tty when neither
 an explicit `--minimal` / `OPENLLM_SETUP_MODE` nor a saved mode is present
-(Enter → Full; EOF/cancel aborts with no vendor consent); headless keeps the
-silent Full default, and updates / re-runs with a saved mode never prompt.
+(Enter → Full; EOF/cancel aborts with no vendor consent); headless /
+non-interactive installs keep the silent Minimal default (callers that want
+Full must set `OPENLLM_SETUP_MODE=full`, and `OPENLLM_INSTALL_VENDOR_CLIS=1` to
+authorize vendors — the Mac desktop app does both), and updates / re-runs with
+a saved mode never prompt.
 **full** is ordinary vendor provisioning + daemon startup; **minimal** keeps
 client launches cloud-directed and never implicitly starts a local daemon
 (`clients/gateway.ts` skips the loopback probe unless `OPENLLM_GATEWAY=local`).
