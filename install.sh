@@ -837,6 +837,13 @@ vendor_cli_cleanup_attempt_files() {
   rm -f "$worker_pid_file" "$handshake_file" 2>/dev/null || true
 }
 
+# Tiny create-or-truncate seam for the post-spawn handshake file. Extracted so
+# tests can force a failure after the worker is already running without racing
+# directory permissions.
+vendor_cli_touch() {
+  : >"$1"
+}
+
 vendor_cli_process_start() {
   local pid="$1" raw
   # Portable PID-reuse guard (same idea as daemon child-supervisor lstart).
@@ -1225,6 +1232,28 @@ vendor_cli_reap_tree() {
   done
 }
 
+# Persist a terminal progress record from the PARENT before reaping a worker.
+# A timed-out parent can kill the worker before its on_signal trap finishes
+# nested-child cleanup (~0.75s) and writes interrupted — without this, the
+# JSON can be left forever at stage=installing.
+vendor_cli_mark_interrupted() {
+  local slug="$1" pid="${2:-}" reason="${3:-interrupted}"
+  local file attempt started json now
+  file="$(vendor_cli_state_dir)/${slug}.json"
+  [ -f "$file" ] || return 1
+  attempt="$(vendor_cli_read_field "$file" attempt_id || true)"
+  started="$(vendor_cli_read_num_field "$file" started_at_ms || true)"
+  [ -n "$attempt" ] || return 1
+  [ -n "$started" ] || started="$(vendor_cli_now_ms)"
+  now="$(vendor_cli_now_ms)"
+  if [ -n "$pid" ]; then
+    json="$(vendor_cli_build_json "$attempt" "$slug" interrupted "$started" "$now" "$reason" "$pid" "$(vendor_cli_process_start "$pid" || true)")"
+  else
+    json="$(vendor_cli_build_json "$attempt" "$slug" interrupted "$started" "$now" "$reason")"
+  fi
+  vendor_cli_write_state "$slug" "$json"
+}
+
 # Args: display, command, slug, dest launcher, installer URL, run PATH, curl,
 # and an OPTIONAL installer function. With the function set, the tracked worker
 # runs `<fn> <curl> <url>` in a subshell instead of `curl <url> | bash` — every
@@ -1379,29 +1408,40 @@ launch_vendor_cli_install() {
   json="$(vendor_cli_build_json "$attempt_id" "$slug" installing "$started" "$(vendor_cli_now_ms)" "" "$worker_pid" "$worker_start")"
   if ! vendor_cli_write_state "$slug" "$json"; then
     echo "  $name CLI: lost track after launch — stopping untracked worker." >&2
-    vendor_cli_reap_tree "$worker_pid"
-    json="$(vendor_cli_build_json "$attempt_id" "$slug" interrupted "$started" "$(vendor_cli_now_ms)" interrupted)"
+    # Persist terminal state BEFORE reaping so a slow on_signal cannot leave
+    # stage=installing after the parent already gave up.
+    json="$(vendor_cli_build_json "$attempt_id" "$slug" interrupted "$started" "$(vendor_cli_now_ms)" interrupted "$worker_pid" "$worker_start")"
     vendor_cli_write_state "$slug" "$json" || true
+    vendor_cli_reap_tree "$worker_pid"
+    wait "$worker_pid" 2>/dev/null || true
     vendor_cli_cleanup_attempt_files "$worker_pid_file" "$handshake_file"
     vendor_cli_release_lock "$slug"
-    return 0
+    VENDOR_LAST_PID=""
+    return 1
   fi
   printf '%s\n' "$worker_pid" >"$worker_pid_file" || {
-    vendor_cli_reap_tree "$worker_pid"
-    json="$(vendor_cli_build_json "$attempt_id" "$slug" interrupted "$started" "$(vendor_cli_now_ms)" interrupted)"
+    json="$(vendor_cli_build_json "$attempt_id" "$slug" interrupted "$started" "$(vendor_cli_now_ms)" interrupted "$worker_pid" "$worker_start")"
     vendor_cli_write_state "$slug" "$json" || true
-    vendor_cli_release_lock "$slug"
-    return 0
-  }
-  # Handshake last — worker may proceed to curl only after this exists.
-  : >"$handshake_file" || {
     vendor_cli_reap_tree "$worker_pid"
-    json="$(vendor_cli_build_json "$attempt_id" "$slug" interrupted "$started" "$(vendor_cli_now_ms)" interrupted)"
-    vendor_cli_write_state "$slug" "$json" || true
+    wait "$worker_pid" 2>/dev/null || true
     vendor_cli_cleanup_attempt_files "$worker_pid_file" "$handshake_file"
     vendor_cli_release_lock "$slug"
-    return 0
+    VENDOR_LAST_PID=""
+    return 1
   }
+  # Handshake last — worker may proceed to curl only after this exists.
+  # `vendor_cli_touch` is a tiny seam so tests can force a post-spawn failure
+  # without inventing filesystem races around chmod.
+  if ! vendor_cli_touch "$handshake_file"; then
+    json="$(vendor_cli_build_json "$attempt_id" "$slug" interrupted "$started" "$(vendor_cli_now_ms)" interrupted "$worker_pid" "$worker_start")"
+    vendor_cli_write_state "$slug" "$json" || true
+    vendor_cli_reap_tree "$worker_pid"
+    wait "$worker_pid" 2>/dev/null || true
+    vendor_cli_cleanup_attempt_files "$worker_pid_file" "$handshake_file"
+    vendor_cli_release_lock "$slug"
+    VENDOR_LAST_PID=""
+    return 1
+  fi
   vendor_cli_release_lock "$slug"
   VENDOR_LAST_PID="$worker_pid"
 }
@@ -1539,6 +1579,24 @@ vendor_cli_selected() {
   esac
 }
 
+# Resolve an absolute curl for vendor installers. Empty when none is usable —
+# callers must treat that as failure (never silently skip provisioning).
+# Overridable in tests via OPENLLM_TEST_CURL_BIN (empty string = force miss).
+vendor_cli_resolve_curl() {
+  local run_path="$1" curl_bin c
+  if [ -n "${OPENLLM_TEST_CURL_BIN+x}" ]; then
+    printf '%s' "$OPENLLM_TEST_CURL_BIN"
+    return 0
+  fi
+  curl_bin="$(PATH="$run_path" command -v curl 2>/dev/null || true)"
+  if [ -z "$curl_bin" ]; then
+    for c in /usr/bin/curl /bin/curl /usr/local/bin/curl /opt/homebrew/bin/curl; do
+      [ -x "$c" ] && { curl_bin="$c"; break; }
+    done
+  fi
+  printf '%s' "$curl_bin"
+}
+
 provision_antigravity() {
   local run_path="$1" curl_bin="$2"
   local name="Google Antigravity" dest="$ANTIGRAVITY_DIR/current/$ANTIGRAVITY_EXE"
@@ -1589,18 +1647,10 @@ provision_clis() {
   local sys_path="/usr/local/bin:/usr/bin:/bin:/usr/local/sbin:/usr/sbin:/sbin:/opt/homebrew/bin"
   local run_path="${sys_path}:${PATH:-}"
   local curl_bin
-  curl_bin="$(PATH="$run_path" command -v curl 2>/dev/null || true)"
-  # Fallback: probe the canonical absolute locations directly (a pathological
-  # PATH or a shell without a working `command -v` still resolves here).
-  if [ -z "$curl_bin" ]; then
-    local c
-    for c in /usr/bin/curl /bin/curl /usr/local/bin/curl /opt/homebrew/bin/curl; do
-      [ -x "$c" ] && { curl_bin="$c"; break; }
-    done
-  fi
+  curl_bin="$(vendor_cli_resolve_curl "$run_path")"
   if [ -z "$curl_bin" ]; then
     echo "  Vendor CLIs: curl not found — install them by hand from their official installers." >&2
-    return 0
+    return 1
   fi
   local spec name cmd slug dest url failed=0 pid
   local pids=()
@@ -1675,10 +1725,27 @@ provision_clis() {
     done
   fi
   if [ "$timed_out" = 1 ]; then
+    # Reap workers first, then persist timed_out as the PARENT's final write.
+    # Doing mark-before-reap lets a slow on_signal overwrite timed_out with a
+    # generic interrupted; doing mark-after-wait wins the last write and also
+    # covers the case where on_signal never finishes (left at installing).
     for pid in "${pids[@]}"; do
       vendor_cli_reap_tree "$pid"
       wait "$pid" 2>/dev/null || true
     done
+    local state_dir slug_file slug_name
+    state_dir="$(vendor_cli_state_dir)"
+    if [ -d "$state_dir" ]; then
+      for slug_file in "$state_dir"/*.json; do
+        [ -f "$slug_file" ] || continue
+        slug_name="$(basename "$slug_file" .json)"
+        case "$(vendor_cli_read_field "$slug_file" stage || true)" in
+          installing|interrupted)
+            vendor_cli_mark_interrupted "$slug_name" "" timed_out || true
+            ;;
+        esac
+      done
+    fi
     echo "  Vendor CLIs: install timed out after ${wait_sec}s — see $OPENLLM_DIR/cli-install.log" >&2
     return 2
   fi
