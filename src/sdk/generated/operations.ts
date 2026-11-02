@@ -80,6 +80,48 @@ export const API_OPERATIONS: readonly TApiOperation[] = [
     "hasBody": false
   },
   {
+    "id": "cliAuth.approve",
+    "method": "post",
+    "path": "/cli/auth/{id}/approve",
+    "summary": "",
+    "tags": [
+      "cliAuth"
+    ],
+    "pathParams": [
+      "id"
+    ],
+    "queryParams": [],
+    "hasBody": true
+  },
+  {
+    "id": "cliAuth.deny",
+    "method": "post",
+    "path": "/cli/auth/{id}/deny",
+    "summary": "",
+    "tags": [
+      "cliAuth"
+    ],
+    "pathParams": [
+      "id"
+    ],
+    "queryParams": [],
+    "hasBody": false
+  },
+  {
+    "id": "cliAuth.view",
+    "method": "get",
+    "path": "/cli/auth/{id}/view",
+    "summary": "",
+    "tags": [
+      "cliAuth"
+    ],
+    "pathParams": [
+      "id"
+    ],
+    "queryParams": [],
+    "hasBody": false
+  },
+  {
     "id": "config.global",
     "method": "get",
     "path": "/config/global",
