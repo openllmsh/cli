@@ -67,6 +67,16 @@ export const DAEMON_CLIS = [
 ] as const;
 export type TDaemonCli = (typeof DAEMON_CLIS)[number];
 
+/**
+ * Official curl|shell installer for a session client. Owned by the registry —
+ * `install-client.ts` and install guidance derive from this; never build a
+ * command from user input.
+ */
+export type TClientCurlInstall = {
+  readonly url: string;
+  readonly shell: "bash" | "sh";
+};
+
 export type TClient = {
   readonly id: TClientId;
   /** Human label for help text + the dashboard card. */
@@ -75,8 +85,14 @@ export type TClient = {
   /** Binary we exec, and the candidate paths to find it at. */
   readonly bin: string;
   readonly binPaths: readonly string[];
-  /** Official install docs, printed when the binary is missing. */
+  /** Official install docs / download page, printed when the binary is missing. */
   readonly installHint: string;
+  /**
+   * Curl|shell installer when OpenLLM may offer on-demand install. Absent for
+   * always-on apps (ChatGPT Mac app, Raycast) and any client without a trusted
+   * official script.
+   */
+  readonly curlInstall?: TClientCurlInstall;
   /** Session clients only: how the overlay reaches the client. */
   readonly strategy?: TSessionStrategy;
   /** Daemon broker's DeviceSessionCli vocabulary for this client. */
@@ -113,6 +129,7 @@ export const CLIENTS: Readonly<Record<TClientId, TClient>> = {
     bin: "claude",
     binPaths: ["~/.local/bin/claude"],
     installHint: "https://claude.ai/install.sh",
+    curlInstall: { url: "https://claude.ai/install.sh", shell: "bash" },
     dangerousFlag: "--dangerously-skip-permissions",
     note: "your ~/.claude config is never modified",
   },
@@ -126,6 +143,10 @@ export const CLIENTS: Readonly<Record<TClientId, TClient>> = {
     bin: "codex",
     binPaths: ["~/.local/bin/codex", "~/.codex/bin/codex"],
     installHint: "https://chatgpt.com/codex/install.sh",
+    curlInstall: {
+      url: "https://chatgpt.com/codex/install.sh",
+      shell: "bash",
+    },
     catalogSlug: "codex",
     dangerousFlag: "--dangerously-bypass-approvals-and-sandbox",
     note: "your ~/.codex/config.toml is never modified",
@@ -140,6 +161,7 @@ export const CLIENTS: Readonly<Record<TClientId, TClient>> = {
     bin: "grok",
     binPaths: ["~/.grok/bin/grok", "~/.local/bin/grok"],
     installHint: "https://x.ai/cli/install.sh",
+    curlInstall: { url: "https://x.ai/cli/install.sh", shell: "bash" },
     catalogSlug: "grok-build",
     dangerousFlag: "--always-approve",
     note: "your ~/.grok config and auth.json are never modified",
@@ -154,6 +176,10 @@ export const CLIENTS: Readonly<Record<TClientId, TClient>> = {
     bin: "hermes",
     binPaths: ["~/.hermes/bin/hermes", "~/.local/bin/hermes"],
     installHint: "https://hermes-agent.nousresearch.com/install.sh",
+    curlInstall: {
+      url: "https://hermes-agent.nousresearch.com/install.sh",
+      shell: "bash",
+    },
     dangerousFlag: "--yolo",
     note: "session overlay; openllm hermes install writes a sticky profile without touching default config",
   },
@@ -167,6 +193,7 @@ export const CLIENTS: Readonly<Record<TClientId, TClient>> = {
     bin: "opencode",
     binPaths: ["~/.opencode/bin/opencode", "~/.local/bin/opencode"],
     installHint: "https://opencode.ai/install",
+    curlInstall: { url: "https://opencode.ai/install", shell: "bash" },
     catalogSlug: "opencode",
     note: "your ~/.config/opencode config is never modified",
   },

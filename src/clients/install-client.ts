@@ -1,60 +1,47 @@
 /**
  * On-demand installation for a single missing session client.
  *
- * Trusted installers only — URLs come from this module's map (aligned with
- * `installHint` in `registry.ts` and `VENDOR_CLI_INSTALL_CMD` in the app).
- * Never build a shell command from user input. Always-on apps (ChatGPT Mac
- * app, Raycast) have no curl installer here; callers print `installHint`.
+ * Trusted installers only — URLs and shells come from registry-owned
+ * `curlInstall` metadata (`CLIENTS` in `registry.ts`). Never build a shell
+ * command from user input. Always-on apps (ChatGPT Mac app, Raycast) have no
+ * curl installer; callers print `installHint`.
  */
 
 import { spawn } from "node:child_process";
-import type { TClient, TClientId } from "./registry";
+import type { TClient, TClientCurlInstall, TClientId } from "./registry";
+import { CLIENTS } from "./registry";
 
 /** Explicit authorize for non-interactive missing-client installs. */
 export const INSTALL_MISSING_CLIENT_ENV = "OPENLLM_INSTALL_MISSING_CLIENT";
 
-type TTrustedInstall = {
-  /** Official installer script URL (never user-supplied). */
-  readonly url: string;
-  /** Shell that runs the downloaded script. */
-  readonly shell: "bash" | "sh";
-};
+/** Display form of a trusted install — what we print and what tests assert. */
+export const formatCurlInstallCommand = (spec: TClientCurlInstall): string =>
+  `curl -fsSL ${spec.url} | ${spec.shell}`;
 
 /**
- * Curl-installable session clients. Keys are client ids from `CLIENTS`, not
- * subscription provider slugs — this map serves `openllm <client>`, not the
+ * Curl-installable session clients, derived from `CLIENTS.curlInstall`.
+ * Keys are client ids — this map serves `openllm <client>`, not the
  * Providers UI.
  */
-const TRUSTED_INSTALL_BY_ID: Readonly<
-  Partial<Record<TClientId, TTrustedInstall>>
-> = {
-  claude: { url: "https://claude.ai/install.sh", shell: "bash" },
-  codex: { url: "https://chatgpt.com/codex/install.sh", shell: "bash" },
-  grok: { url: "https://x.ai/cli/install.sh", shell: "bash" },
-  hermes: {
-    url: "https://hermes-agent.nousresearch.com/install.sh",
-    shell: "bash",
-  },
-  opencode: { url: "https://opencode.ai/install", shell: "bash" },
-};
-
-/** Display form of a trusted install — what we print and what tests assert. */
 export const TRUSTED_CLIENT_INSTALL_CMD: Readonly<
   Partial<Record<TClientId, string>>
 > = Object.fromEntries(
-  Object.entries(TRUSTED_INSTALL_BY_ID).map(([id, spec]) => [
-    id,
-    formatInstallCommand(spec),
-  ]),
-) as Partial<Record<TClientId, string>>;
-
-function formatInstallCommand(spec: TTrustedInstall): string {
-  return `curl -fsSL ${spec.url} | ${spec.shell}`;
-}
+  (Object.keys(CLIENTS) as TClientId[])
+    .map((id): [TClientId, string] | null => {
+      const spec = CLIENTS[id].curlInstall;
+      return spec === undefined ? null : [id, formatCurlInstallCommand(spec)];
+    })
+    .filter((entry): entry is [TClientId, string] => entry !== null),
+);
 
 /** Official install command for a client id, or `null` when not curl-installable. */
 export const trustedClientInstallCmd = (id: TClientId): string | null =>
   TRUSTED_CLIENT_INSTALL_CMD[id] ?? null;
+
+/** Registry-owned curl install for a client, or `null`. */
+export const trustedClientCurlInstall = (
+  id: TClientId,
+): TClientCurlInstall | null => CLIENTS[id].curlInstall ?? null;
 
 /** True when non-interactive launches may run the trusted installer. */
 export const isMissingClientInstallAuthorized = (): boolean =>
@@ -95,14 +82,16 @@ export const runTrustedInstallCommand = async (
   return runCurlPipeShell(spec);
 };
 
-const specForCommand = (command: string): TTrustedInstall | null => {
-  for (const spec of Object.values(TRUSTED_INSTALL_BY_ID)) {
-    if (spec !== undefined && formatInstallCommand(spec) === command) return spec;
+const specForCommand = (command: string): TClientCurlInstall | null => {
+  for (const id of Object.keys(CLIENTS) as TClientId[]) {
+    const spec = CLIENTS[id].curlInstall;
+    if (spec !== undefined && formatCurlInstallCommand(spec) === command)
+      return spec;
   }
   return null;
 };
 
-const runCurlPipeShell = async (spec: TTrustedInstall): Promise<number> =>
+const runCurlPipeShell = async (spec: TClientCurlInstall): Promise<number> =>
   new Promise<number>((resolve) => {
     const curl = spawn("curl", ["-fsSL", spec.url], {
       stdio: ["ignore", "pipe", "inherit"],
@@ -218,8 +207,7 @@ export const ensureClientInstalled = async (
   // Dynamic import breaks the session ↔ install-client cycle: session owns
   // findClientBinary and calls ensureClientInstalled on the missing path.
   const findBinary =
-    deps.findBinary ??
-    (await import("./session")).findClientBinary;
+    deps.findBinary ?? (await import("./session")).findClientBinary;
   const write = deps.write ?? defaultWrite;
   const isInteractive = deps.isInteractive ?? defaultIsInteractive;
   const confirm = deps.confirm ?? defaultConfirm;
