@@ -32,8 +32,8 @@
  * anchor is present; disable blanks that line.
  */
 
-import type { TCliAuthLoginResult } from "./cli-auth-login";
-import { runCliAuthLogin } from "./cli-auth-login";
+import type { TCliAuthLoginResult, TSignalProcess } from "./cli-auth-login";
+import { abortOnProcessSignals, runCliAuthLogin } from "./cli-auth-login";
 import { daemonPort, daemonReachable } from "./clients/gateway";
 import { daemonInvocation } from "./daemon-delegation";
 import {
@@ -97,7 +97,12 @@ export type TLoginIo = {
    *  status. Defaults to a self-spawn of the daemon half. */
   readonly anchorDaemon?: (anchoredKey: string) => Promise<number>;
   /** Injectable OAuth handover (tests). Defaults to `runCliAuthLogin`. */
-  readonly runOAuth?: (origin: string) => Promise<TCliAuthLoginResult>;
+  readonly runOAuth?: (
+    origin: string,
+    signal?: AbortSignal,
+  ) => Promise<TCliAuthLoginResult>;
+  /** Injectable process signal bus for OAuth Ctrl-C (tests). */
+  readonly signalProcess?: TSignalProcess;
 };
 
 /** How long piped stdin may stay silent. A caller that inherits an open but
@@ -244,16 +249,28 @@ export const runLogin = async (
         }
       } else {
         const origin = cliConfig().gatewayUrl;
-        const runOAuth =
-          io.runOAuth ??
-          ((oauthOrigin: string): Promise<TCliAuthLoginResult> =>
-            runCliAuthLogin(oauthOrigin));
-        const oauth = await runOAuth(origin);
-        if (!oauth.ok) {
-          io.terminal.write(oauth.message);
-          return 1;
+        const controller = new AbortController();
+        const detach = abortOnProcessSignals(
+          controller,
+          io.signalProcess ?? process,
+        );
+        try {
+          const runOAuth =
+            io.runOAuth ??
+            ((
+              oauthOrigin: string,
+              signal?: AbortSignal,
+            ): Promise<TCliAuthLoginResult> =>
+              runCliAuthLogin(oauthOrigin, { signal }));
+          const oauth = await runOAuth(origin, controller.signal);
+          if (!oauth.ok) {
+            io.terminal.write(oauth.message);
+            return 1;
+          }
+          key = oauth.apiKey;
+        } finally {
+          detach();
         }
-        key = oauth.apiKey;
       }
     } else {
       io.terminal.write(

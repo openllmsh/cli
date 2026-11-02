@@ -13,8 +13,12 @@ import {
   writeFileSync,
 } from "node:fs";
 import { dirname, join } from "node:path";
-import type { TCliAuthLoginResult } from "./cli-auth-login";
-import { persistClaimedApiKey, runCliAuthLogin } from "./cli-auth-login";
+import type { TCliAuthLoginResult, TSignalProcess } from "./cli-auth-login";
+import {
+  abortOnProcessSignals,
+  persistClaimedApiKey,
+  runCliAuthLogin,
+} from "./cli-auth-login";
 import type { TCliConfig } from "./env";
 import { cliConfig, cliEnvFile } from "./env";
 import type {
@@ -39,7 +43,12 @@ export type TCredentialGateOptions = {
    */
   readonly apiKeyEntry?: boolean;
   /** Injectable OAuth handover (tests). Defaults to `runCliAuthLogin`. */
-  readonly runOAuth?: (origin: string) => Promise<TCliAuthLoginResult>;
+  readonly runOAuth?: (
+    origin: string,
+    signal?: AbortSignal,
+  ) => Promise<TCliAuthLoginResult>;
+  /** Injectable process signal bus for OAuth Ctrl-C (tests). */
+  readonly signalProcess?: TSignalProcess;
 };
 
 /** A local envelope check only; the gateway remains authoritative for validity. */
@@ -326,15 +335,25 @@ export const requireCliApiKey = async (
   terminal.write(
     "OpenLLM needs an API key. Opening browser login (or paste one with `openllm login --api-key`).\n",
   );
-  const oauth = await (options.runOAuth !== undefined
-    ? options.runOAuth(configured.gatewayUrl)
-    : runCliAuthLogin(configured.gatewayUrl, {
-        write: (message) => terminal.write(message),
-      }));
-  if (!oauth.ok) return { ok: false, message: oauth.message };
-  if (!persistClaimedApiKey(oauth.apiKey)) {
-    return { ok: false, message: "[openllm] Could not save the API key.\n" };
+  const controller = new AbortController();
+  const detach = abortOnProcessSignals(
+    controller,
+    options.signalProcess ?? process,
+  );
+  try {
+    const oauth = await (options.runOAuth !== undefined
+      ? options.runOAuth(configured.gatewayUrl, controller.signal)
+      : runCliAuthLogin(configured.gatewayUrl, {
+          write: (message) => terminal.write(message),
+          signal: controller.signal,
+        }));
+    if (!oauth.ok) return { ok: false, message: oauth.message };
+    if (!persistClaimedApiKey(oauth.apiKey)) {
+      return { ok: false, message: "[openllm] Could not save the API key.\n" };
+    }
+    terminal.write("API key saved.\n");
+    return { ok: true, config: { ...configured, apiKey: oauth.apiKey } };
+  } finally {
+    detach();
   }
-  terminal.write("API key saved.\n");
-  return { ok: true, config: { ...configured, apiKey: oauth.apiKey } };
 };

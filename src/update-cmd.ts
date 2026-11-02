@@ -18,6 +18,7 @@
  */
 
 import { CLI_VERSION, cliConfig } from "./env";
+import { awaitPipeCodes, bunSubprocessPeer } from "./process-pipe";
 import { isSecureOrigin } from "./self-update";
 
 /** Bound on the best-effort pinned-version probe so `update` never hangs on it. */
@@ -49,24 +50,6 @@ const fetchPinnedCliVersion = async (
     return null;
   }
 };
-
-/** Kill the peer process if THIS one exits nonzero, then yield its code. */
-const guardExit = (
-  proc: Bun.Subprocess,
-  peer: Bun.Subprocess,
-  killed: { done: boolean },
-): Promise<number> =>
-  proc.exited.then((code) => {
-    if (code !== 0 && !killed.done) {
-      killed.done = true;
-      try {
-        peer.kill();
-      } catch {
-        // already exited — nothing to signal
-      }
-    }
-    return code;
-  });
 
 /**
  * Run the full-product update. Returns the process exit code: 0 on success, or
@@ -122,11 +105,10 @@ export const runUpdate = async (): Promise<number> => {
   // Propagate BOTH sides: a failure in either child kills the other so a broken
   // pipeline can't hang, and a curl failure can't be masked by bash exiting 0 on
   // empty input.
-  const killed = { done: false };
-  const [curlCode, bashCode] = await Promise.all([
-    guardExit(curl, bash, killed),
-    guardExit(bash, curl, killed),
-  ]);
+  const [curlCode, bashCode] = await awaitPipeCodes(
+    bunSubprocessPeer(curl),
+    bunSubprocessPeer(bash),
+  );
   if (curlCode !== 0) {
     process.stderr.write(`[update] download failed (curl exit ${curlCode})\n`);
     return curlCode;

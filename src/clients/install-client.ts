@@ -7,8 +7,8 @@
  * curl installer; callers print `installHint`.
  */
 
-import { spawn } from "node:child_process";
 import type { Readable } from "node:stream";
+import { awaitPipeCodes, bunSubprocessPeer } from "../process-pipe";
 import type { TClient, TClientCurlInstall, TClientId } from "./registry";
 import { CLIENTS } from "./registry";
 
@@ -72,6 +72,19 @@ const defaultWrite = (message: string): void => {
 };
 
 /**
+ * Env for trusted installer children. Keeps HOME / PATH / proxy vars and the
+ * rest of the process environment, but never forwards the account API key to a
+ * vendor curl|shell script. (Device-anchor scrubbing is done at CLI entry.)
+ */
+export const installChildEnv = (
+  source: NodeJS.ProcessEnv = process.env,
+): NodeJS.ProcessEnv => {
+  const env: NodeJS.ProcessEnv = { ...source };
+  delete env.OPENLLM_API_KEY;
+  return env;
+};
+
+/**
  * Run a trusted `curl | shell` installer with argv arrays — the URL never
  * reaches a shell evaluator. Mirrors `update-cmd.ts`'s pipeline pattern.
  */
@@ -92,54 +105,30 @@ const specForCommand = (command: string): TClientCurlInstall | null => {
   return null;
 };
 
-const runCurlPipeShell = async (spec: TClientCurlInstall): Promise<number> =>
-  new Promise<number>((resolve) => {
-    const curl = spawn("curl", ["-fsSL", spec.url], {
-      stdio: ["ignore", "pipe", "inherit"],
-      env: process.env,
-    });
-    const shell = spawn(spec.shell, ["-s", "--"], {
-      stdio: [curl.stdout, "inherit", "inherit"],
-      env: process.env,
-    });
-    const finish = (code: number): void => {
-      try {
-        curl.kill();
-      } catch {
-        // already exited
-      }
-      try {
-        shell.kill();
-      } catch {
-        // already exited
-      }
-      resolve(code);
-    };
-    curl.on("error", () => finish(1));
-    shell.on("error", () => finish(1));
-    let curlCode: number | null = null;
-    let shellCode: number | null = null;
-    const maybeDone = (): void => {
-      if (curlCode === null || shellCode === null) return;
-      if (curlCode !== 0) finish(curlCode);
-      else finish(shellCode);
-    };
-    curl.on("close", (code) => {
-      curlCode = code ?? 1;
-      if (curlCode !== 0) {
-        try {
-          shell.kill();
-        } catch {
-          // already exited
-        }
-      }
-      maybeDone();
-    });
-    shell.on("close", (code) => {
-      shellCode = code ?? 1;
-      maybeDone();
-    });
+/** Exported for tests — production goes through `runTrustedInstallCommand`. */
+export const runCurlPipeShell = async (
+  spec: TClientCurlInstall,
+): Promise<number> => {
+  const childEnv = installChildEnv();
+  const curl = Bun.spawn(["curl", "-fsSL", spec.url], {
+    stdin: "ignore",
+    stdout: "pipe",
+    stderr: "inherit",
+    env: childEnv,
   });
+  const shell = Bun.spawn([spec.shell, "-s", "--"], {
+    stdin: curl.stdout,
+    stdout: "inherit",
+    stderr: "inherit",
+    env: childEnv,
+  });
+  const [curlCode, shellCode] = await awaitPipeCodes(
+    bunSubprocessPeer(curl),
+    bunSubprocessPeer(shell),
+  );
+  if (curlCode !== 0) return curlCode;
+  return shellCode;
+};
 
 /**
  * Read one yes/no answer from stdin without leaving readline listeners behind.

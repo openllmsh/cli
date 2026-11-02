@@ -93,6 +93,61 @@ type TBodyOutcome<T> =
 const defaultSleep = (ms: number): Promise<void> =>
   new Promise((resolve) => setTimeout(resolve, ms));
 
+/**
+ * Sleep that wakes early when `signal` aborts. Without a signal, delegates to
+ * `sleep`. Always resolves (never rejects) so the poll loop can cancelAuth.
+ */
+export const abortableSleep = async (
+  ms: number,
+  signal: AbortSignal | undefined,
+  sleep: (ms: number) => Promise<void> = defaultSleep,
+): Promise<"slept" | "aborted"> => {
+  if (signal?.aborted) return "aborted";
+  if (signal === undefined) {
+    await sleep(ms);
+    return "slept";
+  }
+  await new Promise<void>((resolve) => {
+    let settled = false;
+    const finish = (): void => {
+      if (settled) return;
+      settled = true;
+      signal.removeEventListener("abort", finish);
+      resolve();
+    };
+    signal.addEventListener("abort", finish, { once: true });
+    sleep(ms).then(finish, finish);
+  });
+  return signal.aborted ? "aborted" : "slept";
+};
+
+export type TSignalProcess = {
+  readonly on: (signal: NodeJS.Signals, listener: () => void) => unknown;
+  readonly off: (signal: NodeJS.Signals, listener: () => void) => unknown;
+};
+
+/**
+ * Abort `controller` on SIGINT/SIGTERM. Returns a disposer that removes the
+ * listeners. Installing the listeners also suppresses Node's default exit so
+ * the OAuth poll can still call cancelAuth.
+ */
+export const abortOnProcessSignals = (
+  controller: AbortController,
+  signalProcess: TSignalProcess = process,
+): (() => void) => {
+  const abort = (): void => {
+    if (!controller.signal.aborted) controller.abort();
+  };
+  const onSigint = (): void => abort();
+  const onSigterm = (): void => abort();
+  signalProcess.on("SIGINT", onSigint);
+  signalProcess.on("SIGTERM", onSigterm);
+  return (): void => {
+    signalProcess.off("SIGINT", onSigint);
+    signalProcess.off("SIGTERM", onSigterm);
+  };
+};
+
 const defaultOpenUrl = async (url: string): Promise<boolean> => {
   try {
     const cmd: readonly [string, ...string[]] =
@@ -549,22 +604,30 @@ export const runCliAuthLogin = async (
         "[openllm] could not start login (timed out). Try again, or paste a key with `openllm login --api-key`.\n",
     };
   }
-  if (
-    createdBody.kind !== "ok" ||
-    typeof createdBody.body.id !== "string" ||
-    typeof createdBody.body.poll_token !== "string" ||
-    typeof createdBody.body.authorize_url !== "string"
-  ) {
+  if (createdBody.kind !== "ok") {
     return {
       ok: false,
       message: "[openllm] could not start login (bad response).\n",
     };
   }
-  const {
-    id,
-    poll_token: pollToken,
-    authorize_url: authorizeUrl,
-  } = createdBody.body;
+  const id = createdBody.body.id;
+  const pollToken = createdBody.body.poll_token;
+  const authorizeUrl = createdBody.body.authorize_url;
+  if (typeof id !== "string" || typeof pollToken !== "string") {
+    return {
+      ok: false,
+      message: "[openllm] could not start login (bad response).\n",
+    };
+  }
+  if (typeof authorizeUrl !== "string") {
+    // Create succeeded — abandon the pending row so it does not count toward
+    // the per-IP pending cap.
+    await cancelAuth(base, id, pollToken, resolved);
+    return {
+      ok: false,
+      message: "[openllm] could not start login (bad response).\n",
+    };
+  }
   let safeAuthorizeUrl: string;
   try {
     const url = new URL(authorizeUrl, base);
@@ -581,6 +644,7 @@ export const runCliAuthLogin = async (
     // (relative paths, surrounding whitespace).
     safeAuthorizeUrl = url.href;
   } catch {
+    await cancelAuth(base, id, pollToken, resolved);
     return {
       ok: false,
       message: "[openllm] could not start login (invalid authorization URL).\n",
@@ -599,11 +663,16 @@ export const runCliAuthLogin = async (
     Number.isFinite(expiresAt) ? expiresAt : Infinity,
   );
 
+  const pause = async (): Promise<"slept" | "aborted"> =>
+    abortableSleep(CLI_AUTH_POLL_MS, signal, sleep);
+
+  const cancelled = async (): Promise<TCliAuthLoginResult> => {
+    await cancelAuth(base, id, pollToken, resolved);
+    return { ok: false, message: "[openllm] login cancelled.\n" };
+  };
+
   while (now() < deadline) {
-    if (signal?.aborted) {
-      await cancelAuth(base, id, pollToken, resolved);
-      return { ok: false, message: "[openllm] login cancelled.\n" };
-    }
+    if (signal?.aborted) return cancelled();
     const statusOutcome = await fetchBounded(
       fetchImpl,
       `${base}/api/cli/auth/${encodeURIComponent(id)}/status`,
@@ -620,24 +689,21 @@ export const runCliAuthLogin = async (
       signal,
       requestTimeoutMs,
     );
-    if (statusOutcome.kind === "aborted") {
-      await cancelAuth(base, id, pollToken, resolved);
-      return { ok: false, message: "[openllm] login cancelled.\n" };
-    }
+    if (statusOutcome.kind === "aborted") return cancelled();
     if (statusOutcome.kind === "timeout") {
       if (now() + CLI_AUTH_POLL_MS >= deadline) break;
-      await sleep(CLI_AUTH_POLL_MS);
+      if ((await pause()) === "aborted") return cancelled();
       continue;
     }
     if (statusOutcome.kind === "network") {
       if (now() + CLI_AUTH_POLL_MS >= deadline) break;
-      await sleep(CLI_AUTH_POLL_MS);
+      if ((await pause()) === "aborted") return cancelled();
       continue;
     }
     if (!statusOutcome.response.ok) {
       if (isRetryableCliAuthHttpStatus(statusOutcome.response.status)) {
         if (now() + CLI_AUTH_POLL_MS >= deadline) break;
-        await sleep(CLI_AUTH_POLL_MS);
+        if ((await pause()) === "aborted") return cancelled();
         continue;
       }
       await cancelAuth(base, id, pollToken, resolved);
@@ -657,13 +723,10 @@ export const runCliAuthLogin = async (
       requestTimeoutMs,
       maxBodyBytes,
     );
-    if (statusBody.kind === "aborted") {
-      await cancelAuth(base, id, pollToken, resolved);
-      return { ok: false, message: "[openllm] login cancelled.\n" };
-    }
+    if (statusBody.kind === "aborted") return cancelled();
     if (statusBody.kind === "timeout" || statusBody.kind === "invalid") {
       if (now() + CLI_AUTH_POLL_MS >= deadline) break;
-      await sleep(CLI_AUTH_POLL_MS);
+      if ((await pause()) === "aborted") return cancelled();
       continue;
     }
     const { status } = statusBody.body;
@@ -682,10 +745,7 @@ export const runCliAuthLogin = async (
       // never recreate. Abort during claim cancels and reports
       // cancellation; terminal failures best-effort cancel.
       while (now() < deadline) {
-        if (signal?.aborted) {
-          await cancelAuth(base, id, pollToken, resolved);
-          return { ok: false, message: "[openllm] login cancelled.\n" };
-        }
+        if (signal?.aborted) return cancelled();
         const claimOutcome = await fetchBounded(
           fetchImpl,
           `${base}/api/cli/auth/${encodeURIComponent(id)}/claim`,
@@ -702,10 +762,7 @@ export const runCliAuthLogin = async (
           signal,
           requestTimeoutMs,
         );
-        if (claimOutcome.kind === "aborted") {
-          await cancelAuth(base, id, pollToken, resolved);
-          return { ok: false, message: "[openllm] login cancelled.\n" };
-        }
+        if (claimOutcome.kind === "aborted") return cancelled();
         if (
           claimOutcome.kind === "timeout" ||
           claimOutcome.kind === "network"
@@ -720,7 +777,7 @@ export const runCliAuthLogin = async (
                   : "[openllm] could not claim the key (network error).\n",
             };
           }
-          await sleep(CLI_AUTH_POLL_MS);
+          if ((await pause()) === "aborted") return cancelled();
           continue;
         }
         if (!claimOutcome.response.ok) {
@@ -732,7 +789,7 @@ export const runCliAuthLogin = async (
                 message: `[openllm] could not claim the key (${claimOutcome.response.status}).\n`,
               };
             }
-            await sleep(CLI_AUTH_POLL_MS);
+            if ((await pause()) === "aborted") return cancelled();
             continue;
           }
           await cancelAuth(base, id, pollToken, resolved);
@@ -752,10 +809,7 @@ export const runCliAuthLogin = async (
           requestTimeoutMs,
           maxBodyBytes,
         );
-        if (claimed.kind === "aborted") {
-          await cancelAuth(base, id, pollToken, resolved);
-          return { ok: false, message: "[openllm] login cancelled.\n" };
-        }
+        if (claimed.kind === "aborted") return cancelled();
         if (claimed.kind === "timeout") {
           if (now() + CLI_AUTH_POLL_MS >= deadline) {
             await cancelAuth(base, id, pollToken, resolved);
@@ -764,7 +818,7 @@ export const runCliAuthLogin = async (
               message: "[openllm] could not claim the key (timed out).\n",
             };
           }
-          await sleep(CLI_AUTH_POLL_MS);
+          if ((await pause()) === "aborted") return cancelled();
           continue;
         }
         if (
@@ -822,7 +876,7 @@ export const runCliAuthLogin = async (
       await cancelAuth(base, id, pollToken, resolved);
       return { ok: false, message: "[openllm] authorization timed out.\n" };
     }
-    await sleep(CLI_AUTH_POLL_MS);
+    if ((await pause()) === "aborted") return cancelled();
   }
   await cancelAuth(base, id, pollToken, resolved);
   return { ok: false, message: "[openllm] authorization timed out.\n" };

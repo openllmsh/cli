@@ -485,7 +485,10 @@ esac
 # terminals ask Full vs Minimal (Enter → Full) before any mode-dependent work;
 # headless keeps the silent Minimal default and never hangs. Update with no
 # prior value leaves the mode unset so we do not invent one.
-if [ -n "${OPENLLM_SETUP_MODE:-}" ]; then
+# `${VAR+set}` (not `-n`) so an explicit empty / whitespace-only value is still
+# treated as supplied — otherwise it would fall into the update-no-prior "" case
+# and a fresh install would silently run full (vendors + daemon) with no chooser.
+if [ "${OPENLLM_SETUP_MODE+set}" = set ]; then
   SETUP_MODE_EXPLICIT=1
   SETUP_MODE="$(trim_whitespace "$OPENLLM_SETUP_MODE")"
 else
@@ -502,7 +505,11 @@ else
 fi
 case "$SETUP_MODE" in
   "" )
-    # Update with no prior value — leave unset so we do not invent one.
+    # Accept empty only for update with no saved mode. An explicit env / flag
+    # that trims to empty is an error — never invent full for that case.
+    if [ "$SETUP_MODE_EXPLICIT" = 1 ]; then
+      die "OPENLLM_SETUP_MODE must be 'full' or 'minimal'"
+    fi
     ;;
   full|minimal) ;;
   *) die "OPENLLM_SETUP_MODE must be 'full' or 'minimal'" ;;
