@@ -11,7 +11,6 @@
  */
 
 import { sharedFileConfig } from "./env";
-import { saveEnvVars } from "./onboarding";
 import type { TSetupMode } from "./setup-mode-contract";
 import {
   DEFAULT_SETUP_MODE,
@@ -37,13 +36,6 @@ export const readSetupMode = (): TSetupMode => {
   const fromFile = parseSetupMode(sharedFileConfig()[SETUP_MODE_ENV]);
   if (fromFile !== null) return fromFile;
   return DEFAULT_SETUP_MODE;
-};
-
-/** Persist the mode into the env file and mirror it into process.env. */
-export const setSetupMode = (mode: TSetupMode): boolean => {
-  if (!saveEnvVars({ [SETUP_MODE_ENV]: mode })) return false;
-  process.env[SETUP_MODE_ENV] = mode;
-  return true;
 };
 
 /** True when client launches must stay cloud-directed and not start a daemon. */

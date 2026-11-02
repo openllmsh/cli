@@ -1658,13 +1658,8 @@ vendor_cli_selected() {
 
 # Resolve an absolute curl for vendor installers. Empty when none is usable —
 # callers must treat that as failure (never silently skip provisioning).
-# Overridable in tests via OPENLLM_TEST_CURL_BIN (empty string = force miss).
 vendor_cli_resolve_curl() {
   local run_path="$1" curl_bin c
-  if [ -n "${OPENLLM_TEST_CURL_BIN+x}" ]; then
-    printf '%s' "$OPENLLM_TEST_CURL_BIN"
-    return 0
-  fi
   curl_bin="$(PATH="$run_path" command -v curl 2>/dev/null || true)"
   if [ -z "$curl_bin" ]; then
     for c in /usr/bin/curl /bin/curl /usr/local/bin/curl /opt/homebrew/bin/curl; do
