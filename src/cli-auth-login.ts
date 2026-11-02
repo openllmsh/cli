@@ -25,7 +25,7 @@ import { saveEnvVars } from "./onboarding";
 import { isUsableOpenllmApiKey, parseApiKeyId } from "./runtime-contracts";
 
 export const CLI_AUTH_POLL_MS = 2_000;
-/** Fallback wait when create response lacks a parseable expires_at. */
+/** Local poll budget; server-side expiry arrives as `expired` / 410. */
 export const CLI_AUTH_WAIT_MS = 10 * 60 * 1000;
 /** Hard ceiling for one create/status/claim fetch or body read. */
 export const CLI_AUTH_REQUEST_TIMEOUT_MS = 15_000;
@@ -543,7 +543,7 @@ export const runCliAuthLogin = async (
 
   const base = origin.replace(/\/+$/, "");
   // Overall budget starts before create so a hanging create cannot outlive it.
-  let deadline = now() + waitMs;
+  const deadline = now() + waitMs;
   const pair = await generateCliAuthKeypair();
   const label = `openllm on ${process.platform}`;
 
@@ -670,11 +670,9 @@ export const runCliAuthLogin = async (
   if (!opened) openUrlHint(resolved);
   write("Waiting for approval…\n");
 
-  const expiresAt = Date.parse(createdBody.body.expires_at);
-  deadline = Math.min(
-    deadline,
-    Number.isFinite(expiresAt) ? expiresAt : Infinity,
-  );
+  // No clamp to `expires_at`: it is on the server's clock, and a local clock
+  // running ahead would shorten (or zero) the poll window. The server reports
+  // expiry itself (`status: "expired"` / 410); `waitMs` bounds the loop.
 
   const pause = async (): Promise<"slept" | "aborted"> =>
     abortableSleep(CLI_AUTH_POLL_MS, signal, sleep);
