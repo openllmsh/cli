@@ -133,6 +133,14 @@ const parseEnvFile = (path: string): Record<string, string> => {
 export const DEVICE_ANCHOR_ENV = "OPENLLM_DEVICE_ANCHOR";
 
 /**
+ * The account a browser login signed this computer into, saved beside the
+ * key so `openllm login` can say "Already signed in as <email>" (D12 of
+ * `docs/plan/2026-11-02-cli-auth-ux.md`) — a run-AI key cannot read the
+ * account. Display only; blanked when a different key is saved by hand.
+ */
+export const ACCOUNT_EMAIL_ENV = "OPENLLM_ACCOUNT_EMAIL";
+
+/**
  * Drop an inherited `OPENLLM_DEVICE_ANCHOR` from `process.env` so no child
  * (vendor CLI, mcp upstream, hook, session host, daemon delegation) inherits
  * it. Called first thing at CLI entry.

@@ -18,6 +18,7 @@ import {
   abortOnProcessSignals,
   persistClaimedApiKey,
   runCliAuthLogin,
+  signedInLines,
 } from "./cli-auth-login";
 import type { TCliConfig } from "./env";
 import { cliConfig, cliEnvFile } from "./env";
@@ -346,12 +347,14 @@ export const requireCliApiKey = async (
       : runCliAuthLogin(configured.gatewayUrl, {
           write: (message) => terminal.write(message),
           signal: controller.signal,
+          // This branch only runs on an interactive terminal (checked above).
+          interactive: true,
         }));
     if (!oauth.ok) return { ok: false, message: oauth.message };
-    if (!persistClaimedApiKey(oauth.apiKey)) {
+    if (!persistClaimedApiKey(oauth.apiKey, oauth.email)) {
       return { ok: false, message: "[openllm] Could not save the API key.\n" };
     }
-    terminal.write("API key saved.\n");
+    terminal.write(signedInLines(oauth));
     return { ok: true, config: { ...configured, apiKey: oauth.apiKey } };
   } finally {
     detach();

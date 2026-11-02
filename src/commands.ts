@@ -41,7 +41,7 @@ export const COMMANDS = [
   },
   {
     name: "login",
-    args: "[--key <key>] [--api-key] [--start] [--no-restart] [--json]",
+    args: "[--key <key>] [--api-key] [--force] [--no-browser] [--non-interactive] [--resume <id>] [--start] [--no-restart] [--json]",
     description:
       "Sign in to OpenLLM (browser OAuth by default) and save an API key",
   },
@@ -242,7 +242,17 @@ export const COMMAND_ARGS: Readonly<
   Partial<Record<TCommandName, readonly string[]>>
 > = {
   auth: AUTH_COMMANDS.map((item) => item.name),
-  login: ["--key", "--api-key", "--start", "--no-restart", "--json"],
+  login: [
+    "--key",
+    "--api-key",
+    "--force",
+    "--no-browser",
+    "--non-interactive",
+    "--resume",
+    "--start",
+    "--no-restart",
+    "--json",
+  ],
   completion: [...COMPLETION_SHELLS, "install"],
   "auto-update": [...AUTO_UPDATE_ACTIONS],
   mcp: ["--only", ...MCP_ONLY_GROUPS],
@@ -305,7 +315,16 @@ export const helpText = (version: string): string => {
       left: "OPENLLM_CLOUD_ORIGIN",
       right: "gateway origin (default: the baked cloud origin)",
     },
-    { left: "OPENLLM_API_KEY", right: "your sk-llm-... API key" },
+    {
+      left: "OPENLLM_API_KEY",
+      right:
+        "your sk-llm-... API key; when set, `openllm login` uses it and never opens a browser",
+    },
+    {
+      left: "OPENLLM_NO_BROWSER",
+      right:
+        "set to 1 so `openllm login` prints the link and a QR code instead of opening a browser",
+    },
     {
       left: "OPENLLM_SETUP_MODE",
       right:

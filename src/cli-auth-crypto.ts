@@ -224,6 +224,51 @@ export const generateCliAuthKeypair = async (): Promise<TCliAuthKeypair> => {
   }
 };
 
+/**
+ * Key pair for `openllm login --non-interactive` (D19): the private half must
+ * survive until `--resume`, so it is also returned as PKCS#8 base64 for the
+ * caller to write to a 0600 state file. The in-memory key stays
+ * non-extractable.
+ */
+export const generateResumableCliAuthKeypair = async (): Promise<
+  TCliAuthKeypair & { readonly privateKeyPkcs8B64: string }
+> => {
+  const pair = (await subtle().generateKey({ name: "X25519" }, true, [
+    "deriveBits",
+  ])) as CryptoKeyPair;
+  const spki = new Uint8Array(await subtle().exportKey("spki", pair.publicKey));
+  const pkcs8 = new Uint8Array(
+    await subtle().exportKey("pkcs8", pair.privateKey),
+  );
+  try {
+    return {
+      publicKeyB64: toB64(spki),
+      privateKey: await importCliAuthPrivateKey(toB64(pkcs8)),
+      privateKeyPkcs8B64: toB64(pkcs8),
+    };
+  } finally {
+    zero(pkcs8);
+  }
+};
+
+/** Re-import a resumable private key (non-extractable). */
+export const importCliAuthPrivateKey = async (
+  pkcs8B64: string,
+): Promise<CryptoKey> => {
+  const pkcs8 = fromB64(pkcs8B64);
+  try {
+    return await subtle().importKey(
+      "pkcs8",
+      pkcs8 as BufferSource,
+      { name: "X25519" },
+      false,
+      ["deriveBits"],
+    );
+  } finally {
+    zero(pkcs8);
+  }
+};
+
 /** Caller owns the returned plaintext and must wipe it when finished. */
 export const openCliAuthSealed = async (
   binding: TCliAuthSealBinding,

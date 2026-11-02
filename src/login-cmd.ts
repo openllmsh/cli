@@ -8,11 +8,16 @@
  *   openllm login --api-key            interactive: hidden paste prompt
  *   openllm login --key sk-llm-…       explicit argument (scripts)
  *   echo sk-llm-… | openllm login      piped stdin (keeps the key out of argv)
+ *   openllm login --non-interactive    agents: print the link as JSON, exit
+ *   openllm login --resume <id>        …then finish that sign-in later
  *
- * Unlike the credential gate in `onboarding.ts`, login ALWAYS acquires a key —
- * an already-configured key is replaced, which is how a key gets rotated.
- * Interactive default is OpenLLM OAuth; explicit API-key entry still works.
- * Non-interactive shells never hang: they need `--key` or a piped key.
+ * Unlike the credential gate in `onboarding.ts`, login acquires a key even
+ * when one is configured — that is how a key gets rotated. On a terminal it
+ * first asks ("Already signed in as …? [y/N]", skipped with `--force`);
+ * scripts and pipes replace without asking. An `OPENLLM_API_KEY` in the
+ * environment is used as-is and never opens a browser. Interactive default
+ * is OpenLLM OAuth; explicit API-key entry still works. Non-interactive
+ * shells never hang: they need `--key`, a piped key or `--non-interactive`.
  *
  * A daemon already running reads its key at start, so login restarts it; one
  * that isn't running is left alone unless `--start`. In dev mode
@@ -32,11 +37,22 @@
  * anchor is present; disable blanks that line.
  */
 
-import type { TCliAuthLoginResult, TSignalProcess } from "./cli-auth-login";
-import { abortOnProcessSignals, runCliAuthLogin } from "./cli-auth-login";
+import type {
+  TCliAuthLoginResult,
+  TCliAuthStartResult,
+  TSignalProcess,
+} from "./cli-auth-login";
+import {
+  abortOnProcessSignals,
+  resumeCliAuthLogin,
+  runCliAuthLogin,
+  signedInLines,
+  startCliAuthNonInteractive,
+} from "./cli-auth-login";
 import { daemonPort, daemonReachable } from "./clients/gateway";
 import { daemonInvocation } from "./daemon-delegation";
 import {
+  ACCOUNT_EMAIL_ENV,
   cliConfig,
   DEVICE_ANCHOR_ENV,
   envFileHasDeviceAnchor,
@@ -46,19 +62,28 @@ import { defaultTerminal, saveEnvVars } from "./onboarding";
 import type { TCredentialGateTerminal } from "./runtime-contracts";
 import {
   isOpenllmDevMode,
+  isUsableOpenllmApiKey,
   parseApiKeyId,
   splitAnchoredApiKey,
 } from "./runtime-contracts";
+import { readTtyLine } from "./tty-line";
 
-export const LOGIN_USAGE = `usage: openllm login [sk-llm-...] [--key <sk-llm-...>] [--api-key] [--start] [--no-restart] [--json]
+export const LOGIN_USAGE = `usage: openllm login [sk-llm-...] [--key <sk-llm-...>] [--api-key] [--force]
+                     [--no-browser] [--non-interactive] [--resume <id>]
+                     [--start] [--no-restart] [--json]
 
-Sign in to OpenLLM and save an API key to ~/.openllm/.env, replacing any
-existing key. On an interactive terminal with no key argument, opens a
-browser authorization link (also printed for another device) and waits for
-approval. Pass --api-key to paste a key instead; --key or piped stdin for
-scripts. A running daemon is restarted to pick the key up unless
---no-restart is set (installer uses that so it can start the daemon itself
-after vendor provisioning).
+Sign in to OpenLLM and save an API key to ~/.openllm/.env. On a terminal
+with no key argument it prints a sign-in link and a short code (check the
+browser shows the same code), and opens the link when you press Enter — or
+open it on any device, a phone too. Over SSH, or with --no-browser, it
+prints a QR code instead of opening anything. If the browser that approves
+is on a different network, type the number it shows when asked. Already
+signed in? It asks before replacing the key (--force skips the question).
+An OPENLLM_API_KEY in the environment is used as-is; no browser opens.
+Pass --api-key to paste a key instead; --key or piped stdin for scripts.
+A running daemon is restarted to pick the key up unless --no-restart is
+set (installer uses that so it can start the daemon itself after vendor
+provisioning).
 
 A key copied with Device sessions on ends in a device trust anchor
 (sk-llm-KEY.ANCHOR). It is kept on this machine only, as a separate
@@ -68,6 +93,12 @@ openllm daemon device disable).
 
   --api-key            paste an API key (hidden prompt) instead of browser login
   --key <sk-llm-...>   save this key (non-interactive / scripts)
+  --force              replace a saved key without asking
+  --no-browser         never open a browser; print the link and a QR code
+                       (same as OPENLLM_NO_BROWSER=1)
+  --non-interactive    for agents: print {"authorize_url","code","expires_in",
+                       "resume"} on stdout and exit; a person approves the link
+  --resume <id>        finish a --non-interactive sign-in and save its key
   --start              also start the daemon when it isn't running
   --no-restart         save the key only — never restart or start the daemon
   --json               print {"saved":true,"daemon":"restarted"|"started"|
@@ -100,9 +131,60 @@ export type TLoginIo = {
   readonly runOAuth?: (
     origin: string,
     signal?: AbortSignal,
+    options?: TLoginOAuthOptions,
   ) => Promise<TCliAuthLoginResult>;
+  /** `--non-interactive` (tests). Defaults to `startCliAuthNonInteractive`. */
+  readonly startNonInteractive?: (
+    origin: string,
+  ) => Promise<TCliAuthStartResult>;
+  /** `--resume <id>` (tests). Defaults to `resumeCliAuthLogin`. */
+  readonly resumeOAuth?: (
+    id: string,
+    signal?: AbortSignal,
+    options?: TLoginOAuthOptions,
+  ) => Promise<TCliAuthLoginResult>;
+  /** y/N question on the terminal; false on anything but yes. */
+  readonly confirm?: (question: string) => Promise<boolean>;
+  /** False only when the server refuses the saved key (it no longer works). */
+  readonly checkSavedKey?: (origin: string, key: string) => Promise<boolean>;
   /** Injectable process signal bus for OAuth Ctrl-C (tests). */
   readonly signalProcess?: TSignalProcess;
+};
+
+export type TLoginOAuthOptions = {
+  readonly noBrowser: boolean;
+  readonly interactive: boolean;
+};
+
+/** The one next step after a browser login (D10). */
+export const LOGIN_NEXT_STEP =
+  "Next: openllm claude  (or any client — openllm --help)\n";
+
+const confirmOnTty = async (question: string): Promise<boolean> => {
+  process.stderr.write(question);
+  const answer = await readTtyLine();
+  return answer !== null && /^y(es)?$/i.test(answer.trim());
+};
+
+const SAVED_KEY_CHECK_MS = 5_000;
+
+/**
+ * Does the saved key still work? Only a 401 says no: a network error or an
+ * outage must not make login replace a key without asking.
+ */
+const checkSavedKeyOnline = async (
+  origin: string,
+  key: string,
+): Promise<boolean> => {
+  try {
+    const res = await fetch(`${origin}/api/user/tier`, {
+      headers: { authorization: `Bearer ${key}` },
+      signal: AbortSignal.timeout(SAVED_KEY_CHECK_MS),
+    });
+    return res.status !== 401;
+  } catch {
+    return true;
+  }
 };
 
 /** How long piped stdin may stay silent. A caller that inherits an open but
@@ -187,6 +269,10 @@ type TLoginArgs = {
   readonly start: boolean;
   readonly noRestart: boolean;
   readonly json: boolean;
+  readonly force: boolean;
+  readonly noBrowser: boolean;
+  readonly nonInteractive: boolean;
+  readonly resume: string | null;
 };
 
 const parseLoginArgs = (args: readonly string[]): TLoginArgs | null => {
@@ -195,6 +281,10 @@ const parseLoginArgs = (args: readonly string[]): TLoginArgs | null => {
   let start = false;
   let noRestart = false;
   let json = false;
+  let force = false;
+  let noBrowser = false;
+  let nonInteractive = false;
+  let resume: string | null = null;
   for (let i = 0; i < args.length; i += 1) {
     const arg = args[i];
     if (arg === "--key" || arg === "-k") {
@@ -215,11 +305,69 @@ const parseLoginArgs = (args: readonly string[]): TLoginArgs | null => {
       noRestart = true;
     } else if (arg === "--json") {
       json = true;
+    } else if (arg === "--force") {
+      force = true;
+    } else if (arg === "--no-browser") {
+      noBrowser = true;
+    } else if (arg === "--non-interactive") {
+      nonInteractive = true;
+    } else if (arg === "--resume") {
+      const value = args[i + 1];
+      if (value === undefined || value.startsWith("-")) return null;
+      resume = value;
+      i += 1;
+    } else if (arg?.startsWith("--resume=")) {
+      resume = arg.slice("--resume=".length);
+      if (resume.length === 0) return null;
     } else {
       return null;
     }
   }
-  return { key, apiKeyEntry, start, noRestart, json };
+  // One way in per run: a key, a hand-off, or a resume.
+  const ways = [key !== null, nonInteractive, resume !== null].filter(Boolean);
+  if (ways.length > 1) return null;
+  return {
+    key,
+    apiKeyEntry,
+    start,
+    noRestart,
+    json,
+    force,
+    noBrowser,
+    nonInteractive,
+    resume,
+  };
+};
+
+const ENV_KEY_IN_USE =
+  "Using OPENLLM_API_KEY from your environment, so there is nothing to sign in to. Unset it to save a key on this computer instead.\n";
+
+const NO_KEY_GIVEN =
+  "[openllm] No API key and no terminal to sign in from. Run `openllm login --key <sk-llm-...>`, pipe the key on stdin, set OPENLLM_API_KEY, or use `openllm login --non-interactive` to get a link someone can approve.\n";
+
+/**
+ * D12: on a terminal, a working saved key is replaced only after a yes.
+ * Returns true to go ahead.
+ */
+const confirmReplacingSavedKey = async (
+  io: TLoginIo,
+  origin: string,
+): Promise<boolean> => {
+  const file = sharedFileConfig();
+  const saved = file.OPENLLM_API_KEY;
+  if (saved === undefined || !isUsableOpenllmApiKey(saved)) return true;
+  const check = io.checkSavedKey ?? checkSavedKeyOnline;
+  if (!(await check(origin, saved.trim()))) return true;
+  const email = (file[ACCOUNT_EMAIL_ENV] ?? "").trim();
+  const keyId = parseApiKeyId(saved.trim());
+  const who =
+    email.length > 0
+      ? ` as ${email}`
+      : keyId !== null
+        ? ` (key sk-llm-${keyId}…)`
+        : "";
+  const confirm = io.confirm ?? confirmOnTty;
+  return confirm(`Already signed in${who}. Sign in again? [y/N] `);
 };
 
 export const runLogin = async (
@@ -232,12 +380,81 @@ export const runLogin = async (
     return 2;
   }
 
+  const origin = cliConfig().gatewayUrl;
+  if (parsed.nonInteractive) {
+    const start =
+      io.startNonInteractive ??
+      ((startOrigin: string): Promise<TCliAuthStartResult> =>
+        startCliAuthNonInteractive(startOrigin));
+    const started = await start(origin);
+    if (!started.ok) {
+      io.terminal.write(started.message);
+      return 1;
+    }
+    io.writeStdout(`${JSON.stringify(started.handoff)}\n`);
+    return 0;
+  }
+
   let key = parsed.key;
+  /** Set when a browser login produced the key (D10 line + saved email). */
+  let signedIn: TCliAuthLoginResult | null = null;
+  const runBrowserLogin = async (
+    run: (
+      signal: AbortSignal,
+      options: TLoginOAuthOptions,
+    ) => Promise<TCliAuthLoginResult>,
+  ): Promise<TCliAuthLoginResult> => {
+    const controller = new AbortController();
+    const detach = abortOnProcessSignals(
+      controller,
+      io.signalProcess ?? process,
+    );
+    try {
+      return await run(controller.signal, {
+        noBrowser: parsed.noBrowser,
+        interactive: io.terminal.isInteractive(),
+      });
+    } finally {
+      detach();
+    }
+  };
+
+  if (parsed.resume !== null) {
+    const resumeId = parsed.resume;
+    const resumed = await runBrowserLogin((signal, options) =>
+      io.resumeOAuth !== undefined
+        ? io.resumeOAuth(resumeId, signal, options)
+        : resumeCliAuthLogin(resumeId, {
+            signal,
+            interactive: options.interactive,
+            write: (message) => io.terminal.write(message),
+          }),
+    );
+    if (!resumed.ok) {
+      io.terminal.write(resumed.message);
+      return 1;
+    }
+    key = resumed.apiKey;
+    signedIn = resumed;
+  }
+
   if (key === null) {
     const piped = await io.readStdin();
+    const envKey = process.env.OPENLLM_API_KEY;
+    const envKeyUsable = envKey !== undefined && isUsableOpenllmApiKey(envKey);
     if (piped !== null && piped.trim().length > 0) {
       key = piped;
     } else if (piped === null && io.terminal.isInteractive()) {
+      // D20: an environment key wins over anything saved; signing in here
+      // would only save a key that key shadows.
+      if (envKeyUsable && !parsed.force) {
+        io.terminal.write(ENV_KEY_IN_USE);
+        return 0;
+      }
+      if (!parsed.force && !(await confirmReplacingSavedKey(io, origin))) {
+        io.terminal.write("Keeping the current key.\n");
+        return 0;
+      }
       if (parsed.apiKeyEntry) {
         io.terminal.write(
           `Paste your OpenLLM API key (from ${cliConfig().gatewayUrl}/keys).\n`,
@@ -248,34 +465,29 @@ export const runLogin = async (
           return 1;
         }
       } else {
-        const origin = cliConfig().gatewayUrl;
-        const controller = new AbortController();
-        const detach = abortOnProcessSignals(
-          controller,
-          io.signalProcess ?? process,
+        const oauth = await runBrowserLogin((signal, options) =>
+          io.runOAuth !== undefined
+            ? io.runOAuth(origin, signal, options)
+            : runCliAuthLogin(origin, {
+                signal,
+                interactive: options.interactive,
+                noBrowser: options.noBrowser,
+                write: (message) => io.terminal.write(message),
+              }),
         );
-        try {
-          const runOAuth =
-            io.runOAuth ??
-            ((
-              oauthOrigin: string,
-              signal?: AbortSignal,
-            ): Promise<TCliAuthLoginResult> =>
-              runCliAuthLogin(oauthOrigin, { signal }));
-          const oauth = await runOAuth(origin, controller.signal);
-          if (!oauth.ok) {
-            io.terminal.write(oauth.message);
-            return 1;
-          }
-          key = oauth.apiKey;
-        } finally {
-          detach();
+        if (!oauth.ok) {
+          io.terminal.write(oauth.message);
+          return 1;
         }
+        key = oauth.apiKey;
+        signedIn = oauth;
       }
+    } else if (envKeyUsable) {
+      // D20: CI with OPENLLM_API_KEY — nothing to do, never a browser.
+      io.terminal.write(ENV_KEY_IN_USE);
+      return 0;
     } else {
-      io.terminal.write(
-        "[openllm] No API key given. Pass --key <key>, pipe it on stdin (e.g. `echo $KEY | openllm login`), or run interactively for browser login.\n",
-      );
+      io.terminal.write(NO_KEY_GIVEN);
       return 2;
     }
   }
@@ -302,12 +514,22 @@ export const runLogin = async (
   }
 
   const vars: Record<string, string> = { OPENLLM_API_KEY: trimmed };
+  const savedFile = sharedFileConfig();
+  if (signedIn?.ok === true && signedIn.email !== undefined) {
+    vars[ACCOUNT_EMAIL_ENV] = signedIn.email;
+  } else if (
+    (savedFile[ACCOUNT_EMAIL_ENV] ?? "").length > 0 &&
+    parseApiKeyId(savedFile.OPENLLM_API_KEY ?? "") !== parseApiKeyId(trimmed)
+  ) {
+    // A different key saved by hand may be another account's.
+    vars[ACCOUNT_EMAIL_ENV] = "";
+  }
   // `openllm daemon anchor` already wrote OPENLLM_DEVICE_ANCHOR beside the
   // key. The anchor's pair secret is bound to the key id: a bare login with
   // the SAME id leaves it (re-saving is not "sessions off"). It blanks only
   // when either id is absent/invalid or the ids differ — that anchor is stale
   // (same rule as install.sh and the credential gate).
-  const savedKey = sharedFileConfig().OPENLLM_API_KEY;
+  const savedKey = savedFile.OPENLLM_API_KEY;
   if (
     split.anchor === null &&
     envFileHasDeviceAnchor() &&
@@ -321,7 +543,14 @@ export const runLogin = async (
     io.terminal.write("[openllm] Could not save the API key.\n");
     return 1;
   }
-  if (!parsed.json) io.terminal.write("API key saved.\n");
+  if (!parsed.json) {
+    io.terminal.write(
+      signedIn?.ok === true ? signedInLines(signedIn) : "API key saved.\n",
+    );
+    // The installer (--no-restart) prints its own summary and next step.
+    if (signedIn?.ok === true && !parsed.noRestart)
+      io.terminal.write(LOGIN_NEXT_STEP);
+  }
   const shadowed = process.env.OPENLLM_API_KEY;
   if (shadowed !== undefined && shadowed.trim() !== trimmed) {
     io.terminal.write(

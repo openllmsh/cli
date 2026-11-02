@@ -4,27 +4,69 @@
  * sealed API key, open it locally, and let the caller persist via
  * `persistClaimedApiKey` / `saveEnvVars`.
  *
+ * Experience layer (`docs/plan/2026-11-02-cli-auth-ux.md`): the request is
+ * labelled `<hostname> · <OS name> · openllm <version>` (D5); the server's
+ * user code is printed beside the link (D1); a terminal opens the browser
+ * only on Enter, `--no-browser` / `OPENLLM_NO_BROWSER=1` / SSH print a QR
+ * instead (D3/D4); approval from another network makes the terminal type
+ * back the browser's number (D18); network errors and 429 back off up to
+ * 10 s (D21); `--non-interactive` hands the link off and `--resume` finishes
+ * it (D19).
+ *
  * No OAuth access/refresh tokens are retained — only the ordinary `sk-llm` key.
  * Crypto is local (`cli-auth-crypto.ts`); `@openllm/vault` is never imported.
  */
 
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
+import {
+  chmodSync,
+  mkdirSync,
+  readFileSync,
+  unlinkSync,
+  writeFileSync,
+} from "node:fs";
+import { hostname as osHostname } from "node:os";
+import { dirname, join } from "node:path";
 import type { TCliAuthSealed } from "./cli-auth-crypto";
 import {
   generateCliAuthKeypair,
+  generateResumableCliAuthKeypair,
+  importCliAuthPrivateKey,
   openCliAuthSealed,
   zero,
 } from "./cli-auth-crypto";
+import { CLI_VERSION } from "./cli-version";
 import {
+  ACCOUNT_EMAIL_ENV,
   cliConfig,
   DEVICE_ANCHOR_ENV,
   envFileHasDeviceAnchor,
+  openllmDir,
   sharedFileConfig,
 } from "./env";
 import { saveEnvVars } from "./onboarding";
 import { isUsableOpenllmApiKey, parseApiKeyId } from "./runtime-contracts";
+import { encodeQr, renderQrHalfBlocks } from "./terminal-qr";
+import { readTtyLine } from "./tty-line";
 
 export const CLI_AUTH_POLL_MS = 2_000;
+/** D21: ceiling for the network-error / 429 backoff. */
+export const CLI_AUTH_MAX_BACKOFF_MS = 10_000;
+/**
+ * Mirrors `CLI_AUTH_LABEL_MAX` / `CLI_AUTH_CONFIRM_DIGITS` in
+ * `packages/schema/cli-auth.ts` — the binary does not import the schema
+ * package; `tests/cli/cli-auth-login.test.ts` pins the parity.
+ */
+export const CLI_AUTH_LABEL_MAX_LENGTH = 80;
+export const CLI_AUTH_CONFIRM_LENGTH = 3;
+const CONFIRM_NUMBER = new RegExp(`^[0-9]{${CLI_AUTH_CONFIRM_LENGTH}}$`);
+const CONFIRM_PROMPT = "Type the number shown in your browser: ";
+/** Shape of the server's `user_code` — anything else is not printed. */
+const USER_CODE_DISPLAY = /^[A-Z]{4}-[A-Z]{4}$/;
+
+/** Poll delay after `failures` consecutive network errors / 429s (D21). */
+export const cliAuthBackoffMs = (failures: number): number =>
+  Math.min(CLI_AUTH_MAX_BACKOFF_MS, CLI_AUTH_POLL_MS * 2 ** failures);
 /** Local poll budget; server-side expiry arrives as `expired` / 410. */
 export const CLI_AUTH_WAIT_MS = 10 * 60 * 1000;
 /** Hard ceiling for one create/status/claim fetch or body read. */
@@ -51,14 +93,39 @@ export type TCliAuthLoginIo = {
   readonly requestTimeoutMs?: number;
   /** Max JSON body bytes (defaults to `CLI_AUTH_MAX_BODY_BYTES`). */
   readonly maxBodyBytes?: number;
+  /**
+   * A person is at a terminal: offer Enter-to-open and ask for the D18
+   * number. Default false — a caller that knows it has a terminal says so.
+   */
+  readonly interactive?: boolean;
+  /** `--no-browser`: print link + QR, never open. */
+  readonly noBrowser?: boolean;
+  /** Environment read for `SSH_CONNECTION` / `OPENLLM_NO_BROWSER` (default `process.env`). */
+  readonly env?: Readonly<Record<string, string | undefined>>;
+  /** Resolves true on Enter; false when the terminal is gone or `signal` aborts. */
+  readonly waitForEnter?: (signal: AbortSignal) => Promise<boolean>;
+  /** Ask one line; null on EOF / abort. */
+  readonly promptLine?: (
+    question: string,
+    signal: AbortSignal,
+  ) => Promise<string | null>;
+  /** Override the request label (defaults to `defaultCliAuthLabel()`). */
+  readonly label?: string;
 };
 
 export type TCliAuthLoginResult =
-  | { readonly ok: true; readonly apiKey: string }
+  | {
+      readonly ok: true;
+      readonly apiKey: string;
+      /** Approving account, for "Signed in as" (absent from older servers). */
+      readonly email?: string;
+      readonly keyName?: string;
+    }
   | { readonly ok: false; readonly message: string };
 
 type TCreated = {
   readonly id: string;
+  readonly user_code?: unknown;
   readonly poll_token: string;
   readonly authorize_url: string;
   readonly expires_at: string;
@@ -68,13 +135,77 @@ type TStatus = {
   readonly id: string;
   readonly status: string;
   readonly expires_at: string;
+  readonly needs_confirm?: unknown;
 };
 
 type TClaimed = {
   readonly id: string;
   readonly key_id: string;
   readonly user_id: string;
+  readonly email?: unknown;
+  readonly key_name?: unknown;
   readonly sealed: string;
+};
+
+const OS_NAMES: Readonly<Record<string, string>> = {
+  darwin: "macOS",
+  linux: "Linux",
+  win32: "Windows",
+  freebsd: "FreeBSD",
+  openbsd: "OpenBSD",
+};
+
+/**
+ * D5: `<hostname> · <OS name> · openllm <version>`, at most
+ * `CLI_AUTH_LABEL_MAX_LENGTH`. A long hostname is shortened, never the
+ * suffix; control characters are dropped.
+ */
+export const buildCliAuthLabel = (input: {
+  readonly hostname: string;
+  readonly platform: string;
+  readonly version: string;
+}): string => {
+  const host = input.hostname.replace(/\p{Cc}/gu, "").trim() || "This computer";
+  const suffix = ` · ${OS_NAMES[input.platform] ?? input.platform} · openllm ${input.version}`;
+  const room = CLI_AUTH_LABEL_MAX_LENGTH - suffix.length;
+  const shown =
+    host.length <= room ? host : `${host.slice(0, Math.max(1, room - 1))}…`;
+  return `${shown}${suffix}`.slice(0, CLI_AUTH_LABEL_MAX_LENGTH);
+};
+
+/** The name people gave the machine: macOS ComputerName, else the hostname. */
+const machineName = (): string => {
+  if (process.platform === "darwin") {
+    try {
+      const out = spawnSync("scutil", ["--get", "ComputerName"], {
+        encoding: "utf8",
+        timeout: 1_000,
+        stdio: ["ignore", "pipe", "ignore"],
+      });
+      const name = typeof out.stdout === "string" ? out.stdout.trim() : "";
+      if (out.status === 0 && name.length > 0) return name;
+    } catch {
+      // fall through
+    }
+  }
+  return osHostname().replace(/\.local$/, "");
+};
+
+export const defaultCliAuthLabel = (): string =>
+  buildCliAuthLabel({
+    hostname: machineName(),
+    platform: process.platform,
+    version: CLI_VERSION,
+  });
+
+/** D10: the terminal's success line. */
+export const signedInLines = (who: {
+  readonly email?: string;
+  readonly keyName?: string;
+}): string => {
+  const account = who.email !== undefined ? ` as ${who.email}` : "";
+  const key = who.keyName !== undefined ? ` · key "${who.keyName}"` : "";
+  return `✔ Signed in${account}${key}\n`;
 };
 
 type TTimedOut = { readonly kind: "timeout" };
@@ -174,20 +305,56 @@ const defaultOpenUrl = async (url: string): Promise<boolean> => {
   }
 };
 
-type TResolvedIo = TCliAuthLoginIo & {
+type TResolvedIo = {
   readonly write: (message: string) => void;
   readonly openUrl: (url: string) => Promise<boolean>;
   readonly fetch: TCliAuthFetch;
+  readonly now: () => number;
+  readonly sleep: (ms: number) => Promise<void>;
+  readonly signal: AbortSignal | undefined;
+  readonly waitMs: number;
+  readonly requestTimeoutMs: number;
+  readonly maxBodyBytes: number;
+  readonly interactive: boolean;
+  readonly noBrowser: boolean;
+  readonly env: Readonly<Record<string, string | undefined>>;
+  readonly waitForEnter: (signal: AbortSignal) => Promise<boolean>;
+  readonly promptLine: (
+    question: string,
+    signal: AbortSignal,
+  ) => Promise<string | null>;
 };
 
 const defaultFetch: TCliAuthFetch = (input, init) => fetch(input, init);
 
-const defaultIo = (): TResolvedIo => ({
-  write: (message) => process.stderr.write(message),
-  openUrl: defaultOpenUrl,
-  fetch: defaultFetch,
-  sleep: defaultSleep,
-});
+const resolveIo = (io: TCliAuthLoginIo): TResolvedIo => {
+  const write =
+    io.write ?? ((message: string) => process.stderr.write(message));
+  return {
+    write,
+    openUrl: io.openUrl ?? defaultOpenUrl,
+    fetch: io.fetch ?? defaultFetch,
+    now: io.now ?? Date.now,
+    sleep: io.sleep ?? defaultSleep,
+    signal: io.signal,
+    waitMs: io.waitMs ?? CLI_AUTH_WAIT_MS,
+    requestTimeoutMs: io.requestTimeoutMs ?? CLI_AUTH_REQUEST_TIMEOUT_MS,
+    maxBodyBytes: io.maxBodyBytes ?? CLI_AUTH_MAX_BODY_BYTES,
+    interactive: io.interactive ?? false,
+    noBrowser: io.noBrowser ?? false,
+    env: io.env ?? process.env,
+    waitForEnter:
+      io.waitForEnter ??
+      (async (signal: AbortSignal): Promise<boolean> =>
+        (await readTtyLine(signal)) !== null),
+    promptLine:
+      io.promptLine ??
+      ((question: string, signal: AbortSignal): Promise<string | null> => {
+        write(question);
+        return readTtyLine(signal);
+      }),
+  };
+};
 
 const openUrlHint = (io: TResolvedIo): void => {
   io.write(
@@ -513,46 +680,45 @@ const parseSealed = (raw: string): TCliAuthSealed | null => {
   }
 };
 
-/**
- * Run the browser-handover login against `origin`. Returns the plaintext
- * API key on success (caller persists it). Never logs the key, poll token,
- * or sealed ciphertext — only the authorize URL (id only).
- */
-export const runCliAuthLogin = async (
-  origin: string,
-  io: TCliAuthLoginIo = {},
-): Promise<TCliAuthLoginResult> => {
-  const defaults = defaultIo();
-  const write = io.write ?? defaults.write;
-  const openUrl = io.openUrl ?? defaults.openUrl;
-  const fetchImpl = io.fetch ?? defaults.fetch;
-  const now = io.now ?? Date.now;
-  const sleep = io.sleep ?? defaults.sleep ?? defaultSleep;
-  const signal = io.signal;
-  const waitMs = io.waitMs ?? CLI_AUTH_WAIT_MS;
-  const requestTimeoutMs = io.requestTimeoutMs ?? CLI_AUTH_REQUEST_TIMEOUT_MS;
-  const maxBodyBytes = io.maxBodyBytes ?? CLI_AUTH_MAX_BODY_BYTES;
-  const resolved: TResolvedIo = {
-    write,
-    openUrl,
-    fetch: fetchImpl,
-    now,
-    sleep,
-    signal,
-  };
+type TSession = {
+  readonly base: string;
+  readonly id: string;
+  readonly pollToken: string;
+  readonly authorizeUrl: string;
+  readonly userCode: string | null;
+  readonly publicKeyB64: string;
+  readonly privateKey: CryptoKey;
+};
 
-  const base = origin.replace(/\/+$/, "");
-  // Overall budget starts before create so a hanging create cannot outlive it.
-  const deadline = now() + waitMs;
-  const pair = await generateCliAuthKeypair();
-  const label = `openllm on ${process.platform}`;
+type TCreateOutcome =
+  | {
+      readonly ok: true;
+      readonly id: string;
+      readonly pollToken: string;
+      readonly authorizeUrl: string;
+      readonly userCode: string | null;
+      readonly expiresAt: string;
+    }
+  | { readonly ok: false; readonly message: string };
 
-  if (signal?.aborted) {
-    return { ok: false, message: "[openllm] login cancelled.\n" };
-  }
+const CANCELLED_MESSAGE = "[openllm] login cancelled.\n";
 
+const startFailed = (reason: string): TCreateOutcome => ({
+  ok: false,
+  message: `[openllm] could not start login (${reason}). Try again, or paste a key with \`openllm login --api-key\`.\n`,
+});
+
+/** POST /api/cli/auth and validate what comes back. Never prints. */
+const createCliAuth = async (
+  base: string,
+  r: TResolvedIo,
+  publicKeyB64: string,
+  label: string,
+  deadline: number,
+): Promise<TCreateOutcome> => {
+  if (r.signal?.aborted) return { ok: false, message: CANCELLED_MESSAGE };
   const createOutcome = await fetchBounded(
-    fetchImpl,
+    r.fetch,
     `${base}/api/cli/auth`,
     {
       method: "POST",
@@ -560,39 +726,21 @@ export const runCliAuthLogin = async (
         "content-type": "application/json",
         accept: "application/json",
       },
-      body: JSON.stringify({
-        caller_pubkey: pair.publicKeyB64,
-        label,
-      }),
+      body: JSON.stringify({ caller_pubkey: publicKeyB64, label }),
     },
     deadline,
-    now,
-    signal,
-    requestTimeoutMs,
+    r.now,
+    r.signal,
+    r.requestTimeoutMs,
   );
   if (createOutcome.kind === "aborted") {
-    return { ok: false, message: "[openllm] login cancelled.\n" };
+    return { ok: false, message: CANCELLED_MESSAGE };
   }
-  if (createOutcome.kind === "timeout") {
-    return {
-      ok: false,
-      message:
-        "[openllm] could not start login (timed out). Try again, or paste a key with `openllm login --api-key`.\n",
-    };
-  }
-  if (createOutcome.kind === "network") {
-    return {
-      ok: false,
-      message:
-        "[openllm] could not start login (network error). Try again, or paste a key with `openllm login --api-key`.\n",
-    };
-  }
+  if (createOutcome.kind === "timeout") return startFailed("timed out");
+  if (createOutcome.kind === "network") return startFailed("network error");
   if (!createOutcome.response.ok) {
     if (isRetryableCliAuthHttpStatus(createOutcome.response.status)) {
-      return {
-        ok: false,
-        message: `[openllm] could not start login (${createOutcome.response.status}). Try again, or paste a key with \`openllm login --api-key\`.\n`,
-      };
+      return startFailed(String(createOutcome.response.status));
     }
     return {
       ok: false,
@@ -602,21 +750,15 @@ export const runCliAuthLogin = async (
   const createdBody = await readJsonBounded<TCreated>(
     createOutcome.response,
     deadline,
-    now,
-    signal,
-    requestTimeoutMs,
-    maxBodyBytes,
+    r.now,
+    r.signal,
+    r.requestTimeoutMs,
+    r.maxBodyBytes,
   );
   if (createdBody.kind === "aborted") {
-    return { ok: false, message: "[openllm] login cancelled.\n" };
+    return { ok: false, message: CANCELLED_MESSAGE };
   }
-  if (createdBody.kind === "timeout") {
-    return {
-      ok: false,
-      message:
-        "[openllm] could not start login (timed out). Try again, or paste a key with `openllm login --api-key`.\n",
-    };
-  }
+  if (createdBody.kind === "timeout") return startFailed("timed out");
   if (createdBody.kind !== "ok") {
     return {
       ok: false,
@@ -635,7 +777,7 @@ export const runCliAuthLogin = async (
   if (typeof authorizeUrl !== "string") {
     // Create succeeded — abandon the pending row so it does not count toward
     // the per-IP pending cap.
-    await cancelAuth(base, id, pollToken, resolved);
+    await cancelAuth(base, id, pollToken, r);
     return {
       ok: false,
       message: "[openllm] could not start login (bad response).\n",
@@ -657,35 +799,190 @@ export const runCliAuthLogin = async (
     // (relative paths, surrounding whitespace).
     safeAuthorizeUrl = url.href;
   } catch {
-    await cancelAuth(base, id, pollToken, resolved);
+    await cancelAuth(base, id, pollToken, r);
     return {
       ok: false,
       message: "[openllm] could not start login (invalid authorization URL).\n",
     };
   }
-  write(
-    `Open this link to authorize this CLI (works on another device too):\n  ${safeAuthorizeUrl}\n`,
+  const code = createdBody.body.user_code;
+  return {
+    ok: true,
+    id,
+    pollToken,
+    authorizeUrl: safeAuthorizeUrl,
+    // Display only: anything but the documented shape is dropped, never echoed.
+    userCode:
+      typeof code === "string" && USER_CODE_DISPLAY.test(code) ? code : null,
+    expiresAt:
+      typeof createdBody.body.expires_at === "string"
+        ? createdBody.body.expires_at
+        : "",
+  };
+};
+
+/** True when the env says this shell is on the far end of SSH. */
+const isRemoteSession = (
+  env: Readonly<Record<string, string | undefined>>,
+): boolean =>
+  (env.SSH_CONNECTION ?? "").length > 0 || (env.SSH_TTY ?? "").length > 0;
+
+const browserDisabled = (r: TResolvedIo): boolean =>
+  r.noBrowser === true || r.env.OPENLLM_NO_BROWSER === "1";
+
+const writeQr = (r: TResolvedIo, url: string): void => {
+  const qr = encodeQr(url);
+  if (qr === null) return;
+  r.write(`\nOr scan this with your phone:\n${renderQrHalfBlocks(qr)}\n`);
+};
+
+type TPresented = {
+  /** Stop listening for Enter (the terminal is needed for something else). */
+  readonly stop: () => void;
+  /** Resolves once any open triggered by Enter has finished printing. */
+  readonly settled: () => Promise<void>;
+};
+
+/**
+ * Print the code + link, then decide how the browser gets opened (D3/D4):
+ *   - `--no-browser`, `OPENLLM_NO_BROWSER=1` or SSH → print + QR, never open;
+ *   - a terminal → "Press Enter to open", open on Enter (QR if that fails);
+ *   - no terminal → print only.
+ * Polling runs meanwhile, so approving on a phone never needs the Enter.
+ */
+const presentAuthorizeLink = (
+  session: TSession,
+  r: TResolvedIo,
+): TPresented => {
+  if (session.userCode !== null) {
+    r.write(
+      `Your code: ${session.userCode}  (check the browser shows the same)\n`,
+    );
+  }
+  r.write(
+    `Open this link to sign in — any device works, a phone too:\n  ${session.authorizeUrl}\n`,
   );
-  const opened = await openUrl(safeAuthorizeUrl);
-  if (!opened) openUrlHint(resolved);
-  write("Waiting for approval…\n");
+  const idle: TPresented = { stop: () => {}, settled: async () => {} };
+  if (browserDisabled(r) || isRemoteSession(r.env)) {
+    writeQr(r, session.authorizeUrl);
+    r.write("Waiting for approval…\n");
+    return idle;
+  }
+  if (!r.interactive) {
+    r.write("Waiting for approval…\n");
+    return idle;
+  }
+  r.write("Press Enter to open it in your browser. Waiting for approval…\n");
+  const listening = new AbortController();
+  let opening: Promise<void> = Promise.resolve();
+  void r.waitForEnter(listening.signal).then((pressed) => {
+    if (!pressed || listening.signal.aborted) return;
+    opening = r.openUrl(session.authorizeUrl).then((opened) => {
+      if (opened || listening.signal.aborted) return;
+      openUrlHint(r);
+      writeQr(r, session.authorizeUrl);
+    });
+  });
+  return {
+    stop: () => listening.abort(),
+    settled: () => opening,
+  };
+};
+
+type TErrorBody = { readonly type: string; readonly message: string };
+
+const readErrorBody = async (
+  res: Response,
+  deadline: number,
+  r: TResolvedIo,
+): Promise<TErrorBody | null> => {
+  const body = await readJsonBounded<{ readonly error?: unknown }>(
+    res,
+    deadline,
+    r.now,
+    r.signal,
+    r.requestTimeoutMs,
+    r.maxBodyBytes,
+  );
+  if (body.kind !== "ok") return null;
+  const error = body.body.error;
+  if (typeof error !== "object" || error === null) return null;
+  const type = "type" in error ? error.type : undefined;
+  const message = "message" in error ? error.message : undefined;
+  if (typeof type !== "string") return null;
+  return {
+    type,
+    // Server copy, single line, bounded — never trusted as markup.
+    message:
+      typeof message === "string"
+        ? message.replace(/\p{Cc}/gu, " ").slice(0, 200)
+        : "",
+  };
+};
+
+const NEEDS_CONFIRM_WITHOUT_TTY =
+  "[openllm] This sign-in was approved from a browser on a different network, so it needs the number shown there — and this shell has no terminal to type it. Approve from a browser on the same network, or save a key with `openllm login --key <sk-llm-…>` (or set OPENLLM_API_KEY).\n";
+
+/**
+ * Poll status until approved, then claim and open the sealed key. Shared by
+ * the interactive login and `--resume`.
+ */
+const pollAndClaim = async (
+  session: TSession,
+  r: TResolvedIo,
+  deadline: number,
+  releaseTerminal: () => void,
+): Promise<TCliAuthLoginResult> => {
+  const { base, id, pollToken } = session;
+  const pause = async (ms: number): Promise<"slept" | "aborted"> =>
+    abortableSleep(ms, r.signal, r.sleep);
+
+  const cancelled = async (): Promise<TCliAuthLoginResult> => {
+    await cancelAuth(base, id, pollToken, r);
+    return { ok: false, message: CANCELLED_MESSAGE };
+  };
+
+  /** D18: read the browser's number. `null` result = give up (already handled). */
+  const askConfirmNumber = async (): Promise<
+    { readonly number: string } | TCliAuthLoginResult
+  > => {
+    if (!r.interactive) {
+      await cancelAuth(base, id, pollToken, r);
+      return { ok: false, message: NEEDS_CONFIRM_WITHOUT_TTY };
+    }
+    releaseTerminal();
+    const signal = r.signal ?? new AbortController().signal;
+    while (true) {
+      if (signal.aborted) return cancelled();
+      const answer = await r.promptLine(CONFIRM_PROMPT, signal);
+      if (answer === null) return cancelled();
+      const trimmed = answer.trim();
+      if (CONFIRM_NUMBER.test(trimmed)) return { number: trimmed };
+      r.write(
+        `Enter the ${CLI_AUTH_CONFIRM_LENGTH}-digit number shown in your browser.\n`,
+      );
+    }
+  };
 
   // No clamp to `expires_at`: it is on the server's clock, and a local clock
   // running ahead would shorten (or zero) the poll window. The server reports
   // expiry itself (`status: "expired"` / 410); `waitMs` bounds the loop.
-
-  const pause = async (): Promise<"slept" | "aborted"> =>
-    abortableSleep(CLI_AUTH_POLL_MS, signal, sleep);
-
-  const cancelled = async (): Promise<TCliAuthLoginResult> => {
-    await cancelAuth(base, id, pollToken, resolved);
-    return { ok: false, message: "[openllm] login cancelled.\n" };
+  // D21: network errors and 429 back off exponentially (cap 10 s); every
+  // other wait is the plain poll interval.
+  let failures = 0;
+  const retryAfter = async (
+    backoff: boolean,
+  ): Promise<"continue" | "deadline" | "aborted"> => {
+    failures = backoff ? failures + 1 : 0;
+    const ms = backoff ? cliAuthBackoffMs(failures) : CLI_AUTH_POLL_MS;
+    if (r.now() + ms >= deadline) return "deadline";
+    return (await pause(ms)) === "aborted" ? "aborted" : "continue";
   };
 
-  while (now() < deadline) {
-    if (signal?.aborted) return cancelled();
+  while (r.now() < deadline) {
+    if (r.signal?.aborted) return cancelled();
     const statusOutcome = await fetchBounded(
-      fetchImpl,
+      r.fetch,
       `${base}/api/cli/auth/${encodeURIComponent(id)}/status`,
       {
         method: "POST",
@@ -696,28 +993,25 @@ export const runCliAuthLogin = async (
         body: JSON.stringify({ poll_token: pollToken }),
       },
       deadline,
-      now,
-      signal,
-      requestTimeoutMs,
+      r.now,
+      r.signal,
+      r.requestTimeoutMs,
     );
     if (statusOutcome.kind === "aborted") return cancelled();
-    if (statusOutcome.kind === "timeout") {
-      if (now() + CLI_AUTH_POLL_MS >= deadline) break;
-      if ((await pause()) === "aborted") return cancelled();
-      continue;
-    }
-    if (statusOutcome.kind === "network") {
-      if (now() + CLI_AUTH_POLL_MS >= deadline) break;
-      if ((await pause()) === "aborted") return cancelled();
+    if (statusOutcome.kind === "timeout" || statusOutcome.kind === "network") {
+      const next = await retryAfter(true);
+      if (next === "aborted") return cancelled();
+      if (next === "deadline") break;
       continue;
     }
     if (!statusOutcome.response.ok) {
       if (isRetryableCliAuthHttpStatus(statusOutcome.response.status)) {
-        if (now() + CLI_AUTH_POLL_MS >= deadline) break;
-        if ((await pause()) === "aborted") return cancelled();
+        const next = await retryAfter(statusOutcome.response.status === 429);
+        if (next === "aborted") return cancelled();
+        if (next === "deadline") break;
         continue;
       }
-      await cancelAuth(base, id, pollToken, resolved);
+      await cancelAuth(base, id, pollToken, r);
       return {
         ok: false,
         message: terminalAuthHttpMessage(
@@ -729,15 +1023,16 @@ export const runCliAuthLogin = async (
     const statusBody = await readJsonBounded<TStatus>(
       statusOutcome.response,
       deadline,
-      now,
-      signal,
-      requestTimeoutMs,
-      maxBodyBytes,
+      r.now,
+      r.signal,
+      r.requestTimeoutMs,
+      r.maxBodyBytes,
     );
     if (statusBody.kind === "aborted") return cancelled();
     if (statusBody.kind === "timeout" || statusBody.kind === "invalid") {
-      if (now() + CLI_AUTH_POLL_MS >= deadline) break;
-      if ((await pause()) === "aborted") return cancelled();
+      const next = await retryAfter(false);
+      if (next === "aborted") return cancelled();
+      if (next === "deadline") break;
       continue;
     }
     const { status } = statusBody.body;
@@ -748,17 +1043,27 @@ export const runCliAuthLogin = async (
       };
     }
     if (status === "expired") {
-      return { ok: false, message: "[openllm] authorization expired.\n" };
+      return {
+        ok: false,
+        message:
+          "[openllm] authorization expired. Run `openllm login` again for a new link.\n",
+      };
     }
     if (status === "approved") {
+      let confirmNumber: string | undefined;
+      if (statusBody.body.needs_confirm === true) {
+        const asked = await askConfirmNumber();
+        if (!("number" in asked)) return asked;
+        confirmNumber = asked.number;
+      }
       // Claim is same-caller idempotent until original expiry. Retry
       // transient network / retryable HTTP against THIS auth only —
       // never recreate. Abort during claim cancels and reports
       // cancellation; terminal failures best-effort cancel.
-      while (now() < deadline) {
-        if (signal?.aborted) return cancelled();
+      while (r.now() < deadline) {
+        if (r.signal?.aborted) return cancelled();
         const claimOutcome = await fetchBounded(
-          fetchImpl,
+          r.fetch,
           `${base}/api/cli/auth/${encodeURIComponent(id)}/claim`,
           {
             method: "POST",
@@ -766,20 +1071,25 @@ export const runCliAuthLogin = async (
               "content-type": "application/json",
               accept: "application/json",
             },
-            body: JSON.stringify({ poll_token: pollToken }),
+            body: JSON.stringify({
+              poll_token: pollToken,
+              ...(confirmNumber !== undefined
+                ? { confirm_number: confirmNumber }
+                : {}),
+            }),
           },
           deadline,
-          now,
-          signal,
-          requestTimeoutMs,
+          r.now,
+          r.signal,
+          r.requestTimeoutMs,
         );
         if (claimOutcome.kind === "aborted") return cancelled();
         if (
           claimOutcome.kind === "timeout" ||
           claimOutcome.kind === "network"
         ) {
-          if (now() + CLI_AUTH_POLL_MS >= deadline) {
-            await cancelAuth(base, id, pollToken, resolved);
+          if (r.now() + CLI_AUTH_POLL_MS >= deadline) {
+            await cancelAuth(base, id, pollToken, r);
             return {
               ok: false,
               message:
@@ -788,48 +1098,71 @@ export const runCliAuthLogin = async (
                   : "[openllm] could not claim the key (network error).\n",
             };
           }
-          if ((await pause()) === "aborted") return cancelled();
+          if ((await pause(CLI_AUTH_POLL_MS)) === "aborted") return cancelled();
           continue;
         }
         if (!claimOutcome.response.ok) {
-          if (isRetryableCliAuthHttpStatus(claimOutcome.response.status)) {
-            if (now() + CLI_AUTH_POLL_MS >= deadline) {
-              await cancelAuth(base, id, pollToken, resolved);
+          const httpStatus = claimOutcome.response.status;
+          if (isRetryableCliAuthHttpStatus(httpStatus)) {
+            if (r.now() + CLI_AUTH_POLL_MS >= deadline) {
+              await cancelAuth(base, id, pollToken, r);
               return {
                 ok: false,
-                message: `[openllm] could not claim the key (${claimOutcome.response.status}).\n`,
+                message: `[openllm] could not claim the key (${httpStatus}).\n`,
               };
             }
-            if ((await pause()) === "aborted") return cancelled();
+            if ((await pause(CLI_AUTH_POLL_MS)) === "aborted")
+              return cancelled();
             continue;
           }
-          await cancelAuth(base, id, pollToken, resolved);
+          if (httpStatus === 403 || httpStatus === 409 || httpStatus === 410) {
+            const err = await readErrorBody(claimOutcome.response, deadline, r);
+            if (
+              err?.type === "cli_auth_confirm_mismatch" ||
+              err?.type === "cli_auth_confirm_required"
+            ) {
+              if (
+                err.type === "cli_auth_confirm_mismatch" &&
+                err.message !== ""
+              )
+                r.write(`${err.message}\n`);
+              const asked = await askConfirmNumber();
+              if (!("number" in asked)) return asked;
+              confirmNumber = asked.number;
+              continue;
+            }
+            if (err?.type === "cli_auth_cancelled") {
+              // The server already cancelled — nothing to clean up.
+              return {
+                ok: false,
+                message: `[openllm] ${err.message !== "" ? err.message : "authorization was cancelled."}\n`,
+              };
+            }
+          }
+          await cancelAuth(base, id, pollToken, r);
           return {
             ok: false,
-            message: terminalAuthHttpMessage(
-              "claim",
-              claimOutcome.response.status,
-            ),
+            message: terminalAuthHttpMessage("claim", httpStatus),
           };
         }
         const claimed = await readJsonBounded<TClaimed>(
           claimOutcome.response,
           deadline,
-          now,
-          signal,
-          requestTimeoutMs,
-          maxBodyBytes,
+          r.now,
+          r.signal,
+          r.requestTimeoutMs,
+          r.maxBodyBytes,
         );
         if (claimed.kind === "aborted") return cancelled();
         if (claimed.kind === "timeout") {
-          if (now() + CLI_AUTH_POLL_MS >= deadline) {
-            await cancelAuth(base, id, pollToken, resolved);
+          if (r.now() + CLI_AUTH_POLL_MS >= deadline) {
+            await cancelAuth(base, id, pollToken, r);
             return {
               ok: false,
               message: "[openllm] could not claim the key (timed out).\n",
             };
           }
-          if ((await pause()) === "aborted") return cancelled();
+          if ((await pause(CLI_AUTH_POLL_MS)) === "aborted") return cancelled();
           continue;
         }
         if (
@@ -838,7 +1171,7 @@ export const runCliAuthLogin = async (
           claimed.body.user_id.length === 0 ||
           typeof claimed.body.sealed !== "string"
         ) {
-          await cancelAuth(base, id, pollToken, resolved);
+          await cancelAuth(base, id, pollToken, r);
           return {
             ok: false,
             message: "[openllm] could not claim the key (bad response).\n",
@@ -846,7 +1179,7 @@ export const runCliAuthLogin = async (
         }
         const sealed = parseSealed(claimed.body.sealed);
         if (sealed === null) {
-          await cancelAuth(base, id, pollToken, resolved);
+          await cancelAuth(base, id, pollToken, r);
           return {
             ok: false,
             message: "[openllm] claimed payload was not a valid sealed key.\n",
@@ -858,13 +1191,13 @@ export const runCliAuthLogin = async (
             {
               userId: claimed.body.user_id,
               authorizationId: id,
-              recipientPublicKeyB64: pair.publicKeyB64,
+              recipientPublicKeyB64: session.publicKeyB64,
             },
             sealed,
-            pair.privateKey,
+            session.privateKey,
           );
         } catch {
-          await cancelAuth(base, id, pollToken, resolved);
+          await cancelAuth(base, id, pollToken, r);
           return {
             ok: false,
             message: "[openllm] could not open the sealed key.\n",
@@ -873,34 +1206,282 @@ export const runCliAuthLogin = async (
         try {
           const apiKey = new TextDecoder().decode(plaintext);
           if (!isUsableOpenllmApiKey(apiKey)) {
-            await cancelAuth(base, id, pollToken, resolved);
+            await cancelAuth(base, id, pollToken, r);
             return {
               ok: false,
               message: "[openllm] claimed key format is invalid.\n",
             };
           }
-          return { ok: true, apiKey: apiKey.trim() };
+          const email = displayText(claimed.body.email);
+          const keyName = displayText(claimed.body.key_name);
+          return {
+            ok: true,
+            apiKey: apiKey.trim(),
+            ...(email !== null ? { email } : {}),
+            ...(keyName !== null ? { keyName } : {}),
+          };
         } finally {
           zero(plaintext);
         }
       }
-      await cancelAuth(base, id, pollToken, resolved);
+      await cancelAuth(base, id, pollToken, r);
       return { ok: false, message: "[openllm] authorization timed out.\n" };
     }
-    if ((await pause()) === "aborted") return cancelled();
+    const next = await retryAfter(false);
+    if (next === "aborted") return cancelled();
+    if (next === "deadline") break;
   }
-  await cancelAuth(base, id, pollToken, resolved);
+  await cancelAuth(base, id, pollToken, r);
   return { ok: false, message: "[openllm] authorization timed out.\n" };
+};
+
+/** A server string fit for one terminal line, or null. */
+const displayText = (value: unknown): string | null => {
+  if (typeof value !== "string") return null;
+  const clean = value.replace(/\p{Cc}/gu, "").trim();
+  return clean.length === 0 ? null : clean.slice(0, 200);
+};
+
+/**
+ * Run the browser-handover login against `origin`. Returns the plaintext
+ * API key on success (caller persists it). Never logs the key, poll token,
+ * or sealed ciphertext — only the authorize URL (id only) and the user code.
+ */
+export const runCliAuthLogin = async (
+  origin: string,
+  io: TCliAuthLoginIo = {},
+): Promise<TCliAuthLoginResult> => {
+  const r = resolveIo(io);
+  const base = origin.replace(/\/+$/, "");
+  // Overall budget starts before create so a hanging create cannot outlive it.
+  const deadline = r.now() + r.waitMs;
+  const pair = await generateCliAuthKeypair();
+  const created = await createCliAuth(
+    base,
+    r,
+    pair.publicKeyB64,
+    io.label ?? defaultCliAuthLabel(),
+    deadline,
+  );
+  if (!created.ok) return created;
+  const session: TSession = {
+    base,
+    id: created.id,
+    pollToken: created.pollToken,
+    authorizeUrl: created.authorizeUrl,
+    userCode: created.userCode,
+    publicKeyB64: pair.publicKeyB64,
+    privateKey: pair.privateKey,
+  };
+  const presented = presentAuthorizeLink(session, r);
+  try {
+    return await pollAndClaim(session, r, deadline, presented.stop);
+  } finally {
+    presented.stop();
+    await presented.settled();
+  }
+};
+
+// ─── D19: --non-interactive / --resume ────────────────────────────────
+
+/** What `openllm login --non-interactive` prints (stdout JSON). */
+export type TCliAuthHandoff = {
+  readonly authorize_url: string;
+  readonly code: string | null;
+  readonly expires_in: number;
+  readonly resume: string;
+};
+
+export type TCliAuthStartResult =
+  | { readonly ok: true; readonly handoff: TCliAuthHandoff }
+  | { readonly ok: false; readonly message: string };
+
+/** Server ids are uuids; anything else never becomes a path. */
+const RESUME_ID = /^[A-Za-z0-9-]{1,64}$/;
+
+/** `~/.openllm/cli-auth/<id>.json` — 0600, deleted on resume. */
+export const cliAuthStateFile = (id: string): string =>
+  join(openllmDir(), "cli-auth", `${id}.json`);
+
+type TResumeState = {
+  readonly v: 1;
+  readonly origin: string;
+  readonly id: string;
+  readonly poll_token: string;
+  readonly authorize_url: string;
+  readonly user_code: string | null;
+  readonly public_key: string;
+  readonly private_key_pkcs8: string;
+};
+
+/**
+ * Create the request and hand it off instead of waiting: the private key and
+ * poll token go to a 0600 state file, the link + code to the caller (an AI
+ * agent hands them to a human). `resumeCliAuthLogin` finishes it.
+ */
+export const startCliAuthNonInteractive = async (
+  origin: string,
+  io: TCliAuthLoginIo = {},
+): Promise<TCliAuthStartResult> => {
+  const r = resolveIo(io);
+  const base = origin.replace(/\/+$/, "");
+  const pair = await generateResumableCliAuthKeypair();
+  const created = await createCliAuth(
+    base,
+    r,
+    pair.publicKeyB64,
+    io.label ?? defaultCliAuthLabel(),
+    r.now() + r.requestTimeoutMs,
+  );
+  if (!created.ok) return created;
+  const state: TResumeState = {
+    v: 1,
+    origin: base,
+    id: created.id,
+    poll_token: created.pollToken,
+    authorize_url: created.authorizeUrl,
+    user_code: created.userCode,
+    public_key: pair.publicKeyB64,
+    private_key_pkcs8: pair.privateKeyPkcs8B64,
+  };
+  const file = cliAuthStateFile(created.id);
+  try {
+    if (!RESUME_ID.test(created.id)) throw new Error("bad id");
+    mkdirSync(dirname(file), { recursive: true, mode: 0o700 });
+    writeFileSync(file, `${JSON.stringify(state)}\n`, {
+      mode: 0o600,
+      flag: "wx",
+    });
+    chmodSync(file, 0o600);
+  } catch {
+    await cancelAuth(base, created.id, created.pollToken, r);
+    return {
+      ok: false,
+      message:
+        "[openllm] could not save the pending sign-in on this computer.\n",
+    };
+  }
+  const expiresMs = Date.parse(created.expiresAt) - r.now();
+  return {
+    ok: true,
+    handoff: {
+      authorize_url: created.authorizeUrl,
+      code: created.userCode,
+      expires_in:
+        Number.isFinite(expiresMs) && expiresMs > 0
+          ? Math.round(expiresMs / 1000)
+          : Math.round(CLI_AUTH_WAIT_MS / 1000),
+      resume: `openllm login --resume ${created.id}`,
+    },
+  };
+};
+
+const readResumeState = (id: string): TResumeState | null => {
+  try {
+    const value: unknown = JSON.parse(
+      readFileSync(cliAuthStateFile(id), "utf8"),
+    );
+    if (typeof value !== "object" || value === null) return null;
+    const s = value as Record<string, unknown>;
+    if (
+      s.v !== 1 ||
+      s.id !== id ||
+      typeof s.origin !== "string" ||
+      typeof s.poll_token !== "string" ||
+      typeof s.authorize_url !== "string" ||
+      typeof s.public_key !== "string" ||
+      typeof s.private_key_pkcs8 !== "string"
+    )
+      return null;
+    return {
+      v: 1,
+      origin: s.origin,
+      id,
+      poll_token: s.poll_token,
+      authorize_url: s.authorize_url,
+      user_code: typeof s.user_code === "string" ? s.user_code : null,
+      public_key: s.public_key,
+      private_key_pkcs8: s.private_key_pkcs8,
+    };
+  } catch {
+    return null;
+  }
+};
+
+const removeResumeState = (id: string): void => {
+  try {
+    unlinkSync(cliAuthStateFile(id));
+  } catch {
+    // already gone
+  }
+};
+
+/**
+ * `openllm login --resume <id>`: poll + claim a request started with
+ * `--non-interactive`, against the origin it was created on. The state file
+ * is removed whatever the outcome — every outcome either used the request
+ * or ended it.
+ */
+export const resumeCliAuthLogin = async (
+  id: string,
+  io: TCliAuthLoginIo = {},
+): Promise<TCliAuthLoginResult> => {
+  if (!RESUME_ID.test(id)) {
+    return { ok: false, message: "[openllm] that sign-in id is not valid.\n" };
+  }
+  const state = readResumeState(id);
+  if (state === null) {
+    return {
+      ok: false,
+      message: `[openllm] no pending sign-in ${id} on this computer. Start one with \`openllm login\`.\n`,
+    };
+  }
+  const r = resolveIo(io);
+  let privateKey: CryptoKey;
+  try {
+    privateKey = await importCliAuthPrivateKey(state.private_key_pkcs8);
+  } catch {
+    removeResumeState(id);
+    return { ok: false, message: "[openllm] the saved sign-in is damaged.\n" };
+  }
+  const session: TSession = {
+    base: state.origin,
+    id,
+    pollToken: state.poll_token,
+    authorizeUrl: state.authorize_url,
+    userCode: state.user_code,
+    publicKeyB64: state.public_key,
+    privateKey,
+  };
+  r.write(
+    `Waiting for approval${state.user_code !== null ? ` of ${state.user_code}` : ""} at\n  ${state.authorize_url}\n`,
+  );
+  try {
+    return await pollAndClaim(session, r, r.now() + r.waitMs, () => {});
+  } finally {
+    removeResumeState(id);
+  }
 };
 
 /**
  * Persist a claimed key the same way `openllm login` does, then mirror into
  * process.env so the rest of this process sees it.
  */
-export const persistClaimedApiKey = (apiKey: string): boolean => {
+export const persistClaimedApiKey = (
+  apiKey: string,
+  email?: string,
+): boolean => {
   if (!isUsableOpenllmApiKey(apiKey)) return false;
   const trimmed = apiKey.trim();
-  const vars: Record<string, string> = { OPENLLM_API_KEY: trimmed };
+  const vars: Record<string, string> = {
+    OPENLLM_API_KEY: trimmed,
+    // Blank a stale account line: this key's account is only known when the
+    // claim said so.
+    ...(email !== undefined ||
+    (sharedFileConfig()[ACCOUNT_EMAIL_ENV] ?? "") !== ""
+      ? { [ACCOUNT_EMAIL_ENV]: email ?? "" }
+      : {}),
+  };
   const savedKey = sharedFileConfig().OPENLLM_API_KEY;
   if (
     envFileHasDeviceAnchor() &&
