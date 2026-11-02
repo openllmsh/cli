@@ -37,6 +37,7 @@
 #                                (PATH symlinks / shell rc / completion stay untouched)
 #   OPENLLM_SKIP_VENDOR_CLIS     set to skip vendor CLI provisioning
 #   OPENLLM_INSTALL_VENDOR_CLIS  set to 1 to authorize vendor installation without a terminal
+#   OPENLLM_VENDOR_WAIT_SEC      max seconds to wait for vendor installers (default 600)
 #   OPENLLM_ONLY_VENDOR_CLIS     comma-separated subscription slugs to provision
 #                                (e.g. claude_code,chatgpt); unset = all vendors
 #   OPENLLM_SETUP_MODE           product setup mode: `full` (default) or `minimal`.
@@ -50,15 +51,17 @@
 #   --minimal                    same as OPENLLM_SETUP_MODE=minimal (for
 #                                `curl …/install | bash -s -- --minimal`)
 #
-# This is the ONLY shell installer. In full mode it also background-provisions
-# any missing vendor subscription CLIs (claude / codex / kimi / grok / cursor-agent / muse) via each
-# vendor's official installer — skip if already present. Google Antigravity has no
-# installer script, so the latest official ACP agent release (resolved from the
-# ACP registry) is downloaded and unpacked under ~/.openllm/vendor/antigravity. It never edits a
-# third-party client config: `openllm <client>` applies OpenLLM at run time
-# instead. The only files it writes outside ~/.openllm (besides what a vendor
-# installer itself does) are the PATH symlinks and the ONE marked block in your
-# shell rc that `openllm setup` / `openllm daemon completion` manage.
+# This is the ONLY shell installer. In full mode it also provisions any missing
+# vendor subscription CLIs (claude / codex / kimi / grok / cursor-agent / muse)
+# via each vendor's official installer — skip if already present — and waits a
+# bounded time for those installers before starting the daemon. Google
+# Antigravity has no installer script, so the latest official ACP agent release
+# (resolved from the ACP registry) is downloaded and unpacked under
+# ~/.openllm/vendor/antigravity. It never edits a third-party client config:
+# `openllm <client>` applies OpenLLM at run time instead. The only files it
+# writes outside ~/.openllm (besides what a vendor installer itself does) are
+# the PATH symlinks and the ONE marked block in your shell rc that
+# `openllm setup` / `openllm daemon completion` manage.
 set -euo pipefail
 
 # ORIGIN is resolved in preflight (env → existing ~/.openllm/.env → default),
@@ -785,18 +788,17 @@ if [ -z "$API_KEY" ] && [ "$INSTALL_MODE" != update ]; then
   fi
 fi
 
-# --- provision the vendor subscription CLIs (background) -------------------
+# --- provision the vendor subscription CLIs (awaited, bounded) -------------
 # The daemon RUNS the official vendor CLIs but never INSTALLS them (it runs
 # under an OS sandbox that intentionally can't touch shell rc files). So THIS
 # script — run by the user, unsandboxed, with a real HOME/PATH/rc — is where a
-# missing CLI gets installed: fire-and-forget the official installer for each
-# provider not already present. Each native installer does its own normal
-# rc/PATH edit. The daemon only LINKS its isolated run-view to whatever lands
-# (see cli-install.ts) — symlink self-heal is separate and needs no write grant
-# on the host CLI dirs. Fully best-effort: guarded so a slow/failed vendor
-# install never fails the daemon install, and logged to ~/.openllm/cli-install.log.
-# Full setup only, and only AFTER authentication succeeds (or a usable key was
-# already present). Minimal / update / keyless installs never reach here.
+# missing CLI gets installed: launch each official installer, then wait with a
+# bounded timeout before daemon start. Each native installer does its own
+# normal rc/PATH edit. The daemon only LINKS its isolated run-view to whatever
+# lands (see cli-install.ts) — symlink self-heal is separate and needs no write
+# grant on the host CLI dirs. Logged to ~/.openllm/cli-install.log. Full setup
+# only, and only AFTER authentication succeeds (or a usable key was already
+# present). Minimal / update / keyless installs never reach here.
 #
 # Progress is tracked in per-provider JSON under
 # `$OPENLLM_DIR/vendor-cli-install/<slug>.json` (protocol subscription slugs).
@@ -1636,26 +1638,78 @@ provision_clis() {
       failed=1
     fi
   fi
+  # Bounded wait: never let a stuck vendor installer hang full setup forever.
+  # Preserve auth → vendors → daemon order by finishing (or timing out) here
+  # before the caller starts the daemon. Poll instead of `wait`/timeout(1) so
+  # this stays portable on macOS Bash 3.2 without depending on GNU coreutils.
+  local wait_sec="${OPENLLM_VENDOR_WAIT_SEC:-600}"
+  case "$wait_sec" in
+    ''|*[!0-9]*) wait_sec=600 ;;
+  esac
+  local deadline now timed_out=0 still_running=1
+  deadline=$(( $(date +%s) + wait_sec ))
   if [ "${#pids[@]}" -gt 0 ]; then
-    for pid in "${pids[@]}"; do
-      wait "$pid" || failed=1
+    while [ "$still_running" = 1 ]; do
+      still_running=0
+      for pid in "${pids[@]}"; do
+        if kill -0 "$pid" 2>/dev/null; then
+          still_running=1
+          break
+        fi
+      done
+      [ "$still_running" = 1 ] || break
+      now="$(date +%s)"
+      if [ "$now" -ge "$deadline" ]; then
+        timed_out=1
+        break
+      fi
+      sleep 1
     done
+    for pid in "${pids[@]}"; do
+      if kill -0 "$pid" 2>/dev/null; then
+        continue
+      fi
+      if ! wait "$pid" 2>/dev/null; then
+        failed=1
+      fi
+    done
+  fi
+  if [ "$timed_out" = 1 ]; then
+    for pid in "${pids[@]}"; do
+      vendor_cli_reap_tree "$pid"
+      wait "$pid" 2>/dev/null || true
+    done
+    echo "  Vendor CLIs: install timed out after ${wait_sec}s — see $OPENLLM_DIR/cli-install.log" >&2
+    return 2
   fi
   [ "$failed" = 0 ]
 }
-# `|| true` + the subshell/background jobs keep this off the `set -euo
-# pipefail` path — a vendor install can never abort the daemon install.
-# Background jobs outlive this script. Skipped on a manual update: rerunning
-# every vendor's installer is a first-install action the user didn't ask for.
-# Also skipped without a usable API key — authentication comes first.
+# Awaited vendor install keeps auth → vendors → daemon ordering. Skipped on a
+# manual update: rerunning every vendor's installer is a first-install action
+# the user didn't ask for. Also skipped without a usable API key —
+# authentication comes first.
 VENDOR_PROVISIONED=0
 VENDOR_FAILED=0
+VENDOR_TIMED_OUT=0
 if [ "$INSTALL_MODE" != update ] && [ "$SETUP_MODE" != minimal ] && [ -n "$API_KEY" ] && [ -z "${OPENLLM_SKIP_VENDOR_CLIS:-}" ]; then
   if has_controlling_tty || [ "${OPENLLM_INSTALL_VENDOR_CLIS:-}" = 1 ]; then
     VENDOR_PROVISIONED=1
-    if ! provision_clis; then
-      VENDOR_FAILED=1
-      echo "Warning: vendor CLI installation failed; see $OPENLLM_DIR/cli-install.log and rerun the installer." >&2
+    # `if` keeps a nonzero provision_clis status off the `set -e` path so we can
+    # still start the daemon and report timeout/failure distinctly.
+    if provision_clis; then
+      :
+    else
+      case $? in
+        2)
+          VENDOR_TIMED_OUT=1
+          VENDOR_FAILED=1
+          echo "Warning: vendor CLI installation timed out; see $OPENLLM_DIR/cli-install.log and rerun the installer." >&2
+          ;;
+        *)
+          VENDOR_FAILED=1
+          echo "Warning: vendor CLI installation failed; see $OPENLLM_DIR/cli-install.log and rerun the installer." >&2
+          ;;
+      esac
     fi
   else
     echo "Vendor CLIs were not installed: rerun interactively or set OPENLLM_INSTALL_VENDOR_CLIS=1 to authorize installation." >&2
@@ -1786,7 +1840,11 @@ tab to connect each vendor, or rerun the installer after authentication.
 EOF
     fi
   elif [ -n "$API_KEY" ] && [ "$DAEMON_START_FAILED" = 0 ]; then
-    echo "OpenLLM setup is incomplete: vendor CLI provisioning did not finish. Rerun the installer to retry."
+    if [ "$VENDOR_TIMED_OUT" = 1 ]; then
+      echo "OpenLLM setup is incomplete: vendor CLI installation timed out. See ~/.openllm/cli-install.log and rerun the installer."
+    else
+      echo "OpenLLM setup is incomplete: vendor CLI provisioning did not finish. Rerun the installer to retry."
+    fi
   elif [ -n "$API_KEY" ] && [ "$DAEMON_START_FAILED" = 1 ]; then
     cat <<EOF
 
@@ -1813,7 +1871,13 @@ EOF
   fi
 fi
 
-# The binary + config are already in place. Incomplete auth / vendor / daemon
-# steps are reported above with actionable next commands; keep exit zero so a
-# cancelled or headless partial install does not undo that work. Callers that
-# need a hard gate should check for OPENLLM_API_KEY / daemon status themselves.
+# Incomplete first-install auth is a clear failure (nonzero). The binary and
+# config stay on disk for the recovery command printed above. Vendor/daemon
+# failures are also nonzero so automation never treats a partial full setup as
+# complete. Updates keep exit zero when they only converge binaries/config.
+if [ "$INSTALL_MODE" != update ] && [ -z "$API_KEY" ]; then
+  exit 1
+fi
+if [ "$DAEMON_START_FAILED" = 1 ] || [ "$VENDOR_FAILED" = 1 ]; then
+  exit 1
+fi
