@@ -13,6 +13,8 @@ import {
   writeFileSync,
 } from "node:fs";
 import { dirname, join } from "node:path";
+import type { TCliAuthLoginResult } from "./cli-auth-login";
+import { persistClaimedApiKey, runCliAuthLogin } from "./cli-auth-login";
 import type { TCliConfig } from "./env";
 import { cliConfig, cliEnvFile } from "./env";
 import type {
@@ -30,6 +32,16 @@ export type TCredentialGateResult =
   | { readonly ok: true; readonly config: TCliConfig }
   | { readonly ok: false; readonly message: string };
 
+export type TCredentialGateOptions = {
+  /**
+   * Force the hidden API-key paste prompt instead of browser OAuth.
+   * Used by `openllm login --api-key` and tests of the paste path.
+   */
+  readonly apiKeyEntry?: boolean;
+  /** Injectable OAuth handover (tests). Defaults to `runCliAuthLogin`. */
+  readonly runOAuth?: (origin: string) => Promise<TCliAuthLoginResult>;
+};
+
 /** A local envelope check only; the gateway remains authoritative for validity. */
 export const isUsableApiKey = isUsableOpenllmApiKey;
 
@@ -40,7 +52,7 @@ const keyDiagnostic = (
   problem: "required" | "invalid",
   config?: TCliConfig,
 ): string =>
-  `[openllm] ${problem === "required" ? "API key required." : "API key format is invalid."}\nRun \`openllm start\` in an interactive terminal and sign in at ${signInUrl(config)}. New users receive a key during onboarding; returning users can open Keys after signing in. Paste the key when prompted.\n`;
+  `[openllm] ${problem === "required" ? "API key required." : "API key format is invalid."}\nRun \`openllm login\` in an interactive terminal to sign in with the browser, or pass a key with \`openllm login --key\` / \`--api-key\`. Sign-in: ${signInUrl(config)}.\n`;
 
 export const missingKeyDiagnostic = (config?: TCliConfig): string =>
   keyDiagnostic("required", config);
@@ -254,11 +266,14 @@ export const saveEnvVars = (
 /**
  * Resolve a key for an authenticated CLI operation. Machine mode is deliberately
  * noninteractive so protocol-bearing commands can fail before writing stdout.
+ * Interactive default is browser OAuth handover; pass `apiKeyEntry: true` for
+ * the hidden paste prompt. Existing usable credentials are reused.
  */
-export const requireCliApiKey = (
+export const requireCliApiKey = async (
   mode: TCredentialGateMode,
   terminal: TCredentialGateTerminal = defaultTerminal,
-): TCredentialGateResult => {
+  options: TCredentialGateOptions = {},
+): Promise<TCredentialGateResult> => {
   const configured = cliConfig();
   if (isUsableApiKey(configured.apiKey)) {
     return {
@@ -275,26 +290,51 @@ export const requireCliApiKey = (
         : missingKeyDiagnostic(configured),
     };
   }
-  if (invalid)
+  if (options.apiKeyEntry === true) {
+    if (invalid)
+      terminal.write(
+        "The configured API key format is invalid. Please paste a new key.\n",
+      );
     terminal.write(
-      "The configured API key format is invalid. Please paste a new key.\n",
+      `OpenLLM needs an API key.\nSign in at ${signInUrl(configured)}.\nNew users will receive a key during onboarding. Already have an account? Open Keys after signing in.\n`,
     );
-  terminal.write(
-    `OpenLLM needs an API key.\nSign in at ${signInUrl(configured)}.\nNew users will receive a key during onboarding. Already have an account? Open Keys after signing in.\n`,
-  );
-  while (true) {
-    const pasted = terminal.promptForKey();
-    if (pasted === null || pasted.trim().length === 0)
-      return { ok: false, message: "[openllm] API key setup cancelled.\n" };
-    if (!isUsableApiKey(pasted)) {
-      terminal.write("The API key format is invalid. Please try again.\n");
-      continue;
+    while (true) {
+      const pasted = terminal.promptForKey();
+      if (pasted === null || pasted.trim().length === 0)
+        return { ok: false, message: "[openllm] API key setup cancelled.\n" };
+      if (!isUsableApiKey(pasted)) {
+        terminal.write("The API key format is invalid. Please try again.\n");
+        continue;
+      }
+      const key = pasted.trim();
+      if (!saveApiKey(key))
+        return {
+          ok: false,
+          message: "[openllm] Could not save the API key.\n",
+        };
+      process.env.OPENLLM_API_KEY = key;
+      terminal.write("API key saved.\n");
+      return { ok: true, config: { ...configured, apiKey: key } };
     }
-    const key = pasted.trim();
-    if (!saveApiKey(key))
-      return { ok: false, message: "[openllm] Could not save the API key.\n" };
-    process.env.OPENLLM_API_KEY = key;
-    terminal.write("API key saved.\n");
-    return { ok: true, config: { ...configured, apiKey: key } };
   }
+
+  if (invalid) {
+    terminal.write(
+      "The configured API key format is invalid. Signing in again.\n",
+    );
+  }
+  terminal.write(
+    "OpenLLM needs an API key. Opening browser login (or paste one with `openllm login --api-key`).\n",
+  );
+  const oauth = await (options.runOAuth !== undefined
+    ? options.runOAuth(configured.gatewayUrl)
+    : runCliAuthLogin(configured.gatewayUrl, {
+        write: (message) => terminal.write(message),
+      }));
+  if (!oauth.ok) return { ok: false, message: oauth.message };
+  if (!persistClaimedApiKey(oauth.apiKey)) {
+    return { ok: false, message: "[openllm] Could not save the API key.\n" };
+  }
+  terminal.write("API key saved.\n");
+  return { ok: true, config: { ...configured, apiKey: oauth.apiKey } };
 };

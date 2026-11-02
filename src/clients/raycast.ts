@@ -151,7 +151,7 @@ export const applyRaycast = async (): Promise<number> => {
     process.stderr.write("openllm raycast is macOS-only.\n");
     return 1;
   }
-  const credential = requireCliApiKey("human");
+  const credential = await requireCliApiKey("human");
   if (!credential.ok) {
     process.stderr.write(credential.message);
     return 1;

@@ -238,7 +238,7 @@ export const runMcpServer = async (
   console.error = (...args: unknown[]) =>
     process.stderr.write(`[ERR] ${args.join(" ")}\n`);
 
-  const credential = requireCliApiKey("machine");
+  const credential = await requireCliApiKey("machine");
   if (!credential.ok) {
     process.stderr.write(credential.message);
     process.exitCode = 1;

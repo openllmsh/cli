@@ -193,7 +193,7 @@ export type THermesApplyResult = {
 export const applyHermes = async (opts?: {
   readonly restartGateway?: boolean;
 }): Promise<THermesApplyResult> => {
-  const credential = requireCliApiKey("human");
+  const credential = await requireCliApiKey("human");
   if (!credential.ok) {
     process.stderr.write(credential.message);
     return { code: 1 };
@@ -382,7 +382,7 @@ export const runHermesCommand = async (
     });
     if (!ensured.ok) return ensured.code;
     const bin = ensured.bin;
-    const credential = requireCliApiKey("human");
+    const credential = await requireCliApiKey("human");
     if (!credential.ok) {
       process.stderr.write(credential.message);
       return 1;

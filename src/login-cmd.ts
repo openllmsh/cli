@@ -2,14 +2,17 @@
  * `openllm login` — save (or replace) the OpenLLM API key in this
  * environment's env file (`~/.openllm/.env`, `.dev.env` in dev).
  *
- * Three ways in, so both people and tools can call it:
+ * Ways in, so both people and tools can call it:
  *
- *   openllm login                      hidden prompt on the terminal
+ *   openllm login                      interactive: browser OAuth handover
+ *   openllm login --api-key            interactive: hidden paste prompt
  *   openllm login --key sk-llm-…       explicit argument (scripts)
  *   echo sk-llm-… | openllm login      piped stdin (keeps the key out of argv)
  *
- * Unlike the credential gate in `onboarding.ts`, login ALWAYS asks for a key —
+ * Unlike the credential gate in `onboarding.ts`, login ALWAYS acquires a key —
  * an already-configured key is replaced, which is how a key gets rotated.
+ * Interactive default is OpenLLM OAuth; explicit API-key entry still works.
+ * Non-interactive shells never hang: they need `--key` or a piped key.
  *
  * A daemon already running reads its key at start, so login restarts it; one
  * that isn't running is left alone unless `--start`. In dev mode
@@ -29,6 +32,8 @@
  * anchor is present; disable blanks that line.
  */
 
+import type { TCliAuthLoginResult } from "./cli-auth-login";
+import { runCliAuthLogin } from "./cli-auth-login";
 import { daemonPort, daemonReachable } from "./clients/gateway";
 import { daemonInvocation } from "./daemon-delegation";
 import {
@@ -45,12 +50,15 @@ import {
   splitAnchoredApiKey,
 } from "./runtime-contracts";
 
-export const LOGIN_USAGE = `usage: openllm login [sk-llm-...] [--key <sk-llm-...>] [--start] [--json]
+export const LOGIN_USAGE = `usage: openllm login [sk-llm-...] [--key <sk-llm-...>] [--api-key] [--start] [--no-restart] [--json]
 
-Save your OpenLLM API key to ~/.openllm/.env, replacing any existing key.
-With no key argument, the key is read from piped stdin, or prompted for
-(hidden) on an interactive terminal. A running daemon is restarted to pick
-it up. Get a key under Keys after signing in.
+Sign in to OpenLLM and save an API key to ~/.openllm/.env, replacing any
+existing key. On an interactive terminal with no key argument, opens a
+browser authorization link (also printed for another device) and waits for
+approval. Pass --api-key to paste a key instead; --key or piped stdin for
+scripts. A running daemon is restarted to pick the key up unless
+--no-restart is set (installer uses that so it can start the daemon itself
+after vendor provisioning).
 
 A key copied with Device sessions on ends in a device trust anchor
 (sk-llm-KEY.ANCHOR). It is kept on this machine only, as a separate
@@ -58,12 +66,19 @@ line of the env file; the bare key is the bearer. Sessions on == the
 anchor is present; disable blanks it (Manage device, or
 openllm daemon device disable).
 
+  --api-key            paste an API key (hidden prompt) instead of browser login
+  --key <sk-llm-...>   save this key (non-interactive / scripts)
   --start              also start the daemon when it isn't running
+  --no-restart         save the key only — never restart or start the daemon
   --json               print {"saved":true,"daemon":"restarted"|"started"|
-                       "not_running"} on stdout; everything else on stderr
+                       "not_running"|"unchanged"} on stdout; everything else on stderr
 `;
 
-export type TLoginDaemonOutcome = "restarted" | "started" | "not_running";
+export type TLoginDaemonOutcome =
+  | "restarted"
+  | "started"
+  | "not_running"
+  | "unchanged";
 
 export type TLoginIo = {
   readonly terminal: TCredentialGateTerminal;
@@ -81,6 +96,8 @@ export type TLoginIo = {
   /** Run `openllm daemon anchor` with `anchoredKey` on stdin; its exit
    *  status. Defaults to a self-spawn of the daemon half. */
   readonly anchorDaemon?: (anchoredKey: string) => Promise<number>;
+  /** Injectable OAuth handover (tests). Defaults to `runCliAuthLogin`. */
+  readonly runOAuth?: (origin: string) => Promise<TCliAuthLoginResult>;
 };
 
 /** How long piped stdin may stay silent. A caller that inherits an open but
@@ -161,13 +178,17 @@ const defaultIo: TLoginIo = {
 
 type TLoginArgs = {
   readonly key: string | null;
+  readonly apiKeyEntry: boolean;
   readonly start: boolean;
+  readonly noRestart: boolean;
   readonly json: boolean;
 };
 
 const parseLoginArgs = (args: readonly string[]): TLoginArgs | null => {
   let key: string | null = null;
+  let apiKeyEntry = false;
   let start = false;
+  let noRestart = false;
   let json = false;
   for (let i = 0; i < args.length; i += 1) {
     const arg = args[i];
@@ -181,15 +202,19 @@ const parseLoginArgs = (args: readonly string[]): TLoginArgs | null => {
     } else if (key === null && arg !== undefined && arg.startsWith("sk-llm-")) {
       // `openllm login sk-llm-<key>.<anchor>` — the one-line setup command.
       key = arg;
+    } else if (arg === "--api-key") {
+      apiKeyEntry = true;
     } else if (arg === "--start") {
       start = true;
+    } else if (arg === "--no-restart") {
+      noRestart = true;
     } else if (arg === "--json") {
       json = true;
     } else {
       return null;
     }
   }
-  return { key, start, json };
+  return { key, apiKeyEntry, start, noRestart, json };
 };
 
 export const runLogin = async (
@@ -208,17 +233,31 @@ export const runLogin = async (
     if (piped !== null && piped.trim().length > 0) {
       key = piped;
     } else if (piped === null && io.terminal.isInteractive()) {
-      io.terminal.write(
-        `Paste your OpenLLM API key (from ${cliConfig().gatewayUrl}/keys).\n`,
-      );
-      key = io.terminal.promptForKey();
-      if (key === null || key.trim().length === 0) {
-        io.terminal.write("[openllm] Login cancelled.\n");
-        return 1;
+      if (parsed.apiKeyEntry) {
+        io.terminal.write(
+          `Paste your OpenLLM API key (from ${cliConfig().gatewayUrl}/keys).\n`,
+        );
+        key = io.terminal.promptForKey();
+        if (key === null || key.trim().length === 0) {
+          io.terminal.write("[openllm] Login cancelled.\n");
+          return 1;
+        }
+      } else {
+        const origin = cliConfig().gatewayUrl;
+        const runOAuth =
+          io.runOAuth ??
+          ((oauthOrigin: string): Promise<TCliAuthLoginResult> =>
+            runCliAuthLogin(oauthOrigin));
+        const oauth = await runOAuth(origin);
+        if (!oauth.ok) {
+          io.terminal.write(oauth.message);
+          return 1;
+        }
+        key = oauth.apiKey;
       }
     } else {
       io.terminal.write(
-        "[openllm] No API key given. Pass --key <key> or pipe it on stdin (e.g. `echo $KEY | openllm login`).\n",
+        "[openllm] No API key given. Pass --key <key>, pipe it on stdin (e.g. `echo $KEY | openllm login`), or run interactively for browser login.\n",
       );
       return 2;
     }
@@ -275,6 +314,16 @@ export const runLogin = async (
   process.env.OPENLLM_API_KEY = trimmed;
 
   const running = await io.daemonRunning();
+  if (parsed.noRestart) {
+    // Installer path: persist only. The caller starts/restarts the daemon
+    // after its own ordered setup (vendors first in full mode).
+    if (parsed.json) {
+      io.writeStdout(
+        `${JSON.stringify({ saved: true, daemon: (running ? "unchanged" : "not_running") satisfies TLoginDaemonOutcome })}\n`,
+      );
+    }
+    return 0;
+  }
   if (isOpenllmDevMode()) {
     if (!parsed.json && running) {
       io.terminal.write("bun dev restarts its daemon with the new key.\n");

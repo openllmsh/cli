@@ -300,7 +300,7 @@ const installChatgpt = async (opts?: {
     );
     return 1;
   }
-  const credential = requireCliApiKey("human");
+  const credential = await requireCliApiKey("human");
   if (!credential.ok) {
     process.stderr.write(credential.message);
     return 1;
@@ -377,7 +377,7 @@ export const launchChatgpt = async (): Promise<number> => {
     );
     return 1;
   }
-  const credential = requireCliApiKey("machine");
+  const credential = await requireCliApiKey("machine");
   if (!credential.ok) {
     alert("OpenLLM needs an API key", "Run `openllm chatgpt` in a terminal.");
     return 1;

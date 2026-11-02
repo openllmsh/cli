@@ -263,7 +263,7 @@ export const runChat = async (args: readonly string[]): Promise<number> => {
     return 2;
   }
 
-  const gate = requireCliApiKey("machine");
+  const gate = await requireCliApiKey("machine");
   if (!gate.ok) {
     if (structured) return fail(null, gate.message.trim());
     process.stderr.write(gate.message);
