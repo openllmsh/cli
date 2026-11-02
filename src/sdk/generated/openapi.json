@@ -22938,6 +22938,24 @@
                                             "type": "null"
                                           }
                                         ]
+                                      },
+                                      "rpm": {
+                                        "anyOf": [
+                                          {
+                                            "type": "number"
+                                          },
+                                          {
+                                            "type": "string",
+                                            "enum": [
+                                              "Infinity",
+                                              "-Infinity",
+                                              "NaN"
+                                            ]
+                                          },
+                                          {
+                                            "type": "null"
+                                          }
+                                        ]
                                       }
                                     },
                                     "additionalProperties": false
@@ -23912,6 +23930,24 @@
                                         "type": "null"
                                       }
                                     ]
+                                  },
+                                  "rpm": {
+                                    "anyOf": [
+                                      {
+                                        "type": "number"
+                                      },
+                                      {
+                                        "type": "string",
+                                        "enum": [
+                                          "Infinity",
+                                          "-Infinity",
+                                          "NaN"
+                                        ]
+                                      },
+                                      {
+                                        "type": "null"
+                                      }
+                                    ]
                                   }
                                 },
                                 "additionalProperties": false
@@ -24580,6 +24616,24 @@
                                         "type": "null"
                                       }
                                     ]
+                                  },
+                                  "rpm": {
+                                    "anyOf": [
+                                      {
+                                        "type": "number"
+                                      },
+                                      {
+                                        "type": "string",
+                                        "enum": [
+                                          "Infinity",
+                                          "-Infinity",
+                                          "NaN"
+                                        ]
+                                      },
+                                      {
+                                        "type": "null"
+                                      }
+                                    ]
                                   }
                                 },
                                 "additionalProperties": false
@@ -25151,6 +25205,24 @@
                                       },
                                       {
                                         "type": "null"
+                                      },
+                                      {
+                                        "type": "null"
+                                      }
+                                    ]
+                                  },
+                                  "rpm": {
+                                    "anyOf": [
+                                      {
+                                        "type": "number"
+                                      },
+                                      {
+                                        "type": "string",
+                                        "enum": [
+                                          "Infinity",
+                                          "-Infinity",
+                                          "NaN"
+                                        ]
                                       },
                                       {
                                         "type": "null"
@@ -25975,6 +26047,24 @@
                                     },
                                     {
                                       "type": "null"
+                                    },
+                                    {
+                                      "type": "null"
+                                    }
+                                  ]
+                                },
+                                "rpm": {
+                                  "anyOf": [
+                                    {
+                                      "type": "number"
+                                    },
+                                    {
+                                      "type": "string",
+                                      "enum": [
+                                        "Infinity",
+                                        "-Infinity",
+                                        "NaN"
+                                      ]
                                     },
                                     {
                                       "type": "null"
@@ -27383,6 +27473,24 @@
                                       "type": "null"
                                     }
                                   ]
+                                },
+                                "rpm": {
+                                  "anyOf": [
+                                    {
+                                      "type": "number"
+                                    },
+                                    {
+                                      "type": "string",
+                                      "enum": [
+                                        "Infinity",
+                                        "-Infinity",
+                                        "NaN"
+                                      ]
+                                    },
+                                    {
+                                      "type": "null"
+                                    }
+                                  ]
                                 }
                               },
                               "additionalProperties": false
@@ -28043,6 +28151,24 @@
                                             "type": "null"
                                           }
                                         ]
+                                      },
+                                      "rpm": {
+                                        "anyOf": [
+                                          {
+                                            "type": "number"
+                                          },
+                                          {
+                                            "type": "string",
+                                            "enum": [
+                                              "Infinity",
+                                              "-Infinity",
+                                              "NaN"
+                                            ]
+                                          },
+                                          {
+                                            "type": "null"
+                                          }
+                                        ]
                                       }
                                     },
                                     "additionalProperties": false
@@ -28235,6 +28361,24 @@
                                           },
                                           {
                                             "type": "null"
+                                          },
+                                          {
+                                            "type": "null"
+                                          }
+                                        ]
+                                      },
+                                      "rpm": {
+                                        "anyOf": [
+                                          {
+                                            "type": "number"
+                                          },
+                                          {
+                                            "type": "string",
+                                            "enum": [
+                                              "Infinity",
+                                              "-Infinity",
+                                              "NaN"
+                                            ]
                                           },
                                           {
                                             "type": "null"
@@ -29382,6 +29526,24 @@
                                   },
                                   {
                                     "type": "null"
+                                  },
+                                  {
+                                    "type": "null"
+                                  }
+                                ]
+                              },
+                              "rpm": {
+                                "anyOf": [
+                                  {
+                                    "type": "number"
+                                  },
+                                  {
+                                    "type": "string",
+                                    "enum": [
+                                      "Infinity",
+                                      "-Infinity",
+                                      "NaN"
+                                    ]
                                   },
                                   {
                                     "type": "null"
@@ -31313,6 +31475,24 @@
                                   },
                                   {
                                     "type": "null"
+                                  },
+                                  {
+                                    "type": "null"
+                                  }
+                                ]
+                              },
+                              "rpm": {
+                                "anyOf": [
+                                  {
+                                    "type": "number"
+                                  },
+                                  {
+                                    "type": "string",
+                                    "enum": [
+                                      "Infinity",
+                                      "-Infinity",
+                                      "NaN"
+                                    ]
                                   },
                                   {
                                     "type": "null"
