@@ -1,0 +1,271 @@
+/**
+ * On-demand installation for a single missing session client.
+ *
+ * Trusted installers only — URLs come from this module's map (aligned with
+ * `installHint` in `registry.ts` and `VENDOR_CLI_INSTALL_CMD` in the app).
+ * Never build a shell command from user input. Always-on apps (ChatGPT Mac
+ * app, Raycast) have no curl installer here; callers print `installHint`.
+ */
+
+import { spawn } from "node:child_process";
+import type { TClient, TClientId } from "./registry";
+
+/** Explicit authorize for non-interactive missing-client installs. */
+export const INSTALL_MISSING_CLIENT_ENV = "OPENLLM_INSTALL_MISSING_CLIENT";
+
+type TTrustedInstall = {
+  /** Official installer script URL (never user-supplied). */
+  readonly url: string;
+  /** Shell that runs the downloaded script. */
+  readonly shell: "bash" | "sh";
+};
+
+/**
+ * Curl-installable session clients. Keys are client ids from `CLIENTS`, not
+ * subscription provider slugs — this map serves `openllm <client>`, not the
+ * Providers UI.
+ */
+const TRUSTED_INSTALL_BY_ID: Readonly<
+  Partial<Record<TClientId, TTrustedInstall>>
+> = {
+  claude: { url: "https://claude.ai/install.sh", shell: "bash" },
+  codex: { url: "https://chatgpt.com/codex/install.sh", shell: "bash" },
+  grok: { url: "https://x.ai/cli/install.sh", shell: "bash" },
+  hermes: {
+    url: "https://hermes-agent.nousresearch.com/install.sh",
+    shell: "bash",
+  },
+  opencode: { url: "https://opencode.ai/install", shell: "bash" },
+};
+
+/** Display form of a trusted install — what we print and what tests assert. */
+export const TRUSTED_CLIENT_INSTALL_CMD: Readonly<
+  Partial<Record<TClientId, string>>
+> = Object.fromEntries(
+  Object.entries(TRUSTED_INSTALL_BY_ID).map(([id, spec]) => [
+    id,
+    formatInstallCommand(spec),
+  ]),
+) as Partial<Record<TClientId, string>>;
+
+function formatInstallCommand(spec: TTrustedInstall): string {
+  return `curl -fsSL ${spec.url} | ${spec.shell}`;
+}
+
+/** Official install command for a client id, or `null` when not curl-installable. */
+export const trustedClientInstallCmd = (id: TClientId): string | null =>
+  TRUSTED_CLIENT_INSTALL_CMD[id] ?? null;
+
+/** True when non-interactive launches may run the trusted installer. */
+export const isMissingClientInstallAuthorized = (): boolean =>
+  process.env[INSTALL_MISSING_CLIENT_ENV]?.trim() === "1";
+
+export type TInstallClientRunner = (command: string) => Promise<number>;
+export type TConfirmInstall = (message: string) => Promise<boolean>;
+
+export type TEnsureClientInstalledDeps = {
+  readonly findBinary?: (client: TClient) => string | null;
+  readonly isInteractive?: () => boolean;
+  readonly confirm?: TConfirmInstall;
+  readonly runInstall?: TInstallClientRunner;
+  readonly write?: (message: string) => void;
+  readonly isAuthorized?: () => boolean;
+};
+
+export type TEnsureClientInstalledResult =
+  | { readonly ok: true; readonly bin: string }
+  | { readonly ok: false; readonly code: number };
+
+const defaultIsInteractive = (): boolean =>
+  process.stdin.isTTY === true && process.stderr.isTTY === true;
+
+const defaultWrite = (message: string): void => {
+  process.stderr.write(message);
+};
+
+/**
+ * Run a trusted `curl | shell` installer with argv arrays — the URL never
+ * reaches a shell evaluator. Mirrors `update-cmd.ts`'s pipeline pattern.
+ */
+export const runTrustedInstallCommand = async (
+  command: string,
+): Promise<number> => {
+  const spec = specForCommand(command);
+  if (spec === null) return 1;
+  return runCurlPipeShell(spec);
+};
+
+const specForCommand = (command: string): TTrustedInstall | null => {
+  for (const spec of Object.values(TRUSTED_INSTALL_BY_ID)) {
+    if (spec !== undefined && formatInstallCommand(spec) === command) return spec;
+  }
+  return null;
+};
+
+const runCurlPipeShell = async (spec: TTrustedInstall): Promise<number> =>
+  new Promise<number>((resolve) => {
+    const curl = spawn("curl", ["-fsSL", spec.url], {
+      stdio: ["ignore", "pipe", "inherit"],
+      env: process.env,
+    });
+    const shell = spawn(spec.shell, ["-s", "--"], {
+      stdio: [curl.stdout, "inherit", "inherit"],
+      env: process.env,
+    });
+    const finish = (code: number): void => {
+      try {
+        curl.kill();
+      } catch {
+        // already exited
+      }
+      try {
+        shell.kill();
+      } catch {
+        // already exited
+      }
+      resolve(code);
+    };
+    curl.on("error", () => finish(1));
+    shell.on("error", () => finish(1));
+    let curlCode: number | null = null;
+    let shellCode: number | null = null;
+    const maybeDone = (): void => {
+      if (curlCode === null || shellCode === null) return;
+      if (curlCode !== 0) finish(curlCode);
+      else finish(shellCode);
+    };
+    curl.on("close", (code) => {
+      curlCode = code ?? 1;
+      if (curlCode !== 0) {
+        try {
+          shell.kill();
+        } catch {
+          // already exited
+        }
+      }
+      maybeDone();
+    });
+    shell.on("close", (code) => {
+      shellCode = code ?? 1;
+      maybeDone();
+    });
+  });
+
+/**
+ * Read one yes/no answer from stdin without leaving readline listeners behind.
+ * Empty / anything other than y/yes is a decline.
+ */
+const defaultConfirm = async (message: string): Promise<boolean> => {
+  process.stderr.write(message);
+  const line = await readConfirmLine();
+  return /^(y|yes)$/i.test(line.trim());
+};
+
+const readConfirmLine = async (): Promise<string> =>
+  new Promise<string>((resolve) => {
+    const stdin = process.stdin;
+    let buffer = "";
+    const finish = (value: string): void => {
+      stdin.off("data", onData);
+      stdin.pause();
+      resolve(value);
+    };
+    const onData = (chunk: Buffer): void => {
+      for (const byte of chunk) {
+        if (byte === 0x03 || byte === 0x04) {
+          process.stderr.write("\n");
+          finish("n");
+          return;
+        }
+        if (byte === 0x0a || byte === 0x0d) {
+          process.stderr.write("\n");
+          finish(buffer);
+          return;
+        }
+        if (byte === 0x7f || byte === 0x08) {
+          if (buffer.length > 0) buffer = buffer.slice(0, -1);
+          continue;
+        }
+        buffer += String.fromCharCode(byte);
+      }
+    };
+    stdin.resume();
+    stdin.on("data", onData);
+  });
+
+const manualGuidance = (client: TClient, command: string | null): string => {
+  if (command !== null) {
+    return (
+      `${client.name} is not installed. Install it with:\n  ${command}\n\n` +
+      `Or re-run with ${INSTALL_MISSING_CLIENT_ENV}=1 to install automatically.\n`
+    );
+  }
+  return `${client.name} is not installed. Install it first:\n  ${client.installHint}\n`;
+};
+
+const confirmPrompt = (client: TClient, command: string): string =>
+  `${client.name} is not installed. Install it now?\n  ${command}\n[y/N] `;
+
+/**
+ * Ensure `client`'s binary is on disk. When missing, offer (or, when
+ * authorized, run) the trusted installer for that client alone — never a
+ * vendor bundle, never a daemon start.
+ */
+export const ensureClientInstalled = async (
+  client: TClient,
+  deps: TEnsureClientInstalledDeps = {},
+): Promise<TEnsureClientInstalledResult> => {
+  // Dynamic import breaks the session ↔ install-client cycle: session owns
+  // findClientBinary and calls ensureClientInstalled on the missing path.
+  const findBinary =
+    deps.findBinary ??
+    (await import("./session")).findClientBinary;
+  const write = deps.write ?? defaultWrite;
+  const isInteractive = deps.isInteractive ?? defaultIsInteractive;
+  const confirm = deps.confirm ?? defaultConfirm;
+  const runInstall = deps.runInstall ?? runTrustedInstallCommand;
+  const isAuthorized = deps.isAuthorized ?? isMissingClientInstallAuthorized;
+
+  const existing = findBinary(client);
+  if (existing !== null) return { ok: true, bin: existing };
+
+  const command = trustedClientInstallCmd(client.id);
+  if (command === null) {
+    write(manualGuidance(client, null));
+    return { ok: false, code: 127 };
+  }
+
+  const interactive = isInteractive();
+  if (!interactive && !isAuthorized()) {
+    write(manualGuidance(client, command));
+    return { ok: false, code: 127 };
+  }
+
+  if (interactive) {
+    const accepted = await confirm(confirmPrompt(client, command));
+    if (!accepted) {
+      write(manualGuidance(client, command));
+      return { ok: false, code: 127 };
+    }
+  } else {
+    write(`[openllm] installing ${client.name}…\n  ${command}\n`);
+  }
+
+  const code = await runInstall(command);
+  if (code !== 0) {
+    write(
+      `[openllm] ${client.name} install failed (exit ${code}). Install it with:\n  ${command}\n`,
+    );
+    return { ok: false, code: 127 };
+  }
+
+  const resolved = findBinary(client);
+  if (resolved === null) {
+    write(
+      `[openllm] ${client.name} install finished but the binary still could not be found.\n` +
+        `Install it with:\n  ${command}\n`,
+    );
+    return { ok: false, code: 127 };
+  }
+  return { ok: true, bin: resolved };
+};

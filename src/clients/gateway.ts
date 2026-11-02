@@ -17,6 +17,7 @@ import {
   isOpenllmDevMode,
   parseOpenllmDaemonPort,
 } from "../runtime-contracts";
+import { isMinimalSetupMode } from "../setup-mode";
 
 /**
  * How long to wait for the local daemon's /status before falling back. A
@@ -87,15 +88,16 @@ const probeDaemon = async (port: number): Promise<boolean> => {
 /**
  * Resolve the base URL this launch hands the client.
  *
- * AUTOMATIC: a fast probe of this machine's daemon on the environment's
- * `OPENLLM_DAEMON_PORT`. Answering → `http://127.0.0.1:<port>`, so
- * subscription models serve locally with no cloud round trip. Not answering →
- * the environment's `OPENLLM_CLOUD_ORIGIN`, where origin tunnels subscription
- * hops over the relay to an online device that serves them — so the cloud is
- * a complete answer, not a degraded one, and no flag is needed to choose it.
- *
- * `OPENLLM_GATEWAY=local|cloud` forces the choice for scripting and tests and
- * outranks the probe.
+ * Precedence:
+ *   1. `OPENLLM_GATEWAY=local|cloud` — process force for scripting/tests
+ *   2. minimal setup mode (`OPENLLM_SETUP_MODE=minimal`) → cloud, no probe
+ *      and no daemon start (an already-running daemon is left alone)
+ *   3. AUTOMATIC probe of this machine's daemon on the environment's
+ *      `OPENLLM_DAEMON_PORT`. Answering → `http://127.0.0.1:<port>`, so
+ *      subscription models serve locally with no cloud round trip. Not
+ *      answering → the environment's `OPENLLM_CLOUD_ORIGIN`, where origin
+ *      tunnels subscription hops over the relay to an online device — so the
+ *      cloud is a complete answer, not a degraded one.
  */
 export const resolveGateway = async (opts?: {
   /** Credential-gate result for this launch; keeps the validated snapshot and
@@ -116,6 +118,8 @@ export const resolveGateway = async (opts?: {
   if (forced === "local") {
     return { base: localBase, apiKey, cloudOrigin: gatewayUrl, local: true };
   }
+  // Minimal setup stays cloud-directed: do not probe or start a daemon.
+  if (isMinimalSetupMode()) return cloud;
   const local = await daemonReachable(port);
   return {
     base: local ? localBase : gatewayUrl,

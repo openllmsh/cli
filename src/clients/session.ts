@@ -32,11 +32,14 @@ import {
   waitForSessionHostSocket,
   withDeviceSessionTitles,
 } from "../session-host";
+import { isMinimalSetupMode } from "../setup-mode";
 import { attachBrokerSession } from "./attach";
 import { codexCatalogFor } from "./codex-catalog";
 import { fetchModelCatalog, fetchTier, resolveGateway } from "./gateway";
 import { hermesBundledTuiDir, hermesProfileConfigPath } from "./hermes-home";
 import { HOOK_SCRIPTS } from "./hooks";
+import type { TEnsureClientInstalledDeps } from "./install-client";
+import { ensureClientInstalled } from "./install-client";
 import { buildLaunchPlan, type TLaunchPlan } from "./launch";
 import { buildLiveJson, writeLiveJson } from "./live";
 import {
@@ -216,6 +219,18 @@ export const brokerEligible = (args: {
     args.userArgs.includes(marker),
   );
 };
+
+/**
+ * Whether this launch should take the durable local-session host path.
+ * `OPENLLM_GATEWAY=cloud` and minimal setup both force direct launch so a
+ * client never starts a daemon as a side effect of being invoked.
+ */
+export const shouldBrokerSession = (
+  args: Parameters<typeof brokerEligible>[0],
+): boolean =>
+  process.env.OPENLLM_GATEWAY !== "cloud" &&
+  !isMinimalSetupMode() &&
+  brokerEligible(args);
 
 /** Remove the one optional argv disambiguator before handing args to a vendor or broker. */
 export const forwardedVendorArgs = (
@@ -432,6 +447,8 @@ const chooseRunningSession = async (args: {
 export type TRunSessionClientOptions = {
   /** Override the child launcher; production uses {@link execClient}. */
   readonly execClient?: TExecClient;
+  /** Override missing-client install behaviour (tests). */
+  readonly ensureInstalled?: TEnsureClientInstalledDeps;
 };
 
 export const runSessionClient = async (
@@ -471,10 +488,11 @@ export const runSessionClient = async (
 
   const forwarded = forwardedVendorArgs(userArgs);
   // Durable local sessions do not need a running daemon. A forced
-  // OPENLLM_GATEWAY=cloud still means direct launch.
+  // OPENLLM_GATEWAY=cloud still means direct launch. Minimal setup also
+  // skips the broker — client launches stay cloud-directed and must not
+  // start a local durable host / daemon as a side effect.
   if (
-    process.env.OPENLLM_GATEWAY !== "cloud" &&
-    brokerEligible({
+    shouldBrokerSession({
       client,
       userArgs: forwarded,
       flags,
@@ -512,14 +530,12 @@ export const runSessionClient = async (
     if (code !== null) return code;
   }
 
-  const bin = findClientBinary(client);
-  if (bin === null) {
-    process.stderr.write(
-      `${client.name} is not installed. Install it first:\n  ${client.installHint}\n\n` +
-        `OpenLLM does not install third-party CLIs for you.\n`,
-    );
-    return 127;
-  }
+  const ensured = await ensureClientInstalled(client, {
+    findBinary: findClientBinary,
+    ...options?.ensureInstalled,
+  });
+  if (!ensured.ok) return ensured.code;
+  const bin = ensured.bin;
 
   // Catalog and tier were started with preflight above — both fail open.
   // Marketplace integrations are served by `openllm mcp`.

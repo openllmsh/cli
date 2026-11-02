@@ -32,6 +32,7 @@ import {
   readActiveProfile,
   readHermesStickyProfile,
 } from "./hermes-home";
+import { ensureClientInstalled } from "./install-client";
 import type { TLaunchInputs } from "./launch";
 import { overlayVars } from "./launch";
 import type { TJsonObject } from "./merge";
@@ -376,13 +377,11 @@ export const runHermesCommand = async (
   const clientFlags = flags ?? parseEmptyFlags();
   const sticky = noPersist ? null : readHermesStickyProfile();
   if (sticky !== null) {
-    const bin = findClientBinary(CLIENTS.hermes);
-    if (bin === null) {
-      process.stderr.write(
-        `${CLIENTS.hermes.name} is not installed. Install it first:\n  ${CLIENTS.hermes.installHint}\n`,
-      );
-      return 127;
-    }
+    const ensured = await ensureClientInstalled(CLIENTS.hermes, {
+      findBinary: findClientBinary,
+    });
+    if (!ensured.ok) return ensured.code;
+    const bin = ensured.bin;
     const credential = requireCliApiKey("human");
     if (!credential.ok) {
       process.stderr.write(credential.message);
