@@ -14786,6 +14786,16 @@
                                           "type": "null"
                                         }
                                       ]
+                                    },
+                                    "key_expiry_email": {
+                                      "anyOf": [
+                                        {
+                                          "type": "boolean"
+                                        },
+                                        {
+                                          "type": "null"
+                                        }
+                                      ]
                                     }
                                   },
                                   "additionalProperties": false
