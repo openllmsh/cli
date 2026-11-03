@@ -380,7 +380,7 @@ export const requireCliApiKey = async (
     if (!(await persistClaimedApiKey(oauth.apiKey, oauth.email))) {
       return {
         ok: false,
-        message: `[openllm] Could not save the API key.\n${unsavedKeyNotice(configured.gatewayUrl, oauth.keyId)}`,
+        message: `[openllm] Could not save the API key.\n${unsavedKeyNotice(configured.gatewayUrl, oauth.keyId, oauth.keyMinted)}`,
       };
     }
     // Persist installs any trust anchor and saves the bare key only.

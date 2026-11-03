@@ -139,6 +139,9 @@ export type TCliAuthLoginResult =
       /** The claimed key's id (never secret) — named in the revoke notice
        *  when the caller then fails to save the key. */
       readonly keyId?: string;
+      /** False when the user handed over a key they already had — then a
+       *  failed save leaves nothing new on the account to revoke. */
+      readonly keyMinted?: boolean;
     }
   | { readonly ok: false; readonly message: string };
 
@@ -148,8 +151,14 @@ export type TCliAuthLoginResult =
  * (the expiry sweep revokes only UNclaimed mints) though this CLI never saved
  * it. Names the key by id only — never the secret.
  */
-export const unsavedKeyNotice = (origin: string, keyId?: string): string =>
-  `[openllm] An API key${keyId === undefined ? "" : ` (id ${keyId})`} was already created on your account for this login but was not saved here. Revoke it under Connections (${origin.replace(/\/+$/, "")}/keys) unless it is a key you already use.\n`;
+export const unsavedKeyNotice = (
+  origin: string,
+  keyId?: string,
+  keyMinted?: boolean,
+): string =>
+  keyMinted === false
+    ? ""
+    : `[openllm] An API key${keyId === undefined ? "" : ` (id ${keyId})`} was already created on your account for this login but was not saved here. Revoke it under Connections (${origin.replace(/\/+$/, "")}/keys) unless it is a key you already use.\n`;
 
 type TCreated = {
   readonly id: string;
@@ -171,6 +180,7 @@ type TClaimed = {
   readonly user_id: string;
   readonly email?: unknown;
   readonly key_name?: unknown;
+  readonly key_minted?: unknown;
   readonly sealed: string;
 };
 
@@ -1027,10 +1037,11 @@ const pollAndClaim = async (
   // exists on the account (cancel no longer revokes a claimed key).
   let issued = false;
   let issuedKeyId: string | undefined;
+  let issuedKeyMinted: boolean | undefined;
   const failed = (message: string): TCliAuthLoginResult => ({
     ok: false,
     message: issued
-      ? `${message}${unsavedKeyNotice(base, issuedKeyId)}`
+      ? `${message}${unsavedKeyNotice(base, issuedKeyId, issuedKeyMinted)}`
       : message,
   });
 
@@ -1203,6 +1214,8 @@ const pollAndClaim = async (
         }
         if (typeof claimed.body.key_id === "string")
           issuedKeyId = claimed.body.key_id;
+        if (typeof claimed.body.key_minted === "boolean")
+          issuedKeyMinted = claimed.body.key_minted;
         const sealed = parseSealed(claimed.body.sealed);
         if (sealed === null) {
           await cancelAuth(base, id, pollToken, r);
@@ -1239,6 +1252,9 @@ const pollAndClaim = async (
             ok: true,
             apiKey,
             keyId: issuedKeyId,
+            ...(issuedKeyMinted !== undefined
+              ? { keyMinted: issuedKeyMinted }
+              : {}),
             ...(email !== null ? { email } : {}),
             ...(keyName !== null ? { keyName } : {}),
           };

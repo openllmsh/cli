@@ -471,7 +471,10 @@ export const runLogin = async (
   let key = parsed.key;
   // Set when the key came from the OAuth claim: the server already holds it,
   // so a failure to save it must say so (the revoke notice).
-  let claimed: { readonly keyId?: string } | null = null;
+  let claimed: {
+    readonly keyId?: string;
+    readonly keyMinted?: boolean;
+  } | null = null;
   /** Set when a browser login produced the key (D10 line + saved email). */
   let signedIn: TCliAuthLoginResult | null = null;
   const runBrowserLogin = async (
@@ -513,7 +516,7 @@ export const runLogin = async (
     }
     key = resumed.apiKey;
     signedIn = resumed;
-    claimed = { keyId: resumed.keyId };
+    claimed = { keyId: resumed.keyId, keyMinted: resumed.keyMinted };
   }
 
   if (key === null) {
@@ -560,7 +563,7 @@ export const runLogin = async (
         }
         key = oauth.apiKey;
         signedIn = oauth;
-        claimed = { keyId: oauth.keyId };
+        claimed = { keyId: oauth.keyId, keyMinted: oauth.keyMinted };
       }
     } else if (envKeyUsable) {
       // D20: CI with OPENLLM_API_KEY — nothing to do, never a browser.
@@ -611,7 +614,7 @@ export const runLogin = async (
   }
   if (!saveEnvVars(vars)) {
     io.terminal.write(
-      `[openllm] Could not save the API key.\n${claimed === null ? "" : unsavedKeyNotice(cliConfig().gatewayUrl, claimed.keyId)}`,
+      `[openllm] Could not save the API key.\n${claimed === null ? "" : unsavedKeyNotice(cliConfig().gatewayUrl, claimed.keyId, claimed.keyMinted)}`,
     );
     return 1;
   }
