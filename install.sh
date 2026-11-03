@@ -73,7 +73,9 @@
 #                                never prompts — the saved mode is preserved.
 #                                An update that replaced the binary restarts a
 #                                RUNNING daemon in either mode; Minimal never
-#                                starts a stopped one. EOF / cancel aborts
+#                                starts a stopped one. A re-run that changed
+#                                neither the binary nor the env file leaves a
+#                                running daemon alone. EOF / cancel aborts
 #                                before any mode-dependent persistence or
 #                                vendor install.
 #   --minimal                    same as OPENLLM_SETUP_MODE=minimal (for
@@ -908,6 +910,11 @@ write_env_file() {
   echo "  gateway config written → $ENV_FILE"
 }
 
+# Fingerprint the config before this run touches it: a running daemon is
+# restarted at the end only when what it runs on changed — the binary
+# (INSTALLED_COMPONENTS) or this file (key, origin, port, anchor from the
+# sign-in below or this rewrite).
+ENV_DIGEST_BEFORE="$(sha256_of "$ENV_FILE" 2>/dev/null || true)"
 write_env_file
 
 # --- shell wiring ----------------------------------------------------------
@@ -2111,6 +2118,15 @@ elif [ -n "$API_KEY" ]; then
     else
       echo "  daemon already current — no restart needed"
     fi
+  elif [ "$BINARY_CHANGED" = 0 ] \
+    && [ -n "$ENV_DIGEST_BEFORE" ] \
+    && [ "$ENV_DIGEST_BEFORE" = "$(sha256_of "$ENV_FILE" 2>/dev/null || true)" ] \
+    && daemon_is_running; then
+    # Re-running the installer on a machine that is already set up: same
+    # binary, same config, daemon serving. `daemon start` would re-register
+    # and restart it for nothing.
+    DAEMON_STARTED=1
+    echo "  daemon already running and current — no restart needed"
   else
     echo "Starting the daemon..."
     if "$BIN_DIR/openllm" daemon start; then
