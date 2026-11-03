@@ -23,6 +23,7 @@ export type TStatusDirtyReason =
   | "manual"
   | "models"
   | "presence"
+  | "update"
   | "unknown";
 
 /** Cheap watcher poll — only checks the dirty bit / heartbeat due. */

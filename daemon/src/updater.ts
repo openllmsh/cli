@@ -32,6 +32,8 @@ import {
   writeFileSync,
 } from "node:fs";
 import { dirname, join } from "node:path";
+import type { TUpdateLease, TUpdateLeaseHandle } from "../../src/update-lease";
+import { readUpdateLease, tryAcquireUpdateLease } from "../../src/update-lease";
 import { autoUpdateEnabled } from "./auto-update-pref";
 import { binarySignature } from "./bin-signature";
 import { drainDisposableChildren } from "./child-supervisor";
@@ -54,6 +56,7 @@ import {
   recordUpdateFailure,
   updateBlocked,
 } from "./state-file";
+import { markStatusDirty } from "./status-dirty";
 import { DAEMON_FINGERPRINT, DAEMON_VERSION } from "./version";
 
 // NOTE: never import `../../manifest` here. The daemon half's code fingerprint
@@ -68,6 +71,32 @@ export const managedBinaryPath = (): string =>
  *  the running file (a pre-migration `openllmd` boot). */
 const updateTarget = (): string =>
   existsSync(managedBinaryPath()) ? managedBinaryPath() : process.execPath;
+
+/**
+ * The update replacing this machine's binary right now — this daemon's own or
+ * another process's (CLI, installer, desktop app) — or null. Reported in
+ * `/status` and the pushed status. Never throws.
+ */
+export const currentUpdate = (): TUpdateLease | null =>
+  readUpdateLease(updateTarget());
+
+/** Push the status again whenever this daemon's own update moves. */
+const reportingLease = (lease: TUpdateLeaseHandle): TUpdateLeaseHandle => {
+  let phase: string | null = null;
+  return {
+    progress: (next, bytes) => {
+      lease.progress(next, bytes);
+      if (next !== phase) {
+        phase = next;
+        markStatusDirty("update");
+      }
+    },
+    release: () => {
+      lease.release();
+      markStatusDirty("update");
+    },
+  };
+};
 
 const PROBE_TIMEOUT_MS = 5_000;
 
@@ -162,9 +191,17 @@ const swapFailureMessage = (
     : safeDiagnosticMessage`Binary update failed installing the new binary.`;
 };
 
+/** Stands in when the lock file can't be created (see `takeLease`). */
+const UNGUARDED_LEASE: TUpdateLeaseHandle = {
+  progress: () => {},
+  release: () => {},
+};
+
 type TSwapBinaryDeps = {
   readonly probeFingerprint: TProbeFingerprint;
   readonly harden: (path: string) => void;
+  /** The update lease this swap holds; it reports each step through it. */
+  readonly lease: TUpdateLeaseHandle;
 };
 
 /** Download, verify and atomically install `version` at `dest`. Returns
@@ -193,9 +230,12 @@ const swapBinary = async (
   try {
     const base = `${daemonEnv().cloudOrigin}/api/cli/binary/${target}`;
     const [bytes, expected] = await Promise.all([
-      fetchBinary(base),
+      fetchBinary(base, (received, total) =>
+        deps.lease.progress("download", { received, total }),
+      ),
       fetchDigest(`${base}.sha256`),
     ]);
+    deps.lease.progress("verify");
     const actual = createHash("sha256").update(bytes).digest("hex");
     if (actual !== expected) {
       logError(
@@ -230,6 +270,7 @@ const swapBinary = async (
       return false;
     }
     stage = "install";
+    deps.lease.progress("install");
     renameSync(tmp, dest); // atomic; the running daemon keeps its old inode
     deps.harden(dest); // dequarantine + ad-hoc sign so arm64 can exec it
     // A swap that never converges (mis-publish) must back off too.
@@ -350,12 +391,35 @@ export const createBinaryUpdater = (): TBinaryUpdater => {
     if (running) return;
     if (deps.version === "0.0.0-dev") return;
     running = true;
+    // The cross-process update lease (`src/update-lease.ts`): held from the
+    // download through the restart, so the CLI, the installer and the desktop
+    // app neither swap the file under us nor start a second update.
+    let lease: TUpdateLeaseHandle | null = null;
     try {
       const probeFingerprint: TProbeFingerprint =
         deps.probeFingerprint ?? ((path) => binaryFingerprint(path));
       const harden = deps.harden ?? hardenMacBinary;
       const idle = deps.waitUntilIdle ?? waitUntilIdle;
       const dest = updateTarget();
+      // Someone else is replacing the file: don't swap it too, and don't
+      // fingerprint or restart onto a file in flux. The next tick looks again.
+      if (readUpdateLease(dest) !== null) return;
+      const takeLease = (): TUpdateLeaseHandle | null => {
+        if (lease !== null) return lease;
+        const acquired = tryAcquireUpdateLease(dest, {
+          source: "daemon",
+          version: latest !== null && latest.length > 0 ? latest : null,
+        });
+        if (acquired.ok) {
+          lease = reportingLease(acquired.lease);
+        } else if (acquired.holder === null) {
+          // No live holder, but the lock can't be made: the bin directory
+          // isn't writable. The swap will fail the same way — let it, so the
+          // failure is recorded and backed off instead of retried each tick.
+          lease = UNGUARDED_LEASE;
+        }
+        return lease;
+      };
       const wantSwap =
         (opts.force === true || autoUpdateEnabled()) &&
         latest !== null &&
@@ -365,9 +429,12 @@ export const createBinaryUpdater = (): TBinaryUpdater => {
         // An explicit "update now" retries past a failure's backoff.
         (opts.force === true || !updateBlocked("cli", latest));
       if (wantSwap) {
+        const held = takeLease();
+        if (held === null) return;
         await swapBinary(dest, latest, deps.version, {
           probeFingerprint,
           harden,
+          lease: held,
         });
       }
 
@@ -389,6 +456,9 @@ export const createBinaryUpdater = (): TBinaryUpdater => {
           logInfo("update", "daemon busy; restart deferred to the next check");
           return;
         }
+        const held = takeLease();
+        if (held === null) return;
+        held.progress("restart");
         // The new binary is in place; bounded cleanup must not block the exit
         // that lets launchd/systemd start the replacement daemon.
         await drainDisposableChildren();
@@ -400,6 +470,10 @@ export const createBinaryUpdater = (): TBinaryUpdater => {
         // Linux RestartSec path). Once announced, the relay has unregistered
         // this socket — exit must run even if kickstart's lazy import throws,
         // or the process stays up on an unroutable connection.
+        // Release before kickstart: `launchctl kickstart -k` kills this
+        // process, and a lease left behind would hold off the next update
+        // until it went stale.
+        held.release();
         try {
           await (
             deps.kickstartSupervisedDaemon ?? defaultKickstartSupervisedDaemon
@@ -409,6 +483,7 @@ export const createBinaryUpdater = (): TBinaryUpdater => {
         }
       });
     } finally {
+      (lease as TUpdateLeaseHandle | null)?.release();
       running = false;
     }
   };

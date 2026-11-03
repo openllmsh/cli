@@ -19,6 +19,7 @@
  * (`sandbox/exec.ts`), not that the daemon process is confined (the CLI can't
  * compute the posture itself — it never ran the probe).
  */
+import type { TUpdateLease } from "../../src/update-lease";
 import type { TCloudState } from "./config";
 import { keychainTelemetrySnapshot } from "./delegation/keychain";
 import { refreshTelemetrySnapshot } from "./delegation/refresh";
@@ -48,6 +49,10 @@ export type TDaemonHealth = {
   readonly cloud_origin: string;
   /** Seconds since this process booted (whole seconds). */
   readonly uptime_s: number;
+  /** The update replacing the binary right now (the update lease), or null.
+   *  The desktop app reads the lease file itself too, so it keeps showing
+   *  progress while this daemon is down for the restart. */
+  readonly update: TUpdateLease | null;
   /** Attempt-level `security` spawn counters — no subprocess probe. */
   readonly keychain_spawns: ReturnType<typeof keychainTelemetrySnapshot>;
   /** Per-provider refresh counters — no subprocess probe. */
@@ -74,6 +79,7 @@ export const buildHealth = (deps: {
   readonly cloudOrigin: string;
   readonly bootAt: number;
   readonly now: number;
+  readonly update: TUpdateLease | null;
 }): TDaemonHealth => ({
   version: deps.version,
   installed_version: deps.installedVersion,
@@ -83,6 +89,7 @@ export const buildHealth = (deps: {
   key_configured: deps.keyConfigured,
   cloud_origin: deps.cloudOrigin,
   uptime_s: Math.max(0, Math.floor((deps.now - deps.bootAt) / 1000)),
+  update: deps.update,
   keychain_spawns: keychainTelemetrySnapshot(),
   refresh_spawns: refreshTelemetrySnapshot(),
   identity_conflict: hasIdentityConflict(),

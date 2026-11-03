@@ -601,6 +601,91 @@ json_field() {
 CLI_VERSION="$(json_field cli_version)"
 [ -n "$CLI_VERSION" ] || die "no OpenLLM release is published yet"
 
+# --- the update lease -------------------------------------------------------
+# One process at a time may replace the `openllm` binary: the daemon's
+# auto-update, the CLI's self-update, this installer (also what `openllm update`
+# and the desktop app run). `$BIN_DIR/.update.lock` is created with O_EXCL
+# (`set -C`, like the env-file lock — no flock on fresh installs) and its JSON
+# body is the progress the daemon's /status and the desktop app show. Format
+# and staleness rules: packages/cli/src/update-lease.ts — keep in step.
+UPDATE_LOCK="$BIN_DIR/.update.lock"
+UPDATE_LEASE_STALE_SEC=900
+# The desktop app passes OPENLLM_UPDATE_SOURCE=app so its update is named.
+case "${OPENLLM_UPDATE_SOURCE:-}" in
+  app) UPDATE_SOURCE=app ;;
+  *) UPDATE_SOURCE=installer ;;
+esac
+UPDATE_LEASE_HELD=0
+UPDATE_STARTED_MS=0
+
+now_ms() { printf '%s000' "$(date +%s)"; }
+
+# A numeric field of the lock body ("pid", "updated_at").
+update_lock_num() {
+  sed -n "s/.*\"$1\"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p" "$UPDATE_LOCK" 2>/dev/null | head -n 1
+}
+update_lock_str() {
+  sed -n "s/.*\"$1\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p" "$UPDATE_LOCK" 2>/dev/null | head -n 1
+}
+
+update_lease_body() {
+  local version_json=null
+  [ -n "$2" ] && version_json="\"$2\""
+  printf '{"pid":%s,"source":"%s","version":%s,"phase":"%s","received":null,"total":null,"started_at":%s,"updated_at":%s}' \
+    "$$" "$UPDATE_SOURCE" "$version_json" "$1" "$UPDATE_STARTED_MS" "$(now_ms)"
+}
+
+# Whether the lock names a live holder with a fresh heartbeat.
+update_lock_live() {
+  local pid updated now
+  pid="$(update_lock_num pid)"
+  updated="$(update_lock_num updated_at)"
+  [ -n "$pid" ] && [ -n "$updated" ] || return 1
+  now="$(now_ms)"
+  [ $(( (now - updated) / 1000 )) -le "$UPDATE_LEASE_STALE_SEC" ] || return 1
+  kill -0 "$pid" 2>/dev/null
+}
+
+# acquire_update_lease <version>: take the lease or die naming who holds it.
+acquire_update_lease() {
+  local attempt
+  UPDATE_STARTED_MS="$(now_ms)"
+  for attempt in 1 2; do
+    if (set -C; update_lease_body download "$1" > "$UPDATE_LOCK") 2>/dev/null; then
+      UPDATE_LEASE_HELD=1
+      trap release_update_lease EXIT
+      return 0
+    fi
+    if update_lock_live; then
+      local holder
+      case "$(update_lock_str source)" in
+        daemon) holder="the OpenLLM daemon" ;;
+        app) holder="the OpenLLM desktop app" ;;
+        cli) holder="another openllm command" ;;
+        *) holder="another installer" ;;
+      esac
+      die "openllm is already being updated by $holder — try again when it finishes"
+    fi
+    # Stale (holder gone or silent): take it over.
+    rm -f "$UPDATE_LOCK"
+  done
+  die "could not take the update lock: $UPDATE_LOCK"
+}
+
+# update_lease_phase <phase> <version>: record progress while holding the lease.
+update_lease_phase() {
+  [ "$UPDATE_LEASE_HELD" = 1 ] || return 0
+  [ "$(update_lock_num pid)" = "$$" ] || return 0
+  local tmp="$UPDATE_LOCK.$$.tmp"
+  update_lease_body "$1" "$2" > "$tmp" 2>/dev/null && mv -f "$tmp" "$UPDATE_LOCK" 2>/dev/null || rm -f "$tmp"
+}
+
+release_update_lease() {
+  [ "$UPDATE_LEASE_HELD" = 1 ] || return 0
+  UPDATE_LEASE_HELD=0
+  if [ "$(update_lock_num pid)" = "$$" ]; then rm -f "$UPDATE_LOCK"; fi
+}
+
 # --- fetch + verify + install one component -------------------------------
 # Bytes come from the per-component binary routes, which 302 to the pinned
 # GitHub release asset and serve the committed digest as a `.sha256` sibling —
@@ -642,6 +727,8 @@ install_component() {
     fi
   fi
 
+  # Only the shared binary is leased; it is the file every updater replaces.
+  [ "$name" = openllm ] && acquire_update_lease "$version"
   echo "Downloading $name ${version:+$version }($TARGET)..."
   # Stage inside $BIN_DIR: same filesystem as $dest (so the final mv is an
   # atomic rename, not a cross-device copy) and on the roomy root disk — minimal
@@ -663,6 +750,7 @@ install_component() {
     mv "$dl" "$bin"
   fi
 
+  update_lease_phase verify "$version"
   local actual
   actual="$(sha256_of "$bin")"
   [ -n "$actual" ] || die "could not hash the downloaded $name"
@@ -670,6 +758,7 @@ install_component() {
     die "checksum mismatch for $name (expected $published, got $actual) — refusing to install"
   fi
 
+  update_lease_phase install "$version"
   chmod 0755 "$bin"
   mv -f "$bin" "$dest"
 
@@ -685,6 +774,7 @@ install_component() {
   fi
   echo "  $name installed → $dest"
   INSTALLED_COMPONENTS="$INSTALLED_COMPONENTS $name"
+  release_update_lease
 }
 
 install_component openllm api/cli/binary "$CLI_VERSION"

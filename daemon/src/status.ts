@@ -87,6 +87,7 @@ import type {
 import { teamServeEnabled } from "./team-grant-admit";
 import { teamKeyEpochs } from "./team-keys";
 import { servedTunnelCapacity, servedTunnelLoad } from "./tunnel-capacity";
+import { currentUpdate } from "./updater";
 import { cachedUsage, peekUsage } from "./usage-cache";
 import { attachVendorCliInstall } from "./vendor-cli-install";
 import { DAEMON_VERSION } from "./version";
@@ -947,6 +948,8 @@ const computeStatusFreshInner = async (
     // and schedules a background refresh when stale, so status can stay responsive
     // without blocking and without manifest scans.
     cli: getCliState(),
+    // The binary update in progress (any process's), from the update lease.
+    update: currentUpdate(),
     // Device chat sessions (feature §2.2): whether this box can host a
     // PTY, and the sessions it currently holds (live/dormant).
     pty_supported: ptySupported(),

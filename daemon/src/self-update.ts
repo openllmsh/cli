@@ -152,7 +152,10 @@ export const currentTarget = (): TCliTarget | null => {
 };
 
 /** Fetch a published binary, decompressing the gzipped release asset. */
-export const fetchBinary = async (url: string): Promise<Buffer> => {
+export const fetchBinary = async (
+  url: string,
+  onProgress?: (received: number, total: number | null) => void,
+): Promise<Buffer> => {
   const abort = new AbortController();
   let stall = setTimeout(() => abort.abort(), BINARY_STALL_TIMEOUT_MS);
   const bump = (): void => {
@@ -164,11 +167,16 @@ export const fetchBinary = async (url: string): Promise<Buffer> => {
     const res = await fetch(url, { redirect: "follow", signal: abort.signal });
     if (!res.ok) throw new Error(`binary download failed: ${res.status}`);
     if (res.body === null) throw new Error("binary download had no body");
+    const length = Number(res.headers.get("content-length"));
+    const total = Number.isFinite(length) && length > 0 ? length : null;
+    let received = 0;
     const reader = res.body.getReader();
     for (;;) {
       const { done, value } = await reader.read();
       if (done) break;
       chunks.push(value);
+      received += value.byteLength;
+      onProgress?.(received, total);
       bump();
     }
   } catch (err) {

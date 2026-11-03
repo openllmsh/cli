@@ -18,6 +18,8 @@ import { gunzipSync } from "node:zlib";
 import { CLI_RELEASE } from "../manifest";
 import { CLI_TARGETS } from "../release-types";
 import { CLI_VERSION, cliConfig } from "./env";
+import type { TUpdateLeaseHandle } from "./update-lease";
+import { describeUpdateLease, tryAcquireUpdateLease } from "./update-lease";
 
 const FETCH_TIMEOUT_MS = 30_000;
 
@@ -79,8 +81,35 @@ const hasDaemonHalf = (path: string): boolean => {
 };
 
 /** Outcome of one convergence: `updated`/`current` succeed; `skipped` is a
- *  benign no-op (dev build, nothing published); `failed` is an error. */
-export type TSelfUpdateResult = "updated" | "current" | "skipped" | "failed";
+ *  benign no-op (dev build, nothing published); `busy` means another process
+ *  is already updating the binary (`update-lease.ts`); `failed` is an error. */
+export type TSelfUpdateResult =
+  | "updated"
+  | "current"
+  | "skipped"
+  | "busy"
+  | "failed";
+
+/** Read a download body, reporting bytes as they arrive. */
+const readWithProgress = async (
+  res: Response,
+  onProgress: (received: number, total: number | null) => void,
+): Promise<Buffer> => {
+  if (res.body === null) return Buffer.from(await res.arrayBuffer());
+  const length = Number(res.headers.get("content-length"));
+  const total = Number.isFinite(length) && length > 0 ? length : null;
+  const chunks: Uint8Array[] = [];
+  let received = 0;
+  const reader = res.body.getReader();
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    chunks.push(value);
+    received += value.byteLength;
+    onProgress(received, total);
+  }
+  return Buffer.concat(chunks);
+};
 
 /**
  * Converge the running binary to the gateway's pinned release. `quiet` (the
@@ -104,6 +133,7 @@ export const convergeSelf = async (
     );
     return "failed";
   }
+  let lease: TUpdateLeaseHandle | null = null;
   try {
     const vRes = await fetch(`${gatewayUrl}/api/cli/version`, {
       signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
@@ -138,6 +168,22 @@ export const convergeSelf = async (
       );
       return "failed";
     }
+    // One update at a time across the daemon, the installer, the desktop app
+    // and other CLI runs — see `update-lease.ts`.
+    const self = process.execPath;
+    const acquired = tryAcquireUpdateLease(fs.realpathSync(self), {
+      source: "cli",
+      version: latest,
+    });
+    if (!acquired.ok) {
+      say(
+        acquired.holder === null
+          ? "[self-update] another update is starting — try again in a moment"
+          : `[self-update] ${describeUpdateLease(acquired.holder)} — try again when it finishes`,
+      );
+      return "busy";
+    }
+    lease = acquired.lease;
     say(`[self-update] v${CLI_VERSION} → v${latest} (${target})`);
 
     const shaRes = await fetch(
@@ -159,7 +205,11 @@ export const convergeSelf = async (
       say(`[self-update] download failed: ${binRes.status}`);
       return "failed";
     }
-    let bytes = Buffer.from(await binRes.arrayBuffer());
+    const held = lease;
+    let bytes = await readWithProgress(binRes, (received, total) =>
+      held.progress("download", { received, total }),
+    );
+    held.progress("verify");
     if (bytes.subarray(0, 2).equals(GZIP_MAGIC)) bytes = gunzipSync(bytes);
 
     const actual = createHash("sha256").update(bytes).digest("hex");
@@ -174,7 +224,6 @@ export const convergeSelf = async (
     // rename over. The running process keeps its inode; the next invocation
     // picks up the new binary. A running daemon notices the new file and
     // restarts only if its own half changed (`daemon/src/updater.ts`).
-    const self = process.execPath;
     const staging = join(dirname(self), `.openllm.next-${process.pid}`);
     fs.writeFileSync(staging, bytes, { mode: 0o755 });
     // This file is also the daemon (the service execs `openllm daemon`). Never
@@ -187,6 +236,7 @@ export const convergeSelf = async (
       );
       return "skipped";
     }
+    held.progress("install");
     fs.renameSync(staging, self);
     return "updated";
   } catch (err) {
@@ -194,6 +244,8 @@ export const convergeSelf = async (
       `[self-update] failed: ${err instanceof Error ? err.message : String(err)}`,
     );
     return "failed";
+  } finally {
+    lease?.release();
   }
 };
 
@@ -203,5 +255,5 @@ export const runSelfUpdate = async (): Promise<void> => {
   if (result === "updated") process.stdout.write("openllm updated\n");
   if (result === "current")
     process.stdout.write(`openllm v${CLI_VERSION} is up to date\n`);
-  process.exit(result === "failed" ? 1 : 0);
+  process.exit(result === "failed" || result === "busy" ? 1 : 0);
 };

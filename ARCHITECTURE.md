@@ -91,6 +91,7 @@ packages/cli/
     ├── context-hooks/    # compiled index lifecycle and advisory search nudge
     ├── memory-hooks/     # compiled recall + detached extraction, private health/retry state
     ├── self-update.ts    # converge to /api/cli/version (checksum-gated atomic swap); quiet mode for launch
+    ├── update-lease.ts   # the cross-process update lease + progress (<bin dir>/.update.lock); daemon imports it too
     ├── sdk/
     │   ├── generated/    # COMMITTED: openapi.json + operations.ts (69 ops)
     │   └── client.ts     # thin fetch wrapper over the operations table
@@ -422,3 +423,21 @@ See [`packages/release/commands/cli.ts`](../release/commands/cli.ts):
   in-flight `/v1` request, no login/apply holding the lease); a busy daemon
   defers and retries. A CLI-only release never bounces the daemon.
 - Converge policy (rollbacks supported); `0.0.0-dev` never self-updates.
+- **One update at a time, across processes** (`src/update-lease.ts`). Every
+  path that replaces the binary — the daemon's converge, `convergeSelf`, the
+  installer (`install.sh`, which `openllm update` and the desktop app run) —
+  first creates `<bin dir>/.update.lock` with `O_EXCL` (the env-file lock's
+  shape, so bash takes it with `set -C`). Its JSON body is the progress:
+  `source` (`daemon` / `cli` / `installer` / `app`), target `version`,
+  `phase` (`download` → `verify` → `install` → `restart`) and download bytes,
+  rewritten by the holder as it goes. A live holder makes everyone else back
+  off: background updaters skip the tick, `self-update` exits 1 with
+  `busy`, the installer dies naming the holder, and the desktop app's pairing
+  returns `busy`. A lease whose pid is gone or whose heartbeat is older than
+  15 min is stale and taken over; release removes only a lease still naming
+  the releasing pid. The daemon holds it through its restart (released just
+  before `launchctl kickstart -k`) and reports it in `/status` (`update`) and
+  the pushed `DaemonStatus.update` (protocol `DaemonUpdateState`); the desktop
+  app reads the file directly (`packages/native/src-tauri/src/update_lease.rs`)
+  so it keeps showing progress while the daemon is down. Parity tests pin the
+  three readers to one format.

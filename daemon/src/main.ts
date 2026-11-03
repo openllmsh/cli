@@ -98,7 +98,7 @@ import { recordSandboxState, sandboxState } from "./sandbox/landlock";
 import { beginRequest, endRequest, trackBodyDone } from "./self-update";
 import { migrateLegacyInstall } from "./service";
 import { reconcileSessionHostsAtBoot } from "./session-host";
-import { convergeBinary } from "./updater";
+import { convergeBinary, currentUpdate } from "./updater";
 import { enableUsagePersistence } from "./usage-cache";
 import { DAEMON_VERSION } from "./version";
 
@@ -624,6 +624,7 @@ export const main = async (): Promise<void> => {
             cloudOrigin: daemonEnv().cloudOrigin,
             bootAt: BOOT_AT,
             now: Date.now(),
+            update: currentUpdate(),
           });
           return new Response(JSON.stringify(health), { status: 200, headers });
         }
