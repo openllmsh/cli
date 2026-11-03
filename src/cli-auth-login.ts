@@ -36,6 +36,7 @@ import {
   zero,
 } from "./cli-auth-crypto";
 import { CLI_VERSION } from "./cli-version";
+import { daemonInvocation } from "./daemon-delegation";
 import {
   ACCOUNT_EMAIL_ENV,
   apiKeyEnvVars,
@@ -44,7 +45,7 @@ import {
   sharedFileConfig,
 } from "./env";
 import { saveEnvVars } from "./onboarding";
-import { isUsableOpenllmApiKey } from "./runtime-contracts";
+import { splitAnchoredApiKey } from "./runtime-contracts";
 import type { TTermStyle } from "./term-style";
 import {
   CLEAR_LINE,
@@ -1225,8 +1226,10 @@ const pollAndClaim = async (
           return failed("[openllm] could not open the sealed key.\n");
         }
         try {
-          const apiKey = new TextDecoder().decode(plaintext);
-          if (!isUsableOpenllmApiKey(apiKey)) {
+          const apiKey = new TextDecoder().decode(plaintext).trim();
+          // Bare `sk-llm-…` or `sk-llm-….<anchor>` — the anchor rides when the
+          // approving browser could derive it (device sessions).
+          if (splitAnchoredApiKey(apiKey) === null) {
             await cancelAuth(base, id, pollToken, r);
             return failed("[openllm] claimed key format is invalid.\n");
           }
@@ -1234,7 +1237,7 @@ const pollAndClaim = async (
           const keyName = displayText(claimed.body.key_name);
           return {
             ok: true,
-            apiKey: apiKey.trim(),
+            apiKey,
             keyId: issuedKeyId,
             ...(email !== null ? { email } : {}),
             ...(keyName !== null ? { keyName } : {}),
@@ -1487,19 +1490,48 @@ export const resumeCliAuthLogin = async (
   }
 };
 
+/** Install the trust anchor via `openllm daemon anchor` (stdin carries the
+ *  anchored key — never argv). Same spawn as `openllm login`. */
+const defaultAnchorDaemon = async (anchoredKey: string): Promise<number> => {
+  try {
+    const proc = Bun.spawn([...daemonInvocation(), "anchor"], {
+      stdin: new TextEncoder().encode(anchoredKey),
+      stdout: "ignore",
+      stderr: "inherit",
+    });
+    return await proc.exited;
+  } catch {
+    return 1;
+  }
+};
+
+export type TPersistClaimedApiKeyIo = {
+  readonly anchorDaemon?: (anchoredKey: string) => Promise<number>;
+};
+
 /**
  * Persist a claimed key the same way `openllm login` does, then mirror into
- * process.env so the rest of this process sees it.
+ * process.env so the rest of this process sees it. Accepts a bare key or an
+ * anchored `sk-llm-….<anchor>`: when an anchor is present, runs
+ * `openllm daemon anchor` before saving so device sessions are installed.
  */
-export const persistClaimedApiKey = (
+export const persistClaimedApiKey = async (
   apiKey: string,
   email?: string,
-): boolean => {
-  if (!isUsableOpenllmApiKey(apiKey)) return false;
-  const trimmed = apiKey.trim();
-  // The key line plus a blanked device anchor when it is stale for this key
-  // (`apiKeyEnvVars`, the same rule as `openllm login` and install.sh).
-  const vars: Record<string, string> = apiKeyEnvVars(trimmed);
+  io: TPersistClaimedApiKeyIo = {},
+): Promise<boolean> => {
+  const split = splitAnchoredApiKey(apiKey);
+  if (split === null) return false;
+  if (split.anchor !== null) {
+    const anchor = io.anchorDaemon ?? defaultAnchorDaemon;
+    if ((await anchor(`${split.key}.${split.anchor}`)) !== 0) return false;
+  }
+  // Anchored: `openllm daemon anchor` already wrote OPENLLM_DEVICE_ANCHOR.
+  // Bare: blank a stale anchor that belongs to a different key id.
+  const vars: Record<string, string> =
+    split.anchor === null
+      ? apiKeyEnvVars(split.key)
+      : { OPENLLM_API_KEY: split.key };
   // Blank a stale account line: this key's account is only known when the
   // claim said so.
   if (
@@ -1508,7 +1540,7 @@ export const persistClaimedApiKey = (
   )
     vars[ACCOUNT_EMAIL_ENV] = email ?? "";
   if (!saveEnvVars(vars)) return false;
-  process.env.OPENLLM_API_KEY = trimmed;
+  process.env.OPENLLM_API_KEY = split.key;
   return true;
 };
 

@@ -27,7 +27,10 @@ import type {
   TCredentialGateMode,
   TCredentialGateTerminal,
 } from "./runtime-contracts";
-import { isUsableOpenllmApiKey } from "./runtime-contracts";
+import {
+  isUsableOpenllmApiKey,
+  splitAnchoredApiKey,
+} from "./runtime-contracts";
 
 export type {
   TCredentialGateMode,
@@ -374,14 +377,16 @@ export const requireCliApiKey = async (
           color: stderrColorEnabled(),
         }));
     if (!oauth.ok) return { ok: false, message: oauth.message };
-    if (!persistClaimedApiKey(oauth.apiKey, oauth.email)) {
+    if (!(await persistClaimedApiKey(oauth.apiKey, oauth.email))) {
       return {
         ok: false,
         message: `[openllm] Could not save the API key.\n${unsavedKeyNotice(configured.gatewayUrl, oauth.keyId)}`,
       };
     }
+    // Persist installs any trust anchor and saves the bare key only.
+    const bare = splitAnchoredApiKey(oauth.apiKey)?.key ?? oauth.apiKey;
     terminal.write(signedInLines(oauth));
-    return { ok: true, config: { ...configured, apiKey: oauth.apiKey } };
+    return { ok: true, config: { ...configured, apiKey: bare } };
   } finally {
     detach();
   }
