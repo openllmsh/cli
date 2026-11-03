@@ -43,6 +43,7 @@
  * anchor is present; disable blanks that line.
  */
 
+import { readFileSync } from "node:fs";
 import type {
   TCliAuthLoginResult,
   TCliAuthStartResult,
@@ -268,6 +269,15 @@ const runDaemonArgs = async (
       `[openllm] could not run managed daemon: ${error instanceof Error ? error.message : String(error)}\n`,
     );
     return 1;
+  }
+};
+
+/** The env file this login writes, or null when it doesn't exist yet. */
+const readConfigFile = (): string | null => {
+  try {
+    return readFileSync(cliEnvFile(), "utf8");
+  } catch {
+    return null;
   }
 };
 
@@ -582,6 +592,11 @@ export const runLogin = async (
   }
   // From here on only the bare key exists in this process's config surface.
   const trimmed = split.key;
+  // What the daemon runs on, before this login touches it: a running daemon
+  // is restarted only when the save (or the anchor) actually changed it —
+  // re-pairing the same key (the desktop app's Update / Re-pair) must not
+  // bounce a daemon that is already serving it.
+  const configBefore = readConfigFile();
 
   // Pin the device-control key from the anchor BEFORE saving the key and
   // restarting: the restarted daemon boots anchored. Sessions default on
@@ -652,7 +667,14 @@ export const runLogin = async (
       io.writeStdout(loginJson(running ? "restarted" : "not_running"));
     return 0;
   }
-  const command = running ? "restart" : parsed.start ? "start" : null;
+  const changed = readConfigFile() !== configBefore;
+  const command = running
+    ? changed
+      ? "restart"
+      : null
+    : parsed.start
+      ? "start"
+      : null;
   if (command !== null && (await io.runDaemon(command, parsed.json)) !== 0) {
     io.terminal.write(
       `[openllm] The key is saved, but ${command === "restart" ? "restarting" : "starting"} the daemon failed. Run \`openllm ${command}\`.\n`,
@@ -664,7 +686,9 @@ export const runLogin = async (
       ? "restarted"
       : command === "start"
         ? "started"
-        : "not_running";
+        : running
+          ? "unchanged"
+          : "not_running";
   if (parsed.json) io.writeStdout(loginJson(daemon));
   return 0;
 };

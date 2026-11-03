@@ -1865,7 +1865,7 @@ vendor_cli_on_wait_signal() {
     echo "Stopped: $VENDOR_REAPED_NAMES." >&2
   fi
   echo "OpenLLM is installed and your API key is saved (${ENV_FILE:-$OPENLLM_DIR/.env}), but the daemon was not started." >&2
-  echo "  Start it now:          ${BIN_DIR:-$OPENLLM_DIR/bin}/openllm daemon start" >&2
+  echo "  Start it now:          ${BIN_DIR:-$OPENLLM_DIR/bin}/openllm start" >&2
   echo "  Install vendor CLIs:   $(vendor_cli_retry_hint)" >&2
   echo "  Installer log:         $OPENLLM_DIR/cli-install.log" >&2
   if [ "$sig" = INT ]; then
@@ -2109,7 +2109,7 @@ if [ "$SETUP_MODE" = minimal ]; then
       echo "OpenLLM updated (minimal setup; daemon left as-is)."
     fi
   elif [ -n "$API_KEY" ]; then
-    echo "Minimal setup — daemon not started. Run \`openllm daemon start\` later if you want this machine to serve."
+    echo "Minimal setup — daemon not started. Run \`openllm start\` later if you want this machine to serve."
   fi
 elif [ -n "$API_KEY" ]; then
   if [ "$INSTALL_MODE" = update ]; then
@@ -2191,11 +2191,16 @@ print_auth_next_steps() {
 OpenLLM needs an API key before setup can finish.
 Sign in at $ORIGIN/sign-in.
 New users will receive a key during onboarding. Already have an account? Open Keys after signing in.
-Then run: openllm login
 EOF
   if [ "$SETUP_MODE" != minimal ]; then
     cat <<EOF
-After authentication, start the daemon with: openllm daemon start
+Then run: openllm start
+  (signs this computer in through the browser, then starts the daemon;
+   add --api-key to paste a key instead)
+EOF
+  else
+    cat <<EOF
+Then run: openllm login
 EOF
   fi
 }
@@ -2224,7 +2229,7 @@ OpenLLM is installed (minimal setup).
     openllm opencode       OpenCode
 
   ollm <client>            short alias for any of them
-  openllm daemon start     optional — make this machine a local supplier
+  openllm start            optional — make this machine a local supplier
   openllm --help           everything else
 
 Open a new shell (or source your rc) so \`openllm\` and \`ollm\` are on PATH.
@@ -2267,7 +2272,7 @@ EOF
 
 OpenLLM is installed, but the daemon did not start.
 
-  openllm daemon start     finish daemon setup
+  openllm start            finish daemon setup
   openllm daemon status    diagnose the failure
   openllm --help           everything else
 
@@ -2279,8 +2284,8 @@ EOF
       cat <<EOF
 
 Authentication did not finish. The OpenLLM binary is installed; finish
-setup any time with: openllm login
-Then start the daemon with: openllm daemon start
+setup any time with: openllm start
+(it signs this computer in through the browser, then starts the daemon)
 (Sign in at $ORIGIN/sign-in if you still need an API key.)
 EOF
     else
