@@ -38,9 +38,8 @@ import {
 import { CLI_VERSION } from "./cli-version";
 import {
   ACCOUNT_EMAIL_ENV,
+  apiKeyEnvVars,
   cliConfig,
-  DEVICE_ANCHOR_ENV,
-  envFileHasDeviceAnchor,
   openllmDir,
   sharedFileConfig,
 } from "./env";
@@ -67,8 +66,14 @@ const USER_CODE_DISPLAY = /^[A-Z]{4}-[A-Z]{4}$/;
 /** Poll delay after `failures` consecutive network errors / 429s (D21). */
 export const cliAuthBackoffMs = (failures: number): number =>
   Math.min(CLI_AUTH_MAX_BACKOFF_MS, CLI_AUTH_POLL_MS * 2 ** failures);
-/** Local poll budget; server-side expiry arrives as `expired` / 410. */
-export const CLI_AUTH_WAIT_MS = 10 * 60 * 1000;
+/**
+ * Local poll budget; server-side expiry arrives as `expired` / 410. The
+ * server's TTL (10 min) plus its post-approval claim grace (2 min), so an
+ * approval in the last seconds is still claimed. Kept local because the CLI
+ * ships without workspace deps; `tests/cli/cli-auth-wait-parity.test.ts`
+ * pins it to `packages/schema/cli-auth.ts`.
+ */
+export const CLI_AUTH_WAIT_MS = 12 * 60 * 1000;
 /** Hard ceiling for one create/status/claim fetch or body read. */
 export const CLI_AUTH_REQUEST_TIMEOUT_MS = 15_000;
 /** Upper bound on one auth JSON response body. */
@@ -120,8 +125,20 @@ export type TCliAuthLoginResult =
       /** Approving account, for "Signed in as" (absent from older servers). */
       readonly email?: string;
       readonly keyName?: string;
+      /** The claimed key's id (never secret) — named in the revoke notice
+       *  when the caller then fails to save the key. */
+      readonly keyId?: string;
     }
   | { readonly ok: false; readonly message: string };
+
+/**
+ * Printed after any failure once the server has answered a claim: it marked
+ * the authorization claimed on that 200, so the key now lives on the account
+ * (the expiry sweep revokes only UNclaimed mints) though this CLI never saved
+ * it. Names the key by id only — never the secret.
+ */
+export const unsavedKeyNotice = (origin: string, keyId?: string): string =>
+  `[openllm] An API key${keyId === undefined ? "" : ` (id ${keyId})`} was already created on your account for this login but was not saved here. Revoke it under Connections (${origin.replace(/\/+$/, "")}/keys) unless it is a key you already use.\n`;
 
 type TCreated = {
   readonly id: string;
@@ -937,9 +954,31 @@ const pollAndClaim = async (
   const pause = async (ms: number): Promise<"slept" | "aborted"> =>
     abortableSleep(ms, r.signal, r.sleep);
 
+  // Set on the first claim 200: from then on every failure also says a key
+  // exists on the account (cancel no longer revokes a claimed key).
+  let issued = false;
+  let issuedKeyId: string | undefined;
+  const failed = (message: string): TCliAuthLoginResult => ({
+    ok: false,
+    message: issued
+      ? `${message}${unsavedKeyNotice(base, issuedKeyId)}`
+      : message,
+  });
+
+  // Set on the first claim 200: from then on every failure also says a key
+  // exists on the account (cancel no longer revokes a claimed key).
+  let issued = false;
+  let issuedKeyId: string | undefined;
+  const failed = (message: string): TCliAuthLoginResult => ({
+    ok: false,
+    message: issued
+      ? `${message}${unsavedKeyNotice(base, issuedKeyId)}`
+      : message,
+  });
+
   const cancelled = async (): Promise<TCliAuthLoginResult> => {
     await cancelAuth(base, id, pollToken, r);
-    return { ok: false, message: CANCELLED_MESSAGE };
+    return failed(CANCELLED_MESSAGE);
   };
 
   /** D18: read the browser's number. `null` result = give up (already handled). */
@@ -948,7 +987,7 @@ const pollAndClaim = async (
   > => {
     if (!r.interactive) {
       await cancelAuth(base, id, pollToken, r);
-      return { ok: false, message: NEEDS_CONFIRM_WITHOUT_TTY };
+      return failed(NEEDS_CONFIRM_WITHOUT_TTY);
     }
     releaseTerminal();
     const signal = r.signal ?? new AbortController().signal;
@@ -1012,13 +1051,10 @@ const pollAndClaim = async (
         continue;
       }
       await cancelAuth(base, id, pollToken, r);
-      return {
-        ok: false,
-        message: terminalAuthHttpMessage(
+      return failed(terminalAuthHttpMessage(
           "status",
           statusOutcome.response.status,
-        ),
-      };
+        ));
     }
     const statusBody = await readJsonBounded<TStatus>(
       statusOutcome.response,
@@ -1037,17 +1073,10 @@ const pollAndClaim = async (
     }
     const { status } = statusBody.body;
     if (status === "denied" || status === "cancelled") {
-      return {
-        ok: false,
-        message: `[openllm] authorization was ${status}.\n`,
-      };
+      return failed(`[openllm] authorization was ${status}.\n`);
     }
     if (status === "expired") {
-      return {
-        ok: false,
-        message:
-          "[openllm] authorization expired. Run `openllm login` again for a new link.\n",
-      };
+      return failed("[openllm] authorization expired. Run `openllm login` again for a new link.\n");
     }
     if (status === "approved") {
       let confirmNumber: string | undefined;
@@ -1090,13 +1119,9 @@ const pollAndClaim = async (
         ) {
           if (r.now() + CLI_AUTH_POLL_MS >= deadline) {
             await cancelAuth(base, id, pollToken, r);
-            return {
-              ok: false,
-              message:
-                claimOutcome.kind === "timeout"
+            return failed(claimOutcome.kind === "timeout"
                   ? "[openllm] could not claim the key (timed out).\n"
-                  : "[openllm] could not claim the key (network error).\n",
-            };
+                  : "[openllm] could not claim the key (network error).\n");
           }
           if ((await pause(CLI_AUTH_POLL_MS)) === "aborted") return cancelled();
           continue;
@@ -1106,10 +1131,7 @@ const pollAndClaim = async (
           if (isRetryableCliAuthHttpStatus(httpStatus)) {
             if (r.now() + CLI_AUTH_POLL_MS >= deadline) {
               await cancelAuth(base, id, pollToken, r);
-              return {
-                ok: false,
-                message: `[openllm] could not claim the key (${httpStatus}).\n`,
-              };
+              return failed(`[openllm] could not claim the key (${httpStatus}).\n`);
             }
             if ((await pause(CLI_AUTH_POLL_MS)) === "aborted")
               return cancelled();
@@ -1133,18 +1155,13 @@ const pollAndClaim = async (
             }
             if (err?.type === "cli_auth_cancelled") {
               // The server already cancelled — nothing to clean up.
-              return {
-                ok: false,
-                message: `[openllm] ${err.message !== "" ? err.message : "authorization was cancelled."}\n`,
-              };
+              return failed(`[openllm] ${err.message !== "" ? err.message : "authorization was cancelled."}\n`);
             }
           }
           await cancelAuth(base, id, pollToken, r);
-          return {
-            ok: false,
-            message: terminalAuthHttpMessage("claim", httpStatus),
-          };
+          return failed(terminalAuthHttpMessage("claim", httpStatus));
         }
+        issued = true;
         const claimed = await readJsonBounded<TClaimed>(
           claimOutcome.response,
           deadline,
@@ -1157,10 +1174,7 @@ const pollAndClaim = async (
         if (claimed.kind === "timeout") {
           if (r.now() + CLI_AUTH_POLL_MS >= deadline) {
             await cancelAuth(base, id, pollToken, r);
-            return {
-              ok: false,
-              message: "[openllm] could not claim the key (timed out).\n",
-            };
+            return failed("[openllm] could not claim the key (timed out).\n");
           }
           if ((await pause(CLI_AUTH_POLL_MS)) === "aborted") return cancelled();
           continue;
@@ -1172,18 +1186,14 @@ const pollAndClaim = async (
           typeof claimed.body.sealed !== "string"
         ) {
           await cancelAuth(base, id, pollToken, r);
-          return {
-            ok: false,
-            message: "[openllm] could not claim the key (bad response).\n",
-          };
+          return failed("[openllm] could not claim the key (bad response).\n");
         }
+        if (typeof claimed.body.key_id === "string")
+          issuedKeyId = claimed.body.key_id;
         const sealed = parseSealed(claimed.body.sealed);
         if (sealed === null) {
           await cancelAuth(base, id, pollToken, r);
-          return {
-            ok: false,
-            message: "[openllm] claimed payload was not a valid sealed key.\n",
-          };
+          return failed("[openllm] claimed payload was not a valid sealed key.\n");
         }
         let plaintext: Uint8Array;
         try {
@@ -1198,25 +1208,20 @@ const pollAndClaim = async (
           );
         } catch {
           await cancelAuth(base, id, pollToken, r);
-          return {
-            ok: false,
-            message: "[openllm] could not open the sealed key.\n",
-          };
+          return failed("[openllm] could not open the sealed key.\n");
         }
         try {
           const apiKey = new TextDecoder().decode(plaintext);
           if (!isUsableOpenllmApiKey(apiKey)) {
             await cancelAuth(base, id, pollToken, r);
-            return {
-              ok: false,
-              message: "[openllm] claimed key format is invalid.\n",
-            };
+            return failed("[openllm] claimed key format is invalid.\n");
           }
           const email = displayText(claimed.body.email);
           const keyName = displayText(claimed.body.key_name);
           return {
             ok: true,
             apiKey: apiKey.trim(),
+            keyId: issuedKeyId,
             ...(email !== null ? { email } : {}),
             ...(keyName !== null ? { keyName } : {}),
           };
@@ -1225,14 +1230,14 @@ const pollAndClaim = async (
         }
       }
       await cancelAuth(base, id, pollToken, r);
-      return { ok: false, message: "[openllm] authorization timed out.\n" };
+      return failed("[openllm] authorization timed out.\n");
     }
     const next = await retryAfter(false);
     if (next === "aborted") return cancelled();
     if (next === "deadline") break;
   }
   await cancelAuth(base, id, pollToken, r);
-  return { ok: false, message: "[openllm] authorization timed out.\n" };
+  return failed("[openllm] authorization timed out.\n");
 };
 
 /** A server string fit for one terminal line, or null. */
@@ -1473,23 +1478,16 @@ export const persistClaimedApiKey = (
 ): boolean => {
   if (!isUsableOpenllmApiKey(apiKey)) return false;
   const trimmed = apiKey.trim();
-  const vars: Record<string, string> = {
-    OPENLLM_API_KEY: trimmed,
-    // Blank a stale account line: this key's account is only known when the
-    // claim said so.
-    ...(email !== undefined ||
-    (sharedFileConfig()[ACCOUNT_EMAIL_ENV] ?? "") !== ""
-      ? { [ACCOUNT_EMAIL_ENV]: email ?? "" }
-      : {}),
-  };
-  const savedKey = sharedFileConfig().OPENLLM_API_KEY;
+  // The key line plus a blanked device anchor when it is stale for this key
+  // (`apiKeyEnvVars`, the same rule as `openllm login` and install.sh).
+  const vars: Record<string, string> = apiKeyEnvVars(trimmed);
+  // Blank a stale account line: this key's account is only known when the
+  // claim said so.
   if (
-    envFileHasDeviceAnchor() &&
-    (savedKey === undefined ||
-      parseApiKeyId(savedKey) === null ||
-      parseApiKeyId(savedKey) !== parseApiKeyId(trimmed))
+    email !== undefined ||
+    (sharedFileConfig()[ACCOUNT_EMAIL_ENV] ?? "") !== ""
   )
-    vars[DEVICE_ANCHOR_ENV] = "";
+    vars[ACCOUNT_EMAIL_ENV] = email ?? "";
   if (!saveEnvVars(vars)) return false;
   process.env.OPENLLM_API_KEY = trimmed;
   return true;

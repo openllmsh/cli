@@ -27,6 +27,12 @@
  * through this command (`--start --json`, key on stdin), and `--json` reports
  * the outcome on stdout for callers that parse it.
  *
+ * `--start` is the ask to use the local daemon, so it also switches a Minimal
+ * machine to Full (`OPENLLM_SETUP_MODE=full` in the env file): Minimal sends
+ * every client launch cloud-direct, so a started daemon would otherwise sit
+ * unused. Plain `login` and `--no-restart` (the installer's path) leave the
+ * mode alone.
+ *
  * A key copied with Device sessions on carries a device trust anchor after
  * it (`sk-llm-<key>.<anchor>`). Login splits it on the last dot: the anchored
  * key goes to `openllm daemon anchor` over stdin, which writes
@@ -48,17 +54,18 @@ import {
   runCliAuthLogin,
   signedInLines,
   startCliAuthNonInteractive,
+  unsavedKeyNotice,
 } from "./cli-auth-login";
 import { daemonPort, daemonReachable } from "./clients/gateway";
 import { daemonInvocation } from "./daemon-delegation";
 import {
   ACCOUNT_EMAIL_ENV,
+  apiKeyEnvVars,
   cliConfig,
-  DEVICE_ANCHOR_ENV,
-  envFileHasDeviceAnchor,
+  cliEnvFile,
   sharedFileConfig,
 } from "./env";
-import { defaultTerminal, saveEnvVars } from "./onboarding";
+import { apiKeyShadowNote, defaultTerminal, saveEnvVars } from "./onboarding";
 import type { TCredentialGateTerminal } from "./runtime-contracts";
 import {
   isOpenllmDevMode,
@@ -66,6 +73,14 @@ import {
   parseApiKeyId,
   splitAnchoredApiKey,
 } from "./runtime-contracts";
+import type { TSetupMode } from "./setup-mode";
+import {
+  exportedSetupMode,
+  readSetupMode,
+  SETUP_MODE_ENV,
+  savedSetupMode,
+  saveSetupMode,
+} from "./setup-mode";
 import { readTtyLine } from "./tty-line";
 
 export const LOGIN_USAGE = `usage: openllm login [sk-llm-...] [--key <sk-llm-...>] [--api-key] [--force]
@@ -99,10 +114,13 @@ openllm daemon device disable).
   --non-interactive    for agents: print {"authorize_url","code","expires_in",
                        "resume"} on stdout and exit; a person approves the link
   --resume <id>        finish a --non-interactive sign-in and save its key
-  --start              also start the daemon when it isn't running
-  --no-restart         save the key only — never restart or start the daemon
+  --start              also start the daemon when it isn't running, and switch
+                       a Minimal setup to Full so client launches use it
+  --no-restart         save the key only — never restart or start the daemon,
+                       never change the setup mode
   --json               print {"saved":true,"daemon":"restarted"|"started"|
-                       "not_running"|"unchanged"} on stdout; everything else on stderr
+                       "not_running"|"unchanged","setupMode":"full"|"minimal"}
+                       on stdout; everything else on stderr
 `;
 
 export type TLoginDaemonOutcome =
@@ -110,6 +128,13 @@ export type TLoginDaemonOutcome =
   | "started"
   | "not_running"
   | "unchanged";
+
+/** The `--json` line on stdout. `setupMode` is the mode in effect after login. */
+export type TLoginJson = {
+  readonly saved: true;
+  readonly daemon: TLoginDaemonOutcome;
+  readonly setupMode: TSetupMode;
+};
 
 export type TLoginIo = {
   readonly terminal: TCredentialGateTerminal;
@@ -263,6 +288,39 @@ const defaultIo: TLoginIo = {
   anchorDaemon,
 };
 
+/**
+ * `--start` on a Minimal machine: save Full, so the daemon this login starts
+ * is the one client launches use. An exported `OPENLLM_SETUP_MODE=minimal`
+ * outranks the file, so the file is still switched but only the note is
+ * printed: the export keeps Minimal in effect, so nothing "switched".
+ */
+const switchToFullForStart = (terminal: TCredentialGateTerminal): void => {
+  const exportedMinimal = exportedSetupMode() === "minimal";
+  if (savedSetupMode() === "minimal") {
+    if (!saveSetupMode("full")) {
+      terminal.write(
+        `[openllm] Could not switch setup to Full; client launches stay cloud-direct. Set ${SETUP_MODE_ENV}=full in ${cliEnvFile()}.\n`,
+      );
+      return;
+    }
+    // Only claim the switch when it takes effect; an exported Minimal still
+    // wins, and the note below says so instead.
+    if (!exportedMinimal) {
+      terminal.write(
+        "Setup switched to Full: client launches now use the local daemon.\n",
+      );
+    }
+  }
+  if (exportedMinimal) {
+    terminal.write(
+      `[openllm] Note: ${SETUP_MODE_ENV}=minimal is set in your environment and keeps Minimal in effect. Unset it to use the local daemon.\n`,
+    );
+  }
+};
+
+const loginJson = (daemon: TLoginDaemonOutcome): string =>
+  `${JSON.stringify({ saved: true, daemon, setupMode: readSetupMode() } satisfies TLoginJson)}\n`;
+
 type TLoginArgs = {
   readonly key: string | null;
   readonly apiKeyEntry: boolean;
@@ -396,6 +454,9 @@ export const runLogin = async (
   }
 
   let key = parsed.key;
+  // Set when the key came from the OAuth claim: the server already holds it,
+  // so a failure to save it must say so (the revoke notice).
+  let claimed: { readonly keyId?: string } | null = null;
   /** Set when a browser login produced the key (D10 line + saved email). */
   let signedIn: TCliAuthLoginResult | null = null;
   const runBrowserLogin = async (
@@ -436,6 +497,7 @@ export const runLogin = async (
     }
     key = resumed.apiKey;
     signedIn = resumed;
+    claimed = { keyId: resumed.keyId };
   }
 
   if (key === null) {
@@ -481,6 +543,7 @@ export const runLogin = async (
         }
         key = oauth.apiKey;
         signedIn = oauth;
+        claimed = { keyId: oauth.keyId };
       }
     } else if (envKeyUsable) {
       // D20: CI with OPENLLM_API_KEY — nothing to do, never a browser.
@@ -513,7 +576,12 @@ export const runLogin = async (
     }
   }
 
-  const vars: Record<string, string> = { OPENLLM_API_KEY: trimmed };
+  // `openllm daemon anchor` already wrote OPENLLM_DEVICE_ANCHOR beside an
+  // anchored key; a bare key blanks an anchor that is stale for it.
+  const vars: Record<string, string> =
+    split.anchor === null
+      ? apiKeyEnvVars(trimmed)
+      : { OPENLLM_API_KEY: trimmed };
   const savedFile = sharedFileConfig();
   if (signedIn?.ok === true && signedIn.email !== undefined) {
     vars[ACCOUNT_EMAIL_ENV] = signedIn.email;
@@ -524,23 +592,10 @@ export const runLogin = async (
     // A different key saved by hand may be another account's.
     vars[ACCOUNT_EMAIL_ENV] = "";
   }
-  // `openllm daemon anchor` already wrote OPENLLM_DEVICE_ANCHOR beside the
-  // key. The anchor's pair secret is bound to the key id: a bare login with
-  // the SAME id leaves it (re-saving is not "sessions off"). It blanks only
-  // when either id is absent/invalid or the ids differ — that anchor is stale
-  // (same rule as install.sh and the credential gate).
-  const savedKey = savedFile.OPENLLM_API_KEY;
-  if (
-    split.anchor === null &&
-    envFileHasDeviceAnchor() &&
-    (savedKey === undefined ||
-      parseApiKeyId(savedKey) === null ||
-      parseApiKeyId(savedKey) !== parseApiKeyId(trimmed))
-  ) {
-    vars[DEVICE_ANCHOR_ENV] = "";
-  }
   if (!saveEnvVars(vars)) {
-    io.terminal.write("[openllm] Could not save the API key.\n");
+    io.terminal.write(
+      `[openllm] Could not save the API key.\n${claimed === null ? "" : unsavedKeyNotice(cliConfig().gatewayUrl, claimed.keyId)}`,
+    );
     return 1;
   }
   if (!parsed.json) {
@@ -551,33 +606,25 @@ export const runLogin = async (
     if (signedIn?.ok === true && !parsed.noRestart)
       io.terminal.write(LOGIN_NEXT_STEP);
   }
-  const shadowed = process.env.OPENLLM_API_KEY;
-  if (shadowed !== undefined && shadowed.trim() !== trimmed) {
-    io.terminal.write(
-      "[openllm] Note: OPENLLM_API_KEY is set in your environment and overrides the saved key. Unset it to use the new one.\n",
-    );
-  }
+  const shadowNote = apiKeyShadowNote(trimmed);
+  if (shadowNote !== null) io.terminal.write(shadowNote);
   process.env.OPENLLM_API_KEY = trimmed;
 
   const running = await io.daemonRunning();
   if (parsed.noRestart) {
     // Installer path: persist only. The caller starts/restarts the daemon
     // after its own ordered setup (vendors first in full mode).
-    if (parsed.json) {
-      io.writeStdout(
-        `${JSON.stringify({ saved: true, daemon: (running ? "unchanged" : "not_running") satisfies TLoginDaemonOutcome })}\n`,
-      );
-    }
+    if (parsed.json)
+      io.writeStdout(loginJson(running ? "unchanged" : "not_running"));
     return 0;
   }
+  if (parsed.start) switchToFullForStart(io.terminal);
   if (isOpenllmDevMode()) {
     if (!parsed.json && running) {
       io.terminal.write("bun dev restarts its daemon with the new key.\n");
     }
-    if (parsed.json) {
-      const daemon: TLoginDaemonOutcome = running ? "restarted" : "not_running";
-      io.writeStdout(`${JSON.stringify({ saved: true, daemon })}\n`);
-    }
+    if (parsed.json)
+      io.writeStdout(loginJson(running ? "restarted" : "not_running"));
     return 0;
   }
   const command = running ? "restart" : parsed.start ? "start" : null;
@@ -593,7 +640,6 @@ export const runLogin = async (
       : command === "start"
         ? "started"
         : "not_running";
-  if (parsed.json)
-    io.writeStdout(`${JSON.stringify({ saved: true, daemon })}\n`);
+  if (parsed.json) io.writeStdout(loginJson(daemon));
   return 0;
 };

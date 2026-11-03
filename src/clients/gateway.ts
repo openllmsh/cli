@@ -90,8 +90,9 @@ const probeDaemon = async (port: number): Promise<boolean> => {
  *
  * Precedence:
  *   1. `OPENLLM_GATEWAY=local|cloud` — process force for scripting/tests
- *   2. minimal setup mode (`OPENLLM_SETUP_MODE=minimal`) → cloud, no probe
- *      and no daemon start (an already-running daemon is left alone)
+ *   2. minimal setup mode (`OPENLLM_SETUP_MODE=minimal`) → cloud, never a
+ *      probe — even a running daemon is not used. Using it means switching
+ *      to full (`openllm login --start` saves it, or set the variable)
  *   3. AUTOMATIC probe of this machine's daemon on the environment's
  *      `OPENLLM_DAEMON_PORT`. Answering → `http://127.0.0.1:<port>`, so
  *      subscription models serve locally with no cloud round trip. Not
@@ -118,7 +119,7 @@ export const resolveGateway = async (opts?: {
   if (forced === "local") {
     return { base: localBase, apiKey, cloudOrigin: gatewayUrl, local: true };
   }
-  // Minimal setup stays cloud-directed: do not probe or start a daemon.
+  // Minimal setup is cloud-direct: never probe or use a daemon.
   if (isMinimalSetupMode()) return cloud;
   const local = await daemonReachable(port);
   return {

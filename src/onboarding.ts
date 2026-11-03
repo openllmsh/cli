@@ -19,9 +19,10 @@ import {
   persistClaimedApiKey,
   runCliAuthLogin,
   signedInLines,
+  unsavedKeyNotice,
 } from "./cli-auth-login";
 import type { TCliConfig } from "./env";
-import { cliConfig, cliEnvFile } from "./env";
+import { apiKeyEnvVars, cliConfig, cliEnvFile, exportedApiKey } from "./env";
 import type {
   TCredentialGateMode,
   TCredentialGateTerminal,
@@ -69,6 +70,23 @@ export const missingKeyDiagnostic = (config?: TCliConfig): string =>
 
 export const invalidKeyDiagnostic = (config?: TCliConfig): string =>
   keyDiagnostic("invalid", config);
+
+/**
+ * A non-blank exported `OPENLLM_API_KEY` outranks the env file, so signing in
+ * again would only save a key this shell never reads — and mint a new one on
+ * every launch. Refuse instead of starting browser login (the value is never
+ * echoed).
+ */
+export const invalidExportedKeyDiagnostic = (): string =>
+  "[openllm] OPENLLM_API_KEY is set in your environment but is not a valid OpenLLM API key, and it overrides the saved key. Unset it (`unset OPENLLM_API_KEY`) or set it to a valid key, then try again.\n";
+
+/** The note printed when a shell-exported key keeps shadowing `savedKey`. */
+export const apiKeyShadowNote = (savedKey: string): string | null => {
+  const exported = exportedApiKey();
+  return exported !== undefined && exported.trim() !== savedKey
+    ? "[openllm] Note: OPENLLM_API_KEY is set in your environment and overrides the saved key. Unset it to use the new one.\n"
+    : null;
+};
 
 type THiddenInputSignalProcess = {
   readonly on: (signal: NodeJS.Signals, listener: () => void) => unknown;
@@ -166,15 +184,14 @@ const waitForEnvUpdateLock = (): void => {
   );
 };
 
-/**
- * Serialize read-modify-rename updates with the daemon-compatible file lock.
- * A killed writer leaves a stale regular file that is recovered after 30 seconds.
- */
+/** Save `key` (blanking a device anchor that is stale for it). */
 export const saveApiKey = (key: string): boolean =>
-  saveEnvVars({ OPENLLM_API_KEY: key });
+  saveEnvVars(apiKeyEnvVars(key));
 
 /** Set `vars` in this environment's env file, keeping every other line (one
- *  line per name, the first one replaced in place). Same lock as the daemon. */
+ *  line per name, the first one replaced in place). Read-modify-rename is
+ *  serialized with the daemon-compatible file lock; a killed writer leaves a
+ *  stale regular file that is recovered after 30 seconds. */
 export const saveEnvVars = (
   vars: Readonly<Record<string, string>>,
 ): boolean => {
@@ -291,6 +308,9 @@ export const requireCliApiKey = async (
       config: { ...configured, apiKey: configured.apiKey.trim() },
     };
   }
+  // The exported value is what `cliConfig` read, and it is unusable.
+  if (exportedApiKey() !== undefined)
+    return { ok: false, message: invalidExportedKeyDiagnostic() };
   const invalid = configured.apiKey.trim().length > 0;
   if (mode === "machine" || !terminal.isInteractive()) {
     return {
@@ -352,7 +372,10 @@ export const requireCliApiKey = async (
         }));
     if (!oauth.ok) return { ok: false, message: oauth.message };
     if (!persistClaimedApiKey(oauth.apiKey, oauth.email)) {
-      return { ok: false, message: "[openllm] Could not save the API key.\n" };
+      return {
+        ok: false,
+        message: `[openllm] Could not save the API key.\n${unsavedKeyNotice(configured.gatewayUrl, oauth.keyId)}`,
+      };
     }
     terminal.write(signedInLines(oauth));
     return { ok: true, config: { ...configured, apiKey: oauth.apiKey } };

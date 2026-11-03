@@ -222,8 +222,9 @@ export const brokerEligible = (args: {
 
 /**
  * Whether this launch should take the durable local-session host path.
- * `OPENLLM_GATEWAY=cloud` and minimal setup both force direct launch so a
- * client never starts a daemon as a side effect of being invoked.
+ * `OPENLLM_GATEWAY=cloud` and minimal setup both force direct launch: a
+ * minimal launch never starts or brokers through a daemon, even a running
+ * one (switching to full — `openllm login --start` — is how to use it).
  */
 export const shouldBrokerSession = (
   args: Parameters<typeof brokerEligible>[0],
