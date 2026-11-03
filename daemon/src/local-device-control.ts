@@ -30,13 +30,19 @@ import {
   DEVICE_ANCHOR_LOCAL_PATH,
   DEVICE_CONTROL_LOCAL_MAX_BODY_BYTES,
   DEVICE_CONTROL_LOCAL_PATH,
+  DOCTOR_LOCAL_CAPABILITY_HEADER,
   IDENTITY_LOCAL_PATH,
   isOpenllmDeviceAnchorSyntax,
   LocalDeviceAnchorRequest,
   LocalDeviceControlRequest,
 } from "@openllmsh/protocol";
 import { Result, Schema } from "effect";
-import { localAgentRefusal, localAgentRefusalResponse } from "./agent/loopback";
+import {
+  isAllowedLocalAgentOrigin,
+  localAgentRefusal,
+  localAgentRefusalResponse,
+  localPreflightRefusal,
+} from "./agent/loopback";
 import {
   deviceKeyFingerprint,
   getDeviceAccessPin,
@@ -192,10 +198,52 @@ const anchorResponse = async (req: Request): Promise<Response> => {
 };
 
 /**
+ * CORS for the desktop app's page: it is served from a remote origin
+ * (`~/.openllm/.env`'s, see `isAllowedLocalAgentOrigin`) and calls
+ * `http://127.0.0.1` with the capability header, so the browser preflights
+ * and then needs the origin reflected. Nothing for any other origin.
+ */
+export const localControlCorsHeaders = (
+  req: Request,
+): Record<string, string> => {
+  const origin = req.headers.get("origin");
+  if (origin === null || !isAllowedLocalAgentOrigin(origin)) return {};
+  return {
+    "access-control-allow-origin": origin,
+    "access-control-allow-methods": "GET, POST, OPTIONS",
+    "access-control-allow-headers": `content-type, accept, ${DOCTOR_LOCAL_CAPABILITY_HEADER}`,
+    "access-control-allow-private-network": "true",
+    "access-control-max-age": "600",
+    vary: "origin",
+  };
+};
+
+const withCors = (req: Request, res: Response): Response => {
+  for (const [name, value] of Object.entries(localControlCorsHeaders(req))) {
+    res.headers.set(name, value);
+  }
+  return res;
+};
+
+/**
  * Serve one loopback device-control request. `remoteAddress` is the TCP peer
  * (`server.requestIP(req)?.address`).
  */
 export const handleLocalDeviceControl = async (
+  req: Request,
+  remoteAddress: string | null | undefined,
+): Promise<Response> => {
+  // The preflight can't carry the capability; the real request must.
+  if (req.method === "OPTIONS") {
+    const refused = localPreflightRefusal(req, remoteAddress);
+    return refused !== null
+      ? localAgentRefusalResponse(refused)
+      : withCors(req, new Response(null, { status: 204 }));
+  }
+  return withCors(req, await serveLocalDeviceControl(req, remoteAddress));
+};
+
+const serveLocalDeviceControl = async (
   req: Request,
   remoteAddress: string | null | undefined,
 ): Promise<Response> => {

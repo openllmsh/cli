@@ -30,6 +30,7 @@ import {
 } from "@openllmsh/protocol";
 import { isTrustedDeploymentOrigin } from "../cors";
 import { capabilityMatches } from "../doctor-report/capability";
+import { daemonEnv } from "../env";
 import { isLoopbackLocalHost } from "../local-http";
 import type { TAgentDispatcher } from "./dispatcher";
 import type { TAgentConnection } from "./types";
@@ -66,11 +67,21 @@ const isLoopbackAddress = (address: string | null | undefined): boolean => {
   return /^127(\.\d{1,3}){3}$/.test(v4);
 };
 
-/** Whether a loopback agent caller's `Origin` may drive this daemon. */
+/**
+ * Whether a loopback agent caller's `Origin` may drive this daemon: the
+ * desktop app's own webview, an OpenLLM deployment, or the origin this
+ * daemon is configured for — `daemonEnv().dashboardOrigin`, i.e. the
+ * `OPENLLM_CLOUD_ORIGIN` in `~/.openllm/.env` (or `OPENLLM_DASHBOARD_ORIGIN`).
+ * Read live, never hardcoded: the desktop app loads exactly that origin, and
+ * a daemon paired to it already holds its key. Without it the app's own page
+ * was refused (`forbidden_origin`) on any origin outside the fixed list, e.g.
+ * staging. The capability token is still required on top.
+ */
 export const isAllowedLocalAgentOrigin = (origin: string | null): boolean =>
   origin === null ||
   TAURI_ORIGINS.has(origin) ||
-  isTrustedDeploymentOrigin(origin);
+  isTrustedDeploymentOrigin(origin) ||
+  origin === daemonEnv().dashboardOrigin;
 
 const offeredProtocols = (req: Request): string[] =>
   (req.headers.get("sec-websocket-protocol") ?? "")
@@ -90,6 +101,24 @@ const presentedCapability = (req: Request): string | null => {
 };
 
 /**
+ * Admission for a CORS preflight to a loopback control route: loopback peer,
+ * loopback `Host`, allowed `Origin`. A preflight never carries the
+ * capability header (the browser only names it in
+ * `access-control-request-headers`), so the capability is checked on the
+ * real request ({@link localAgentRefusal}). Null = admitted.
+ */
+export const localPreflightRefusal = (
+  req: Request,
+  remoteAddress: string | null | undefined,
+): TLocalAgentRefusal | null => {
+  if (!isLoopbackAddress(remoteAddress)) return "not_loopback";
+  if (!isLoopbackLocalHost(req.headers.get("host"))) return "not_loopback";
+  return isAllowedLocalAgentOrigin(req.headers.get("origin"))
+    ? null
+    : "forbidden_origin";
+};
+
+/**
  * Admission for a loopback agent upgrade. `remoteAddress` is the TCP peer
  * (`server.requestIP(req)?.address`). Null = admitted.
  */
@@ -97,10 +126,8 @@ export const localAgentRefusal = (
   req: Request,
   remoteAddress: string | null | undefined,
 ): TLocalAgentRefusal | null => {
-  if (!isLoopbackAddress(remoteAddress)) return "not_loopback";
-  if (!isLoopbackLocalHost(req.headers.get("host"))) return "not_loopback";
-  if (!isAllowedLocalAgentOrigin(req.headers.get("origin")))
-    return "forbidden_origin";
+  const refused = localPreflightRefusal(req, remoteAddress);
+  if (refused !== null) return refused;
   return capabilityMatches(presentedCapability(req))
     ? null
     : "capability_missing";
