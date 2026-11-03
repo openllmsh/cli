@@ -10,13 +10,12 @@
 # starting the daemon.
 #
 # Exit status: nonzero when a first install ends without a usable key, or when
-# the daemon fails to start / restart. Vendor CLIs never change it — skipped
-# (headless without OPENLLM_INSTALL_VENDOR_CLIS=1), pending (another installer
-# already has that provider in flight), failed or timed out are reported with a
-# warning naming ~/.openllm/cli-install.log and how to retry, and the run still
-# exits 0 once the daemon is up. Ctrl-C / TERM during the vendor wait stops
-# only the vendor installers this run started, says what is already saved and
-# exits nonzero.
+# the daemon fails to start / restart. Vendor CLIs never change it — pending
+# (another installer already has that provider in flight), failed or timed out
+# are reported with a warning naming ~/.openllm/cli-install.log and how to
+# retry, and the run still exits 0 once the daemon is up. Ctrl-C / TERM during
+# the vendor wait stops only the vendor installers this run started, says what
+# is already saved and exits nonzero.
 #
 #   curl -fsSL https://www.openllm.sh/install | bash
 #
@@ -44,40 +43,39 @@
 #                          probed or changed)
 #   OPENLLM_SKIP_SHELL_SETUP     set to skip `openllm setup` + completion install
 #                                (PATH symlinks / shell rc / completion stay untouched)
-#   OPENLLM_SKIP_VENDOR_CLIS     set to skip vendor CLI provisioning
-#   OPENLLM_INSTALL_VENDOR_CLIS  set to 1 to authorize vendor installation without a
-#                                terminal (headless runs skip vendors otherwise —
-#                                a skip, not a failure)
+#   OPENLLM_SKIP_VENDOR_CLIS     set to skip vendor CLI provisioning (opt-out;
+#                                Full installs vendors by default, including
+#                                headless / curl|bash)
 #   OPENLLM_VENDOR_WAIT_SEC      max seconds to wait for vendor installers (default 600;
 #                                a "still installing …" line every 20 s meanwhile)
 #   OPENLLM_ONLY_VENDOR_CLIS     comma-separated subscription slugs to provision
 #                                (e.g. claude_code,chatgpt); unset = all vendors
 #   OPENLLM_SETUP_MODE           product setup mode: `full` or `minimal`.
 #                                Explicit value / `--minimal` bypasses the
-#                                interactive chooser. Full authenticates,
-#                                provisions missing vendor CLIs, and starts the
-#                                daemon when a key is available. Minimal
-#                                authenticates only — no vendor install and no
-#                                daemon start; later `openllm <client>` launches
-#                                stay cloud-directed. Persisted into the env file
-#                                so subsequent launches honor it. Distinct from
-#                                OPENLLM_INSTALL_MODE (install vs update).
-#                                On a fresh interactive install with no saved
-#                                mode, the installer asks Full vs Minimal on the
-#                                controlling tty (Enter → Full). Headless /
-#                                non-interactive installs (CI, scripts, the
-#                                desktop app; no controlling tty) never hang
-#                                and pick silently: Full when OPENLLM_API_KEY
-#                                is supplied (binary + key + daemon; vendors
-#                                still need OPENLLM_INSTALL_VENDOR_CLIS=1),
-#                                Minimal without a key. An update, or a re-run
-#                                that already has OPENLLM_SETUP_MODE in the env
-#                                file, never prompts — the saved mode is
-#                                preserved. An update that replaced the binary
-#                                restarts a RUNNING daemon in either mode;
-#                                Minimal never starts a stopped one. EOF /
-#                                cancel aborts before any mode-dependent
-#                                persistence or vendor install.
+#                                interactive chooser. Full (the default)
+#                                authenticates, provisions missing vendor CLIs,
+#                                and starts the daemon when a key is available.
+#                                Minimal authenticates only — no vendor install
+#                                and no daemon start; later `openllm <client>`
+#                                launches stay cloud-directed. Persisted into
+#                                the env file so subsequent launches honor it.
+#                                Distinct from OPENLLM_INSTALL_MODE (install vs
+#                                update). On a fresh interactive install with
+#                                no saved mode, the installer asks Full vs
+#                                Minimal on the controlling tty (Enter → Full).
+#                                Headless / non-interactive installs (scripts,
+#                                CI, the desktop app; no controlling tty) never
+#                                hang and pick Full silently — including bare
+#                                `curl … | bash`. Anyone who wants Minimal in
+#                                automation sets OPENLLM_SETUP_MODE=minimal or
+#                                passes `--minimal`. An update, or a re-run that
+#                                already has OPENLLM_SETUP_MODE in the env file,
+#                                never prompts — the saved mode is preserved.
+#                                An update that replaced the binary restarts a
+#                                RUNNING daemon in either mode; Minimal never
+#                                starts a stopped one. EOF / cancel aborts
+#                                before any mode-dependent persistence or
+#                                vendor install.
 #   --minimal                    same as OPENLLM_SETUP_MODE=minimal (for
 #                                `curl …/install | bash -s -- --minimal`)
 #
@@ -498,11 +496,10 @@ esac
 # OPENLLM_SETUP_MODE in the env file is preserved on re-run / update (no prompt,
 # no unexpected reset). On a fresh install with no saved mode: interactive
 # terminals ask Full vs Minimal (Enter → Full) before any mode-dependent work;
-# headless never hangs and picks silently — Full when OPENLLM_API_KEY is
-# supplied (a caller that hands over a key wants this machine paired and
-# serving: the desktop app's installer run, including app builds that predate
-# OPENLLM_SETUP_MODE), Minimal otherwise. Update with no prior value leaves the
-# mode unset so we do not invent one.
+# headless never hangs and picks Full silently (including bare curl|bash — CI /
+# automation that wants Minimal must pass OPENLLM_SETUP_MODE=minimal or
+# --minimal). Update with no prior value leaves the mode unset so we do not
+# invent one.
 # `${VAR+set}` (not `-n`) so an explicit empty / whitespace-only value is still
 # treated as supplied — otherwise it would fall into the update-no-prior "" case
 # and a fresh install would silently run full (vendors + daemon) with no chooser.
@@ -516,10 +513,8 @@ else
       if ! prompt_setup_mode; then
         die "setup cancelled — re-run and choose Full or Minimal (or pass --minimal / OPENLLM_SETUP_MODE=…)"
       fi
-    elif [ -n "$(trim_whitespace "${OPENLLM_API_KEY:-}")" ]; then
-      SETUP_MODE=full
     else
-      SETUP_MODE=minimal
+      SETUP_MODE=full
     fi
   fi
 fi
@@ -1735,16 +1730,10 @@ VENDOR_REAPED_NAMES=""
 # Seconds between "still installing …" lines while provision_clis waits.
 VENDOR_WAIT_PROGRESS_SEC=20
 
-# How to retry vendor provisioning, worded for how this run was started: a run
-# without a terminal installs vendor CLIs only with OPENLLM_INSTALL_VENDOR_CLIS=1,
-# so a bare headless re-run would skip them again.
+# How to retry vendor provisioning after a skip / failure / interrupt.
 vendor_cli_retry_hint() {
   local origin="${ORIGIN:-https://www.openllm.sh}"
-  if declare -F has_controlling_tty >/dev/null 2>&1 && has_controlling_tty; then
-    printf 're-run the installer: curl -fsSL %s/install | bash' "$origin"
-  else
-    printf 're-run the installer with vendor installs authorized: curl -fsSL %s/install | OPENLLM_INSTALL_VENDOR_CLIS=1 bash (or run it from a terminal)' "$origin"
-  fi
+  printf 're-run the installer: curl -fsSL %s/install | bash' "$origin"
 }
 
 # Stop the still-live workers in provision_clis's owned_pids / owned_slugs /
@@ -1962,8 +1951,8 @@ provision_clis() {
 # Awaited vendor install keeps auth → vendors → daemon ordering. Skipped on a
 # manual update: rerunning every vendor's installer is a first-install action
 # the user didn't ask for. Also skipped without a usable API key —
-# authentication comes first. Vendor CLIs are optional extras on top of a
-# working install: an unauthorized headless run skips them, a provider another
+# authentication comes first. Full setup (the default, including headless)
+# provisions vendors; OPENLLM_SKIP_VENDOR_CLIS opts out. A provider another
 # installer already has in flight is left to it (pending), and a failed or
 # timed-out vendor installer is reported as a warning — none of these fail the
 # run once the daemon is up (see the exit status at the end).
@@ -1971,25 +1960,18 @@ VENDOR_PROVISIONED=0
 VENDOR_FAILED=0
 VENDOR_TIMED_OUT=0
 VENDOR_PENDING=0
-VENDOR_UNAUTHORIZED=0
 if [ "$INSTALL_MODE" != update ] && [ "$SETUP_MODE" != minimal ] && [ -n "$API_KEY" ] && [ -z "${OPENLLM_SKIP_VENDOR_CLIS:-}" ]; then
-  if has_controlling_tty || [ "${OPENLLM_INSTALL_VENDOR_CLIS:-}" = 1 ]; then
-    VENDOR_PROVISIONED=1
-    # `||` keeps a nonzero provision_clis status off the `set -e` path so we
-    # still start the daemon and report timeout/failure/pending distinctly.
-    VENDOR_RC=0
-    provision_clis || VENDOR_RC=$?
-    case "$VENDOR_RC" in
-      0) ;;
-      2) VENDOR_TIMED_OUT=1; VENDOR_FAILED=1 ;;
-      3) VENDOR_PENDING=1 ;;
-      *) VENDOR_FAILED=1 ;;
-    esac
-  else
-    # Not a failure: nobody authorized third-party installers for this run.
-    VENDOR_UNAUTHORIZED=1
-    echo "Vendor CLIs skipped: this run has no terminal to ask on and OPENLLM_INSTALL_VENDOR_CLIS=1 was not set." >&2
-  fi
+  VENDOR_PROVISIONED=1
+  # `||` keeps a nonzero provision_clis status off the `set -e` path so we
+  # still start the daemon and report timeout/failure/pending distinctly.
+  VENDOR_RC=0
+  provision_clis || VENDOR_RC=$?
+  case "$VENDOR_RC" in
+    0) ;;
+    2) VENDOR_TIMED_OUT=1; VENDOR_FAILED=1 ;;
+    3) VENDOR_PENDING=1 ;;
+    *) VENDOR_FAILED=1 ;;
+  esac
 fi
 
 # Is a daemon answering on this install's port? `/status` is the daemon's
@@ -2083,12 +2065,6 @@ print_vendor_summary() {
     cat <<EOF
 Another installer is still installing: $VENDOR_PENDING_NAMES. It keeps going
 in the background (see $log); if a CLI is still missing afterwards, $(vendor_cli_retry_hint).
-EOF
-  elif [ "$VENDOR_UNAUTHORIZED" = 1 ]; then
-    cat <<EOF
-Vendor CLIs were not installed: this run had no terminal to ask on.
-To install them, $(vendor_cli_retry_hint).
-Or connect each vendor from the dashboard's Providers tab.
 EOF
   elif [ "$VENDOR_PROVISIONED" = 1 ]; then
     cat <<EOF

@@ -145,17 +145,17 @@ to the compile-time cloud-origin bake. Product setup mode is
 `OPENLLM_SETUP_MODE=full|minimal` (persisted in that env file). The curl
 installer (`install.sh`) asks Full vs Minimal on a controlling tty when neither
 an explicit `--minimal` / `OPENLLM_SETUP_MODE` nor a saved mode is present
-(Enter → Full; EOF/cancel aborts with no vendor consent); headless /
-non-interactive installs pick silently: Full when `OPENLLM_API_KEY` is supplied
-(binary + key + daemon — what already-shipped desktop app builds, which pass
-only the key and origin, rely on), Minimal without one. Headless vendor installs
-still need `OPENLLM_INSTALL_VENDOR_CLIS=1` (the current Mac desktop app sets it
-with `OPENLLM_SETUP_MODE=full`); without it they are skipped, not failed. The
-installer exits nonzero only for a missing first-install key or a daemon that
-did not start; skipped, pending, failed or timed-out vendor CLIs are a warning
-naming `~/.openllm/cli-install.log`. Updates / re-runs with a saved mode never
-prompt, and an update that replaced the binary restarts a running daemon even
-in Minimal (which still never starts a stopped one).
+(Enter → Full; EOF/cancel aborts before mode-dependent work); headless /
+non-interactive installs pick Full silently (including bare `curl … | bash`).
+Automation that wants Minimal must pass `--minimal` or
+`OPENLLM_SETUP_MODE=minimal`. Full installs vendor CLIs by default (opt out
+with `OPENLLM_SKIP_VENDOR_CLIS`); the Mac desktop app passes
+`OPENLLM_SETUP_MODE=full` plus key and origin explicitly so its run never
+prompts. The installer exits nonzero only for a missing first-install key or a
+daemon that did not start; skipped, pending, failed or timed-out vendor CLIs
+are a warning naming `~/.openllm/cli-install.log`. Updates / re-runs with a
+saved mode never prompt, and an update that replaced the binary restarts a
+running daemon even in Minimal (which still never starts a stopped one).
 **full** is ordinary vendor provisioning + daemon startup; **minimal** sends
 every client launch cloud-direct and never probes, starts or brokers through
 the local daemon, even a running one (`clients/gateway.ts` skips the loopback
