@@ -223,6 +223,13 @@ const AGENT_FORBIDDEN_PATHS: ReadonlySet<string> = new Set([
   "/connect/grants/reconsent",
   "/connect/grants/pickup",
   "/connect/grants/revoke",
+  // CLI OpenLLM OAuth approval (`/cli/authorize/[id]`): viewing, approving or
+  // denying a waiting CLI login hands an account key to a terminal (or refuses
+  // it). That is the signed-in user's act in the browser; as a web-chat tool it
+  // would run under the session cookie and let an agent let a CLI in.
+  "/cli/auth/{id}/approve",
+  "/cli/auth/{id}/deny",
+  "/cli/auth/{id}/view",
 ]);
 
 const AGENT_OPERATIONS: ReadonlyArray<TApiOperation> = API_OPERATIONS.filter(
