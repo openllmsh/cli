@@ -33398,6 +33398,18 @@
                                 ]
                               }
                             ]
+                          },
+                          "device_access_pubkey": {
+                            "anyOf": [
+                              {
+                                "type": "string",
+                                "minLength": 30,
+                                "maxLength": 60
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
                           }
                         },
                         "required": [
@@ -33421,6 +33433,18 @@
                         "type": "string",
                         "minLength": 1,
                         "maxLength": 128
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "device_access_pubkey": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "minLength": 30,
+                        "maxLength": 60
                       },
                       {
                         "type": "null"
