@@ -34,6 +34,8 @@ export type {
   TCredentialGateTerminal,
 } from "./runtime-contracts";
 
+import { stderrColorEnabled } from "./term-style";
+
 export type TCredentialGateResult =
   | { readonly ok: true; readonly config: TCliConfig }
   | { readonly ok: false; readonly message: string };
@@ -369,6 +371,7 @@ export const requireCliApiKey = async (
           signal: controller.signal,
           // This branch only runs on an interactive terminal (checked above).
           interactive: true,
+          color: stderrColorEnabled(),
         }));
     if (!oauth.ok) return { ok: false, message: oauth.message };
     if (!persistClaimedApiKey(oauth.apiKey, oauth.email)) {

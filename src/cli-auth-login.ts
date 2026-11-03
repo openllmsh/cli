@@ -45,6 +45,14 @@ import {
 } from "./env";
 import { saveEnvVars } from "./onboarding";
 import { isUsableOpenllmApiKey } from "./runtime-contracts";
+import type { TTermStyle } from "./term-style";
+import {
+  CLEAR_LINE,
+  plainStyle,
+  SPINNER_FRAMES,
+  stderrColorEnabled,
+  termStyle,
+} from "./term-style";
 import { encodeQr, renderQrHalfBlocks } from "./terminal-qr";
 import { readTtyLine } from "./tty-line";
 
@@ -116,6 +124,11 @@ export type TCliAuthLoginIo = {
   ) => Promise<string | null>;
   /** Override the request label (defaults to `defaultCliAuthLabel()`). */
   readonly label?: string;
+  /**
+   * Style the output (bold code, dim hints, a spinner while waiting).
+   * Defaults to on only when writing to a real stderr terminal.
+   */
+  readonly color?: boolean;
 };
 
 export type TCliAuthLoginResult =
@@ -215,14 +228,18 @@ export const defaultCliAuthLabel = (): string =>
     version: CLI_VERSION,
   });
 
-/** D10: the terminal's success line. */
-export const signedInLines = (who: {
-  readonly email?: string;
-  readonly keyName?: string;
-}): string => {
-  const account = who.email !== undefined ? ` as ${who.email}` : "";
-  const key = who.keyName !== undefined ? ` · key "${who.keyName}"` : "";
-  return `✔ Signed in${account}${key}\n`;
+/** D10: the terminal's success line — `✔ Connected as dou@gmail.com`. */
+export const signedInLines = (
+  who: {
+    readonly email?: string;
+    readonly keyName?: string;
+  },
+  style: TTermStyle = plainStyle,
+): string => {
+  const account = who.email !== undefined ? ` as ${style.bold(who.email)}` : "";
+  const key =
+    who.keyName !== undefined ? style.dim(` · key "${who.keyName}"`) : "";
+  return `\n${style.green("✔")} Connected${account}${key}\n`;
 };
 
 type TTimedOut = { readonly kind: "timeout" };
@@ -340,13 +357,73 @@ type TResolvedIo = {
     question: string,
     signal: AbortSignal,
   ) => Promise<string | null>;
+  readonly style: TTermStyle;
+  /** Show an animated wait line (styled terminals only); any write clears it. */
+  readonly startSpinner: (text: string) => void;
+  readonly stopSpinner: () => void;
+  /** The user's Enter echoed a newline under the wait line: step back up. */
+  readonly afterEnterEcho: () => void;
 };
 
 const defaultFetch: TCliAuthFetch = (input, init) => fetch(input, init);
 
+const SPINNER_INTERVAL_MS = 80;
+
 const resolveIo = (io: TCliAuthLoginIo): TResolvedIo => {
-  const write =
+  const rawWrite =
     io.write ?? ((message: string) => process.stderr.write(message));
+  const env = io.env ?? process.env;
+  const style =
+    (io.color ?? (io.write === undefined && stderrColorEnabled(env)))
+      ? termStyle(true)
+      : plainStyle;
+
+  // The wait line animates in place, so anything else written while it
+  // spins first erases it; a finished line (ending in a newline) brings it
+  // back underneath, a prompt (no newline) leaves it off for the answer.
+  let spinner: {
+    readonly text: string;
+    frame: number;
+    timer: ReturnType<typeof setInterval>;
+  } | null = null;
+  const drawSpinner = (): void => {
+    if (spinner === null) return;
+    const glyph = SPINNER_FRAMES[spinner.frame % SPINNER_FRAMES.length] ?? "";
+    rawWrite(`${CLEAR_LINE}${style.dim(`${glyph} ${spinner.text}`)}`);
+  };
+  const stopSpinner = (): void => {
+    if (spinner === null) return;
+    clearInterval(spinner.timer);
+    spinner = null;
+    rawWrite(CLEAR_LINE);
+  };
+  const startSpinner = (text: string): void => {
+    if (!style.enabled) {
+      rawWrite(`${text}\n`);
+      return;
+    }
+    stopSpinner();
+    const timer = setInterval(() => {
+      if (spinner === null) return;
+      spinner.frame += 1;
+      drawSpinner();
+    }, SPINNER_INTERVAL_MS);
+    // Never hold the process open just to animate.
+    if (typeof timer === "object" && "unref" in timer) timer.unref();
+    spinner = { text, frame: 0, timer };
+    drawSpinner();
+  };
+  const write = (message: string): void => {
+    if (spinner === null) {
+      rawWrite(message);
+      return;
+    }
+    const text = spinner.text;
+    stopSpinner();
+    rawWrite(message);
+    if (message.endsWith("\n")) startSpinner(text);
+  };
+
   return {
     write,
     openUrl: io.openUrl ?? defaultOpenUrl,
@@ -359,7 +436,7 @@ const resolveIo = (io: TCliAuthLoginIo): TResolvedIo => {
     maxBodyBytes: io.maxBodyBytes ?? CLI_AUTH_MAX_BODY_BYTES,
     interactive: io.interactive ?? false,
     noBrowser: io.noBrowser ?? false,
-    env: io.env ?? process.env,
+    env,
     waitForEnter:
       io.waitForEnter ??
       (async (signal: AbortSignal): Promise<boolean> =>
@@ -370,6 +447,14 @@ const resolveIo = (io: TCliAuthLoginIo): TResolvedIo => {
         write(question);
         return readTtyLine(signal);
       }),
+    style,
+    startSpinner,
+    stopSpinner,
+    afterEnterEcho: () => {
+      if (spinner === null) return;
+      rawWrite("\x1b[1A");
+      drawSpinner();
+    },
   };
 };
 
@@ -850,8 +935,13 @@ const browserDisabled = (r: TResolvedIo): boolean =>
 const writeQr = (r: TResolvedIo, url: string): void => {
   const qr = encodeQr(url);
   if (qr === null) return;
-  r.write(`\nOr scan this with your phone:\n${renderQrHalfBlocks(qr)}\n`);
+  r.write(
+    `\n  ${r.style.dim("Or scan this with your phone:")}\n${renderQrHalfBlocks(qr)}\n`,
+  );
 };
+
+/** The wait line under the link (animated on a styled terminal). */
+const WAITING_TEXT = "Waiting for you to approve in the browser…";
 
 type TPresented = {
   /** Stop listening for Enter (the terminal is needed for something else). */
@@ -866,34 +956,50 @@ type TPresented = {
  *   - a terminal → "Press Enter to open", open on Enter (QR if that fails);
  *   - no terminal → print only.
  * Polling runs meanwhile, so approving on a phone never needs the Enter.
+ *
+ * Layout (the copy agreed in the CLI sign-in mockup):
+ *
+ *   Connect this computer to OpenLLM
+ *
+ *     Your code  WDJB-MJHT
+ *     Press Enter to open the browser, or visit:
+ *     https://openllm.sh/cli/authorize/…
+ *
+ *   ⠋ Waiting for you to approve in the browser…
  */
 const presentAuthorizeLink = (
   session: TSession,
   r: TResolvedIo,
 ): TPresented => {
+  const { bold, dim } = r.style;
+  const noOpen = browserDisabled(r) || isRemoteSession(r.env);
+  const hint = noOpen
+    ? "Open this link on any device, a phone too:"
+    : r.interactive
+      ? "Press Enter to open the browser, or visit:"
+      : "Open this link on any device to approve:";
+  r.write(`\n${bold("Connect this computer to OpenLLM")}\n\n`);
   if (session.userCode !== null) {
     r.write(
-      `Your code: ${session.userCode}  (check the browser shows the same)\n`,
+      `  Your code  ${bold(session.userCode)}  ${dim("(the browser shows the same)")}\n`,
     );
   }
-  r.write(
-    `Open this link to sign in — any device works, a phone too:\n  ${session.authorizeUrl}\n`,
-  );
+  r.write(`  ${dim(hint)}\n  ${session.authorizeUrl}\n`);
   const idle: TPresented = { stop: () => {}, settled: async () => {} };
-  if (browserDisabled(r) || isRemoteSession(r.env)) {
+  if (noOpen) {
     writeQr(r, session.authorizeUrl);
-    r.write("Waiting for approval…\n");
+    r.write("\n");
+    r.startSpinner(WAITING_TEXT);
     return idle;
   }
-  if (!r.interactive) {
-    r.write("Waiting for approval…\n");
-    return idle;
-  }
-  r.write("Press Enter to open it in your browser. Waiting for approval…\n");
+  r.write("\n");
+  r.startSpinner(WAITING_TEXT);
+  if (!r.interactive) return idle;
   const listening = new AbortController();
   let opening: Promise<void> = Promise.resolve();
   void r.waitForEnter(listening.signal).then((pressed) => {
     if (!pressed || listening.signal.aborted) return;
+    r.afterEnterEcho();
     opening = r.openUrl(session.authorizeUrl).then((opened) => {
       if (opened || listening.signal.aborted) return;
       openUrlHint(r);
@@ -1282,6 +1388,7 @@ export const runCliAuthLogin = async (
   } finally {
     presented.stop();
     await presented.settled();
+    r.stopSpinner();
   }
 };
 
@@ -1456,12 +1563,16 @@ export const resumeCliAuthLogin = async (
     publicKeyB64: state.public_key,
     privateKey,
   };
-  r.write(
-    `Waiting for approval${state.user_code !== null ? ` of ${state.user_code}` : ""} at\n  ${state.authorize_url}\n`,
-  );
+  const { bold, dim } = r.style;
+  if (state.user_code !== null) {
+    r.write(`  Your code  ${bold(state.user_code)}\n`);
+  }
+  r.write(`  ${dim("Approve it at:")}\n  ${state.authorize_url}\n\n`);
+  r.startSpinner(WAITING_TEXT);
   try {
     return await pollAndClaim(session, r, r.now() + r.waitMs, () => {});
   } finally {
+    r.stopSpinner();
     removeResumeState(id);
   }
 };

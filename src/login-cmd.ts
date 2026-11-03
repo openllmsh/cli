@@ -81,6 +81,8 @@ import {
   savedSetupMode,
   saveSetupMode,
 } from "./setup-mode";
+import type { TTermStyle } from "./term-style";
+import { plainStyle, stderrColorEnabled, termStyle } from "./term-style";
 import { readTtyLine } from "./tty-line";
 
 export const LOGIN_USAGE = `usage: openllm login [sk-llm-...] [--key <sk-llm-...>] [--api-key] [--force]
@@ -182,8 +184,8 @@ export type TLoginOAuthOptions = {
 };
 
 /** The one next step after a browser login (D10). */
-export const LOGIN_NEXT_STEP =
-  "Next: openllm claude  (or any client — openllm --help)\n";
+export const loginNextStep = (style: TTermStyle = plainStyle): string =>
+  `  ${style.dim("Try it:")} openllm claude  ${style.dim("(or any client — openllm --help)")}\n`;
 
 const confirmOnTty = async (question: string): Promise<boolean> => {
   process.stderr.write(question);
@@ -489,6 +491,7 @@ export const runLogin = async (
             signal,
             interactive: options.interactive,
             write: (message) => io.terminal.write(message),
+            color: options.interactive && stderrColorEnabled(),
           }),
     );
     if (!resumed.ok) {
@@ -535,6 +538,7 @@ export const runLogin = async (
                 interactive: options.interactive,
                 noBrowser: options.noBrowser,
                 write: (message) => io.terminal.write(message),
+                color: options.interactive && stderrColorEnabled(),
               }),
         );
         if (!oauth.ok) {
@@ -599,12 +603,17 @@ export const runLogin = async (
     return 1;
   }
   if (!parsed.json) {
+    const style = termStyle(
+      io.terminal.isInteractive() && stderrColorEnabled(),
+    );
     io.terminal.write(
-      signedIn?.ok === true ? signedInLines(signedIn) : "API key saved.\n",
+      signedIn?.ok === true
+        ? signedInLines(signedIn, style)
+        : "API key saved.\n",
     );
     // The installer (--no-restart) prints its own summary and next step.
     if (signedIn?.ok === true && !parsed.noRestart)
-      io.terminal.write(LOGIN_NEXT_STEP);
+      io.terminal.write(loginNextStep(style));
   }
   const shadowNote = apiKeyShadowNote(trimmed);
   if (shadowNote !== null) io.terminal.write(shadowNote);
