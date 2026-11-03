@@ -44,7 +44,7 @@ import {
   sharedFileConfig,
 } from "./env";
 import { saveEnvVars } from "./onboarding";
-import { isUsableOpenllmApiKey, parseApiKeyId } from "./runtime-contracts";
+import { isUsableOpenllmApiKey } from "./runtime-contracts";
 import { encodeQr, renderQrHalfBlocks } from "./terminal-qr";
 import { readTtyLine } from "./tty-line";
 
@@ -965,17 +965,6 @@ const pollAndClaim = async (
       : message,
   });
 
-  // Set on the first claim 200: from then on every failure also says a key
-  // exists on the account (cancel no longer revokes a claimed key).
-  let issued = false;
-  let issuedKeyId: string | undefined;
-  const failed = (message: string): TCliAuthLoginResult => ({
-    ok: false,
-    message: issued
-      ? `${message}${unsavedKeyNotice(base, issuedKeyId)}`
-      : message,
-  });
-
   const cancelled = async (): Promise<TCliAuthLoginResult> => {
     await cancelAuth(base, id, pollToken, r);
     return failed(CANCELLED_MESSAGE);
@@ -1051,10 +1040,9 @@ const pollAndClaim = async (
         continue;
       }
       await cancelAuth(base, id, pollToken, r);
-      return failed(terminalAuthHttpMessage(
-          "status",
-          statusOutcome.response.status,
-        ));
+      return failed(
+        terminalAuthHttpMessage("status", statusOutcome.response.status),
+      );
     }
     const statusBody = await readJsonBounded<TStatus>(
       statusOutcome.response,
@@ -1076,7 +1064,9 @@ const pollAndClaim = async (
       return failed(`[openllm] authorization was ${status}.\n`);
     }
     if (status === "expired") {
-      return failed("[openllm] authorization expired. Run `openllm login` again for a new link.\n");
+      return failed(
+        "[openllm] authorization expired. Run `openllm login` again for a new link.\n",
+      );
     }
     if (status === "approved") {
       let confirmNumber: string | undefined;
@@ -1119,9 +1109,11 @@ const pollAndClaim = async (
         ) {
           if (r.now() + CLI_AUTH_POLL_MS >= deadline) {
             await cancelAuth(base, id, pollToken, r);
-            return failed(claimOutcome.kind === "timeout"
-                  ? "[openllm] could not claim the key (timed out).\n"
-                  : "[openllm] could not claim the key (network error).\n");
+            return failed(
+              claimOutcome.kind === "timeout"
+                ? "[openllm] could not claim the key (timed out).\n"
+                : "[openllm] could not claim the key (network error).\n",
+            );
           }
           if ((await pause(CLI_AUTH_POLL_MS)) === "aborted") return cancelled();
           continue;
@@ -1131,7 +1123,9 @@ const pollAndClaim = async (
           if (isRetryableCliAuthHttpStatus(httpStatus)) {
             if (r.now() + CLI_AUTH_POLL_MS >= deadline) {
               await cancelAuth(base, id, pollToken, r);
-              return failed(`[openllm] could not claim the key (${httpStatus}).\n`);
+              return failed(
+                `[openllm] could not claim the key (${httpStatus}).\n`,
+              );
             }
             if ((await pause(CLI_AUTH_POLL_MS)) === "aborted")
               return cancelled();
@@ -1155,7 +1149,9 @@ const pollAndClaim = async (
             }
             if (err?.type === "cli_auth_cancelled") {
               // The server already cancelled — nothing to clean up.
-              return failed(`[openllm] ${err.message !== "" ? err.message : "authorization was cancelled."}\n`);
+              return failed(
+                `[openllm] ${err.message !== "" ? err.message : "authorization was cancelled."}\n`,
+              );
             }
           }
           await cancelAuth(base, id, pollToken, r);
@@ -1193,7 +1189,9 @@ const pollAndClaim = async (
         const sealed = parseSealed(claimed.body.sealed);
         if (sealed === null) {
           await cancelAuth(base, id, pollToken, r);
-          return failed("[openllm] claimed payload was not a valid sealed key.\n");
+          return failed(
+            "[openllm] claimed payload was not a valid sealed key.\n",
+          );
         }
         let plaintext: Uint8Array;
         try {
