@@ -899,6 +899,23 @@ export const API_OPERATIONS: readonly TApiOperation[] = [
     "hasBody": false
   },
   {
+    "id": "stats.adminValue",
+    "method": "get",
+    "path": "/stats/admin/value",
+    "summary": "",
+    "tags": [
+      "stats"
+    ],
+    "pathParams": [],
+    "queryParams": [
+      {
+        "name": "tz",
+        "required": false
+      }
+    ],
+    "hasBody": false
+  },
+  {
     "id": "stats.key",
     "method": "get",
     "path": "/stats/keys/{id}",
