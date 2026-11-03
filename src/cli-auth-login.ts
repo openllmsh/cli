@@ -1522,16 +1522,24 @@ export const persistClaimedApiKey = async (
 ): Promise<boolean> => {
   const split = splitAnchoredApiKey(apiKey);
   if (split === null) return false;
+  // Device sessions are optional (approve never fails over them either): a
+  // failed anchor install still saves the claimed key, bare, so the login
+  // never orphans a key that was already claimed.
+  let anchored = false;
   if (split.anchor !== null) {
     const anchor = io.anchorDaemon ?? defaultAnchorDaemon;
-    if ((await anchor(`${split.key}.${split.anchor}`)) !== 0) return false;
+    anchored = (await anchor(`${split.key}.${split.anchor}`)) === 0;
+    if (!anchored) {
+      process.stderr.write(
+        "[openllm] Could not turn on device sessions; saving the key without them.\n",
+      );
+    }
   }
   // Anchored: `openllm daemon anchor` already wrote OPENLLM_DEVICE_ANCHOR.
   // Bare: blank a stale anchor that belongs to a different key id.
-  const vars: Record<string, string> =
-    split.anchor === null
-      ? apiKeyEnvVars(split.key)
-      : { OPENLLM_API_KEY: split.key };
+  const vars: Record<string, string> = anchored
+    ? { OPENLLM_API_KEY: split.key }
+    : apiKeyEnvVars(split.key);
   // Blank a stale account line: this key's account is only known when the
   // claim said so.
   if (
