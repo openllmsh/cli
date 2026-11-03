@@ -309,7 +309,7 @@ export const helpText = (version: string): string => {
     {
       left: "OPENLLM_SETUP_MODE",
       right:
-        "full or minimal — persist in ~/.openllm/.env; installer asks on a tty when unset (Enter→full), headless defaults to minimal",
+        "full or minimal — persist in ~/.openllm/.env; installer asks on a tty when unset (Enter→full); headless picks full with an API key, minimal without",
     },
     {
       left: "OPENLLM_GATEWAY",

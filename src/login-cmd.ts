@@ -203,21 +203,26 @@ const defaultIo: TLoginIo = {
 /**
  * `--start` on a Minimal machine: save Full, so the daemon this login starts
  * is the one client launches use. An exported `OPENLLM_SETUP_MODE=minimal`
- * outranks the file, so the file is still switched but the note says the
- * export keeps Minimal in effect.
+ * outranks the file, so the file is still switched but only the note is
+ * printed: the export keeps Minimal in effect, so nothing "switched".
  */
 const switchToFullForStart = (terminal: TCredentialGateTerminal): void => {
   const exportedMinimal = exportedSetupMode() === "minimal";
-  if (savedSetupMode() !== "minimal" && !exportedMinimal) return;
-  if (!saveSetupMode("full")) {
-    terminal.write(
-      `[openllm] Could not switch setup to Full; client launches stay cloud-direct. Set ${SETUP_MODE_ENV}=full in ${cliEnvFile()}.\n`,
-    );
-    return;
+  if (savedSetupMode() === "minimal") {
+    if (!saveSetupMode("full")) {
+      terminal.write(
+        `[openllm] Could not switch setup to Full; client launches stay cloud-direct. Set ${SETUP_MODE_ENV}=full in ${cliEnvFile()}.\n`,
+      );
+      return;
+    }
+    // Only claim the switch when it takes effect; an exported Minimal still
+    // wins, and the note below says so instead.
+    if (!exportedMinimal) {
+      terminal.write(
+        "Setup switched to Full: client launches now use the local daemon.\n",
+      );
+    }
   }
-  terminal.write(
-    "Setup switched to Full: client launches now use the local daemon.\n",
-  );
   if (exportedMinimal) {
     terminal.write(
       `[openllm] Note: ${SETUP_MODE_ENV}=minimal is set in your environment and keeps Minimal in effect. Unset it to use the local daemon.\n`,
