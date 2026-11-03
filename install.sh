@@ -2134,8 +2134,14 @@ elif [ "$SETUP_MODE" = minimal ]; then
 
 OpenLLM is installed (minimal setup).
 
-  openllm claude           run Claude Code through the cloud origin
-  ollm codex               (short alias) run Codex through OpenLLM
+  Run any of these (through the cloud origin):
+    openllm claude         Claude Code
+    openllm codex          Codex
+    openllm grok           Grok Build
+    openllm hermes         Hermes
+    openllm opencode       OpenCode
+
+  ollm <client>            short alias for any of them
   openllm daemon start     optional — make this machine a local supplier
   openllm --help           everything else
 
@@ -2160,9 +2166,15 @@ else
 
 OpenLLM is installed.
 
+  Run any of these:
+    openllm claude         Claude Code
+    openllm codex          Codex
+    openllm grok           Grok Build
+    openllm hermes         Hermes
+    openllm opencode       OpenCode
+
+  ollm <client>            short alias for any of them
   openllm status           daemon service + run state
-  openllm claude           run Claude Code through OpenLLM
-  ollm codex               (short alias) run Codex through OpenLLM
   openllm --help           everything else
 
 Open a new shell (or source your rc) so \`openllm\` and \`ollm\` are on PATH.

@@ -57,6 +57,7 @@ import {
   unsavedKeyNotice,
 } from "./cli-auth-login";
 import { daemonPort, daemonReachable } from "./clients/gateway";
+import { CLIENT_IDS, CLIENTS } from "./clients/registry";
 import { daemonInvocation } from "./daemon-delegation";
 import {
   ACCOUNT_EMAIL_ENV,
@@ -183,9 +184,22 @@ export type TLoginOAuthOptions = {
   readonly interactive: boolean;
 };
 
-/** The one next step after a browser login (D10). */
-export const loginNextStep = (style: TTermStyle = plainStyle): string =>
-  `  ${style.dim("Try it:")} openllm claude  ${style.dim("(or any client — openllm --help)")}\n`;
+/** The terminal clients `openllm <client>` launches, in registry order. */
+const RUNNABLE_CLIENTS = CLIENT_IDS.map((id) => CLIENTS[id]).filter(
+  (client) => client.mode === "session",
+);
+
+/**
+ * What to do after a browser login (D10): every client it can launch, not
+ * just one, so nobody reads OpenLLM as a Claude-only tool.
+ */
+export const loginNextStep = (style: TTermStyle = plainStyle): string => {
+  const width = Math.max(...RUNNABLE_CLIENTS.map((c) => c.id.length));
+  const rows = RUNNABLE_CLIENTS.map(
+    (c) => `    openllm ${c.id.padEnd(width)}  ${style.dim(c.name)}\n`,
+  ).join("");
+  return `  ${style.dim("Run any of these:")}\n${rows}`;
+};
 
 const confirmOnTty = async (question: string): Promise<boolean> => {
   process.stderr.write(question);
