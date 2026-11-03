@@ -118,7 +118,7 @@ packages/cli/
 | `openllm daemon …` | the daemon half — boot / `start` / `stop` / `status` / `logs` / … |
 | `openllm sessions [list\|attach\|kill]` | list, attach to, or kill durable local sessions (`attach` requires an id) |
 | `openllm status` | mirror of `openllm daemon status` — runs the daemon half in a child process |
-| `openllm login […]` | OpenLLM account sign-in: browser OAuth handover by default (prints `/cli/authorize/<id>`, opens when possible, claims a sealed `sk-llm` — no OAuth tokens retained); `--api-key` / `--key` / piped stdin for explicit key entry. See `docs/plan/2026-11-01-cli-install-onboarding.md`. |
+| `openllm login […]` | OpenLLM account sign-in: browser OAuth handover by default (prints `/cli/authorize/<id>`, opens when possible, claims a sealed `sk-llm` — no OAuth tokens retained); `--api-key` / `--key` / piped stdin for explicit key entry; `--start` also starts the daemon and switches a Minimal setup to Full (`--json` reports `setupMode`). A key claimed but not saved is named by id for revocation under Connections. See `docs/plan/2026-11-01-cli-install-onboarding.md`. |
 | `openllm config --json` | resolved cloud origin, env-file path, daemon port, and product `setupMode` (`full`\|`minimal`) |
 | `openllm auth <providers\|status\|usage\|refresh\|login\|submit-code\|cancel\|logout> …` | local **vendor** provider auth, delegated to the running daemon through `openllm daemon auth`; `--json` for agents, runtime provider/method discovery — distinct from `openllm login` |
 | `openllm version` | print this CLI version only (`openllm vX.Y.Z`); `-v`/`--version` are the same. Combined daemon diagnostics stay on `status`/`doctor` |
@@ -144,13 +144,25 @@ to the compile-time cloud-origin bake. Product setup mode is
 installer (`install.sh`) asks Full vs Minimal on a controlling tty when neither
 an explicit `--minimal` / `OPENLLM_SETUP_MODE` nor a saved mode is present
 (Enter → Full; EOF/cancel aborts with no vendor consent); headless /
-non-interactive installs keep the silent Minimal default (callers that want
-Full must set `OPENLLM_SETUP_MODE=full`, and `OPENLLM_INSTALL_VENDOR_CLIS=1` to
-authorize vendors — the Mac desktop app does both), and updates / re-runs with
-a saved mode never prompt.
-**full** is ordinary vendor provisioning + daemon startup; **minimal** keeps
-client launches cloud-directed and never implicitly starts a local daemon
-(`clients/gateway.ts` skips the loopback probe unless `OPENLLM_GATEWAY=local`).
+non-interactive installs pick silently: Full when `OPENLLM_API_KEY` is supplied
+(binary + key + daemon — what already-shipped desktop app builds, which pass
+only the key and origin, rely on), Minimal without one. Headless vendor installs
+still need `OPENLLM_INSTALL_VENDOR_CLIS=1` (the current Mac desktop app sets it
+with `OPENLLM_SETUP_MODE=full`); without it they are skipped, not failed. The
+installer exits nonzero only for a missing first-install key or a daemon that
+did not start; skipped, pending, failed or timed-out vendor CLIs are a warning
+naming `~/.openllm/cli-install.log`. Updates / re-runs with a saved mode never
+prompt, and an update that replaced the binary restarts a running daemon even
+in Minimal (which still never starts a stopped one).
+**full** is ordinary vendor provisioning + daemon startup; **minimal** sends
+every client launch cloud-direct and never probes, starts or brokers through
+the local daemon, even a running one (`clients/gateway.ts` skips the loopback
+probe and `clients/session.ts` the durable session host; only
+`OPENLLM_GATEWAY=local` overrides). To use the local daemon, switch to Full:
+`openllm login --start` (the desktop app's pairing call) saves
+`OPENLLM_SETUP_MODE=full` and starts it, or set the variable yourself;
+`openllm daemon start` alone does not change the mode, and plain `login` /
+`login --no-restart` (the installer's path) leave it alone.
 Mode switches do not stop or delete an already-running daemon. A missing client
 under interactive launch asks before installing only that client
 (`clients/install-client.ts`); non-interactive runs print the install command
