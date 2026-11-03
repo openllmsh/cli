@@ -60,14 +60,11 @@ export const CLI_AUTH_POLL_MS = 2_000;
 /** D21: ceiling for the network-error / 429 backoff. */
 export const CLI_AUTH_MAX_BACKOFF_MS = 10_000;
 /**
- * Mirrors `CLI_AUTH_LABEL_MAX` / `CLI_AUTH_CONFIRM_DIGITS` in
- * `packages/schema/cli-auth.ts` — the binary does not import the schema
- * package; `tests/cli/cli-auth-login.test.ts` pins the parity.
+ * Mirrors `CLI_AUTH_LABEL_MAX` in `packages/schema/cli-auth.ts` — the binary
+ * does not import the schema package; `tests/cli/cli-auth-login.test.ts`
+ * pins the parity.
  */
 export const CLI_AUTH_LABEL_MAX_LENGTH = 80;
-export const CLI_AUTH_CONFIRM_LENGTH = 3;
-const CONFIRM_NUMBER = new RegExp(`^[0-9]{${CLI_AUTH_CONFIRM_LENGTH}}$`);
-const CONFIRM_PROMPT = "Type the number shown in your browser: ";
 /** Shape of the server's `user_code` — anything else is not printed. */
 const USER_CODE_DISPLAY = /^[A-Z]{4}-[A-Z]{4}$/;
 
@@ -165,7 +162,6 @@ type TStatus = {
   readonly id: string;
   readonly status: string;
   readonly expires_at: string;
-  readonly needs_confirm?: unknown;
 };
 
 type TClaimed = {
@@ -1012,40 +1008,6 @@ const presentAuthorizeLink = (
   };
 };
 
-type TErrorBody = { readonly type: string; readonly message: string };
-
-const readErrorBody = async (
-  res: Response,
-  deadline: number,
-  r: TResolvedIo,
-): Promise<TErrorBody | null> => {
-  const body = await readJsonBounded<{ readonly error?: unknown }>(
-    res,
-    deadline,
-    r.now,
-    r.signal,
-    r.requestTimeoutMs,
-    r.maxBodyBytes,
-  );
-  if (body.kind !== "ok") return null;
-  const error = body.body.error;
-  if (typeof error !== "object" || error === null) return null;
-  const type = "type" in error ? error.type : undefined;
-  const message = "message" in error ? error.message : undefined;
-  if (typeof type !== "string") return null;
-  return {
-    type,
-    // Server copy, single line, bounded — never trusted as markup.
-    message:
-      typeof message === "string"
-        ? message.replace(/\p{Cc}/gu, " ").slice(0, 200)
-        : "",
-  };
-};
-
-const NEEDS_CONFIRM_WITHOUT_TTY =
-  "[openllm] This sign-in was approved from a browser on a different network, so it needs the number shown there — and this shell has no terminal to type it. Approve from a browser on the same network, or save a key with `openllm login --key <sk-llm-…>` (or set OPENLLM_API_KEY).\n";
-
 /**
  * Poll status until approved, then claim and open the sealed key. Shared by
  * the interactive login and `--resume`.
@@ -1074,28 +1036,6 @@ const pollAndClaim = async (
   const cancelled = async (): Promise<TCliAuthLoginResult> => {
     await cancelAuth(base, id, pollToken, r);
     return failed(CANCELLED_MESSAGE);
-  };
-
-  /** D18: read the browser's number. `null` result = give up (already handled). */
-  const askConfirmNumber = async (): Promise<
-    { readonly number: string } | TCliAuthLoginResult
-  > => {
-    if (!r.interactive) {
-      await cancelAuth(base, id, pollToken, r);
-      return failed(NEEDS_CONFIRM_WITHOUT_TTY);
-    }
-    releaseTerminal();
-    const signal = r.signal ?? new AbortController().signal;
-    while (true) {
-      if (signal.aborted) return cancelled();
-      const answer = await r.promptLine(CONFIRM_PROMPT, signal);
-      if (answer === null) return cancelled();
-      const trimmed = answer.trim();
-      if (CONFIRM_NUMBER.test(trimmed)) return { number: trimmed };
-      r.write(
-        `Enter the ${CLI_AUTH_CONFIRM_LENGTH}-digit number shown in your browser.\n`,
-      );
-    }
   };
 
   // No clamp to `expires_at`: it is on the server's clock, and a local clock
@@ -1175,12 +1115,8 @@ const pollAndClaim = async (
       );
     }
     if (status === "approved") {
-      let confirmNumber: string | undefined;
-      if (statusBody.body.needs_confirm === true) {
-        const asked = await askConfirmNumber();
-        if (!("number" in asked)) return asked;
-        confirmNumber = asked.number;
-      }
+      // Stop the concurrent Enter-to-open waiter before claiming.
+      releaseTerminal();
       // Claim is same-caller idempotent until original expiry. Retry
       // transient network / retryable HTTP against THIS auth only —
       // never recreate. Abort during claim cancels and reports
@@ -1198,9 +1134,6 @@ const pollAndClaim = async (
             },
             body: JSON.stringify({
               poll_token: pollToken,
-              ...(confirmNumber !== undefined
-                ? { confirm_number: confirmNumber }
-                : {}),
             }),
           },
           deadline,
@@ -1236,29 +1169,6 @@ const pollAndClaim = async (
             if ((await pause(CLI_AUTH_POLL_MS)) === "aborted")
               return cancelled();
             continue;
-          }
-          if (httpStatus === 403 || httpStatus === 409 || httpStatus === 410) {
-            const err = await readErrorBody(claimOutcome.response, deadline, r);
-            if (
-              err?.type === "cli_auth_confirm_mismatch" ||
-              err?.type === "cli_auth_confirm_required"
-            ) {
-              if (
-                err.type === "cli_auth_confirm_mismatch" &&
-                err.message !== ""
-              )
-                r.write(`${err.message}\n`);
-              const asked = await askConfirmNumber();
-              if (!("number" in asked)) return asked;
-              confirmNumber = asked.number;
-              continue;
-            }
-            if (err?.type === "cli_auth_cancelled") {
-              // The server already cancelled — nothing to clean up.
-              return failed(
-                `[openllm] ${err.message !== "" ? err.message : "authorization was cancelled."}\n`,
-              );
-            }
           }
           await cancelAuth(base, id, pollToken, r);
           return failed(terminalAuthHttpMessage("claim", httpStatus));

@@ -32505,16 +32505,6 @@
                     },
                     "expires_at": {
                       "type": "string"
-                    },
-                    "confirm_number": {
-                      "anyOf": [
-                        {
-                          "type": "string"
-                        },
-                        {
-                          "type": "null"
-                        }
-                      ]
                     }
                   },
                   "required": [
@@ -32526,8 +32516,7 @@
                     "caller_user_agent",
                     "status",
                     "created_at",
-                    "expires_at",
-                    "confirm_number"
+                    "expires_at"
                   ],
                   "additionalProperties": false
                 }
@@ -32951,22 +32940,11 @@
                     },
                     "id": {
                       "type": "string"
-                    },
-                    "confirm_number": {
-                      "anyOf": [
-                        {
-                          "type": "string"
-                        },
-                        {
-                          "type": "null"
-                        }
-                      ]
                     }
                   },
                   "required": [
                     "ok",
-                    "id",
-                    "confirm_number"
+                    "id"
                   ],
                   "additionalProperties": false
                 }

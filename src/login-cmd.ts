@@ -94,10 +94,9 @@ Sign in to OpenLLM and save an API key to ~/.openllm/.env. On a terminal
 with no key argument it prints a sign-in link and a short code (check the
 browser shows the same code), and opens the link when you press Enter — or
 open it on any device, a phone too. Over SSH, or with --no-browser, it
-prints a QR code instead of opening anything. If the browser that approves
-is on a different network, type the number it shows when asked. Already
-signed in? It asks before replacing the key (--force skips the question).
-An OPENLLM_API_KEY in the environment is used as-is; no browser opens.
+prints a QR code instead of opening anything. Already signed in? It asks
+before replacing the key (--force skips the question). An OPENLLM_API_KEY
+in the environment is used as-is; no browser opens.
 Pass --api-key to paste a key instead; --key or piped stdin for scripts.
 A running daemon is restarted to pick the key up unless --no-restart is
 set (installer uses that so it can start the daemon itself after vendor
