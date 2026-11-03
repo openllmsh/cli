@@ -633,7 +633,7 @@ export const serviceStart = (): boolean => {
   // credentials just to exit(2). Mirrors serviceRestart, which runs the same
   // guard ahead of stopping a healthy service.
   if (DAEMON_VERSION === "0.0.0-dev") rejectSourceServiceRegistration();
-  const gate = requireServiceApiKey("human", undefined, serviceEnvFilePath());
+  const gate = requireServiceApiKey("human", serviceEnvFilePath());
   if (!gate.ok) {
     process.stderr.write(gate.message);
     return false;
@@ -653,7 +653,7 @@ export const serviceStop = (): void => {
  * first, so a failed/cancelled restart leaves an existing service untouched.
  */
 export const serviceRestart = (): boolean => {
-  const gate = requireServiceApiKey("human", undefined, serviceEnvFilePath());
+  const gate = requireServiceApiKey("human", serviceEnvFilePath());
   if (!gate.ok) {
     process.stderr.write(gate.message);
     return false;

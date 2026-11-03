@@ -1,31 +1,16 @@
-import { spawnSync } from "node:child_process";
-import { closeSync, openSync, readSync } from "node:fs";
-import type {
-  TCredentialGateMode,
-  TCredentialGateTerminal,
-} from "@openllmsh/protocol";
-import {
-  isUsableOpenllmApiKey,
-  splitAnchoredApiKey,
-} from "@openllmsh/protocol";
-import { decodeDeviceAnchor } from "@openllmsh/tunnel";
-import { invalidateDeviceAccessPin } from "./device-access-verify";
+import type { TCredentialGateMode } from "@openllmsh/protocol";
+import { isUsableOpenllmApiKey } from "@openllmsh/protocol";
 import {
   applyPersistedApiKey,
-  DEVICE_ANCHOR_ENV,
   daemonEnv,
   envFilePath,
   envFileValue,
   isDevMode,
-  parseApiKeyId,
   sharedEnvFilePath,
   writeEnvFileVars,
 } from "./env";
 
-export type {
-  TCredentialGateMode,
-  TCredentialGateTerminal,
-} from "@openllmsh/protocol";
+export type { TCredentialGateMode } from "@openllmsh/protocol";
 
 export type TCredentialGateResult =
   | { readonly ok: true }
@@ -50,121 +35,14 @@ export const isUsableApiKey = isUsableOpenllmApiKey;
 const signInUrl = (): string => `${daemonEnv().cloudOrigin}/sign-in`;
 
 export const missingKeyDiagnostic = (): string =>
-  `[openllm] API key required.\nRun \`openllm start\` in an interactive terminal and sign in at ${signInUrl()}. New users receive a key during onboarding; returning users can open Keys after signing in. Paste the key when prompted.\n`;
+  `[openllm] API key required.\nRun \`openllm login\` in a terminal to sign in through the browser (${signInUrl()}), or \`openllm login --api-key\` to paste a key.\n`;
 
-type THiddenInputSignalProcess = {
-  readonly on: (signal: NodeJS.Signals, listener: () => void) => unknown;
-  readonly off: (signal: NodeJS.Signals, listener: () => void) => unknown;
-  readonly kill: (pid: number, signal: NodeJS.Signals) => boolean;
-};
-
-export const restoreEchoOnSignal = (
-  restore: () => void,
-  signalProcess: THiddenInputSignalProcess = process,
-): (() => void) => {
-  let restored = false;
-  const restoreOnce = (): void => {
-    if (restored) return;
-    restored = true;
-    restore();
-  };
-  const forward = (signal: NodeJS.Signals): void => {
-    cleanup();
-    restoreOnce();
-    signalProcess.kill(process.pid, signal);
-  };
-  const onSigint = (): void => forward("SIGINT");
-  const onSigterm = (): void => forward("SIGTERM");
-  const cleanup = (): void => {
-    signalProcess.off("SIGINT", onSigint);
-    signalProcess.off("SIGTERM", onSigterm);
-  };
-  signalProcess.on("SIGINT", onSigint);
-  signalProcess.on("SIGTERM", onSigterm);
-  return (): void => {
-    cleanup();
-    restoreOnce();
-  };
-};
-
-const readHiddenLine = (): string | null => {
-  let fd: number | null = null;
-  try {
-    fd = openSync("/dev/tty", "r+");
-    const disabled = spawnSync("stty", ["-echo"], {
-      stdio: [fd, fd, fd],
-    });
-    if (disabled.status !== 0) return null;
-    const restore = (): void => {
-      spawnSync("stty", ["echo"], { stdio: [fd, fd, fd] });
-    };
-    const cleanupSignals = restoreEchoOnSignal(restore);
-    try {
-      const bytes: number[] = [];
-      const buffer = Buffer.alloc(1);
-      while (true) {
-        const count = readSync(fd, buffer, 0, 1, null);
-        if (count === 0) return null;
-        if (buffer[0] === 10 || buffer[0] === 13) break;
-        bytes.push(buffer[0]);
-      }
-      return Buffer.from(bytes).toString("utf8");
-    } finally {
-      cleanupSignals();
-      process.stderr.write("\n");
-    }
-  } catch {
-    return null;
-  } finally {
-    if (fd !== null) closeSync(fd);
-  }
-};
-
-const defaultTerminal: TCredentialGateTerminal = {
-  isInteractive: (): boolean =>
-    process.stdin.isTTY === true && process.stderr.isTTY === true,
-  promptForKey: (): string | null => {
-    process.stderr.write("API key: ");
-    return readHiddenLine();
-  },
-  write: (message: string): void => {
-    process.stderr.write(message);
-  },
-};
-
-const persistServiceKey = (
-  key: string,
-  targetPath: string,
-  anchor?: string | null,
-): boolean => {
-  // A pasted key may replace the anchor line. An anchored paste writes it.
-  // A bare paste (`null`) blanks an existing anchor only when its key id
-  // differs from the saved OPENLLM_API_KEY id (or either cannot be parsed).
-  // The anchor's pair secret is bound to the id, so re-saving any key with
-  // the same id leaves it. `undefined`
-  // (an inherited key made durable) leaves the anchor alone. The device-access
-  // pin is invalidated only when the anchor line actually changes.
-  const vars: Record<string, string> = { OPENLLM_API_KEY: key };
-  const savedAnchor = envFileValue(targetPath, DEVICE_ANCHOR_ENV)?.trim() ?? "";
-  const savedKey = envFileValue(targetPath, "OPENLLM_API_KEY")?.trim() ?? "";
-  let anchorChanged = false;
-  if (typeof anchor === "string") {
-    if (anchor !== savedAnchor) {
-      vars[DEVICE_ANCHOR_ENV] = anchor;
-      anchorChanged = true;
-    }
-  } else if (
-    anchor === null &&
-    savedAnchor !== "" &&
-    (parseApiKeyId(savedKey) === null ||
-      parseApiKeyId(savedKey) !== parseApiKeyId(key))
-  ) {
-    vars[DEVICE_ANCHOR_ENV] = "";
-    anchorChanged = true;
-  }
-  if (!writeEnvFileVars(vars, targetPath)) return false;
+/** Make an inherited key durable in the service's env file. The anchor line
+ *  is left alone: anchors are written by `openllm login` / `openllm daemon
+ *  anchor`, never by the service gate. */
+const persistServiceKey = (key: string, targetPath: string): boolean => {
+  if (!writeEnvFileVars({ OPENLLM_API_KEY: key }, targetPath)) return false;
   applyPersistedApiKey(key);
-  if (anchorChanged) invalidateDeviceAccessPin();
   return true;
 };
 
@@ -186,13 +64,14 @@ const isReadOnlyDevKey = (key: string): boolean => {
 };
 
 /**
- * Resolve a usable service key without mutating service state. Human callers may
- * acquire a missing/malformed key from the controlling terminal; machine callers
- * receive one stable stderr-safe diagnostic instead.
+ * Resolve a usable service key. This gate never prompts: on a terminal the
+ * CLI has already run the one shared credential gate before handing `start`
+ * / `restart` here (`requireCliApiKey` — browser sign-in, or `--api-key` to
+ * paste). A key the service inherited from its launching environment is made
+ * durable in the file its supervisor reads; dev's read-only key never is.
  */
 export const requireServiceApiKey = (
   mode: TCredentialGateMode,
-  terminal: TCredentialGateTerminal = defaultTerminal,
   targetPath: string = envFilePath(),
 ): TCredentialGateResult => {
   // A durable valid key is already authoritative. Never rewrite it just because
@@ -200,7 +79,7 @@ export const requireServiceApiKey = (
   if (persistedUsableKey(targetPath) !== null) return approved();
 
   const configured = configuredUsableKey();
-  // Headless service boots are presence-only: no secret write and no prompt.
+  // Headless service boots are presence-only: no secret write.
   if (mode === "machine") {
     return configured === null
       ? { ok: false, message: missingKeyDiagnostic() }
@@ -214,38 +93,5 @@ export const requireServiceApiKey = (
     if (persistServiceKey(configured, targetPath)) return approved();
     return { ok: false, message: "[openllm] Could not save the API key.\n" };
   }
-
-  if (!terminal.isInteractive()) {
-    return { ok: false, message: missingKeyDiagnostic() };
-  }
-
-  terminal.write(
-    `${configured === null ? "OpenLLM needs an API key." : "The available development API key is read-only and cannot be saved for this service."}\nSign in at ${signInUrl()}.\nNew users will receive a key during onboarding. Already have an account? Open Keys after signing in.\n`,
-  );
-  while (true) {
-    const pasted = terminal.promptForKey();
-    if (pasted === null || pasted.trim().length === 0) {
-      return { ok: false, message: "[openllm] API key setup cancelled.\n" };
-    }
-    const split = splitAnchoredApiKey(pasted);
-    if (split === null) {
-      terminal.write("The API key format is invalid. Please try again.\n");
-      continue;
-    }
-    // A key from "Set up device sessions" carries a device trust anchor: it
-    // is saved as its own OPENLLM_DEVICE_ANCHOR line beside the bare key.
-    if (split.anchor !== null) {
-      const decoded = decodeDeviceAnchor(split.anchor);
-      if (decoded === null) {
-        terminal.write("The API key format is invalid. Please try again.\n");
-        continue;
-      }
-      decoded.pairSecret.fill(0);
-    }
-    if (!persistServiceKey(split.key, targetPath, split.anchor)) {
-      return { ok: false, message: "[openllm] Could not save the API key.\n" };
-    }
-    terminal.write(`Saved to ${targetPath}.\n`);
-    return approved();
-  }
+  return { ok: false, message: missingKeyDiagnostic() };
 };

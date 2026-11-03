@@ -111,12 +111,16 @@ export const COMMANDS = [
   },
   {
     name: "start",
-    description: "Start OpenLLM and guide credential setup when needed",
+    args: "[--api-key]",
+    description:
+      "Start OpenLLM; signs this computer in through the browser when needed (--api-key to paste a key)",
   },
   { name: "stop", description: "Stop OpenLLM" },
   {
     name: "restart",
-    description: "Restart OpenLLM after completing credential setup",
+    args: "[--api-key]",
+    description:
+      "Restart OpenLLM; signs this computer in through the browser when needed (--api-key to paste a key)",
   },
   {
     name: "status",

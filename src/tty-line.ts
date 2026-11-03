@@ -2,8 +2,12 @@
  * Read one visible line from the person at the terminal, without blocking
  * the event loop (polling and Ctrl-C keep working while it waits).
  *
- * Uses stdin when it is a TTY; otherwise opens `/dev/tty` — `install.sh`
- * runs `openllm login < /dev/tty`, but a piped caller still has a terminal.
+ * Always reads its own `tty.ReadStream` on `/dev/tty`, never
+ * `process.stdin`: when stdin IS the `/dev/tty` alias — `install.sh` runs
+ * `openllm login < /dev/tty` — Bun's stdin stream fails on macOS with
+ * `EINVAL … kqueue` (kqueue can't watch `/dev/tty`), which read as EOF and
+ * left "Press Enter to open the browser" dead. A `tty.ReadStream` on the same
+ * path reads fine, from a terminal stdin and a redirected one alike.
  */
 
 import { closeSync, openSync } from "node:fs";
@@ -31,17 +35,11 @@ export const readTtyLine = (signal?: AbortSignal): Promise<string | null> =>
       return;
     }
     let stream: NodeJS.ReadStream;
-    let owned = false;
-    if (process.stdin.isTTY === true) {
-      stream = process.stdin;
-    } else {
-      try {
-        stream = new ReadStream(openSync("/dev/tty", "r"));
-        owned = true;
-      } catch {
-        resolve(null);
-        return;
-      }
+    try {
+      stream = new ReadStream(openSync("/dev/tty", "r"));
+    } catch {
+      resolve(null);
+      return;
     }
     let buffered = "";
     let done = false;
@@ -52,8 +50,7 @@ export const readTtyLine = (signal?: AbortSignal): Promise<string | null> =>
       stream.off("end", onEnd);
       stream.off("error", onEnd);
       signal?.removeEventListener("abort", onAbort);
-      if (owned) stream.destroy();
-      else stream.pause();
+      stream.destroy();
       resolve(value);
     };
     const onData = (chunk: Buffer | string): void => {

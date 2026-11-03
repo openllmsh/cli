@@ -22,6 +22,8 @@ import {
   isDoctorReportingVerb,
   runDoctorReportCommand,
 } from "./doctor-report-cmd";
+import type { TLifecycleCommand } from "./lifecycle-args";
+import { lifecycleUsage, parseLifecycleArgs } from "./lifecycle-args";
 import { runSetup } from "./setup-cmd";
 import { runUninstall } from "./uninstall-cmd";
 import { runUpdate } from "./update-cmd";
@@ -108,13 +110,6 @@ gateway origin so the daemon AND CLI binaries converge and install invariants
 are re-enforced. Distinct from \`self-update\` (CLI binary only) and from the
 daemon's background \`auto-update\` preference. Preserves your env file and
 never installs vendor CLIs or edits your shell.
-`;
-
-const DAEMON_LIFECYCLE_USAGE = (
-  command: string,
-): string => `usage: openllm ${command}
-
-Delegate ${command} to the managed openllmd daemon.
 `;
 
 const STATUS_USAGE = `usage: openllm status
@@ -310,12 +305,24 @@ export const runCli = async (argv: readonly string[]): Promise<void> => {
       return process.exit(runCompletionCommand(rest));
     case "start":
     case "stop":
-    case "restart":
-      if (wantsHelp(rest)) return usage(DAEMON_LIFECYCLE_USAGE(cmd), 0);
-      if (rest.length > 0) return usage(DAEMON_LIFECYCLE_USAGE(cmd), 2);
-      return process.exit(
-        await runManagedDaemonCommand(cmd as TDaemonLifecycleCommand),
-      );
+    case "restart": {
+      const command = cmd as TDaemonLifecycleCommand & TLifecycleCommand;
+      if (wantsHelp(rest)) return usage(lifecycleUsage(command), 0);
+      const parsed = parseLifecycleArgs(command, rest);
+      if (parsed === null) return usage(lifecycleUsage(command), 2);
+      if (parsed.needsCredential) {
+        // The one credential gate: browser sign-in, or `--api-key` to paste.
+        const { requireCliApiKey } = await import("./onboarding");
+        const gate = await requireCliApiKey("human", undefined, {
+          apiKeyEntry: parsed.apiKeyEntry,
+        });
+        if (!gate.ok) {
+          process.stderr.write(gate.message);
+          return process.exit(1);
+        }
+      }
+      return process.exit(await runManagedDaemonCommand(command));
+    }
     case "auth": {
       const { authHelp } = await import("./generated/local-auth");
       if (rest.length === 0 || wantsHelp(rest))

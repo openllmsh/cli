@@ -13,7 +13,11 @@ import {
   writeFileSync,
 } from "node:fs";
 import { dirname, join } from "node:path";
-import type { TCliAuthLoginResult, TSignalProcess } from "./cli-auth-login";
+import type {
+  TCliAuthLoginResult,
+  TPersistClaimedApiKeyIo,
+  TSignalProcess,
+} from "./cli-auth-login";
 import {
   abortOnProcessSignals,
   persistClaimedApiKey,
@@ -56,6 +60,8 @@ export type TCredentialGateOptions = {
   ) => Promise<TCliAuthLoginResult>;
   /** Injectable process signal bus for OAuth Ctrl-C (tests). */
   readonly signalProcess?: TSignalProcess;
+  /** Injectable `openllm daemon anchor` for a pasted anchored key (tests). */
+  readonly anchorDaemon?: TPersistClaimedApiKeyIo["anchorDaemon"];
 };
 
 /** A local envelope check only; the gateway remains authoritative for validity. */
@@ -337,19 +343,28 @@ export const requireCliApiKey = async (
       const pasted = terminal.promptForKey();
       if (pasted === null || pasted.trim().length === 0)
         return { ok: false, message: "[openllm] API key setup cancelled.\n" };
-      if (!isUsableApiKey(pasted)) {
+      // A bare key, or one from "Set up device sessions" carrying its device
+      // trust anchor (`sk-llm-….<anchor>`) — saved exactly like a browser
+      // sign-in's key: the anchor installed, a stale one blanked.
+      const split = splitAnchoredApiKey(pasted);
+      if (split === null) {
         terminal.write("The API key format is invalid. Please try again.\n");
         continue;
       }
-      const key = pasted.trim();
-      if (!saveApiKey(key))
+      const persisted = await persistClaimedApiKey(
+        pasted.trim(),
+        undefined,
+        options.anchorDaemon !== undefined
+          ? { anchorDaemon: options.anchorDaemon }
+          : {},
+      );
+      if (!persisted)
         return {
           ok: false,
           message: "[openllm] Could not save the API key.\n",
         };
-      process.env.OPENLLM_API_KEY = key;
       terminal.write("API key saved.\n");
-      return { ok: true, config: { ...configured, apiKey: key } };
+      return { ok: true, config: { ...configured, apiKey: split.key } };
     }
   }
 
