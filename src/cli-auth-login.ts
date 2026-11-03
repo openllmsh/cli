@@ -15,18 +15,19 @@ import {
   openCliAuthSealed,
   zero,
 } from "./cli-auth-crypto";
-import {
-  cliConfig,
-  DEVICE_ANCHOR_ENV,
-  envFileHasDeviceAnchor,
-  sharedFileConfig,
-} from "./env";
+import { apiKeyEnvVars, cliConfig } from "./env";
 import { saveEnvVars } from "./onboarding";
-import { isUsableOpenllmApiKey, parseApiKeyId } from "./runtime-contracts";
+import { isUsableOpenllmApiKey } from "./runtime-contracts";
 
 export const CLI_AUTH_POLL_MS = 2_000;
-/** Local poll budget; server-side expiry arrives as `expired` / 410. */
-export const CLI_AUTH_WAIT_MS = 10 * 60 * 1000;
+/**
+ * Local poll budget; server-side expiry arrives as `expired` / 410. The
+ * server's TTL (10 min) plus its post-approval claim grace (2 min), so an
+ * approval in the last seconds is still claimed. Kept local because the CLI
+ * ships without workspace deps; `tests/cli/cli-auth-wait-parity.test.ts`
+ * pins it to `packages/schema/cli-auth.ts`.
+ */
+export const CLI_AUTH_WAIT_MS = 12 * 60 * 1000;
 /** Hard ceiling for one create/status/claim fetch or body read. */
 export const CLI_AUTH_REQUEST_TIMEOUT_MS = 15_000;
 /** Upper bound on one auth JSON response body. */
@@ -54,8 +55,23 @@ export type TCliAuthLoginIo = {
 };
 
 export type TCliAuthLoginResult =
-  | { readonly ok: true; readonly apiKey: string }
+  | {
+      readonly ok: true;
+      readonly apiKey: string;
+      /** The claimed key's id (never secret) — named in the revoke notice
+       *  when the caller then fails to save the key. */
+      readonly keyId?: string;
+    }
   | { readonly ok: false; readonly message: string };
+
+/**
+ * Printed after any failure once the server has answered a claim: it marked
+ * the authorization claimed on that 200, so the key now lives on the account
+ * (the expiry sweep revokes only UNclaimed mints) though this CLI never saved
+ * it. Names the key by id only — never the secret.
+ */
+export const unsavedKeyNotice = (origin: string, keyId?: string): string =>
+  `[openllm] An API key${keyId === undefined ? "" : ` (id ${keyId})`} was already created on your account for this login but was not saved here. Revoke it under Connections (${origin.replace(/\/+$/, "")}/keys) unless it is a key you already use.\n`;
 
 type TCreated = {
   readonly id: string;
@@ -677,9 +693,20 @@ export const runCliAuthLogin = async (
   const pause = async (): Promise<"slept" | "aborted"> =>
     abortableSleep(CLI_AUTH_POLL_MS, signal, sleep);
 
+  // Set on the first claim 200: from then on every failure also says a key
+  // exists on the account (cancel no longer revokes a claimed key).
+  let issued = false;
+  let issuedKeyId: string | undefined;
+  const failed = (message: string): TCliAuthLoginResult => ({
+    ok: false,
+    message: issued
+      ? `${message}${unsavedKeyNotice(base, issuedKeyId)}`
+      : message,
+  });
+
   const cancelled = async (): Promise<TCliAuthLoginResult> => {
     await cancelAuth(base, id, pollToken, resolved);
-    return { ok: false, message: "[openllm] login cancelled.\n" };
+    return failed("[openllm] login cancelled.\n");
   };
 
   while (now() < deadline) {
@@ -780,13 +807,11 @@ export const runCliAuthLogin = async (
         ) {
           if (now() + CLI_AUTH_POLL_MS >= deadline) {
             await cancelAuth(base, id, pollToken, resolved);
-            return {
-              ok: false,
-              message:
-                claimOutcome.kind === "timeout"
-                  ? "[openllm] could not claim the key (timed out).\n"
-                  : "[openllm] could not claim the key (network error).\n",
-            };
+            return failed(
+              claimOutcome.kind === "timeout"
+                ? "[openllm] could not claim the key (timed out).\n"
+                : "[openllm] could not claim the key (network error).\n",
+            );
           }
           if ((await pause()) === "aborted") return cancelled();
           continue;
@@ -795,23 +820,19 @@ export const runCliAuthLogin = async (
           if (isRetryableCliAuthHttpStatus(claimOutcome.response.status)) {
             if (now() + CLI_AUTH_POLL_MS >= deadline) {
               await cancelAuth(base, id, pollToken, resolved);
-              return {
-                ok: false,
-                message: `[openllm] could not claim the key (${claimOutcome.response.status}).\n`,
-              };
+              return failed(
+                `[openllm] could not claim the key (${claimOutcome.response.status}).\n`,
+              );
             }
             if ((await pause()) === "aborted") return cancelled();
             continue;
           }
           await cancelAuth(base, id, pollToken, resolved);
-          return {
-            ok: false,
-            message: terminalAuthHttpMessage(
-              "claim",
-              claimOutcome.response.status,
-            ),
-          };
+          return failed(
+            terminalAuthHttpMessage("claim", claimOutcome.response.status),
+          );
         }
+        issued = true;
         const claimed = await readJsonBounded<TClaimed>(
           claimOutcome.response,
           deadline,
@@ -824,10 +845,7 @@ export const runCliAuthLogin = async (
         if (claimed.kind === "timeout") {
           if (now() + CLI_AUTH_POLL_MS >= deadline) {
             await cancelAuth(base, id, pollToken, resolved);
-            return {
-              ok: false,
-              message: "[openllm] could not claim the key (timed out).\n",
-            };
+            return failed("[openllm] could not claim the key (timed out).\n");
           }
           if ((await pause()) === "aborted") return cancelled();
           continue;
@@ -839,18 +857,16 @@ export const runCliAuthLogin = async (
           typeof claimed.body.sealed !== "string"
         ) {
           await cancelAuth(base, id, pollToken, resolved);
-          return {
-            ok: false,
-            message: "[openllm] could not claim the key (bad response).\n",
-          };
+          return failed("[openllm] could not claim the key (bad response).\n");
         }
+        if (typeof claimed.body.key_id === "string")
+          issuedKeyId = claimed.body.key_id;
         const sealed = parseSealed(claimed.body.sealed);
         if (sealed === null) {
           await cancelAuth(base, id, pollToken, resolved);
-          return {
-            ok: false,
-            message: "[openllm] claimed payload was not a valid sealed key.\n",
-          };
+          return failed(
+            "[openllm] claimed payload was not a valid sealed key.\n",
+          );
         }
         let plaintext: Uint8Array;
         try {
@@ -865,27 +881,21 @@ export const runCliAuthLogin = async (
           );
         } catch {
           await cancelAuth(base, id, pollToken, resolved);
-          return {
-            ok: false,
-            message: "[openllm] could not open the sealed key.\n",
-          };
+          return failed("[openllm] could not open the sealed key.\n");
         }
         try {
           const apiKey = new TextDecoder().decode(plaintext);
           if (!isUsableOpenllmApiKey(apiKey)) {
             await cancelAuth(base, id, pollToken, resolved);
-            return {
-              ok: false,
-              message: "[openllm] claimed key format is invalid.\n",
-            };
+            return failed("[openllm] claimed key format is invalid.\n");
           }
-          return { ok: true, apiKey: apiKey.trim() };
+          return { ok: true, apiKey: apiKey.trim(), keyId: issuedKeyId };
         } finally {
           zero(plaintext);
         }
       }
       await cancelAuth(base, id, pollToken, resolved);
-      return { ok: false, message: "[openllm] authorization timed out.\n" };
+      return failed("[openllm] authorization timed out.\n");
     }
     if ((await pause()) === "aborted") return cancelled();
   }
@@ -900,16 +910,7 @@ export const runCliAuthLogin = async (
 export const persistClaimedApiKey = (apiKey: string): boolean => {
   if (!isUsableOpenllmApiKey(apiKey)) return false;
   const trimmed = apiKey.trim();
-  const vars: Record<string, string> = { OPENLLM_API_KEY: trimmed };
-  const savedKey = sharedFileConfig().OPENLLM_API_KEY;
-  if (
-    envFileHasDeviceAnchor() &&
-    (savedKey === undefined ||
-      parseApiKeyId(savedKey) === null ||
-      parseApiKeyId(savedKey) !== parseApiKeyId(trimmed))
-  )
-    vars[DEVICE_ANCHOR_ENV] = "";
-  if (!saveEnvVars(vars)) return false;
+  if (!saveEnvVars(apiKeyEnvVars(trimmed))) return false;
   process.env.OPENLLM_API_KEY = trimmed;
   return true;
 };

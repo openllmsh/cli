@@ -8,6 +8,7 @@
  */
 
 import type { Readable } from "node:stream";
+import { defaultTerminal } from "../onboarding";
 import { awaitPipeCodes, bunSubprocessPeer } from "../process-pipe";
 import type { TClient, TClientCurlInstall, TClientId } from "./registry";
 import { CLIENTS } from "./registry";
@@ -63,9 +64,6 @@ export type TEnsureClientInstalledDeps = {
 export type TEnsureClientInstalledResult =
   | { readonly ok: true; readonly bin: string }
   | { readonly ok: false; readonly code: number };
-
-const defaultIsInteractive = (): boolean =>
-  process.stdin.isTTY === true && process.stderr.isTTY === true;
 
 const defaultWrite = (message: string): void => {
   process.stderr.write(message);
@@ -217,7 +215,7 @@ export const ensureClientInstalled = async (
   const findBinary =
     deps.findBinary ?? (await import("./session")).findClientBinary;
   const write = deps.write ?? defaultWrite;
-  const isInteractive = deps.isInteractive ?? defaultIsInteractive;
+  const isInteractive = deps.isInteractive ?? defaultTerminal.isInteractive;
   const confirm = deps.confirm ?? defaultConfirm;
   const runInstall = deps.runInstall ?? runTrustedInstallCommand;
   const isAuthorized = deps.isAuthorized ?? isMissingClientInstallAuthorized;

@@ -7,7 +7,9 @@
  *
  * Resolution order per value:
  *
- *   1. process env — `OPENLLM_CLOUD_ORIGIN` / `OPENLLM_API_KEY`
+ *   1. process env — `OPENLLM_CLOUD_ORIGIN` / `OPENLLM_API_KEY` (an empty or
+ *      blank exported key counts as unset, so `OPENLLM_API_KEY=` never
+ *      shadows the saved one)
  *   2. the environment's file — `~/.openllm/.env`, or `~/.openllm/.dev.env`
  *      in dev mode (`OPENLLM_DAEMON_DEV=1`, the daemon's own signal); a dev
  *      launch falls back to `.env` for the API key only, like the dev daemon
@@ -27,6 +29,7 @@ import {
   bearerApiKeyOf,
   DEV_CLOUD_ORIGIN,
   isOpenllmDevMode,
+  parseApiKeyId,
 } from "./runtime-contracts";
 
 export { CLI_VERSION } from "./cli-version";
@@ -153,6 +156,31 @@ export const sharedFileConfig = (): Record<string, string> => {
   return rest;
 };
 
+/**
+ * The env-file lines that save `key`: the key itself, plus a blanked
+ * `OPENLLM_DEVICE_ANCHOR` when the file's anchor is stale for it. The anchor's
+ * pair secret is bound to the key id, so re-saving a key with the SAME id
+ * keeps it; it blanks when the saved key is absent/invalid or its id differs
+ * (same rule as install.sh). Callers that just wrote a fresh anchor for `key`
+ * (`openllm daemon anchor`) save `{ OPENLLM_API_KEY }` alone instead.
+ */
+export const apiKeyEnvVars = (key: string): Record<string, string> => {
+  const vars: Record<string, string> = { OPENLLM_API_KEY: key };
+  if (!envFileHasDeviceAnchor()) return vars;
+  const savedKey = sharedFileConfig().OPENLLM_API_KEY;
+  const savedId = savedKey === undefined ? null : parseApiKeyId(savedKey);
+  if (savedId === null || savedId !== parseApiKeyId(key))
+    vars[DEVICE_ANCHOR_ENV] = "";
+  return vars;
+};
+
+/** The shell-exported `OPENLLM_API_KEY`, or undefined when unset, empty or
+ *  blank. A non-blank value outranks the env file (`cliConfig`). */
+export const exportedApiKey = (): string | undefined => {
+  const value = process.env.OPENLLM_API_KEY;
+  return value !== undefined && value.trim().length > 0 ? value : undefined;
+};
+
 export type TCliConfig = {
   readonly gatewayUrl: string;
   /** Empty string when no key is configured — callers decide whether the
@@ -176,7 +204,7 @@ export const cliConfig = (): TCliConfig => {
       ? file.OPENLLM_API_KEY
       : undefined;
   const rawKey =
-    process.env.OPENLLM_API_KEY ??
+    exportedApiKey() ??
     fileKey ??
     (dev
       ? parseEnvFile(join(openllmDir(), ".env")).OPENLLM_API_KEY
