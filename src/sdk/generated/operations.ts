@@ -384,6 +384,72 @@ export const API_OPERATIONS: readonly TApiOperation[] = [
     "hasBody": true
   },
   {
+    "id": "developerApps.list",
+    "method": "get",
+    "path": "/developer/apps",
+    "summary": "",
+    "tags": [
+      "developerApps"
+    ],
+    "pathParams": [],
+    "queryParams": [],
+    "hasBody": false
+  },
+  {
+    "id": "developerApps.create",
+    "method": "post",
+    "path": "/developer/apps",
+    "summary": "",
+    "tags": [
+      "developerApps"
+    ],
+    "pathParams": [],
+    "queryParams": [],
+    "hasBody": true
+  },
+  {
+    "id": "developerApps.remove",
+    "method": "delete",
+    "path": "/developer/apps/{client_id}",
+    "summary": "",
+    "tags": [
+      "developerApps"
+    ],
+    "pathParams": [
+      "client_id"
+    ],
+    "queryParams": [],
+    "hasBody": false
+  },
+  {
+    "id": "developerApps.update",
+    "method": "patch",
+    "path": "/developer/apps/{client_id}",
+    "summary": "",
+    "tags": [
+      "developerApps"
+    ],
+    "pathParams": [
+      "client_id"
+    ],
+    "queryParams": [],
+    "hasBody": true
+  },
+  {
+    "id": "developerApps.rotateSecret",
+    "method": "post",
+    "path": "/developer/apps/{client_id}/secret",
+    "summary": "",
+    "tags": [
+      "developerApps"
+    ],
+    "pathParams": [
+      "client_id"
+    ],
+    "queryParams": [],
+    "hasBody": false
+  },
+  {
     "id": "gravity.appOpen",
     "method": "post",
     "path": "/gravity/app-open",
