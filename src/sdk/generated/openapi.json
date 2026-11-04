@@ -32571,11 +32571,30 @@
                           ]
                         }
                       ]
+                    },
+                    "issuer": {
+                      "anyOf": [
+                        {
+                          "type": "string"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "api_origin": {
+                      "type": "string"
+                    },
+                    "available": {
+                      "type": "boolean"
                     }
                   },
                   "required": [
                     "data",
-                    "limit"
+                    "limit",
+                    "issuer",
+                    "api_origin",
+                    "available"
                   ],
                   "additionalProperties": false
                 }
