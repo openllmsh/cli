@@ -384,6 +384,30 @@ export const API_OPERATIONS: readonly TApiOperation[] = [
     "hasBody": true
   },
   {
+    "id": "developerApps.listApplications",
+    "method": "get",
+    "path": "/developer/applications",
+    "summary": "",
+    "tags": [
+      "developerApps"
+    ],
+    "pathParams": [],
+    "queryParams": [],
+    "hasBody": false
+  },
+  {
+    "id": "developerApps.submitApplication",
+    "method": "post",
+    "path": "/developer/applications",
+    "summary": "",
+    "tags": [
+      "developerApps"
+    ],
+    "pathParams": [],
+    "queryParams": [],
+    "hasBody": true
+  },
+  {
     "id": "developerApps.list",
     "method": "get",
     "path": "/developer/apps",
@@ -425,6 +449,20 @@ export const API_OPERATIONS: readonly TApiOperation[] = [
     "id": "developerApps.update",
     "method": "patch",
     "path": "/developer/apps/{client_id}",
+    "summary": "",
+    "tags": [
+      "developerApps"
+    ],
+    "pathParams": [
+      "client_id"
+    ],
+    "queryParams": [],
+    "hasBody": true
+  },
+  {
+    "id": "developerApps.requestReview",
+    "method": "post",
+    "path": "/developer/apps/{client_id}/review",
     "summary": "",
     "tags": [
       "developerApps"
