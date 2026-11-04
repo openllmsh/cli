@@ -229,6 +229,7 @@ const AGENT_FORBIDDEN_PATHS: ReadonlySet<string> = new Set([
   "/developer/apps",
   "/developer/apps/{client_id}",
   "/developer/apps/{client_id}/secret",
+  "/developer/apps/{client_id}/sealed",
   // Asking OpenLLM to review an app (and reading those applications) speaks
   // for the developer to OpenLLM's team; also the developer's own act.
   "/developer/apps/{client_id}/review",

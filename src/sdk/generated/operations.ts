@@ -474,6 +474,20 @@ export const API_OPERATIONS: readonly TApiOperation[] = [
     "hasBody": true
   },
   {
+    "id": "developerApps.saveSealed",
+    "method": "put",
+    "path": "/developer/apps/{client_id}/sealed",
+    "summary": "",
+    "tags": [
+      "developerApps"
+    ],
+    "pathParams": [
+      "client_id"
+    ],
+    "queryParams": [],
+    "hasBody": true
+  },
+  {
     "id": "developerApps.rotateSecret",
     "method": "post",
     "path": "/developer/apps/{client_id}/secret",
