@@ -35,8 +35,13 @@ let cache: CliStateCache = {
 
 const installedBinary = (): string | null => resolveOpenllmCli();
 
-const parseOpenllmVersion = (out: string | null): string | null =>
-  out?.match(/openllmc? v(\S+)/)?.[1] ?? null;
+/** Read the version at this exact path, using the shared binary-stamp cache. */
+export const readOpenllmVersion = async (
+  bin: string,
+): Promise<string | null> => {
+  const out = await cliVersion(bin);
+  return out?.match(/openllmc? v(\S+)/)?.[1] ?? null;
+};
 
 /**
  * Probe the CLI's presence + version. `cliVersion` coalesces and caches by
@@ -49,8 +54,7 @@ export const refreshCliState = async (): Promise<TDaemonCliState> => {
     return { installed: false, version: null };
   }
   const signature = binarySignature(bin);
-  const out = await cliVersion(bin);
-  const version = parseOpenllmVersion(out);
+  const version = await readOpenllmVersion(bin);
   cache = { path: bin, signature, version };
   logDebug("device-state", "cli state", { installed: true, version });
   return { installed: true, version };

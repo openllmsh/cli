@@ -37,6 +37,7 @@ import { readUpdateLease, tryAcquireUpdateLease } from "../../src/update-lease";
 import { autoUpdateEnabled } from "./auto-update-pref";
 import { binarySignature } from "./bin-signature";
 import { drainDisposableChildren } from "./child-supervisor";
+import { readOpenllmVersion } from "./device-state";
 import type { TSafeDiagnosticMessage } from "./doctor-report/message";
 import { daemonEnv, stateDir } from "./env";
 import { hardenMacBinary } from "./harden-binary";
@@ -424,10 +425,12 @@ export const createBinaryUpdater = (): TBinaryUpdater => {
         (opts.force === true || autoUpdateEnabled()) &&
         latest !== null &&
         latest.length > 0 &&
-        latest !== deps.version &&
         !recentlyAttempted("cli", latest) &&
         // An explicit "update now" retries past a failure's backoff.
-        (opts.force === true || !updateBlocked("cli", latest));
+        (opts.force === true || !updateBlocked("cli", latest)) &&
+        // A CLI-only update leaves deps.version running indefinitely. Compare
+        // the exact install target instead; its stamp invalidates on any swap.
+        latest !== (await readOpenllmVersion(dest));
       if (wantSwap) {
         const held = takeLease();
         if (held === null) return;
