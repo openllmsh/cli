@@ -144,7 +144,7 @@ export const refreshBootstrap = (): Promise<boolean> =>
       // never receives DEK material.
       invalidateDeviceAccessPin();
       if (snapshot.device_access_pubkey !== undefined) {
-        setDeviceAccessPubkey(snapshot.device_access_pubkey, {
+        await setDeviceAccessPubkey(snapshot.device_access_pubkey, {
           ...(snapshot.device_access_kind === undefined
             ? {}
             : { kind: snapshot.device_access_kind }),

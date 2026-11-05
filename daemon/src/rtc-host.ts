@@ -155,7 +155,7 @@ const RTC_TUNNEL_ONLY_REASONS: ReadonlySet<string> = new Set([
   ...AGENT_PIN_REFUSALS,
 ]);
 
-export const rtcOfferSeedGate = (
+export const rtcOfferSeedGate = async (
   consumer: "browser" | "daemon" | undefined,
   grant: string | undefined,
   offer: {
@@ -164,7 +164,7 @@ export const rtcOfferSeedGate = (
     /** The offer's sealed browser DTLS fingerprint (`inner.fb`). */
     readonly fingerprint: string;
   },
-): TRtcOfferGate => {
+): Promise<TRtcOfferGate> => {
   if (consumer === "daemon") return { mode: "ok", seedGated: false };
   // An `rtc` grant bound to the sealed fingerprint: sealing to our public key
   // authenticates nothing, so without the binding a relay could wrap a
@@ -177,7 +177,10 @@ export const rtcOfferSeedGate = (
     aud: daemonPublicKey(),
     offerVersion: offer.offerVersion,
   };
-  const strict = enforceRtcSeedGate(grant, { ...expect, requireDpk: true });
+  const strict = await enforceRtcSeedGate(grant, {
+    ...expect,
+    requireDpk: true,
+  });
   if (strict.mode === "ok") return { mode: "ok", seedGated: true };
   // A dpk-less grant (the browser has not verified this daemon's dpk proof),
   // an UNANCHORED pin (first-use / legacy — the cloud chose it), or a
@@ -186,7 +189,7 @@ export const rtcOfferSeedGate = (
   if (!RTC_TUNNEL_ONLY_REASONS.has(strict.reason)) {
     return strict;
   }
-  const relaxed = enforceRtcSeedGate(grant, expect);
+  const relaxed = await enforceRtcSeedGate(grant, expect);
   return relaxed.mode === "ok" ? { mode: "ok", seedGated: false } : relaxed;
 };
 
@@ -469,7 +472,7 @@ export const createRtcHost = (): TRtcHost => {
       return;
     }
 
-    const opened = openSealed(frame.fingerprint_proof);
+    const opened = await openSealed(frame.fingerprint_proof);
     if (opened === null) {
       logWarn(
         "rtc-host",
@@ -588,7 +591,7 @@ export const createRtcHost = (): TRtcHost => {
     } else {
       // Browser consumers need a provisioned pin + v2 device grant. Fleet
       // daemon→daemon hops skip the offer gate but never get seed-gated kinds.
-      const gate = rtcOfferSeedGate(
+      const gate = await rtcOfferSeedGate(
         frame.consumer,
         "grant" in inner ? inner.grant : undefined,
         {
@@ -712,7 +715,7 @@ export const createRtcHost = (): TRtcHost => {
 
       let fingerprintProof: string;
       try {
-        fingerprintProof = sealTo(
+        fingerprintProof = await sealTo(
           inner.epk,
           encodeAnswerInner({
             v: RTC_AUTH_VERSION,

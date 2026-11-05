@@ -24,19 +24,17 @@
  * Sessions on == the anchor is present. There is no separate enabled flag and
  * no remote enable — re-enable writes the anchor again.
  *
- * node:crypto only — the daemon never imports `@openllmsh/sdk/vault`.
+ * Dpk proof + grant verify thin-wrap `@openllmsh/sdk/vault`; pin/env I/O stay here.
  */
-import { createHmac } from "node:crypto";
 import type { TDeviceSessionsReport } from "@openllmsh/sdk/protocol";
 import { splitAnchoredApiKey } from "@openllmsh/sdk/protocol";
 import {
   buildDeviceSessionsDisableMessage,
-  buildDpkProofMessage,
   DEVICE_SESSIONS_DISABLE_TS_WINDOW_MS,
   decodeDeviceAnchor,
   decodeDeviceSessionsDisable,
-  toB64UrlBytes,
 } from "@openllmsh/sdk/tunnel";
+import { computeDpkProof } from "@openllmsh/sdk/vault";
 import {
   deviceKeyFingerprint,
   getDeviceAccessPin,
@@ -139,14 +137,7 @@ export const computeDpkProofNode = (
   pairSecret: Uint8Array,
   keyId: string,
   dpk: string,
-): string =>
-  toB64UrlBytes(
-    new Uint8Array(
-      createHmac("sha256", Buffer.from(pairSecret))
-        .update(buildDpkProofMessage(keyId, dpk))
-        .digest(),
-    ),
-  );
+): Promise<string> => computeDpkProof(pairSecret, keyId, dpk);
 
 /**
  * This daemon's dpk proof from the env file's anchor, or null when there is
@@ -154,10 +145,10 @@ export const computeDpkProofNode = (
  * swap without a fresh anchor yields a proof the browser rejects; install,
  * login and the credential gate drop the anchor line when the key changes.
  */
-export const deviceDpkProof = (
+export const deviceDpkProof = async (
   keyId: string | null = daemonApiKeyId(),
   dpk: string = daemonPublicKey(),
-): string | null => {
+): Promise<string | null> => {
   const raw = deviceAnchorFromEnvFile();
   if (raw === null || keyId === null) return null;
   // The anchor is paired with the key on the line next to it.
@@ -166,22 +157,23 @@ export const deviceDpkProof = (
   const anchor = decodeDeviceAnchor(raw);
   if (anchor === null) return null;
   try {
-    return computeDpkProofNode(anchor.pairSecret, keyId, dpk);
+    return await computeDpkProofNode(anchor.pairSecret, keyId, dpk);
   } finally {
     anchor.pairSecret.fill(0);
   }
 };
 
 /** `DaemonStatus.device_sessions` — sessions on == env-file anchor present. */
-export const deviceSessionsReport = (): TDeviceSessionsReport => {
-  const proof = deviceDpkProof();
-  return {
-    anchored:
-      deviceAnchorFromEnvFile() !== null &&
-      isAgentEligiblePin(getDeviceAccessPin()),
-    ...(proof === null ? {} : { dpk_proof: proof }),
+export const deviceSessionsReport =
+  async (): Promise<TDeviceSessionsReport> => {
+    const proof = await deviceDpkProof();
+    return {
+      anchored:
+        deviceAnchorFromEnvFile() !== null &&
+        isAgentEligiblePin(getDeviceAccessPin()),
+      ...(proof === null ? {} : { dpk_proof: proof }),
+    };
   };
-};
 
 export type TDeviceSessionsDisableRefusal =
   | "malformed"
@@ -202,10 +194,10 @@ export type TApplyDeviceSessionsDisableResult =
  * key. Idempotent when already unanchored after a successful verify would have
  * applied — unanchored without a valid statement is `device_not_anchored`.
  */
-export const applyDeviceSessionsDisable = (
+export const applyDeviceSessionsDisable = async (
   encoded: string,
   now: number = Date.now(),
-): TApplyDeviceSessionsDisableResult => {
+): Promise<TApplyDeviceSessionsDisableResult> => {
   const command = decodeDeviceSessionsDisable(encoded);
   if (command === null) return { ok: false, reason: "malformed" };
   const keyId = daemonApiKeyId();
@@ -223,11 +215,11 @@ export const applyDeviceSessionsDisable = (
     return { ok: false, reason: "stale_ts" };
   }
   if (
-    !verifyDeviceGrantNode(
+    !(await verifyDeviceGrantNode(
       pin.pubkey,
       buildDeviceSessionsDisableMessage(command),
       command.sig,
-    )
+    ))
   ) {
     return { ok: false, reason: "bad_sig" };
   }

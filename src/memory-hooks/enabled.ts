@@ -1,10 +1,10 @@
 import { createHash } from "node:crypto";
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { MemoryClient } from "@openllmsh/sdk/mcp";
 import { CLI_VERSION } from "../cli-version";
 import type { TCliConfig } from "../env";
 import { openllmDir } from "../env";
-import { MemoryClient } from "../mcp/memory/client";
 import { memoryHookTransport } from "./transport";
 
 /** Short TTL — toggles should take effect within a minute without hammering. */

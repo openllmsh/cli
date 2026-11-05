@@ -359,7 +359,7 @@ export const createRtcClient = (): TRtcClient => {
     try {
       pc = new RTCPeerConnection({ iceServers: [...iceServers()] });
       const dc = pc.createDataChannel("mux", { ordered: true });
-      const eph = generateEphKeypair();
+      const eph = await generateEphKeypair();
       const channelId = crypto.randomUUID();
       session = {
         keyId,
@@ -452,7 +452,7 @@ export const createRtcClient = (): TRtcClient => {
         return;
       }
       session.fingerprint = fingerprint;
-      const proof = sealTo(
+      const proof = await sealTo(
         pubkey,
         encodeOfferInner({
           v: RTC_AUTH_VERSION,
@@ -498,7 +498,7 @@ export const createRtcClient = (): TRtcClient => {
       session.answered
     )
       return;
-    const opened = openSealedWith(
+    const opened = await openSealedWith(
       session.eph.privateKey,
       frame.fingerprint_proof,
     );

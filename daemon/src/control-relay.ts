@@ -384,7 +384,7 @@ const runCommandInAccount = async (
             result: { error: "flow_mismatch" },
           };
         }
-        const code = openSealed(cmd.payload.sealed);
+        const code = await openSealed(cmd.payload.sealed);
         if (code === null) {
           return {
             id: cmd.id,
@@ -654,7 +654,7 @@ const runCommandInAccount = async (
         const port = cmd.payload.port;
         let plaintext = "";
         if (cmd.payload.sealed !== "") {
-          const opened = openSealed(cmd.payload.sealed);
+          const opened = await openSealed(cmd.payload.sealed);
           if (opened === null) {
             return {
               id: cmd.id,
@@ -685,7 +685,7 @@ const runCommandInAccount = async (
       case "set_provider_key": {
         let plaintext = "";
         if (cmd.payload.sealed !== "") {
-          const opened = openSealed(cmd.payload.sealed);
+          const opened = await openSealed(cmd.payload.sealed);
           if (opened === null) {
             return {
               id: cmd.id,
@@ -717,7 +717,7 @@ const runCommandInAccount = async (
       // this daemon's X25519 pubkey; written only to the 0600 team-keys store
       // and never echoed. Status reports `{ team_id, epoch }` only.
       case "set_team_key": {
-        const opened = openSealed(cmd.payload.sealed);
+        const opened = await openSealed(cmd.payload.sealed);
         if (opened === null) {
           return {
             id: cmd.id,
@@ -764,21 +764,21 @@ const runCommandInAccount = async (
       // There is no remote enable. The post-command status push carries the
       // new state.
       case "set_device_sessions": {
-        const applied = applyDeviceSessionsDisable(cmd.payload.statement);
+        const applied = await applyDeviceSessionsDisable(cmd.payload.statement);
         if (!applied.ok) {
           return {
             id: cmd.id,
             status: "error",
             result: {
               error: applied.reason,
-              device_sessions: deviceSessionsReport(),
+              device_sessions: await deviceSessionsReport(),
             },
           };
         }
         return {
           id: cmd.id,
           status: "done",
-          result: { device_sessions: deviceSessionsReport() },
+          result: { device_sessions: await deviceSessionsReport() },
         };
       }
       default: {

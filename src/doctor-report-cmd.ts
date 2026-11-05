@@ -17,6 +17,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { dirname, join } from "node:path";
+import { API_OPERATIONS, callOperation } from "@openllmsh/sdk/openapi";
 import { daemonPort } from "./clients/gateway";
 import { CLI_VERSION, cliConfig, daemonStateDir } from "./env";
 import {
@@ -26,8 +27,6 @@ import {
   parseDoctorLocalReportResult,
   parseDoctorReportingStatus,
 } from "./generated/doctor-report-cli";
-import { callOperation } from "./sdk/client";
-import { API_OPERATIONS } from "./sdk/generated/operations";
 
 const LOCAL_TIMEOUT_MS = 4_000;
 const OFFLINE_ACCOUNT_PENDING =

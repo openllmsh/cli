@@ -452,7 +452,7 @@ const handleParsed = async (input: TLocalAuthRequest): Promise<Response> => {
           payload: {
             slug: provider,
             ...accountField,
-            sealed: sealTo(daemonPublicKey(), input.code),
+            sealed: await sealTo(daemonPublicKey(), input.code),
           },
         };
         break;

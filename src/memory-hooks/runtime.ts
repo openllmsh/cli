@@ -9,13 +9,12 @@ import {
   writeFileSync,
 } from "node:fs";
 import { dirname, join } from "node:path";
+import type { SaveOptions } from "@openllmsh/sdk/mcp";
+import { MemoryClient } from "@openllmsh/sdk/mcp";
+import { API_OPERATIONS, callOperation } from "@openllmsh/sdk/openapi";
 import { CLI_VERSION } from "../cli-version";
 import type { TCliConfig } from "../env";
 import { cliConfig, openllmDir } from "../env";
-import type { SaveOptions } from "../mcp/memory/client";
-import { MemoryClient } from "../mcp/memory/client";
-import { callOperation } from "../sdk/client";
-import { API_OPERATIONS } from "../sdk/generated/operations";
 import { isPersonalMemoryEnabledCached } from "./enabled";
 import { memoryEnv, RECALL_MARKER } from "./env";
 import type { TProjectRef } from "./project-ref";

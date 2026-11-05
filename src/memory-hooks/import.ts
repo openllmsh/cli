@@ -10,9 +10,9 @@
 
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { basename, extname, join } from "node:path";
+import { MemoryClient } from "@openllmsh/sdk/mcp";
 import { CLI_VERSION } from "../cli-version";
 import { cliConfig, userHome } from "../env";
-import { MemoryClient } from "../mcp/memory/client";
 import { memoryProject } from "./transcript";
 
 const MAX_CONTENT_LENGTH = 200_000;

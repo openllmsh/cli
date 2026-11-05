@@ -926,7 +926,7 @@ const computeStatusFreshInner = async (
     pubkey: daemonPublicKey(),
     identity_conflict: hasIdentityConflict() || undefined,
     device_access_pin: deviceAccessPinReport() ?? undefined,
-    device_sessions: deviceSessionsReport(),
+    device_sessions: await deviceSessionsReport(),
     port: daemonPort(),
     sandbox: sandboxState(),
     team_psk: teamKeyEpochs(),

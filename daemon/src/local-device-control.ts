@@ -89,13 +89,13 @@ export const isLocalDeviceControlPath = (pathname: string): boolean =>
   pathname === DEVICE_CONTROL_LOCAL_PATH ||
   pathname === DEVICE_ANCHOR_LOCAL_PATH;
 
-const identityResponse = (): Response => {
+const identityResponse = async (): Promise<Response> => {
   const pubkey = daemonPublicKey();
   const body: TLocalIdentityResponse = {
     pubkey,
     fingerprint: deviceKeyFingerprint(pubkey) ?? "",
     device_access_pin: deviceAccessPinReport(),
-    device_sessions: deviceSessionsReport(),
+    device_sessions: await deviceSessionsReport(),
   };
   return json(200, body);
 };
@@ -121,7 +121,7 @@ const pinResponse = async (req: Request): Promise<Response> => {
   if (!isEd25519SpkiB64(input.device_control_pubkey)) {
     return json(400, { error: "invalid_pubkey" });
   }
-  const result = setDeviceAccessPubkey(input.device_control_pubkey, {
+  const result = await setDeviceAccessPubkey(input.device_control_pubkey, {
     force: true,
     kind: "control",
     ...(input.version === undefined ? {} : { version: input.version }),
@@ -174,7 +174,7 @@ const anchorResponse = async (req: Request): Promise<Response> => {
     if (!removed.ok) return anchorRefusal(500, "persist_failed");
     const body: TLocalDeviceAnchorResponse = {
       ok: true,
-      device_sessions: deviceSessionsReport(),
+      device_sessions: await deviceSessionsReport(),
     };
     return json(200, body);
   }
@@ -192,7 +192,7 @@ const anchorResponse = async (req: Request): Promise<Response> => {
   }
   const body: TLocalDeviceAnchorResponse = {
     ok: true,
-    device_sessions: deviceSessionsReport(),
+    device_sessions: await deviceSessionsReport(),
   };
   return json(200, body);
 };
@@ -252,7 +252,7 @@ const serveLocalDeviceControl = async (
   const { pathname } = new URL(req.url);
   if (pathname === IDENTITY_LOCAL_PATH) {
     return req.method === "GET"
-      ? identityResponse()
+      ? await identityResponse()
       : json(405, { error: "method_not_allowed" });
   }
   if (req.method !== "POST") return json(405, { error: "method_not_allowed" });

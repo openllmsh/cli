@@ -105,29 +105,29 @@ const runAnchor = async (args: readonly string[]): Promise<number> => {
 };
 
 /** `openllm daemon device <disable|status>`. Disable blanks the anchor. */
-const runDevice = (args: readonly string[]): never => {
+const runDevice = async (args: readonly string[]): Promise<number> => {
   const action = args[0];
   if (args.length !== 1 || action === undefined) {
     process.stderr.write(DEVICE_USAGE);
-    process.exit(2);
+    return 2;
   }
   if (action === "disable") {
     const removed = removeDeviceAnchor();
     if (!removed.ok) {
       process.stderr.write("could not remove the device trust anchor\n");
-      process.exit(1);
+      return 1;
     }
   } else if (action !== "status") {
     process.stderr.write(DEVICE_USAGE);
-    process.exit(2);
+    return 2;
   }
-  const report = deviceSessionsReport();
+  const report = await deviceSessionsReport();
   process.stdout.write(
     report.anchored
       ? "device sessions enabled (anchor present)\n"
       : "device sessions disabled (no anchor) — re-run install/update/login with Device sessions on\n",
   );
-  process.exit(0);
+  return 0;
 };
 
 /**
@@ -337,8 +337,8 @@ export const runCli = (args: readonly string[] = userArgs()): boolean => {
       void runAnchor(rest).then((code) => process.exit(code));
       return true;
     case "device":
-      runDevice(rest);
-      break;
+      void runDevice(rest).then((code) => process.exit(code));
+      return true;
     case "identity":
       runIdentity(rest);
       break;

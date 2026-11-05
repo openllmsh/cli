@@ -14,7 +14,7 @@
  * it (D19).
  *
  * No OAuth access/refresh tokens are retained — only the ordinary `sk-llm` key.
- * Crypto is local (`cli-auth-crypto.ts`); `@openllmsh/sdk/vault` is never imported.
+ * Crypto comes from `@openllmsh/sdk/vault` (cli-auth seal + X25519 keypairs).
  */
 
 import { spawn, spawnSync } from "node:child_process";
@@ -27,14 +27,14 @@ import {
 } from "node:fs";
 import { hostname as osHostname } from "node:os";
 import { dirname, join } from "node:path";
-import type { TCliAuthSealed } from "./cli-auth-crypto";
+import type { TCliAuthSealed } from "@openllmsh/sdk/vault";
 import {
   generateCliAuthKeypair,
   generateResumableCliAuthKeypair,
   importCliAuthPrivateKey,
   openCliAuthSealed,
   zero,
-} from "./cli-auth-crypto";
+} from "@openllmsh/sdk/vault";
 import { CLI_VERSION } from "./cli-version";
 import { daemonInvocation } from "./daemon-delegation";
 import {
