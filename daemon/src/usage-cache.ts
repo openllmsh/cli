@@ -69,8 +69,8 @@ import { join } from "node:path";
 import type {
   TProviderUsageRefreshFailure,
   TProviderUsageSnapshot,
-} from "@openllmsh/protocol";
-import { classifyUsageRefreshFailureReason } from "@openllmsh/protocol";
+} from "@openllmsh/sdk/protocol";
+import { classifyUsageRefreshFailureReason } from "@openllmsh/sdk/protocol";
 import { isDevMode } from "./env";
 import { withoutCommandReplayContext } from "./op-context";
 

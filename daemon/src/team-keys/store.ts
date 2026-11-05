@@ -9,7 +9,7 @@
  */
 import { existsSync, readdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
-import { TEAM_KEY_ID_PATTERN } from "@openllmsh/protocol";
+import { TEAM_KEY_ID_PATTERN } from "@openllmsh/sdk/protocol";
 import { stateDir } from "../env";
 import { readJsonStateFile, writeJsonStateAtomic } from "../json-state-cache";
 

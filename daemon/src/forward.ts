@@ -14,7 +14,7 @@
 import {
   MEDIA_PERSISTENCE_REQUEST_HEADER,
   TUNNELED_REQUEST_HEADER,
-} from "@openllmsh/protocol";
+} from "@openllmsh/sdk/protocol";
 import { CLOUD_FETCH_TIMEOUT_MS } from "./cloud-client";
 import { errorJson } from "./cors";
 import { daemonEnv } from "./env";

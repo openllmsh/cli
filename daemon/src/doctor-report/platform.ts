@@ -1,5 +1,8 @@
 import { readFileSync } from "node:fs";
-import type { TDoctorArchitecture, TDoctorPlatform } from "@openllmsh/protocol";
+import type {
+  TDoctorArchitecture,
+  TDoctorPlatform,
+} from "@openllmsh/sdk/protocol";
 
 type TDoctorOsStamp = {
   readonly os_version?: string;

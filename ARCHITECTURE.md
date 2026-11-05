@@ -345,7 +345,7 @@ timeout, other 4xx) ends the walk, so audio a provider may have accepted is
 never resent and never billed twice. An explicit `model` is the only hop tried, and an unreadable
 catalog falls back to one gateway-selected request. The constants come from the
 generated `sdk/generated/inference-headers.ts`, because CLI command code never
-imports `@openllmsh/protocol`. No codec is downloaded or bundled. Conversion is
+imports `@openllmsh/sdk/protocol`. No codec is downloaded or bundled. Conversion is
 no-shell, forced-demuxer, pipe-only input, time/diagnostic/output bounded, and
 writes to a private seekable file so WAV headers contain final sizes; cleanup
 runs on all outcomes.

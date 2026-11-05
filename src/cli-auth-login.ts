@@ -14,7 +14,7 @@
  * it (D19).
  *
  * No OAuth access/refresh tokens are retained — only the ordinary `sk-llm` key.
- * Crypto is local (`cli-auth-crypto.ts`); `@openllm/vault` is never imported.
+ * Crypto is local (`cli-auth-crypto.ts`); `@openllmsh/sdk/vault` is never imported.
  */
 
 import { spawn, spawnSync } from "node:child_process";

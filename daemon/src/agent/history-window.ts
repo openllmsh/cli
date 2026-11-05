@@ -6,11 +6,11 @@
  * Turn ids are the keyset: they are minted by the engine's transcript parser,
  * so a cursor survives a re-attach, a daemon restart and a resume.
  */
-import type { TAgentEvent, TAgentItem } from "@openllmsh/protocol";
+import type { TAgentEvent, TAgentItem } from "@openllmsh/sdk/protocol";
 import {
   AGENT_HISTORY_MAX_PAGE_EVENTS,
   encodeAgentLine,
-} from "@openllmsh/protocol";
+} from "@openllmsh/sdk/protocol";
 
 /** Attach replays at most this many of the latest turns… */
 // A few screens: enough to see where the conversation is; scrolling up pages

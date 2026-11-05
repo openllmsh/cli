@@ -19,7 +19,7 @@
  * also supports `handrolled`.
  */
 
-import type { TExecutionSelection } from "@openllmsh/protocol";
+import type { TExecutionSelection } from "@openllmsh/sdk/protocol";
 import {
   defaultExecutionSelectionFor,
   providerSupportsVariant,

@@ -446,7 +446,7 @@ const isImageGenerationBody = (
  * rewriting the caller's request to `stream: false` — which silently handed
  * an agent something other than what it asked for.
  *
- * Mirrors `packages/wire/lib/canonical/image-sse.ts` in behaviour, but is
+ * Mirrors `packages/sdk/wire/lib/canonical/image-sse.ts` in behaviour, but is
  * reimplemented here because the CLI ships as a self-contained binary with no
  * workspace dependencies. Two deliberate differences from
  * `aggregateImageSse`: EVERY completion is kept (`n > 1` yields one completed

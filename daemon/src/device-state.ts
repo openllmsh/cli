@@ -15,7 +15,7 @@
  * push never blocks on a spawn.
  */
 
-import type { TDaemonCliState } from "@openllmsh/protocol";
+import type { TDaemonCliState } from "@openllmsh/sdk/protocol";
 import { binarySignature } from "./bin-signature";
 import { resolveOpenllmCli } from "./cli-path";
 import { cliVersion } from "./delegation/util";

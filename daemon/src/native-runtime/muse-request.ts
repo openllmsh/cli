@@ -13,7 +13,7 @@
  * MIME types, empty prompts, and `response_format`.
  */
 
-import type { TChatCompletionRequest } from "@openllmsh/protocol";
+import type { TChatCompletionRequest } from "@openllmsh/sdk/protocol";
 import { suppressMuseHostedSearchClientTool } from "./muse-web-search";
 
 /** Official MSP turn input part (`TurnInputPart` in `@muse-code/sdk`). */

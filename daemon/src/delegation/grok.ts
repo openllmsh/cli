@@ -51,9 +51,9 @@ import { join } from "node:path";
 import type {
   TProviderUsageSnapshot,
   TProviderUsageWindow,
-} from "@openllmsh/protocol";
-import { MODEL_LIST_FETCH_TIMEOUT_MS } from "@openllmsh/protocol";
-import { REALTIME_DEFAULT_MODEL_BY_PROVIDER } from "@openllmsh/protocol/realtime-generated";
+} from "@openllmsh/sdk/protocol";
+import { MODEL_LIST_FETCH_TIMEOUT_MS } from "@openllmsh/sdk/protocol";
+import { REALTIME_DEFAULT_MODEL_BY_PROVIDER } from "@openllmsh/sdk/protocol/realtime-generated";
 import { Option, Schema as S } from "effect";
 import { noteAuthStoreIdentityChange } from "../auth-user-action";
 import { cliInstallState } from "../cli-install";
@@ -127,7 +127,7 @@ const GROK_IMAGE_EDIT_URL = "https://api.x.ai/v1/images/edits";
 const GROK_STT_URL = "https://api.x.ai/v1/stt";
 const GROK_TTS_URL = "https://api.x.ai/v1/tts";
 // The `model` query param is CATALOG-OWNED via the generated realtime
-// artifact (`@openllmsh/protocol/realtime-generated`), so this URL cannot
+// artifact (`@openllmsh/sdk/protocol/realtime-generated`), so this URL cannot
 // drift from the catalog row the admission schema accepts. The HOST is a
 // vendor fact and stays local. Byte-identical to the previous literal.
 const GROK_REALTIME_URL = `wss://api.x.ai/v1/realtime?model=${REALTIME_DEFAULT_MODEL_BY_PROVIDER.grok}`;

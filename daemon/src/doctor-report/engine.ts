@@ -13,7 +13,7 @@ import type {
   TDoctorReportingStatus,
   TDoctorUploadAttemptOutcome,
   TDoctorUploadBlocker,
-} from "@openllmsh/protocol";
+} from "@openllmsh/sdk/protocol";
 import {
   DAEMON_DOCTOR_REPORTS_PATH,
   DOCTOR_REPORT_DEBOUNCE_MS,
@@ -31,7 +31,7 @@ import {
   parseDoctorReportReject,
   reportingPolicyAllowsUpload,
   stripDoctorOutcomeLedger,
-} from "@openllmsh/protocol";
+} from "@openllmsh/sdk/protocol";
 import { InvalidApiKeyError, NoApiKeyError } from "../cloud-client";
 import { getReportingPolicy, getReportingPolicyRevision } from "../config";
 import { daemonApiKeyId, daemonEnv, hasApiKey } from "../env";

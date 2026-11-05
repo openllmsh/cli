@@ -1,11 +1,11 @@
-import type { TChatCompletionChunk } from "@openllmsh/protocol";
-import { AnthropicStreamEvent } from "@openllmsh/protocol";
-import { CLAUDE_NATIVE_ASSISTANT_PENDING } from "@openllmsh/wire/adapters/messages/reasoning-signature";
-import { decodeProviderEventStream } from "@openllmsh/wire/lib/streaming/provider-decode";
+import type { TChatCompletionChunk } from "@openllmsh/sdk/protocol";
+import { AnthropicStreamEvent } from "@openllmsh/sdk/protocol";
+import { CLAUDE_NATIVE_ASSISTANT_PENDING } from "@openllmsh/sdk/wire/adapters/messages/reasoning-signature";
+import { decodeProviderEventStream } from "@openllmsh/sdk/wire/lib/streaming/provider-decode";
 import {
   fromAnthropicStreamEvent,
   newAnthropicStreamState,
-} from "@openllmsh/wire/providers/anthropic/streaming";
+} from "@openllmsh/sdk/wire/providers/anthropic/streaming";
 import { claudeNativeAssistantCarrier } from "./claude-facade-history";
 import type { TClaudeToolNameMap } from "./claude-tool-capture";
 

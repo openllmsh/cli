@@ -11,7 +11,7 @@
  */
 import { platform } from "node:os";
 import { join } from "node:path";
-import type { TProviderModelEntry } from "@openllmsh/protocol";
+import type { TProviderModelEntry } from "@openllmsh/sdk/protocol";
 import { cliConfigDir, cliHome } from "../cli-paths";
 import type { TFileStoreIdentity } from "../delegation/observation-cache";
 import {

@@ -4,7 +4,7 @@ import type {
   TImageGenerationResponse,
   TMediaOptionIssue,
   TModelCaps,
-} from "@openllmsh/protocol";
+} from "@openllmsh/sdk/protocol";
 import {
   aspectRatioFromDimensions,
   base64ToBytes,
@@ -19,13 +19,13 @@ import {
   parseMediaDimensions,
   resolutionTierForLongEdge,
   unsupportedParamIssue,
-} from "@openllmsh/protocol";
-import { inspectImageBytes } from "@openllmsh/wire/lib/canonical/image-signature";
+} from "@openllmsh/sdk/protocol";
+import { inspectImageBytes } from "@openllmsh/sdk/wire/lib/canonical/image-signature";
 import {
   completedEventFromFinalImage,
   encodeImageSseEvent,
-} from "@openllmsh/wire/lib/canonical/image-sse";
-import { originatorHeadersFrom } from "@openllmsh/wire/lib/forwarded-headers";
+} from "@openllmsh/sdk/wire/lib/canonical/image-sse";
+import { originatorHeadersFrom } from "@openllmsh/sdk/wire/lib/forwarded-headers";
 import { Schema } from "effect";
 import { uploadMedia } from "./cloud-client";
 import { errorJson } from "./cors";
@@ -858,7 +858,7 @@ export const runImageWalker = async (args: TWalkArgs): Promise<Response> => {
 // A distinct entry point (`runImageEditWalker`) rather than a branch inside
 // `runImageWalker`: edits have their own request shape (single reference
 // image, no `style`/`background`, masks explicitly rejected — see
-// `@openllmsh/protocol/image-edit-parse`), their own upstream wire per
+// `@openllmsh/sdk/protocol/image-edit-parse`), their own upstream wire per
 // provider (`buildImageEditUpstreamBody`), and — critically — they must
 // NEVER silently fall back to generation when a provider/credential is
 // missing.

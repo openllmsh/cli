@@ -15,11 +15,11 @@
  * there is no cycle.
  */
 
-import type { TSubscriptionProviderSlug } from "@openllmsh/protocol";
+import type { TSubscriptionProviderSlug } from "@openllmsh/sdk/protocol";
 import {
   classifyFailureOutput,
   wireCompatibleFailureSignature,
-} from "@openllmsh/protocol";
+} from "@openllmsh/sdk/protocol";
 import type { TReapOutcome } from "../child-supervisor";
 import { opaqueDoctorCorrelation } from "../doctor-report/correlation";
 import { clearPendingAuth } from "../pending-auth";

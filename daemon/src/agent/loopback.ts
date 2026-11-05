@@ -20,14 +20,14 @@
  *      cannot set headers, as a `Sec-WebSocket-Protocol` entry
  *      `openllm-cap.<token>` next to {@link AGENT_LOCAL_SUBPROTOCOL}.
  */
-import type { TAgentCommand, TAgentEvent } from "@openllmsh/protocol";
+import type { TAgentCommand, TAgentEvent } from "@openllmsh/sdk/protocol";
 import {
   AGENT_MAX_LINE_BYTES,
   DOCTOR_LOCAL_CAPABILITY_HEADER,
   encodeAgentLine,
   parseAgentCommand,
   parseStreamCtrlPayload,
-} from "@openllmsh/protocol";
+} from "@openllmsh/sdk/protocol";
 import { isTrustedDeploymentOrigin } from "../cors";
 import { capabilityMatches } from "../doctor-report/capability";
 import { daemonEnv } from "../env";

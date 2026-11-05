@@ -30,7 +30,7 @@ import type {
   TChatCompletionChunk,
   TChatCompletionRequest,
   TToolCall,
-} from "@openllmsh/protocol";
+} from "@openllmsh/sdk/protocol";
 import { z } from "zod";
 import { spawnCwd } from "../delegation/util";
 import { logError, safeDiagnosticMessage } from "../logger";

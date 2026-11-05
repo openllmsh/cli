@@ -25,7 +25,7 @@ import {
   readSync,
 } from "node:fs";
 import { join } from "node:path";
-import type { TAgentEvent } from "@openllmsh/protocol";
+import type { TAgentEvent } from "@openllmsh/sdk/protocol";
 import {
   createTranscriptParser,
   SUBAGENT_TOOL_NAMES,

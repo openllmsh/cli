@@ -10,7 +10,7 @@
  * restores that order. A live socket never enqueues, so a never-dropped
  * channel re-delivers nothing.
  */
-import type { TAuthEvent } from "@openllmsh/protocol";
+import type { TAuthEvent } from "@openllmsh/sdk/protocol";
 
 const MAX_FLOWS = 8;
 

@@ -42,8 +42,11 @@ import {
 import { rm } from "node:fs/promises";
 import { arch, hostname, release, type } from "node:os";
 import { dirname, join } from "node:path";
-import type { TProviderUsageSnapshot } from "@openllmsh/protocol";
-import { QUOTA_REJECT_PERCENT, QUOTA_WARN_PERCENT } from "@openllmsh/protocol";
+import type { TProviderUsageSnapshot } from "@openllmsh/sdk/protocol";
+import {
+  QUOTA_REJECT_PERCENT,
+  QUOTA_WARN_PERCENT,
+} from "@openllmsh/sdk/protocol";
 import { accountCell } from "../account-scope";
 import { noteAuthStoreIdentityChange } from "../auth-user-action";
 import { cliInstallState } from "../cli-install";

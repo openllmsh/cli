@@ -23,8 +23,8 @@ import type {
   TExecutionSelection,
   TModelCapsDefaultRule,
   TModelSettingsOverrides,
-} from "@openllmsh/protocol";
-import { resolveContextOverflowStrategy } from "@openllmsh/wire";
+} from "@openllmsh/sdk/protocol";
+import { resolveContextOverflowStrategy } from "@openllmsh/sdk/wire";
 import {
   fetchBootstrap,
   InvalidApiKeyError,
@@ -219,7 +219,7 @@ export const contextOverflowStrategy = (): TContextOverflowStrategy =>
  * The cloud's resolved `ACTIVE_SUB_METHOD` global preference — a named
  * execution variant (`stream-json` / `sdk-facade` / `acp` / `app-server` /
  * `msp` / `agent-sdk`, optionally capture) or `handrolled`; see
- * `@openllmsh/protocol`'s `execution-selection.ts`. The daemon NEVER reads an
+ * `@openllmsh/sdk/protocol`'s `execution-selection.ts`. The daemon NEVER reads an
  * `ACTIVE_SUB_METHOD` env of its own — this snapshot field is the only
  * source; null = no preference (each hop uses its registry default).
  * `walker.ts` samples it (with the overrides below) once per request so a

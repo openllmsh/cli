@@ -11,21 +11,21 @@
  * surface the last error (final).
  */
 import { createHash } from "node:crypto";
-import type { TChatCompletionResponse } from "@openllmsh/protocol";
+import type { TChatCompletionResponse } from "@openllmsh/sdk/protocol";
 import {
   cooldownPolicyFor,
   isLocalKeyProviderSlug,
   localKeyProviderPreset,
-} from "@openllmsh/protocol";
-import type { TAttemptOutcome } from "@openllmsh/wire/lib/attempt-outcome";
-import { classifyHopError } from "@openllmsh/wire/lib/error-class";
-import { scrubSecretText } from "@openllmsh/wire/lib/secret-scrub";
-import { createUsageObserver } from "@openllmsh/wire/lib/usage-observer";
+} from "@openllmsh/sdk/protocol";
+import type { TAttemptOutcome } from "@openllmsh/sdk/wire/lib/attempt-outcome";
+import { classifyHopError } from "@openllmsh/sdk/wire/lib/error-class";
+import { scrubSecretText } from "@openllmsh/sdk/wire/lib/secret-scrub";
+import { createUsageObserver } from "@openllmsh/sdk/wire/lib/usage-observer";
 import {
   buildUpstreamRequest,
   clientWireOf,
   UnsupportedContentError,
-} from "@openllmsh/wire/providers/upstream-request";
+} from "@openllmsh/sdk/wire/providers/upstream-request";
 import { deliverChunkStream, deliverJsonResponse } from "../client-encode";
 import { errorJson } from "../cors";
 import { accountHash } from "../delegation/account-id";

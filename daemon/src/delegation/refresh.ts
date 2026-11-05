@@ -16,7 +16,7 @@
  * hard-expired — exactly "no latency unless the refresh is close".
  */
 
-import type { TSubscriptionProviderSlug } from "@openllmsh/protocol";
+import type { TSubscriptionProviderSlug } from "@openllmsh/sdk/protocol";
 import {
   AccountKeyedMap,
   accountScoped,

@@ -1,5 +1,5 @@
 /**
- * Loopback device-control routes (`@openllmsh/protocol` `local-device-control`).
+ * Loopback device-control routes (`@openllmsh/sdk/protocol` `local-device-control`).
  *
  * - `GET /local/identity` — this daemon's X25519 key + fingerprint + its
  *   device-control pin, so a local browser / the desktop app can attest the
@@ -24,7 +24,7 @@ import type {
   TLocalDeviceAnchorResponse,
   TLocalDeviceControlRequest,
   TLocalIdentityResponse,
-} from "@openllmsh/protocol";
+} from "@openllmsh/sdk/protocol";
 import {
   DEVICE_ANCHOR_LOCAL_MAX_BODY_BYTES,
   DEVICE_ANCHOR_LOCAL_PATH,
@@ -35,7 +35,7 @@ import {
   isOpenllmDeviceAnchorSyntax,
   LocalDeviceAnchorRequest,
   LocalDeviceControlRequest,
-} from "@openllmsh/protocol";
+} from "@openllmsh/sdk/protocol";
 import { Result, Schema } from "effect";
 import {
   isAllowedLocalAgentOrigin,

@@ -6,7 +6,7 @@
  * correlation without importing login-flow.
  */
 import { AsyncLocalStorage } from "node:async_hooks";
-import { isReplaySessionId } from "@openllmsh/protocol";
+import { isReplaySessionId } from "@openllmsh/sdk/protocol";
 import { opaqueDoctorCorrelation } from "./doctor-report/correlation";
 
 type TCommandReplayContext = {

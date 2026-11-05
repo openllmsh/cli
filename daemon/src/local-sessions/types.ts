@@ -4,7 +4,10 @@
  * control command `list_local_sessions`.
  */
 
-import type { TDeviceSessionCli, TLocalCliSession } from "@openllmsh/protocol";
+import type {
+  TDeviceSessionCli,
+  TLocalCliSession,
+} from "@openllmsh/sdk/protocol";
 
 /** openllm client id used under `~/.openllm/run/<client>/`. */
 export type TOpenllmClientId =

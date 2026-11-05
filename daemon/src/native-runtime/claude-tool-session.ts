@@ -27,8 +27,8 @@ import { query, tool } from "@anthropic-ai/claude-agent-sdk";
 import type {
   TChatCompletionResponse,
   TServerSearchCall,
-} from "@openllmsh/protocol";
-import type { TAttemptUsage } from "@openllmsh/wire/lib/attempt-outcome";
+} from "@openllmsh/sdk/protocol";
+import type { TAttemptUsage } from "@openllmsh/sdk/wire/lib/attempt-outcome";
 import { z } from "zod";
 import { CLAUDE_TOOL_PASSTHROUGH_SCOPE } from "../execution-identity";
 import type {

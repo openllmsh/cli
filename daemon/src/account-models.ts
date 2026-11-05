@@ -5,7 +5,7 @@
  * device walker picks whichever account can serve a model. A single-account
  * provider calls the delegate exactly as before.
  */
-import type { TProviderModelEntry } from "@openllmsh/protocol";
+import type { TProviderModelEntry } from "@openllmsh/sdk/protocol";
 import { readRoster } from "./account-roster";
 import type { TCliProvider } from "./cli-paths";
 import type { TProviderDelegate } from "./delegation";

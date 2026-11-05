@@ -3,7 +3,7 @@ import type {
   TModelCaps,
   TProviderModelEntry,
   TProviderUsageSnapshot,
-} from "@openllmsh/protocol";
+} from "@openllmsh/sdk/protocol";
 import type { TRefreshErrorClass } from "./refresh";
 
 /**

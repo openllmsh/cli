@@ -23,7 +23,7 @@ export const DAEMON_ENTRY = join(PKG_ROOT, "daemon", "src", "main.ts");
 /** Inputs that never change daemon behaviour. The subscription floors are
  *  cloud-side policy data the old daemon change-gate excluded too. */
 const EXCLUDED: readonly string[] = [
-  "packages/protocol/subscription-daemon-floors.ts",
+  "packages/sdk/protocol/subscription-daemon-floors.ts",
 ];
 
 /** The daemon entry's resolved import closure, repo-relative and sorted. */

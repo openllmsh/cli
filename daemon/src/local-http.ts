@@ -1,5 +1,5 @@
 /** Shared private loopback transport guards. Never used by the public health/CORS surface. */
-import { DOCTOR_LOCAL_CAPABILITY_HEADER } from "@openllmsh/protocol";
+import { DOCTOR_LOCAL_CAPABILITY_HEADER } from "@openllmsh/sdk/protocol";
 import { capabilityMatches } from "./doctor-report/capability";
 
 export const localJson = (status: number, body: unknown): Response =>

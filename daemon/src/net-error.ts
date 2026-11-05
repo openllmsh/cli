@@ -1,7 +1,7 @@
 /**
  * Classify thrown fetch/connect failures for the daemon's cloud origin
  * (plan fetch + passthrough). Distinct from hop-error classification in
- * `@openllmsh/wire`, which needs an HTTP status.
+ * `@openllmsh/sdk/wire`, which needs an HTTP status.
  *
  * Transport identity is errno/`code` on the error or its `cause` (reuse
  * {@link TRANSIENT_NETWORK_CODES} / {@link isTransientNetworkError}), plus

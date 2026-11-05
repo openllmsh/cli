@@ -13,11 +13,11 @@
  *     - PRE-STREAM candidate failure → next hop (unless client aborted)
  *     - committed (response received, ok) → stream straight to the client
  *
- * Coreless: imports `@openllmsh/wire` + `@openllmsh/protocol` + local modules
+ * Coreless: imports `@openllmsh/sdk/wire` + `@openllmsh/sdk/protocol` + local modules
  * only — NEVER `@openllm/core`. The pure provider wire transforms
  * (request/response/streaming for anthropic + chatgpt, the canonical
  * message adapters, and the SSE decode/encode primitives) all live in
- * `@openllmsh/wire`; the walker wires them into a tiny per-hop mini-runner.
+ * `@openllmsh/sdk/wire`; the walker wires them into a tiny per-hop mini-runner.
  *
  * Serves all three subscription providers + cross-wire:
  *   - claude_code (Anthropic upstream): passthrough for an Anthropic-wire
@@ -51,7 +51,7 @@ import type {
   TProviderUsageSnapshot,
   TRequestStatus,
   TServerSearchCall,
-} from "@openllmsh/protocol";
+} from "@openllmsh/sdk/protocol";
 import {
   AnthropicResponse,
   ChatCompletionChunk,
@@ -63,123 +63,123 @@ import {
   TOOL_SESSION_HEADER,
   TUNNELED_REQUEST_HEADER,
   TUNNELED_REQUEST_VALUE,
-} from "@openllmsh/protocol";
-import { declaresAnthropicServerSearchTool } from "@openllmsh/wire/adapters/messages/request";
-import type { TRankableAccount } from "@openllmsh/wire/features/account-rank";
+} from "@openllmsh/sdk/protocol";
+import { declaresAnthropicServerSearchTool } from "@openllmsh/sdk/wire/adapters/messages/request";
+import type { TRankableAccount } from "@openllmsh/sdk/wire/features/account-rank";
 import {
   pickFinalFallback,
   rankProviderAccounts,
-} from "@openllmsh/wire/features/account-rank";
-import type { TCompactionSurface } from "@openllmsh/wire/features/compaction/compact-request";
-import { compactRequestToFit } from "@openllmsh/wire/features/compaction/compact-request";
+} from "@openllmsh/sdk/wire/features/account-rank";
+import type { TCompactionSurface } from "@openllmsh/sdk/wire/features/compaction/compact-request";
+import { compactRequestToFit } from "@openllmsh/sdk/wire/features/compaction/compact-request";
 import {
   contextOverflowRequiredTokens,
   nextLargerContextModel,
-} from "@openllmsh/wire/features/context-demote";
-import type { TContextOverflowStrategy } from "@openllmsh/wire/features/context-overflow-strategy";
+} from "@openllmsh/sdk/wire/features/context-demote";
+import type { TContextOverflowStrategy } from "@openllmsh/sdk/wire/features/context-overflow-strategy";
 import {
   resolveContextOverflowStrategy,
   shouldDemoteOnContextOverflow,
   shouldSkipHopForSize,
-} from "@openllmsh/wire/features/context-overflow-strategy";
+} from "@openllmsh/sdk/wire/features/context-overflow-strategy";
 import {
   compactionTargetFromOverflow,
   forcedCompactionTarget,
   MAX_LAST_RESORT_COMPACTION_ROUNDS,
   shouldSkipHopForContext,
-} from "@openllmsh/wire/features/context-skip";
-import type { TAffinityMemory } from "@openllmsh/wire/features/conversation-affinity";
+} from "@openllmsh/sdk/wire/features/context-skip";
+import type { TAffinityMemory } from "@openllmsh/sdk/wire/features/conversation-affinity";
 import {
   affinitySlot,
   conversationAffinityKey,
   createAffinityMemory,
   preferRemembered,
-} from "@openllmsh/wire/features/conversation-affinity";
-import { applyOutputTokenBackfill } from "@openllmsh/wire/features/max-tokens-backfill";
-import { applyModelSettings } from "@openllmsh/wire/features/model-settings";
+} from "@openllmsh/sdk/wire/features/conversation-affinity";
+import { applyOutputTokenBackfill } from "@openllmsh/sdk/wire/features/max-tokens-backfill";
+import { applyModelSettings } from "@openllmsh/sdk/wire/features/model-settings";
 import {
   GATE_STALE_CAP_MS,
   quotaGateDecision,
-} from "@openllmsh/wire/features/quota-gate";
-import type { TAttemptOutcome } from "@openllmsh/wire/lib/attempt-outcome";
+} from "@openllmsh/sdk/wire/features/quota-gate";
+import type { TAttemptOutcome } from "@openllmsh/sdk/wire/lib/attempt-outcome";
 import {
   classifyAttemptOutcome,
   isReadableProviderBody,
-} from "@openllmsh/wire/lib/attempt-outcome";
-import type { TCountTokensCapabilityMemory } from "@openllmsh/wire/lib/canonical/count-tokens-capability";
+} from "@openllmsh/sdk/wire/lib/attempt-outcome";
+import type { TCountTokensCapabilityMemory } from "@openllmsh/sdk/wire/lib/canonical/count-tokens-capability";
 import {
   countTokensEndpointIdentity,
   countTokensUnsupportedFromUpstream,
   isCountTokensUnsupported,
   rememberCountTokensUnsupported,
-} from "@openllmsh/wire/lib/canonical/count-tokens-capability";
-import type { TTokenEncoding } from "@openllmsh/wire/lib/canonical/encoding-select";
+} from "@openllmsh/sdk/wire/lib/canonical/count-tokens-capability";
+import type { TTokenEncoding } from "@openllmsh/sdk/wire/lib/canonical/encoding-select";
 import {
   DEFAULT_ENCODING,
   encodingForSurface,
   getTokenCounter,
-} from "@openllmsh/wire/lib/canonical/encoding-select";
+} from "@openllmsh/sdk/wire/lib/canonical/encoding-select";
 import {
   estimateAnthropicInputTokens,
   estimateBodyTokens,
   estimateBodyTokensExact,
-} from "@openllmsh/wire/lib/canonical/token-estimate";
+} from "@openllmsh/sdk/wire/lib/canonical/token-estimate";
 import {
   isEncryptedContentError,
   responsesBodyHasEncryptedContent,
   stripResponsesEncryptedContent,
-} from "@openllmsh/wire/lib/encrypted-content";
+} from "@openllmsh/sdk/wire/lib/encrypted-content";
 import {
   CONTEXT_OVERFLOW_BODY,
   classifyHopError,
-} from "@openllmsh/wire/lib/error-class";
-import { originatorHeadersFrom } from "@openllmsh/wire/lib/forwarded-headers";
+} from "@openllmsh/sdk/wire/lib/error-class";
+import { originatorHeadersFrom } from "@openllmsh/sdk/wire/lib/forwarded-headers";
 import {
   isCanonicalRefusal,
   isRefusalChunk,
-} from "@openllmsh/wire/lib/refusal";
-import { accumulateChunksToResponse } from "@openllmsh/wire/lib/streaming/accumulate";
+} from "@openllmsh/sdk/wire/lib/refusal";
+import { accumulateChunksToResponse } from "@openllmsh/sdk/wire/lib/streaming/accumulate";
 import {
   isMeaningfulChunk,
   peekFirstChunk,
-} from "@openllmsh/wire/lib/streaming/peek";
-import { decodeProviderEventStream } from "@openllmsh/wire/lib/streaming/provider-decode";
-import { responseToChunkStream } from "@openllmsh/wire/lib/streaming/response-stream";
-import { withFrameAlignedHeartbeat } from "@openllmsh/wire/lib/streaming/sse";
+} from "@openllmsh/sdk/wire/lib/streaming/peek";
+import { decodeProviderEventStream } from "@openllmsh/sdk/wire/lib/streaming/provider-decode";
+import { responseToChunkStream } from "@openllmsh/sdk/wire/lib/streaming/response-stream";
+import { withFrameAlignedHeartbeat } from "@openllmsh/sdk/wire/lib/streaming/sse";
 import {
   partialUsageFrom,
   streamFailureCause,
   UpstreamStreamError,
   upstreamErrorFrom,
-} from "@openllmsh/wire/lib/streaming/upstream-error";
+} from "@openllmsh/sdk/wire/lib/streaming/upstream-error";
 import {
   isThinkingSignatureError,
   messagesBodyHasStrippableThinking,
   stripMessagesThinkingBlocks,
-} from "@openllmsh/wire/lib/thinking-signature";
+} from "@openllmsh/sdk/wire/lib/thinking-signature";
 import {
   normalizeSchemaRefs,
   stripSchemaKeywords,
-} from "@openllmsh/wire/lib/tool-schema";
-import { createUsageObserver } from "@openllmsh/wire/lib/usage-observer";
-import { buildAnthropicToolNameMap } from "@openllmsh/wire/providers/anthropic/request";
-import { fromAnthropicResponse } from "@openllmsh/wire/providers/anthropic/response";
-import { decodeAnthropicEventStream } from "@openllmsh/wire/providers/anthropic/streaming";
-import { buildChatGptToolNameMap } from "@openllmsh/wire/providers/chatgpt/request";
-import type { TChatGptStreamEvent } from "@openllmsh/wire/providers/chatgpt/streaming";
+} from "@openllmsh/sdk/wire/lib/tool-schema";
+import { createUsageObserver } from "@openllmsh/sdk/wire/lib/usage-observer";
+import { buildAnthropicToolNameMap } from "@openllmsh/sdk/wire/providers/anthropic/request";
+import { fromAnthropicResponse } from "@openllmsh/sdk/wire/providers/anthropic/response";
+import { decodeAnthropicEventStream } from "@openllmsh/sdk/wire/providers/anthropic/streaming";
+import { buildChatGptToolNameMap } from "@openllmsh/sdk/wire/providers/chatgpt/request";
+import type { TChatGptStreamEvent } from "@openllmsh/sdk/wire/providers/chatgpt/streaming";
 import {
   chatGptEventToChunk,
   isChatGptResponsesTerminalEvent,
   newChatGptStreamState,
-} from "@openllmsh/wire/providers/chatgpt/streaming";
-import { withChatGptNativeSearch } from "@openllmsh/wire/providers/chatgpt/web-search";
-import { withGrokNativeSearch } from "@openllmsh/wire/providers/grok/web-search";
+} from "@openllmsh/sdk/wire/providers/chatgpt/streaming";
+import { withChatGptNativeSearch } from "@openllmsh/sdk/wire/providers/chatgpt/web-search";
+import { withGrokNativeSearch } from "@openllmsh/sdk/wire/providers/grok/web-search";
 import {
   KIMI_SEARCH_MAX_ROUNDS,
   kimiBuiltinSearchCalls,
   kimiSearchEchoMessages,
   withKimiBuiltinSearch,
-} from "@openllmsh/wire/providers/kimi/web-search";
+} from "@openllmsh/sdk/wire/providers/kimi/web-search";
 // The SINGLE (clientWire × upstreamWire) request recipe — shared with the
 // cloud runner so the two can't drift (this fork caused two regressions). See
 // `docs/proposals/unified-upstream-request-builder.md`.
@@ -188,7 +188,7 @@ import {
   canonicalFromInbound,
   clientWireOf,
   UnsupportedContentError,
-} from "@openllmsh/wire/providers/upstream-request";
+} from "@openllmsh/sdk/wire/providers/upstream-request";
 import { Schema } from "effect";
 import {
   beginHeldAttempt,
@@ -907,20 +907,20 @@ export const report = (
 const decodeAnthropicResponse = Schema.decodeUnknownSync(AnthropicResponse);
 
 // The (clientWire × upstreamWire) request recipe — body + headers — lives in
-// `@openllmsh/wire/providers/upstream-request` (buildUpstreamRequest /
+// `@openllmsh/sdk/wire/providers/upstream-request` (buildUpstreamRequest /
 // buildUpstreamHeaders / buildUpstreamBody / canonicalToUpstreamBody /
 // canonicalFromInbound / clientWireOf). The walker is a thin caller; it never
 // re-derives the recipe (that fork caused two regressions).
 
-export type { TPeekedChunks } from "@openllmsh/wire/lib/streaming/peek";
+export type { TPeekedChunks } from "@openllmsh/sdk/wire/lib/streaming/peek";
 // The pre-commit first-event peek is a SHARED wire primitive (one
 // implementation for the daemon walker and the cloud dispatch chain, like
-// the context ladder — see `@openllmsh/wire/lib/streaming/peek`).
+// the context ladder — see `@openllmsh/sdk/wire/lib/streaming/peek`).
 // Re-exported here so the walker's callers/tests keep one import surface.
 export {
   isMeaningfulChunk,
   peekFirstChunk,
-} from "@openllmsh/wire/lib/streaming/peek";
+} from "@openllmsh/sdk/wire/lib/streaming/peek";
 
 type TDebugStreamReason = "end" | "error" | "aborted";
 
@@ -2113,7 +2113,7 @@ export const serveSubscription = async (
 /**
  * Serve a kimi_code hop whose client declared the Anthropic server search
  * tool, over Moonshot's builtin `$web_search` PROTOCOL ECHO (see
- * `@openllmsh/wire/providers/kimi/web-search`): each round's builtin
+ * `@openllmsh/sdk/wire/providers/kimi/web-search`): each round's builtin
  * tool calls are answered by echoing their opaque arguments back verbatim —
  * the search already ran server-side; Moonshot injects the stored results
  * into context on the next round. The walker extracts nothing, executes
@@ -2404,7 +2404,9 @@ export const ensureLocalSubscription = async (
   if (cached !== undefined) return cached;
 
   const { readProviderStatus } = await import("./status");
-  const { normalizeProviderConnection } = await import("@openllmsh/protocol");
+  const { normalizeProviderConnection } = await import(
+    "@openllmsh/sdk/protocol"
+  );
   // Always probe through `readProviderStatus` — a process-wide last-known
   // connected row must not mask a later unknown/timeout (serviceable:false).
   // Per-walk dedupe is `connectedByProvider` above; status owns its own

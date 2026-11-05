@@ -31,8 +31,8 @@
  */
 import { appendFileSync, mkdirSync, renameSync, statSync } from "node:fs";
 import { appendFile } from "node:fs/promises";
-import type { TDoctorOutcomeLedger } from "@openllmsh/protocol";
-import { projectDoctorOutcomeLedger } from "@openllmsh/protocol";
+import type { TDoctorOutcomeLedger } from "@openllmsh/sdk/protocol";
+import { projectDoctorOutcomeLedger } from "@openllmsh/sdk/protocol";
 import { observeDoctorEvent } from "./doctor-report/engine";
 import type { TSafeDiagnosticMessage } from "./doctor-report/message";
 import {

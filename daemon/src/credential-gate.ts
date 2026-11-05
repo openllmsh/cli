@@ -1,5 +1,5 @@
-import type { TCredentialGateMode } from "@openllmsh/protocol";
-import { isUsableOpenllmApiKey } from "@openllmsh/protocol";
+import type { TCredentialGateMode } from "@openllmsh/sdk/protocol";
+import { isUsableOpenllmApiKey } from "@openllmsh/sdk/protocol";
 import {
   applyPersistedApiKey,
   daemonEnv,
@@ -10,7 +10,7 @@ import {
   writeEnvFileVars,
 } from "./env";
 
-export type { TCredentialGateMode } from "@openllmsh/protocol";
+export type { TCredentialGateMode } from "@openllmsh/sdk/protocol";
 
 export type TCredentialGateResult =
   | { readonly ok: true }

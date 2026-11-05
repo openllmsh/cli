@@ -24,11 +24,11 @@ import type {
   TDaemonProviderConnection,
   TProviderModelEntry,
   TSubscriptionProviderSlug,
-} from "@openllmsh/protocol";
+} from "@openllmsh/sdk/protocol";
 import {
   DaemonModelsReason,
   normalizeProviderConnection,
-} from "@openllmsh/protocol";
+} from "@openllmsh/sdk/protocol";
 import {
   discoverModelsAcrossAccounts,
   listModelsAcrossAccounts,

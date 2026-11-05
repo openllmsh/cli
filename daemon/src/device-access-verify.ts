@@ -4,7 +4,7 @@
  * The browser signs grants with the account DEVICE-CONTROL key — Ed25519,
  * derived from the recovery phrase and never from the DEK, so a compromised
  * cloud that unwraps the DEK cannot sign. This module verifies with
- * node:crypto only — the daemon package must NEVER import `@openllm/vault`,
+ * node:crypto only — the daemon package must NEVER import `@openllmsh/sdk/vault`,
  * and the daemon never holds DEK material. The pin comes from bootstrap
  * (`device_access_pubkey`); when null, seedgate enforcement is off.
  *
@@ -33,7 +33,7 @@
  * along a signed rotation chain or a local root.
  */
 import { createHash, createPublicKey, verify as nodeVerify } from "node:crypto";
-import type { TDeviceGrantUse } from "@openllmsh/tunnel";
+import type { TDeviceGrantUse } from "@openllmsh/sdk/tunnel";
 import {
   buildDeviceControlRotationMessage,
   buildDeviceGrantMessage,
@@ -43,7 +43,7 @@ import {
   decodeDeviceControlRotation,
   decodeDeviceGrant,
   formatKeyFingerprint,
-} from "@openllmsh/tunnel";
+} from "@openllmsh/sdk/tunnel";
 import { deviceAnchorFromEnvFile } from "./env";
 import { daemonPublicKey } from "./keypair";
 import { logWarn, safeDiagnosticMessage } from "./logger";
@@ -304,7 +304,7 @@ export const walkDeviceControlRotations = (
 
 /**
  * Fingerprint of a base64 SPKI key in the shared `keyFingerprint` format
- * (`@openllmsh/tunnel`), computed synchronously. Null when not base64.
+ * (`@openllmsh/sdk/tunnel`), computed synchronously. Null when not base64.
  */
 export const deviceKeyFingerprint = (spkiB64: string): string | null => {
   const der = Buffer.from(spkiB64, "base64");

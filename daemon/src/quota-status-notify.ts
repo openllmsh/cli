@@ -12,12 +12,12 @@ import type {
   TDaemonProviderConnection,
   TDaemonQuotaStatusReached,
   TProviderUsageWindow,
-} from "@openllmsh/protocol";
+} from "@openllmsh/sdk/protocol";
 import {
   isOAuthProviderSlug,
   QUOTA_REJECT_PERCENT,
   QUOTA_WARN_PERCENT,
-} from "@openllmsh/protocol";
+} from "@openllmsh/sdk/protocol";
 
 type TQuotaStatus = "allowed" | "allowed_warning" | "rejected";
 

@@ -7,7 +7,7 @@
  * §7, phase 3).
  *
  * This is INTERNAL bookkeeping, distinct from the public wire vocabulary in
- * `@openllmsh/protocol` (`TExecutionSelection` / `TBridgeVariant` /
+ * `@openllmsh/sdk/protocol` (`TExecutionSelection` / `TBridgeVariant` /
  * `resolveExecutionSelection` in `./execution-registry.ts`). For the LEGACY
  * `bridge`/`bridge-capture` selector (still the default — no explicit
  * new-vocabulary override configured for the hop), `native-runtime/serve.ts`
@@ -39,7 +39,7 @@
  * (the capability authority) still does not register it for any provider.
  */
 
-import type { TBridgeVariant } from "@openllmsh/protocol";
+import type { TBridgeVariant } from "@openllmsh/sdk/protocol";
 import { scopedSlug } from "./account-scope";
 import type { TNativeRuntimeProvider } from "./native-runtime/types";
 
@@ -53,7 +53,7 @@ export type TExecutionIdentity = {
  * Canonical string key for maps/logs/token-claim scoping. This is an OPAQUE
  * partition key, never parsed back into a {@link TExecutionIdentity} — for
  * the parsed public wire grammar, see
- * `@openllmsh/protocol/execution-selection`'s `parseActiveExecutionToken`.
+ * `@openllmsh/sdk/protocol/execution-selection`'s `parseActiveExecutionToken`.
  */
 /** Scoped to the ambient provider account so a native session never resumes
  *  under another account's credential. Account 0 keeps the bare provider. */

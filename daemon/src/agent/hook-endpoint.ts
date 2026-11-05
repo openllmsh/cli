@@ -7,7 +7,7 @@
 import {
   AGENT_HOOK_EVENTS,
   AGENT_SESSION_ID_PATTERN,
-} from "@openllmsh/protocol";
+} from "@openllmsh/sdk/protocol";
 import { handleAgentHook } from "./claude-code";
 import { localAgentRefusal, localAgentRefusalResponse } from "./loopback";
 

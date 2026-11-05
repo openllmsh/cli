@@ -101,7 +101,7 @@
  * 09-implementation-plan.md §13b for the corrected execution-status
  * wording.
  *
- * Streaming output reuses `@openllmsh/wire`'s
+ * Streaming output reuses `@openllmsh/sdk/wire`'s
  * `fromAnthropicStreamEvent`/`newAnthropicStreamState` UNCHANGED — the same
  * `--include-partial-messages` NDJSON shape `claude-native.ts` already
  * decodes — with `toolNameMap` wired so a caller `tool_use` block decodes
@@ -117,16 +117,16 @@ import type {
   TAnthropicStreamEvent,
   TChatCompletionChunk,
   TChatCompletionRequest,
-} from "@openllmsh/protocol";
-import { AnthropicStreamEvent } from "@openllmsh/protocol";
-import { CLAUDE_NATIVE_ASSISTANT_PENDING } from "@openllmsh/wire/adapters/messages/reasoning-signature";
-import { isRefusalChunk } from "@openllmsh/wire/lib/refusal";
-import { isMeaningfulChunk } from "@openllmsh/wire/lib/streaming/peek";
-import type { TAnthropicStreamState } from "@openllmsh/wire/providers/anthropic/streaming";
+} from "@openllmsh/sdk/protocol";
+import { AnthropicStreamEvent } from "@openllmsh/sdk/protocol";
+import { CLAUDE_NATIVE_ASSISTANT_PENDING } from "@openllmsh/sdk/wire/adapters/messages/reasoning-signature";
+import { isRefusalChunk } from "@openllmsh/sdk/wire/lib/refusal";
+import { isMeaningfulChunk } from "@openllmsh/sdk/wire/lib/streaming/peek";
+import type { TAnthropicStreamState } from "@openllmsh/sdk/wire/providers/anthropic/streaming";
 import {
   fromAnthropicStreamEvent,
   newAnthropicStreamState,
-} from "@openllmsh/wire/providers/anthropic/streaming";
+} from "@openllmsh/sdk/wire/providers/anthropic/streaming";
 import { Schema } from "effect";
 import { logDebug, logError, safeDiagnosticMessage } from "../logger";
 import {

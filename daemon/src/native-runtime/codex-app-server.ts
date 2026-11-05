@@ -28,9 +28,9 @@ import type {
   TChatCompletionChunk,
   TServerSearchCall,
   TUsage,
-} from "@openllmsh/protocol";
-import { codexServiceTier } from "@openllmsh/protocol";
-import type { TAttemptUsage } from "@openllmsh/wire/lib/attempt-outcome";
+} from "@openllmsh/sdk/protocol";
+import { codexServiceTier } from "@openllmsh/sdk/protocol";
+import type { TAttemptUsage } from "@openllmsh/sdk/wire/lib/attempt-outcome";
 import type { TSupervisedChild } from "../child-supervisor";
 import { superviseSpawn } from "../child-supervisor";
 import { spawnCwd } from "../delegation/util";

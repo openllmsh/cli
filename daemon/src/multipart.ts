@@ -4,7 +4,7 @@
  * edits (`/v1/images/edits`) can arrive as `multipart/form-data`, but the
  * listener's body pipeline was JSON-only (`req.arrayBuffer()` +
  * `JSON.parse`). This module turns an already-collected, size-bounded body
- * (see `collectBoundedBytes` in `@openllmsh/tunnel`) into a plain
+ * (see `collectBoundedBytes` in `@openllmsh/sdk/tunnel`) into a plain
  * `{fields, files}` shape any walker can consume without re-touching the
  * request stream — the ORIGINAL bytes stay available to the caller
  * separately for cloud passthrough / signature purposes.

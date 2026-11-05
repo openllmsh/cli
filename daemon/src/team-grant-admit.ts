@@ -22,9 +22,9 @@
  * same-user.
  */
 
-import { providerOfModel } from "@openllmsh/protocol";
-import type { TTeamGrant } from "@openllmsh/tunnel";
-import { verifyTeamGrant } from "@openllmsh/tunnel";
+import { providerOfModel } from "@openllmsh/sdk/protocol";
+import type { TTeamGrant } from "@openllmsh/sdk/tunnel";
+import { verifyTeamGrant } from "@openllmsh/sdk/tunnel";
 import { daemonUserId, refreshBootstrap, teamGrantKey } from "./config";
 import { daemonApiKeyId } from "./env";
 import { estimateTeamLegInputTokens } from "./team-leg-body";
@@ -74,7 +74,7 @@ export type TTeamGrantAdmitResult =
   | { readonly ok: true; readonly grant: TTeamGrant }
   | { readonly ok: false; readonly reason: TTeamGrantAdmitReason };
 
-export { providerOfModel } from "@openllmsh/protocol";
+export { providerOfModel } from "@openllmsh/sdk/protocol";
 export { teamServeEnabled } from "./team-serve";
 
 /** Estimate tokens to reserve locally when the grant carries `cap_tokens`. */

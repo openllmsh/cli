@@ -33,7 +33,7 @@
  * `tool_calls`. Citation urls accept only credential-less http(s).
  */
 
-import type { TServerSearchCall } from "@openllmsh/protocol";
+import type { TServerSearchCall } from "@openllmsh/sdk/protocol";
 import type { TMuseToolNameMap } from "./muse-mcp-server";
 
 /** MSP approval choice fields this policy reads. */

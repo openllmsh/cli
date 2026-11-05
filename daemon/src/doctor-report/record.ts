@@ -13,14 +13,14 @@ import type {
   TTunnelRequestPath,
   TTunnelRequestPlanCache,
   TTunnelRequestTransport,
-} from "@openllmsh/protocol";
+} from "@openllmsh/sdk/protocol";
 import {
   isReplaySessionId,
   parseDoctorReportEvent,
   projectDoctorOutcomeLedger,
   projectDoctorTimings,
   sanitizeDoctorScope,
-} from "@openllmsh/protocol";
+} from "@openllmsh/sdk/protocol";
 import { DAEMON_VERSION } from "../version";
 import { opaqueDoctorCorrelation } from "./correlation";
 import { doctorStateDir, doctorStatePath } from "./files";

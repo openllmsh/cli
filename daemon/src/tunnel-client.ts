@@ -8,7 +8,7 @@
  * `tunnel_*` splice — if neither RTC nor mux is available the hop fails and
  * the walker continues.
  *
- * Both rungs go through `fleetRequest` (`@openllmsh/tunnel/fleet`), the one
+ * Both rungs go through `fleetRequest` (`@openllmsh/sdk/tunnel/fleet`), the one
  * handler origin also uses: it sets `consumer:"daemon"` so the peer's
  * tunnel-server stamps `x-openllm-tunneled` and the peer walker loop-guards
  * further fleet hops.
@@ -17,13 +17,13 @@
  * the walk (degradation preserved).
  */
 
-import type { TTunnelSurface } from "@openllmsh/protocol";
-import { RTC_CAP, SEEDGATE_CAP, TEAM_RTC_CAP } from "@openllmsh/protocol";
-import { fleetRequest } from "@openllmsh/tunnel/fleet";
+import type { TTunnelSurface } from "@openllmsh/sdk/protocol";
+import { RTC_CAP, SEEDGATE_CAP, TEAM_RTC_CAP } from "@openllmsh/sdk/protocol";
+import { fleetRequest } from "@openllmsh/sdk/tunnel/fleet";
 import {
   createPeerLink,
   peerLinkFailureReasonOf,
-} from "@openllmsh/tunnel/peer-link";
+} from "@openllmsh/sdk/tunnel/peer-link";
 import { fleetSubscriptionPubkeyFor } from "./config";
 import { logInfo, safeDiagnosticMessage } from "./logger";
 import { getMuxPeerCaps, muxChannelTo } from "./mux-host";

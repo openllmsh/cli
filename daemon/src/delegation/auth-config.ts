@@ -17,7 +17,7 @@
  * `docs/proposals/active-sub-method.md` §claude_code handrolled parity: for
  * every provider EXCEPT `claude_code`, nothing here is replayed as inference
  * identity — the daemon serves each request with the ORIGINATOR's own headers
- * (`@openllmsh/wire/lib/forwarded-headers`) + the injected bearer, and this
+ * (`@openllmsh/sdk/wire/lib/forwarded-headers`) + the injected bearer, and this
  * config supplies only the request TARGET URL. For `claude_code` the config
  * ALSO persists the isolated CLI's own IDENTITY HEADERS (`identity_headers`,
  * captured from the CLI's real request shape — killed before it reaches the

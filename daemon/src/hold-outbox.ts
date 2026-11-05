@@ -10,7 +10,7 @@ import {
 } from "node:fs";
 import { open, readFile, rename } from "node:fs/promises";
 import { dirname, join } from "node:path";
-import type { TDaemonRecordRequest } from "@openllmsh/protocol";
+import type { TDaemonRecordRequest } from "@openllmsh/sdk/protocol";
 import { isDevMode, stateDir } from "./env";
 
 const RETRY_BASE_MS = 2_000;

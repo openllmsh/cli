@@ -25,13 +25,13 @@ import type {
   TDoctorAuthPhase,
   TDoctorLauncherAdapter,
   TDoctorLauncherKind,
-} from "@openllmsh/protocol";
+} from "@openllmsh/sdk/protocol";
 import {
   classifyFailureOutput,
   DoctorLauncherAdapter,
   projectDoctorOutcomeLedger,
   wireCompatibleFailureSignature,
-} from "@openllmsh/protocol";
+} from "@openllmsh/sdk/protocol";
 import { Schema as S } from "effect";
 import { AccountKeyedSet, scopedSlug } from "../account-scope";
 import {

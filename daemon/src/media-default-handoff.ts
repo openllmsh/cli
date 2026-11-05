@@ -9,11 +9,11 @@
 import type {
   TMediaDefaultRequest,
   TMediaDefaultSurface,
-} from "@openllmsh/protocol";
+} from "@openllmsh/sdk/protocol";
 import {
   decodeMediaModelSelection,
   mediaDefaultRequestFromBody,
-} from "@openllmsh/protocol";
+} from "@openllmsh/sdk/protocol";
 import type { TParsedMultipart } from "./multipart";
 import { serializeMultipartWithFields } from "./multipart";
 

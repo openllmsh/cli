@@ -6,7 +6,7 @@
 export type {
   TLocalServerPreset,
   TLocalServerPresetSlug,
-} from "@openllmsh/protocol";
+} from "@openllmsh/sdk/protocol";
 export {
   isLocalServerPresetSlug,
   isLocalServerSlug,
@@ -16,4 +16,4 @@ export {
   localServerPresetByPort,
   localServerPresetBySlug,
   parseLocalPortSlug,
-} from "@openllmsh/protocol";
+} from "@openllmsh/sdk/protocol";

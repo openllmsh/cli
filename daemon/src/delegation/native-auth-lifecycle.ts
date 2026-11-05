@@ -3,8 +3,8 @@ import type {
   TDoctorAuthPhase,
   TDoctorOutcomeLedger,
   TSubscriptionProviderSlug,
-} from "@openllmsh/protocol";
-import { projectDoctorOutcomeLedger } from "@openllmsh/protocol";
+} from "@openllmsh/sdk/protocol";
+import { projectDoctorOutcomeLedger } from "@openllmsh/sdk/protocol";
 import { opaqueDoctorCorrelation } from "../doctor-report/correlation";
 import { logInfo, safeDiagnosticMessage } from "../logger";
 import type { TNativeAuthProducer } from "./spawn";

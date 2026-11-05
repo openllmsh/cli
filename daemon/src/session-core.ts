@@ -19,13 +19,16 @@ import { basename, isAbsolute, join, resolve } from "node:path";
 import type {
   TDeviceSessionCli,
   TLocalSessionOpenPayload,
-} from "@openllmsh/protocol";
+} from "@openllmsh/sdk/protocol";
 import {
   DANGEROUS_SESSION_CLIS,
   parseLocalSessionCtrlPayload,
   SESSION_ID_PATTERN,
-} from "@openllmsh/protocol";
-import { decodeJsonPayload, encodeJsonPayload } from "@openllmsh/tunnel/codec";
+} from "@openllmsh/sdk/protocol";
+import {
+  decodeJsonPayload,
+  encodeJsonPayload,
+} from "@openllmsh/sdk/tunnel/codec";
 import { Terminal } from "@xterm/headless";
 import { resolveOpenllmCli } from "./cli-path";
 import { sessionEnv } from "./cli-paths";

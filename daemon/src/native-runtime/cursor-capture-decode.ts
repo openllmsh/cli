@@ -29,7 +29,7 @@
  */
 
 import { gunzipSync, gzipSync } from "node:zlib";
-import type { TChatCompletionChunk } from "@openllmsh/protocol";
+import type { TChatCompletionChunk } from "@openllmsh/sdk/protocol";
 
 /** Connect envelope flag: payload is end-stream JSON (trailers / error). */
 export const CONNECT_FLAG_END_STREAM = 0x02;

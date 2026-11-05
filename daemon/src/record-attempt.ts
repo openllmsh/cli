@@ -1,5 +1,5 @@
-import type { TDaemonRecordRequest } from "@openllmsh/protocol";
-import type { TAttemptOutcome } from "@openllmsh/wire/lib/attempt-outcome";
+import type { TDaemonRecordRequest } from "@openllmsh/sdk/protocol";
+import type { TAttemptOutcome } from "@openllmsh/sdk/wire/lib/attempt-outcome";
 import { holdFieldsForRecord, trackHoldRecord } from "./access-hold-context";
 import { recordRequest } from "./cloud-client";
 import {

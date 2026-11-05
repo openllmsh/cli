@@ -9,7 +9,7 @@
  */
 import { mkdirSync, readdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
-import type { TDaemonProviderConnection } from "@openllmsh/protocol";
+import type { TDaemonProviderConnection } from "@openllmsh/sdk/protocol";
 import {
   allocateAccount,
   findDuplicateAccount,

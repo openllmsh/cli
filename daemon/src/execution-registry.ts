@@ -11,11 +11,11 @@ import type {
   TBridgeVariant,
   TExecutionSelection,
   TSubscriptionProviderSlug,
-} from "@openllmsh/protocol";
+} from "@openllmsh/sdk/protocol";
 import {
   executionSelectionBridge,
   executionSelectionHandrolled,
-} from "@openllmsh/protocol";
+} from "@openllmsh/sdk/protocol";
 
 export type TExecutionVariant = TBridgeVariant | "handrolled";
 

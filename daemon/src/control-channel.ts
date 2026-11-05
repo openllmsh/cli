@@ -14,13 +14,13 @@ import type {
   TDaemonStatus,
   TIceServer,
   TRelayFrame,
-} from "@openllmsh/protocol";
+} from "@openllmsh/sdk/protocol";
 import {
   RELAY_PROTOCOL_VERSION,
   RelayFrame,
   RelayStampedChannelOpenFrame,
   RelayStampedRtcOfferFrame,
-} from "@openllmsh/protocol";
+} from "@openllmsh/sdk/protocol";
 import { Result, Schema } from "effect";
 import { WebSocket as ReconnectingWebSocket } from "partysocket";
 import { setAuthSink } from "./auth-events";

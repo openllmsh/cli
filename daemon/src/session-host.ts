@@ -6,7 +6,7 @@
  * reconciliation while never creating or retaining a daemon-owned session.
  */
 
-import type { TDeviceSessionCli } from "@openllmsh/protocol";
+import type { TDeviceSessionCli } from "@openllmsh/sdk/protocol";
 import type { TSessionHostClient } from "./session-host-proc";
 import { defaultSessionHostClient } from "./session-host-proc";
 

@@ -14,7 +14,7 @@
  */
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
-import type { TProviderModelEntry } from "@openllmsh/protocol";
+import type { TProviderModelEntry } from "@openllmsh/sdk/protocol";
 import { antigravityTokenPath } from "./antigravity-acp";
 
 type TObservation = {

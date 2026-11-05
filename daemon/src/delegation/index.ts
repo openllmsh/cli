@@ -1,4 +1,4 @@
-import type { TSubscriptionProviderSlug } from "@openllmsh/protocol";
+import type { TSubscriptionProviderSlug } from "@openllmsh/sdk/protocol";
 import { antigravityEnabled } from "../antigravity-feature";
 import { antigravityDelegate } from "./antigravity";
 import { chatgptDelegate } from "./chatgpt";

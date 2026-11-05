@@ -15,7 +15,7 @@
  * guarantees the terminal record however the handler exits; records go
  * through the durable outbox (`hold-outbox.ts`).
  */
-import type { TDaemonRecordRequest } from "@openllmsh/protocol";
+import type { TDaemonRecordRequest } from "@openllmsh/sdk/protocol";
 import type { THoldOutcome } from "./access-hold-context";
 import {
   holdCharge,

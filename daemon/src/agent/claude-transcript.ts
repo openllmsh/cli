@@ -23,12 +23,12 @@ import type {
   TAgentAttachmentMeta,
   TAgentEvent,
   TAgentItem,
-} from "@openllmsh/protocol";
+} from "@openllmsh/sdk/protocol";
 import {
   AGENT_DETAIL_TEXT_MAX_LENGTH,
   AGENT_TOOL_NAME_MAX_LENGTH,
   normalizeUserPromptText,
-} from "@openllmsh/protocol";
+} from "@openllmsh/sdk/protocol";
 import { claudeConfigDir } from "../local-sessions/paths";
 
 /** Bytes read per poll at most (a burst is drained over several polls). */

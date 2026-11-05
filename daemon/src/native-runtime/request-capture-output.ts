@@ -15,7 +15,7 @@
  * cleanup through {@link publishCapturedDirectOutput}'s `onRelease`.
  */
 
-import type { TChatCompletionChunk, TToolCall } from "@openllmsh/protocol";
+import type { TChatCompletionChunk, TToolCall } from "@openllmsh/sdk/protocol";
 import type {
   TBuilderSettlement,
   TCapturedRequestEnvelope,
@@ -240,7 +240,7 @@ export class CaptureTruncatedStreamError extends Error {
 
 /**
  * Capture-only truncated-stream guard. Wraps an already-decoded chunk stream
- * (never the shared `packages/wire` accumulator/decoder — this is narrowly
+ * (never the shared `packages/sdk/wire` accumulator/decoder — this is narrowly
  * scoped to bridge-capture adapters) so a clean EOF with no observed terminal
  * `finish_reason` errors instead of completing normally.
  *

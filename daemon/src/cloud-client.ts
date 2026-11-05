@@ -24,7 +24,7 @@ import type {
   TRelayChannelResponse,
   TVideoIdFields,
   TVideoJobPlanRequest,
-} from "@openllmsh/protocol";
+} from "@openllmsh/sdk/protocol";
 import {
   DAEMON_BOOTSTRAP_CAPS_HEADER,
   DAEMON_CAPS_HEADER,
@@ -43,7 +43,7 @@ import {
   RelayChannelResponse,
   TEAM_SERVE_CAP,
   VideoJobPlanRequest,
-} from "@openllmsh/protocol";
+} from "@openllmsh/sdk/protocol";
 import { Schema } from "effect";
 import { daemonEnv, deviceId } from "./env";
 import { enqueueHoldRecord } from "./hold-outbox";

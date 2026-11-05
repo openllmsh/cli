@@ -1,5 +1,5 @@
-import type { TDoctorSeverity } from "@openllmsh/protocol";
-import { sanitizeDoctorMessage } from "@openllmsh/protocol";
+import type { TDoctorSeverity } from "@openllmsh/sdk/protocol";
+import { sanitizeDoctorMessage } from "@openllmsh/sdk/protocol";
 
 /** Objects are trusted by identity, never by a forgeable property or raw prose. */
 export type TSafeDiagnosticMessage = { readonly text: string };

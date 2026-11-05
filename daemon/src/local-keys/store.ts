@@ -10,11 +10,11 @@
  */
 import { existsSync } from "node:fs";
 import { join } from "node:path";
-import type { TLocalKeyProviderSlug } from "@openllmsh/protocol";
+import type { TLocalKeyProviderSlug } from "@openllmsh/sdk/protocol";
 import {
   isLocalKeyProviderSlug,
   LOCAL_KEY_PROVIDER_PRESETS,
-} from "@openllmsh/protocol";
+} from "@openllmsh/sdk/protocol";
 import { stateDir } from "../env";
 import { readJsonStateFile, writeJsonStateAtomic } from "../json-state-cache";
 

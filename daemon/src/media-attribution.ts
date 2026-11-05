@@ -5,7 +5,7 @@
 import {
   OPENLLM_CHAIN_HEADER,
   OPENLLM_RESOLVED_MODEL_HEADER,
-} from "@openllmsh/protocol";
+} from "@openllmsh/sdk/protocol";
 
 export { OPENLLM_CHAIN_HEADER, OPENLLM_RESOLVED_MODEL_HEADER };
 

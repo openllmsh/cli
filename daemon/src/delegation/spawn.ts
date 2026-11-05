@@ -11,7 +11,7 @@ import { existsSync } from "node:fs";
 import { rm } from "node:fs/promises";
 import { platform } from "node:os";
 import { join } from "node:path";
-import type { TDoctorEventTimings } from "@openllmsh/protocol";
+import type { TDoctorEventTimings } from "@openllmsh/sdk/protocol";
 import type { TReapOutcome, TSuperviseSpawnOptions } from "../child-supervisor";
 import { superviseSpawn } from "../child-supervisor";
 import type { TChildSupervisor } from "../child-supervisor/supervisor";

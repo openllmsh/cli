@@ -23,11 +23,11 @@ import {
 } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, sep } from "node:path";
-import type { TDoctorFailureSignature } from "@openllmsh/protocol";
+import type { TDoctorFailureSignature } from "@openllmsh/sdk/protocol";
 import {
   classifyFailureOutput,
   type DOCTOR_LAUNCHER_ADAPTERS,
-} from "@openllmsh/protocol";
+} from "@openllmsh/sdk/protocol";
 import { runCaptureResult, spawnCwd } from "./delegation/spawn";
 import { envMs } from "./env-ms";
 import { launcherManagerById, SHIM_LAUNCHER_ADAPTERS } from "./launcher-roots";

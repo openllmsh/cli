@@ -5,7 +5,7 @@
  * `openllm <client>` attach picker name a session the same way the browser does.
  */
 
-import type { TDeviceSessionCli } from "@openllmsh/protocol";
+import type { TDeviceSessionCli } from "@openllmsh/sdk/protocol";
 import { readLocalSessions } from "./index";
 
 export type TSessionHostTitleInput = {

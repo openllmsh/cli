@@ -53,7 +53,7 @@ export type TSessionStrategy =
   | "config-file";
 
 /** The daemon broker's session vocabulary for launchable clients.
- *  Mirrors DeviceSessionCli in packages/protocol/daemon.ts — this compiled
+ *  Mirrors DeviceSessionCli in packages/sdk/protocol/daemon.ts — this compiled
  *  binary carries no workspace deps, so the set is restated here once and
  *  every CLI-side consumer imports THIS alias. Overlay clients remain
  *  vendor-only; shell deliberately has no `CLIENTS` entry. */

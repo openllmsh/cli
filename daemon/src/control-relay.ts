@@ -13,7 +13,7 @@ import type {
   TDaemonCommand,
   TDaemonCommandAck,
   TLocalCliSession,
-} from "@openllmsh/protocol";
+} from "@openllmsh/sdk/protocol";
 import type { TAccountCommandResult } from "./account-commands";
 import {
   addAccount,

@@ -2,7 +2,7 @@
  * Engine-adapter contract for agent sessions
  * (docs/plan/2026-10-23-agent-sessions-replace-remote-pty.md, "Agent
  * protocol"). One adapter per engine; every adapter emits the same
- * `@openllmsh/protocol` agent event stream, so the dispatcher and the UI never
+ * `@openllmsh/sdk/protocol` agent event stream, so the dispatcher and the UI never
  * see engine-specific shapes.
  */
 import type {
@@ -11,7 +11,7 @@ import type {
   TAgentEngine,
   TAgentEvent,
   TAgentRespondCommand,
-} from "@openllmsh/protocol";
+} from "@openllmsh/sdk/protocol";
 
 /** How an engine session is started. */
 export type TAgentEngineStartOptions = {

@@ -8,14 +8,17 @@
  * in mux-host), so everything below reads and writes plaintext while the
  * relay forwards ciphertext; on RTC, DTLS bound to the daemon key is the E2E.
  */
-import { parseStreamCtrlPayload } from "@openllmsh/protocol";
-import { decodeJsonPayload, encodeJsonPayload } from "@openllmsh/tunnel/codec";
-import type { TServeAgent } from "@openllmsh/tunnel/streams";
+import { parseStreamCtrlPayload } from "@openllmsh/sdk/protocol";
+import {
+  decodeJsonPayload,
+  encodeJsonPayload,
+} from "@openllmsh/sdk/tunnel/codec";
+import type { TServeAgent } from "@openllmsh/sdk/tunnel/streams";
 import {
   acceptAgentStream,
   pumpAgentCommands,
   sendAgentEvent,
-} from "@openllmsh/tunnel/streams";
+} from "@openllmsh/sdk/tunnel/streams";
 import type { TAgentDispatcher } from "./dispatcher";
 
 export const createAgentStreamHandler =

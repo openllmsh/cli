@@ -1,8 +1,11 @@
-import type { TChatCompletionRequest, TChatMessage } from "@openllmsh/protocol";
-import { AnthropicMessage } from "@openllmsh/protocol";
-import { plainTextFromReasoningItems } from "@openllmsh/wire/adapters/messages/reasoning-from-items";
-import { CLAUDE_NATIVE_ASSISTANT_CARRIER } from "@openllmsh/wire/adapters/messages/reasoning-signature";
-import { contentToAnthropicBlocks } from "@openllmsh/wire/providers/anthropic";
+import type {
+  TChatCompletionRequest,
+  TChatMessage,
+} from "@openllmsh/sdk/protocol";
+import { AnthropicMessage } from "@openllmsh/sdk/protocol";
+import { plainTextFromReasoningItems } from "@openllmsh/sdk/wire/adapters/messages/reasoning-from-items";
+import { CLAUDE_NATIVE_ASSISTANT_CARRIER } from "@openllmsh/sdk/wire/adapters/messages/reasoning-signature";
+import { contentToAnthropicBlocks } from "@openllmsh/sdk/wire/providers/anthropic";
 import { Schema } from "effect";
 import type {
   TClaudeAnthropicMessage,
@@ -13,7 +16,7 @@ import { anthropicMessagesFromHistoryTurns } from "./claude-tool-capture";
 // Versioned, request-carried native history, analogous to Hermes's native
 // assistant carrier. Signed blocks are replayed only with the same visible
 // projection and model. Never synthesize a signature from reasoning text.
-export { CLAUDE_NATIVE_ASSISTANT_CARRIER } from "@openllmsh/wire/adapters/messages/reasoning-signature";
+export { CLAUDE_NATIVE_ASSISTANT_CARRIER } from "@openllmsh/sdk/wire/adapters/messages/reasoning-signature";
 
 type TAssistant = Extract<TChatMessage, { role: "assistant" }>;
 type TProjection = {

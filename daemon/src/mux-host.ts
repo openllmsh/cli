@@ -1,4 +1,4 @@
-import type { TRelayFrame } from "@openllmsh/protocol";
+import type { TRelayFrame } from "@openllmsh/sdk/protocol";
 import {
   AGENT_CAP,
   MEDIA_HTTP_CAP,
@@ -10,35 +10,42 @@ import {
   streamOpenKindOf,
   TEAM_RTC_CAP,
   TEAM_SERVE_CAP,
-} from "@openllmsh/protocol";
+} from "@openllmsh/sdk/protocol";
 import {
   channelIdToBytes,
   decodeChannelEnvelope,
   encodeChannelEnvelopeWithTag,
-} from "@openllmsh/tunnel/channel-envelope";
-import { decodeJsonPayload, encodeJsonPayload } from "@openllmsh/tunnel/codec";
-import { noiseGrantBinding } from "@openllmsh/tunnel/device-grant";
-import type { TDuplex, TMuxChannel, TMuxStream } from "@openllmsh/tunnel/mux";
-import { createChannel } from "@openllmsh/tunnel/mux";
+} from "@openllmsh/sdk/tunnel/channel-envelope";
+import {
+  decodeJsonPayload,
+  encodeJsonPayload,
+} from "@openllmsh/sdk/tunnel/codec";
+import { noiseGrantBinding } from "@openllmsh/sdk/tunnel/device-grant";
+import type {
+  TDuplex,
+  TMuxChannel,
+  TMuxStream,
+} from "@openllmsh/sdk/tunnel/mux";
+import { createChannel } from "@openllmsh/sdk/tunnel/mux";
 import {
   PEER_LINK_DEFAULTS,
   peerLinkFailureCache,
-} from "@openllmsh/tunnel/peer-link";
+} from "@openllmsh/sdk/tunnel/peer-link";
 import type {
   TNoiseStaticKey,
   TSecureAuthorizeContext,
-} from "@openllmsh/tunnel/secure";
+} from "@openllmsh/sdk/tunnel/secure";
 import {
   SecureChannelError,
   secureMuxStream,
   x25519RawFromSpkiB64,
-} from "@openllmsh/tunnel/secure";
-import type { TServeAgent, TServeTunnel } from "@openllmsh/tunnel/streams";
+} from "@openllmsh/sdk/tunnel/secure";
+import type { TServeAgent, TServeTunnel } from "@openllmsh/sdk/tunnel/streams";
 import {
   AGENT_SECURE_PROLOGUE_INFO,
   agentSecurePrologue,
   serveStream,
-} from "@openllmsh/tunnel/streams";
+} from "@openllmsh/sdk/tunnel/streams";
 import { daemonUserId } from "./config";
 import {
   AGENT_PIN_REFUSALS,

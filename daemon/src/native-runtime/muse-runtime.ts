@@ -62,7 +62,7 @@ import {
 import type {
   TChatCompletionChunk,
   TProviderModelEntry,
-} from "@openllmsh/protocol";
+} from "@openllmsh/sdk/protocol";
 import { cliBin, cliEnv, MUSE_CREDENTIAL_BACKEND } from "../cli-paths";
 import {
   clearMuseStatusObservationCache,

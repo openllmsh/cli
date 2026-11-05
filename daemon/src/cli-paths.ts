@@ -24,7 +24,7 @@ import {
 } from "node:fs";
 import { homedir } from "node:os";
 import { delimiter, dirname, join } from "node:path";
-import type { TSubscriptionProviderSlug } from "@openllmsh/protocol";
+import type { TSubscriptionProviderSlug } from "@openllmsh/sdk/protocol";
 import { scopedSlug } from "./account-scope";
 import {
   ANTIGRAVITY_HARNESS,

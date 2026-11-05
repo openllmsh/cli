@@ -23,7 +23,7 @@
 import type {
   TTunnelForwardHeaders,
   TTunnelSurface,
-} from "@openllmsh/protocol";
+} from "@openllmsh/sdk/protocol";
 import {
   HOP_GRANT_HEADER,
   MEDIA_PERSISTENCE_BROWSER,
@@ -33,10 +33,10 @@ import {
   TUNNELED_REQUEST_HEADER,
   TUNNELED_REQUEST_VALUE,
   tunnelResponseHeadersFromHttp,
-} from "@openllmsh/protocol";
-import { StreamResetError } from "@openllmsh/tunnel/stream-reset-error";
-import type { TServeTunnel } from "@openllmsh/tunnel/streams";
-import { warmCapTokenCounter } from "@openllmsh/wire/lib/canonical/token-estimate";
+} from "@openllmsh/sdk/protocol";
+import { StreamResetError } from "@openllmsh/sdk/tunnel/stream-reset-error";
+import type { TServeTunnel } from "@openllmsh/sdk/tunnel/streams";
+import { warmCapTokenCounter } from "@openllmsh/sdk/wire/lib/canonical/token-estimate";
 import { handleInference } from "./listener";
 import { logInfo, logWarn, safeDiagnosticMessage } from "./logger";
 import { beginRequest, endRequest } from "./self-update";

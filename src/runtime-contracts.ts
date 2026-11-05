@@ -46,7 +46,7 @@ export const parseApiKeyId = (raw: string): string | null => {
   return rest.slice(0, dot);
 };
 
-/** Must match `packages/protocol/api-key-syntax.ts` (parity-tested). */
+/** Must match `packages/sdk/protocol/api-key-syntax.ts` (parity-tested). */
 export const OPENLLM_DEVICE_ANCHOR_LENGTH = 86;
 
 const deviceAnchorPattern = new RegExp(
@@ -76,7 +76,7 @@ export const splitAnchoredApiKey = (
 /**
  * True when `raw` starts like an OpenLLM key but carries anything after the
  * secret (`sk-llm-<id>.<secret>.<…>`). Must match
- * `packages/protocol/api-key-syntax.ts` (parity-tested).
+ * `packages/sdk/protocol/api-key-syntax.ts` (parity-tested).
  */
 export const hasOpenllmApiKeySuffix = (raw: string): boolean => {
   const value = raw.trim();
@@ -121,7 +121,7 @@ export const parseOpenllmDaemonPort = (
   fallback: number,
 ): number => {
   const trimmed = raw.trim();
-  // Must match packages/protocol/daemon-port.ts. Order depends on WHERE the
+  // Must match packages/sdk/protocol/daemon-port.ts. Order depends on WHERE the
   // comment sits relative to the quotes:
   //   "59321 # local"  → comment INSIDE quotes → unwrap first, then de-comment
   //   "59321" # local  → comment OUTSIDE quotes → de-comment first, then unwrap

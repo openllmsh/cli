@@ -13,12 +13,12 @@ import type {
   TLocalServerState,
   TProviderModelEntry,
   TProviderModelList,
-} from "@openllmsh/protocol";
+} from "@openllmsh/sdk/protocol";
 import {
   LOCAL_SERVER_PRESETS,
   localPortSlug,
   localServerPresetByPort,
-} from "@openllmsh/protocol";
+} from "@openllmsh/sdk/protocol";
 import { requestStatusPush } from "../auth-events";
 import { reportModels } from "../cloud-client";
 import { logWarn, safeDiagnosticMessage } from "../logger";

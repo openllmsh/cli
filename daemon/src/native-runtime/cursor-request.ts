@@ -22,7 +22,7 @@
  *     never errors the request.
  */
 
-import type { TChatCompletionRequest } from "@openllmsh/protocol";
+import type { TChatCompletionRequest } from "@openllmsh/sdk/protocol";
 
 /** One ACP image prompt block (base64 payload, no `data:` prefix). */
 export type TCursorImage = {

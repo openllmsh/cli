@@ -25,8 +25,8 @@ import type {
   TChatCompletionChunk,
   TChatCompletionRequest,
   TCooldownReason,
-} from "@openllmsh/protocol";
-import type { TAttemptUsage } from "@openllmsh/wire/lib/attempt-outcome";
+} from "@openllmsh/sdk/protocol";
+import type { TAttemptUsage } from "@openllmsh/sdk/wire/lib/attempt-outcome";
 import { stateDir } from "../env";
 
 /**

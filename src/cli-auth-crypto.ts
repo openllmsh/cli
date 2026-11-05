@@ -1,7 +1,7 @@
 /**
- * CLI-local mirror of `packages/vault/cli-auth-seal.ts` open path + X25519
+ * CLI-local mirror of `packages/sdk/vault/cli-auth-seal.ts` open path + X25519
  * keypair mint. The compiled `openllm` binary must NOT depend on
- * `@openllm/vault`; keep this algorithm byte-identical so vault-sealed
+ * `@openllmsh/sdk/vault`; keep this algorithm byte-identical so vault-sealed
  * envelopes open here.
  *
  * Domain: `openllm-cli-auth-seal-v1`

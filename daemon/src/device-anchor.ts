@@ -1,6 +1,6 @@
 /**
  * Daemon side of the install-time device trust anchor
- * (`@openllmsh/tunnel` `device-anchor.ts` owns the wire formats).
+ * (`@openllmsh/sdk/tunnel` `device-anchor.ts` owns the wire formats).
  *
  * - {@link installDeviceAnchor} — split `sk-llm-<id>.<secret>.<anchor>` on
  *   the last dot and write `OPENLLM_API_KEY=<bare>` plus
@@ -24,11 +24,11 @@
  * Sessions on == the anchor is present. There is no separate enabled flag and
  * no remote enable — re-enable writes the anchor again.
  *
- * node:crypto only — the daemon never imports `@openllm/vault`.
+ * node:crypto only — the daemon never imports `@openllmsh/sdk/vault`.
  */
 import { createHmac } from "node:crypto";
-import type { TDeviceSessionsReport } from "@openllmsh/protocol";
-import { splitAnchoredApiKey } from "@openllmsh/protocol";
+import type { TDeviceSessionsReport } from "@openllmsh/sdk/protocol";
+import { splitAnchoredApiKey } from "@openllmsh/sdk/protocol";
 import {
   buildDeviceSessionsDisableMessage,
   buildDpkProofMessage,
@@ -36,7 +36,7 @@ import {
   decodeDeviceAnchor,
   decodeDeviceSessionsDisable,
   toB64UrlBytes,
-} from "@openllmsh/tunnel";
+} from "@openllmsh/sdk/tunnel";
 import {
   deviceKeyFingerprint,
   getDeviceAccessPin,

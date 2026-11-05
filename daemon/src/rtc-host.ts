@@ -22,11 +22,14 @@ import type {
   TIceServer,
   TRelayFrame,
   TRtcNackReason,
-} from "@openllmsh/protocol";
-import { streamOpenKindOf } from "@openllmsh/protocol";
-import { decodeJsonPayload, MAX_PAYLOAD_BYTES } from "@openllmsh/tunnel/codec";
-import type { TMuxChannel } from "@openllmsh/tunnel/mux";
-import { createChannel } from "@openllmsh/tunnel/mux";
+} from "@openllmsh/sdk/protocol";
+import { streamOpenKindOf } from "@openllmsh/sdk/protocol";
+import {
+  decodeJsonPayload,
+  MAX_PAYLOAD_BYTES,
+} from "@openllmsh/sdk/tunnel/codec";
+import type { TMuxChannel } from "@openllmsh/sdk/tunnel/mux";
+import { createChannel } from "@openllmsh/sdk/tunnel/mux";
 import {
   decodeOfferInner,
   encodeAnswerInner,
@@ -37,10 +40,10 @@ import {
   resolveIceServers,
   sdpFingerprintsMatch,
   weriftIceServers,
-} from "@openllmsh/tunnel/rtc-auth";
-import type { TRtcDataChannelLike } from "@openllmsh/tunnel/rtc-duplex";
-import { rtcDuplex } from "@openllmsh/tunnel/rtc-duplex";
-import { preflightIceCandidate } from "@openllmsh/tunnel/rtc-ice";
+} from "@openllmsh/sdk/tunnel/rtc-auth";
+import type { TRtcDataChannelLike } from "@openllmsh/sdk/tunnel/rtc-duplex";
+import { rtcDuplex } from "@openllmsh/sdk/tunnel/rtc-duplex";
+import { preflightIceCandidate } from "@openllmsh/sdk/tunnel/rtc-ice";
 import type { RTCDataChannel, RTCIceCandidate } from "werift";
 import { RTCPeerConnection } from "werift";
 import { daemonUserId } from "./config";

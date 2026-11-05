@@ -14,7 +14,7 @@
  */
 
 import { createHash } from "node:crypto";
-import type { TContextOverflowStrategy } from "@openllmsh/protocol";
+import type { TContextOverflowStrategy } from "@openllmsh/sdk/protocol";
 import {
   AnthropicCountTokensRequest,
   AnthropicRequest,
@@ -29,16 +29,16 @@ import {
   parseImageEditMultipart,
   parseVideoGenerationInput,
   ResponsesRequest,
-} from "@openllmsh/protocol";
+} from "@openllmsh/sdk/protocol";
 import {
   collectBoundedBytes,
   TUNNEL_MEDIA_MAX_BODY_BYTES,
-} from "@openllmsh/tunnel";
+} from "@openllmsh/sdk/tunnel";
 import {
   resolveContextOverflowStrategy,
   shouldDemoteOnContextOverflow,
-} from "@openllmsh/wire/features/context-overflow-strategy";
-import { estimateBodyTokens } from "@openllmsh/wire/lib/canonical/token-estimate";
+} from "@openllmsh/sdk/wire/features/context-overflow-strategy";
+import { estimateBodyTokens } from "@openllmsh/sdk/wire/lib/canonical/token-estimate";
 import { Schema } from "effect";
 import { waitForHoldRecords, withHoldNonce } from "./access-hold-context";
 import {

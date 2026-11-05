@@ -18,13 +18,16 @@ import { join } from "node:path";
 import type {
   TDeviceSessionCli,
   TLocalSessionOpenPayload,
-} from "@openllmsh/protocol";
+} from "@openllmsh/sdk/protocol";
 import {
   DeviceSessionCli,
   SESSION_ID_PATTERN,
   TerminalDimension,
-} from "@openllmsh/protocol";
-import { decodeJsonPayload, encodeJsonPayload } from "@openllmsh/tunnel/codec";
+} from "@openllmsh/sdk/protocol";
+import {
+  decodeJsonPayload,
+  encodeJsonPayload,
+} from "@openllmsh/sdk/tunnel/codec";
 import { Schema as S } from "effect";
 import { stateDir } from "../env";
 import type {

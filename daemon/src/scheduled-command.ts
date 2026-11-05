@@ -1,4 +1,7 @@
-import type { TDaemonCommand, TDaemonCommandAck } from "@openllmsh/protocol";
+import type {
+  TDaemonCommand,
+  TDaemonCommandAck,
+} from "@openllmsh/sdk/protocol";
 import { daemonCommandScheduler } from "./command-scheduler";
 import { loginSlot } from "./delegation/login-flow";
 
