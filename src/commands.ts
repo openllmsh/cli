@@ -190,8 +190,8 @@ export const FLAGS: readonly TFlag[] = [
  * SDK graph; `mcp/server.ts` re-exports it as `MCP_GROUPS` for dispatch.
  *
  * The group STRINGS are the openllm-branded selector vocabulary
- * (`openllm-memory`) — distinct from the internal backend plugin slug
- * (`/api/plugins/memory`).
+ * (`openllm-memory`) — distinct from the internal backend integration slug
+ * (`/api/integrations/memory`).
  */
 export const MCP_ONLY_GROUPS = ["openllm", "openllm-memory"] as const;
 export type TMcpGroup = (typeof MCP_ONLY_GROUPS)[number];

@@ -1,5 +1,5 @@
 /**
- * Memory hook settings come from `MEMORY_<NAME>` env vars. The plugin was
+ * Memory hook settings come from `MEMORY_<NAME>` env vars. The integration was
  * called supermemory before the rename, so `SUPERMEMORY_<NAME>` is still
  * honoured as a fallback for configs written by released clients.
  */
