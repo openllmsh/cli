@@ -78,7 +78,6 @@ packages/sdk/protocol/setup-mode.ts
 packages/sdk/protocol/sha256-hex.ts
 packages/sdk/protocol/stats.ts
 packages/sdk/protocol/streaming.ts
-packages/sdk/protocol/subscription-provider-compat.ts
 packages/sdk/protocol/subscription-provider.ts
 packages/sdk/protocol/team-grant.ts
 packages/sdk/protocol/team-shareable.ts

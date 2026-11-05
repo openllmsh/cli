@@ -293,36 +293,17 @@ export const runChat = async (args: readonly string[]): Promise<number> => {
       },
     });
     try {
-      if (stream) {
-        const streamed = await client.chat.completions.create(
-          {
-            model: parsed.model,
-            messages,
-            stream: true,
-            ...(structured ? { stream_options: { include_usage: true } } : {}),
-          },
-          { headers: { "user-agent": PROMPT_USER_AGENT } },
-        );
-        if (!(streamed instanceof Response)) {
-          return fail(null, `request to ${gateway.base} failed: bad response`);
-        }
-        res = streamed;
-      } else {
-        // Non-stream: still use the raw request so we keep Response semantics
-        // (status/body text) that the rest of this command expects.
-        res = await client.http.request("/v1/chat/completions", {
-          method: "POST",
-          headers: {
-            "content-type": "application/json",
-            "user-agent": PROMPT_USER_AGENT,
-          },
-          body: JSON.stringify({
-            model: parsed.model,
-            messages,
-            stream: false,
-          }),
-        });
-      }
+      res = await client.chat.completions.create(
+        {
+          model: parsed.model,
+          messages,
+          stream,
+          ...(stream && structured
+            ? { stream_options: { include_usage: true } }
+            : {}),
+        },
+        { headers: { "user-agent": PROMPT_USER_AGENT } },
+      );
     } finally {
       client.close();
     }

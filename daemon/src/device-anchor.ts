@@ -132,13 +132,6 @@ export const removeDeviceAnchor = (): TRemoveDeviceAnchorResult => {
   return { ok: true, changed: true };
 };
 
-/** HMAC-SHA256 dpk proof under `pairSecret`, base64url (43 chars). */
-export const computeDpkProofNode = (
-  pairSecret: Uint8Array,
-  keyId: string,
-  dpk: string,
-): Promise<string> => computeDpkProof(pairSecret, keyId, dpk);
-
 /**
  * This daemon's dpk proof from the env file's anchor, or null when there is
  * none. The pair secret is bound to the key id it was minted for, so a key
@@ -157,7 +150,7 @@ export const deviceDpkProof = async (
   const anchor = decodeDeviceAnchor(raw);
   if (anchor === null) return null;
   try {
-    return await computeDpkProofNode(anchor.pairSecret, keyId, dpk);
+    return await computeDpkProof(anchor.pairSecret, keyId, dpk);
   } finally {
     anchor.pairSecret.fill(0);
   }
