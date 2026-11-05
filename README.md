@@ -15,84 +15,112 @@
 
 ---
 
-Run your AI clients through OpenLLM with **`openllm <client>`**. The CLI also
-manages the local daemon and serves one MCP server with:
+Run your AI clients through OpenLLM with **`openllm <client>`**.
 
-- **Inference and read-only gateway tools**, generated from the gateway's OpenAPI
-  spec. Account/configuration writes and duplicate raw plugin endpoints are not
-  exposed through MCP.
-- **Persistent cross-session memory** (`openllm-memory`, including the free tier).
+`openllm` is one self-contained binary. It holds:
 
-The compiled binary is self-contained: the SDK and client overlays ship with it.
-The SDK is [generated and committed](./src/sdk/generated), so the public source
-mirror builds without private runtime workspace packages.
+- **the CLI**: it signs you in, runs your clients and applies their config overlays;
+- **the local daemon** (`openllm daemon`): it serves your subscriptions (Claude,
+  ChatGPT, Grok, …) and local model servers from this machine;
+- **one MCP server** (`openllm mcp`): gateway tools plus OpenLLM Memory.
+
+Release binaries need no Bun or Node.js. The vendor clients have their own
+requirements.
 
 ## Install
 
-For most users, install **the full product: daemon + CLI**:
-
 ```sh
 curl -fsSL https://www.openllm.sh/install | bash
-openllm version
-openllm status
 ```
 
-Supported targets are **macOS and Linux, arm64 and x64**. Release binaries do not
-require Bun or Node.js to run; the vendor clients have their own requirements.
-The installer verifies downloaded binaries against their published SHA-256.
+Supported targets are **macOS and Linux, arm64 and x64**. The installer checks
+each download against its published SHA-256, then:
 
-You can install before obtaining an API key. In an interactive terminal, the
-installer starts credential setup; if setup could not run, continue with:
+1. **Asks Full or Minimal** in a terminal (Enter picks Full). A headless run
+   picks Full without asking.
+2. **Signs you in.** A browser window opens on OpenLLM. If it can't open, the
+   link is printed so you can finish on another device. Approve there and the
+   CLI receives its API key by itself, with nothing to copy. A key you already
+   have is reused. Use `openllm login --api-key` to paste a key instead.
+3. **Full only:** installs the vendor CLIs you don't have yet (Claude Code,
+   Codex, …) and starts the daemon.
+
+You sign in to your subscriptions later, on the **Providers** page or through
+MCP. The installer never asks for them.
+
+| Mode | What you get |
+| --- | --- |
+| **Full** (default) | CLI + vendor CLIs + the daemon running. This machine serves its own subscriptions. |
+| **Minimal** | CLI only. Clients go to the cloud, which reaches your subscriptions on another online device. A missing client CLI is offered for install the first time you run it. |
 
 ```sh
-openllm start
+# Minimal
+curl -fsSL https://www.openllm.sh/install | bash -s -- --minimal
+
+# Headless, with a key (the dashboard's Add a computer command does this)
+curl -fsSL https://www.openllm.sh/install | OPENLLM_API_KEY=sk-llm-... bash
 ```
 
-This guides you to the gateway's sign-in page and accepts your `sk-llm-...` key.
-For a non-interactive install, supply `OPENLLM_API_KEY` to the installer process.
-Use `OPENLLM_CLOUD_ORIGIN` as well when installing against a different gateway.
-Configuration is shared with the daemon in `~/.openllm/.env`.
+The mode is saved, so updates and re-runs keep it. To switch a Minimal machine
+to Full, run `openllm login --start`.
 
-> If `openllm` is not on PATH after installation, run
-> `~/.openllm/bin/openllm setup`, then open a new terminal. Sandboxed dashboard
-> installs can skip PATH and shell-completion setup.
+Useful installer variables: `OPENLLM_CLOUD_ORIGIN` (another gateway),
+`OPENLLM_SETUP_MODE=full|minimal`, `OPENLLM_SKIP_VENDOR_CLIS=1`,
+`OPENLLM_ONLY_VENDOR_CLIS=claude_code,chatgpt` and `OPENLLM_DAEMON_PORT` (8787
+by default). The full list is at the top of [`install.sh`](./install.sh).
 
-### CLI only
+Everything is saved in `~/.openllm/.env`, which the CLI and the daemon share.
 
-If you only need the CLI/MCP tools and do not need a local subscription daemon:
-
-```sh
-curl -fsSL https://raw.githubusercontent.com/openllmsh/cli/main/install.sh | bash
-openllm version
-```
-
-This installs the CLI and runs `openllm setup`; it does **not** install or start
-`openllmd`. Configure `OPENLLM_CLOUD_ORIGIN` and `OPENLLM_API_KEY` through your
-environment or the shared `~/.openllm/.env` file. Subscription requests still
-require a reachable, configured daemon.
+> If `openllm` is not on PATH afterwards, run `~/.openllm/bin/openllm setup`
+> and open a new terminal.
 
 ## Run a client
 
 ```sh
-openllm claude
-openllm codex
-openllm grok
-openllm hermes
-openllm opencode
-openllm raycast
+openllm claude         # Claude Code
+openllm codex          # Codex
+openllm grok           # Grok Build
+openllm hermes         # Hermes TUI
+openllm opencode       # OpenCode
+openllm raycast        # apply OpenLLM to Raycast (uninstall to remove)
+openllm chatgpt        # macOS: the ChatGPT app launcher (uninstall to remove)
 ```
 
-The corresponding client must be installed; follow any missing-client guidance.
-Arguments after the client name are passed through, for example
-`openllm claude --resume`. Session clients use runtime configuration overlays.
-Raycast applies persistent configuration; `openllm raycast uninstall` removes it.
-Hermes manages a named profile; see `openllm hermes --help` for profile controls.
+Arguments after the client name go to the client (`openllm claude --resume`).
+OpenLLM's own flags go **before** it: `openllm -d claude` skips every approval
+prompt.
 
-The gateway is automatic: the local daemon if it answers on
-`OPENLLM_DAEMON_PORT`, else `OPENLLM_CLOUD_ORIGIN` (both from `~/.openllm/.env`,
-or `.dev.env` in dev), which tunnels subscription models to one of your online
-devices. OpenLLM flags go **before** the client name; flags after it belong to
-the client.
+Session clients get their OpenLLM config at run time and leave your own client
+config untouched. Raycast and the ChatGPT launcher are applied once and stay
+until removed.
+
+Where requests go:
+
+- **Full:** to the local daemon when it answers, otherwise to the cloud.
+- **Minimal:** always to the cloud.
+- `OPENLLM_GATEWAY=local|cloud` overrides both.
+
+The cloud sends subscription models to one of your online devices.
+
+You can also get a reply without opening a client:
+
+```sh
+openllm -p "summarise this repo" -m lite --json
+```
+
+## Local daemon
+
+When the daemon runs, any OpenAI- or Anthropic-compatible tool can use it at
+`http://127.0.0.1:8787`. Send no API key, or any placeholder (`dummy-key`,
+`ollama`, …), and the daemon uses the key you signed in with. An `sk-llm-` key
+you send yourself is used as-is.
+
+```sh
+openllm start | stop | restart | status
+openllm sessions [list|attach|kill]
+openllm auth providers                 # this machine's provider logins
+openllm auth status [provider]
+```
 
 ## Commands
 
@@ -100,57 +128,62 @@ Every command accepts `-h` / `--help`.
 
 | Command | What |
 | --- | --- |
-| `openllm <client> [...args]` | Run Claude Code, Codex, Grok Build, Hermes, OpenCode, or configure Raycast |
-| `openllm start` / `stop` / `restart` / `status` | Manage the local daemon; start/restart guide credential setup when needed |
-| `openllm update` | Update the full product using the configured gateway's installer |
-| `openllm self-update` | Update **only the CLI binary** to the gateway's pinned release |
-| `openllm auto-update <on\|off\|status>` | Control daemon automatic updates |
-| `openllm sessions [list\|attach\|kill]` | Manage local daemon sessions |
-| `openllm doctor [report\|opt-out\|opt-in\|reporting-status\|--fix]` | Diagnostics, reporting preferences, and leftover install-state cleanup |
-| `openllm uninstall [--yes] [--keep-logins\|--remove-logins]` | Remove the full product: daemon + CLI |
-| `openllm mcp [--only <group>]` | MCP over stdio: `openllm`, `openllm-memory`; tier restrictions still apply |
-| `openllm exec memory <recall\|extract>` | Automatic memory hooks (event JSON on stdin; extraction runs in a detached worker) |
-| `openllm setup` | PATH symlink and shell completion (idempotent) |
+| `openllm <client> [...args]` | Run a client through OpenLLM (see above) |
+| `openllm login [--api-key] [--start] [--no-browser] …` | Sign in through the browser and save an API key. `--start` also switches to Full and starts the daemon |
+| `openllm start` / `stop` / `restart` / `status` | Manage the local daemon. `start` signs you in first if needed |
+| `openllm auth <verb>` | Provider logins on this machine: `providers`, `status`, `usage`, `login`, … |
+| `openllm sessions [list\|attach\|kill]` | Local daemon sessions |
+| `openllm mcp [--only <group>]` | MCP over stdio. Groups: `openllm`, `openllm-memory` |
+| `openllm config --json` | Print the gateway origin, env file and port in use |
+| `openllm update` | Update the whole product from your gateway |
+| `openllm self-update` | Update only this binary |
+| `openllm auto-update <on\|off\|status>` | Turn the daemon's automatic updates on or off |
+| `openllm doctor [report\|--fix\|opt-out\|opt-in\|reporting-status]` | Diagnose the daemon and leftover install state, and choose whether to send diagnostics |
+| `openllm uninstall [--yes] [--keep-logins\|--remove-logins]` | Remove OpenLLM from this machine |
+| `openllm exec memory <recall\|extract>` | The memory hooks (event JSON on stdin) |
+| `openllm setup` | Add `openllm` to PATH and install shell completion |
 | `openllm completion <bash\|zsh\|fish\|install>` | Print or install shell completion |
 | `openllm api --spec` | Print the embedded OpenAPI spec |
-| `openllm version` | Print this CLI's version |
+| `openllm version` | Print the version |
 
-Config resolution: process environment → shared `~/.openllm/.env` → baked gateway
-origin. The key variables are `OPENLLM_CLOUD_ORIGIN` and `OPENLLM_API_KEY`.
-`OPENLLM_GATEWAY=local|cloud` controls client routing; otherwise the CLI prefers
-local routing when the daemon is available.
+Settings are read from the process environment first, then
+`~/.openllm/.env`, then the gateway built into the binary.
 
-### Proactive memory
+## MCP
 
-Claude Code and Grok Build sessions automatically recall relevant memories before
-prompts and extract confirmed, durable preferences and decisions after a turn.
-Both hooks run inside the compiled OpenLLM CLI; **Python, Node, and Bun do not
-need to be installed**. Memory storage uses the cloud gateway, while extraction
-uses the session's selected inference gateway and the `lite` alias by default
-(`MEMORY_AUTO_MODEL` overrides it).
+`openllm mcp` is one stdio server. It carries:
 
-Set `MEMORY_AUTO_SAVE=0` or `MEMORY_AUTO_RECALL=0` to disable either
-behavior (the pre-rename `SUPERMEMORY_*` names still work). Repeated failures
-produce a rate-limited warning without blocking your work. Private, content-free health logs live under
-`~/.claude/plugin-state/memory/scopes/` (override the parent with
-`MEMORY_AUTO_LOG_DIR`). Failed attempts remain retryable; no historical
-conversation backfill runs automatically. New hook code takes effect in a fresh
-session after updating the CLI.
+- **Gateway tools**, generated from the OpenAPI spec: inference and read-only
+  account views. Account and configuration writes are not exposed.
+- **Provider login tools** for this machine's daemon.
+- **Integrations you turned on** in the dashboard **Marketplace**. OpenLLM
+  Memory is on by default; others such as context.dev appear once enabled.
 
-### MCP model discovery
+`api_v1Models_list` lists your subscription models first and asks agents to
+prefer them over metered API models. Aliases (`ultra`, `plus`, `lite`, your own)
+are fallback chains, not a promise that a subscription answers. The list does
+not check live reachability or remaining quota.
 
-The `api_v1Models_list` tool lists direct subscription models first and tells
-agents to prefer a suitable subscription model over a metered API alternative.
-It preserves exact model IDs, capabilities, and format/limit metadata. Aliases
-are configurable fallback chains, not subscription guarantees; configured
-availability is not a live reachability or remaining-quota check.
+### Memory in sessions
+
+In Claude Code and Grok Build sessions, OpenLLM Memory:
+
+- recalls relevant memories before each prompt;
+- saves durable preferences and decisions after a turn.
+
+The hooks run inside the binary, so no Python, Node or Bun is needed. Memories
+are stored in the cloud. Extraction runs on the session's gateway with the
+`lite` alias by default (`MEMORY_AUTO_MODEL` overrides it).
+
+`MEMORY_AUTO_SAVE=0` or `MEMORY_AUTO_RECALL=0` turns either off. Failures only
+produce a rate-limited warning; they never block you. Content-free health logs
+are in `~/.claude/plugin-state/memory/scopes/` (`MEMORY_AUTO_LOG_DIR` moves
+them). Updated hooks take effect in your next session.
 
 ## Build from source
 
-Bun is required **for building**, not for running release binaries. Clone the
-public mirror rather than treating a source-package dependency as the installer.
-`main` tracks stable releases; to build a prerelease, check out its `v...` tag
-(or the rolling `prerelease` branch) before installing dependencies:
+Bun is needed **to build**, not to run release binaries. `main` tracks stable
+releases; for a prerelease, check out its `v...` tag first.
 
 ```sh
 git clone https://github.com/openllmsh/cli
@@ -161,39 +194,38 @@ bun run compile:host       # → dist/openllm (this machine's target)
 bun run compile            # all 4 targets: darwin/linux × arm64/x64 (+ .gz)
 ```
 
-Source builds carry the `0.0.0-dev` sentinel, rather than a pinned release
-version. Run the binary directly or point your MCP client's `openllm` server
-entry at its absolute `dist/openllm` path with the `mcp` argument. Release builds
-receive their version from the release pipeline.
+Source builds report `0.0.0-dev`; release builds get their version from the
+release pipeline. To use a source build as your MCP server, point the client's
+`openllm` entry at `dist/openllm` with the `mcp` argument.
 
 ## Verify
 
 Published binaries are pinned by SHA-256 in [`manifest.ts`](./manifest.ts).
-From a source checkout, compare downloaded or installed bytes to those pins:
+From a source checkout, compare a binary against those pins:
 
 ```sh
 bun install
 bun run verify                         # every published target
 bun run verify -- --host               # this machine's target
-bun run verify -- --file ./openllm      # a local binary
+bun run verify -- --file ./openllm     # a local binary
 bun run verify -- --installed          # the openllm on PATH
 ```
 
-Exit code is `0` only when every checked binary matches its pinned digest. Use
-the source revision carrying the pins for the release you intend to verify.
+It exits `0` only when every checked binary matches its pin. Use the source
+revision that carries the pins of the release you are checking.
 
-The binary is **not byte-reproducible**: `bun build --compile --bytecode` embeds
-non-deterministic bytecode. Rebuilding from source will not hash-match the
-release. These checks establish consistency with the committed release digest;
-they do not eliminate the need to trust the release source and publisher.
+The binary is **not byte-reproducible**: `bun build --compile --bytecode`
+embeds non-deterministic bytecode, so a rebuild won't match the release hash.
+The check proves a binary is the one that was published. You still have to
+trust the release source and the publisher.
 
 ## License
 
 **Source-available** under the [Business Source License 1.1](./LICENSE)
-(© OpenLLM, INC) — converts to MIT on the Change Date. Not OSI open-source.
+(© OpenLLM, INC). It converts to MIT on the Change Date. Not OSI open-source.
 
 ---
 
 > **Read-only mirror.** Regenerated from the OpenLLM monorepo each release.
-> PRs welcome — ingested upstream with your authorship preserved. BUSL
+> PRs welcome: they are ingested upstream with your authorship preserved. BUSL
 > contributions require the CLA (the bot will prompt you).
