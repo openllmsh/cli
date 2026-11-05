@@ -22,7 +22,8 @@ Run your AI clients through OpenLLM with **`openllm <client>`**.
 - **the CLI**: it signs you in, runs your clients and applies their config overlays;
 - **the local daemon** (`openllm daemon`): it serves your subscriptions (Claude,
   ChatGPT, Grok, …) and local model servers from this machine;
-- **one MCP server** (`openllm mcp`): gateway tools plus OpenLLM Memory.
+- **one MCP server** (`openllm mcp`): gateway tools plus the Marketplace
+  integrations you turned on.
 
 Release binaries need no Bun or Node.js. The vendor clients have their own
 requirements.
@@ -133,7 +134,7 @@ Every command accepts `-h` / `--help`.
 | `openllm start` / `stop` / `restart` / `status` | Manage the local daemon. `start` signs you in first if needed |
 | `openllm auth <verb>` | Provider logins on this machine: `providers`, `status`, `usage`, `login`, … |
 | `openllm sessions [list\|attach\|kill]` | Local daemon sessions |
-| `openllm mcp [--only <group>]` | MCP over stdio. Groups: `openllm`, `openllm-memory` |
+| `openllm mcp [--only <group>]` | MCP over stdio; `--only` serves a single tool group (`openllm`, `openllm-memory`) |
 | `openllm config --json` | Print the gateway origin, env file and port in use |
 | `openllm update` | Update the whole product from your gateway |
 | `openllm self-update` | Update only this binary |
@@ -156,17 +157,20 @@ Settings are read from the process environment first, then
 - **Gateway tools**, generated from the OpenAPI spec: inference and read-only
   account views. Account and configuration writes are not exposed.
 - **Provider login tools** for this machine's daemon.
-- **Integrations you turned on** in the dashboard **Marketplace**. OpenLLM
-  Memory is on by default; others such as context.dev appear once enabled.
+- **Integrations you turned on** in the dashboard **Marketplace**, each as its
+  own tool group. Catalog items such as OpenLLM Memory and context.dev are
+  included in every plan; you can also bring your own key where an
+  integration allows it.
 
 `api_v1Models_list` lists your subscription models first and asks agents to
 prefer them over metered API models. Aliases (`ultra`, `plus`, `lite`, your own)
 are fallback chains, not a promise that a subscription answers. The list does
 not check live reachability or remaining quota.
 
-### Memory in sessions
+### Memory hooks
 
-In Claude Code and Grok Build sessions, OpenLLM Memory:
+When the OpenLLM Memory integration is on, Claude Code and Grok Build sessions
+also get hooks that:
 
 - recalls relevant memories before each prompt;
 - saves durable preferences and decisions after a turn.
