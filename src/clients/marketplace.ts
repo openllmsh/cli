@@ -13,7 +13,7 @@ export { LAUNCH_TIMEOUT_MS };
 
 /**
  * The user's enabled marketplace integrations as ready upstream MCP servers
- * plus first-party builtins (`GET /api/marketplace/launch`). Delegates to
+ * (`GET /api/marketplace/launch`). Delegates to
  * `@openllmsh/sdk/mcp` (which goes through `@openllmsh/sdk/client` HTTP).
  */
 export const fetchMarketplaceLaunch = async (

@@ -157,10 +157,12 @@ Settings are read from the process environment first, then
 - **Gateway tools**, generated from the OpenAPI spec: inference and read-only
   account views. Account and configuration writes are not exposed.
 - **Provider login tools** for this machine's daemon.
-- **Integrations you turned on** in the dashboard **Marketplace**, each as its
-  own tool group. Catalog items such as OpenLLM Memory and context.dev are
-  included in every plan; you can also bring your own key where an
-  integration allows it.
+- **Integrations you turned on** in the dashboard **Marketplace**, re-exported
+  as `<id>__<tool>` (for example `openllm-memory__recall`,
+  `context-dev__web-search`). Catalog items such as OpenLLM Memory and
+  context.dev are included in every plan; you can also bring your own key
+  where an integration allows it. `--only openllm-memory` keeps just that
+  upstream.
 
 `api_v1Models_list` lists your subscription models first and asks agents to
 prefer them over metered API models. Aliases (`ultra`, `plus`, `lite`, your own)

@@ -25,8 +25,6 @@ import type { TMarketplaceLaunch as TCliMarketplaceLaunch } from "../clients/mar
 import type { TMcpGroup } from "../commands";
 import { mcpGroupsForTier } from "../commands";
 import { CLI_VERSION } from "../env";
-import { buildProjectRef } from "../memory-hooks/project-ref";
-import { memoryProject } from "../memory-hooks/transcript";
 import { requireCliApiKey } from "../onboarding";
 import {
   handleLocalAuthTool,
@@ -78,13 +76,11 @@ export const createCliMcpServer = ({
   tier,
   config,
   upstreams = [],
-  builtins = [],
 }: {
   requested: readonly TMcpGroup[];
   tier: Parameters<typeof mcpGroupsForTier>[1];
   config: { baseUrl: string; apiKey: string };
   upstreams?: readonly TUpstream[];
-  builtins?: readonly string[];
 }): McpServer => {
   const groups = mcpGroupsForTier(requested, tier);
   const server = createSdkMcpServer({
@@ -92,13 +88,8 @@ export const createCliMcpServer = ({
     groups,
     config,
     upstreams,
-    builtins,
     includeFreeTierOnlyTools: tier === "free",
     transcribe: (args, cfg) => transcribeAudio(args, cfg),
-    memory: {
-      resolveProject: (override) => memoryProject(process.cwd(), override),
-      buildProjectRef: (slug) => buildProjectRef(process.cwd(), slug),
-    },
   });
   if (groups.includes("openllm")) registerLocalAuthTools(server);
   return server;
@@ -131,10 +122,7 @@ export const beginMarketplaceLoad = (
       : {
           fetchLaunch: async () => {
             const launch = await options.fetchLaunch?.(gateway);
-            return (launch ?? {
-              servers: [],
-              builtins: [],
-            }) as TMarketplaceLaunch;
+            return (launch ?? { servers: [] }) as TMarketplaceLaunch;
           },
         }),
     ...(options.connect === undefined
@@ -204,15 +192,10 @@ export const runMcpServer = async (
     gateway,
   );
   let upstreams: readonly TUpstream[] = [];
-  let builtins: readonly string[] = [];
   let marketplaceSettled = false;
-  void launchPromise.then((launch) => {
-    builtins = launch.builtins;
-  });
   const marketplaceTask = marketplacePromise.then(
     (connected) => {
       upstreams = connected.upstreams;
-      builtins = connected.builtins;
       marketplaceSettled = true;
       return connected;
     },
@@ -223,7 +206,6 @@ export const runMcpServer = async (
       );
       return {
         upstreams: [] as readonly TUpstream[],
-        builtins,
       };
     },
   );
@@ -245,22 +227,18 @@ export const runMcpServer = async (
       ]),
     ]);
     const includedAtCreate = upstreams;
-    const builtinsAtCreate = builtins;
     const server = createCliMcpServer({
       requested,
       tier,
       config,
       upstreams: includedAtCreate,
-      builtins: builtinsAtCreate,
     });
     if (includedAtCreate.length > 0) attachedLate = true;
     if (!marketplaceSettled) {
       void marketplaceTask.then((connected) => {
         if (attachedLate || connected.upstreams.length === 0) return;
         attachedLate = true;
-        if (mcpGroupsForTier(requested, tier).includes("openllm")) {
-          attachMarketplaceUpstreams(server, connected.upstreams);
-        }
+        attachMarketplaceUpstreams(server, connected.upstreams);
       });
     }
     return server;
