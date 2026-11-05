@@ -15,6 +15,8 @@ import type {
   TUpstreamTool,
 } from "@openllmsh/sdk/mcp";
 import {
+  CALL_TIMEOUT_MS,
+  CONNECT_TIMEOUT_MS,
   connectUpstream as connectHttpUpstream,
   connectUpstreams as connectHttpUpstreams,
   UPSTREAM_TOOL_SEPARATOR,
@@ -37,8 +39,6 @@ type TChannel = {
 };
 
 const PROTOCOL_VERSION = "2025-06-18";
-const CONNECT_TIMEOUT_MS = 5_000;
-const CALL_TIMEOUT_MS = 120_000;
 const MAX_TOOL_PAGES = 10;
 
 type TRpcMessage = {

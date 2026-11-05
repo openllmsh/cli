@@ -33,10 +33,9 @@ gateway; subscription requests require a reachable daemon with the relevant
 provider connected.
 
 The daemon does not import the cloud proxy pipeline. It shares the public
-[protocol](https://github.com/openllmsh/protocol),
-[wire transforms](https://github.com/openllmsh/wire), and
-[tunnel transport](https://github.com/openllmsh/tunnel) packages, using Effect
-and provider-specific dependencies locally.
+[SDK](https://github.com/openllmsh/sdk) (`@openllmsh/sdk/protocol`,
+`@openllmsh/sdk/wire`, `@openllmsh/sdk/tunnel`), using Effect and
+provider-specific dependencies locally.
 
 ## Install
 
