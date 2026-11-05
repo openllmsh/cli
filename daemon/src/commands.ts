@@ -8,7 +8,7 @@
  * Descriptions are deliberately free of `:` and `'` so they embed into the
  * zsh/bash/fish completion grammars without escaping.
  */
-import { AUTH_COMMANDS } from "@openllmsh/protocol";
+import { AUTH_COMMANDS } from "@openllmsh/sdk/protocol";
 import { antigravityEnabled } from "./antigravity-feature";
 
 export type TCommand = {

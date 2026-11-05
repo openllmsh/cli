@@ -3,15 +3,18 @@
  *
  * The daemon's resilience contract: every provider's usage read reduces
  * into the ONE canonical `TProviderUsageSnapshot` struct
- * (`packages/protocol/provider-usage.ts`) at this boundary — no fetch, no
+ * (`packages/sdk/protocol/provider-usage.ts`) at this boundary — no fetch, no
  * fs, no spawn — so a vendor payload reshape is absorbed inside a pure,
  * unit-testable function and never leaks a format change downstream
  * (relay persistence, the calibration estimator, the UI all consume only
  * the canonical struct).
  */
 
-import type { TProviderUsageWindow } from "@openllmsh/protocol";
-import { QUOTA_REJECT_PERCENT, QUOTA_WARN_PERCENT } from "@openllmsh/protocol";
+import type { TProviderUsageWindow } from "@openllmsh/sdk/protocol";
+import {
+  QUOTA_REJECT_PERCENT,
+  QUOTA_WARN_PERCENT,
+} from "@openllmsh/sdk/protocol";
 
 /**
  * Duration label for a vendor-stated quota window — "5-hour", "7-day",

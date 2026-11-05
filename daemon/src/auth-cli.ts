@@ -1,5 +1,5 @@
 /** Short-lived CLI is a private loopback client, never a provider executor. */
-import type { TLocalAuthRequest } from "@openllmsh/protocol";
+import type { TLocalAuthRequest } from "@openllmsh/sdk/protocol";
 import {
   AUTH_CODE_MAX_BYTES,
   AUTH_LOCAL_PATH,
@@ -7,7 +7,7 @@ import {
   authHelp,
   DOCTOR_LOCAL_CAPABILITY_HEADER,
   parseAuthArgs,
-} from "@openllmsh/protocol";
+} from "@openllmsh/sdk/protocol";
 import { readOwnerDoctorCapability } from "./doctor-report/capability";
 import { daemonPort } from "./env";
 

@@ -10,7 +10,7 @@
  * Task / Agent calls in the page bring their subagent's items with them.
  */
 import { closeSync, fstatSync, openSync, readSync } from "node:fs";
-import type { TAgentEvent } from "@openllmsh/protocol";
+import type { TAgentEvent } from "@openllmsh/sdk/protocol";
 import { subagentDirOf, subagentEvents } from "./claude-subagents";
 import {
   createTranscriptParser,

@@ -26,7 +26,7 @@
  */
 
 import { join } from "node:path";
-import type { TChatCompletionChunk } from "@openllmsh/protocol";
+import type { TChatCompletionChunk } from "@openllmsh/sdk/protocol";
 import { logError, safeDiagnosticMessage } from "../logger";
 import { daemonTempDir } from "../sandbox/working-set";
 import type { TClientTool } from "./claude-tool-session";

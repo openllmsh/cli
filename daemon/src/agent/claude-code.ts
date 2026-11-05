@@ -49,7 +49,7 @@ import type {
   TAgentRespondCommand,
   TAgentUserInputAnswers,
   TAgentUserInputQuestion,
-} from "@openllmsh/protocol";
+} from "@openllmsh/sdk/protocol";
 import {
   AGENT_DETAIL_TEXT_MAX_LENGTH,
   AGENT_MAX_ATTACHMENT_BASE64_LENGTH,
@@ -63,7 +63,7 @@ import {
   MEDIA_TYPES,
   MIME_BY_MEDIA_EXT,
   SESSION_ID_PATTERN,
-} from "@openllmsh/protocol";
+} from "@openllmsh/sdk/protocol";
 import { stateDir } from "../env";
 import { readClaudeSessionIdUnderPid } from "../local-sessions/claude";
 import { logError } from "../logger";

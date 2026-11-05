@@ -1,4 +1,4 @@
-import type { THttpClientOptions } from "../sdk/client";
+import type { THttpClientOptions } from "@openllmsh/sdk/openapi";
 
 const HOOK_USER_AGENT = "OpenLLM/memory-hooks (+https://openllm.sh)";
 const RESPONSE_LIMIT = 2 * 1024 * 1024;

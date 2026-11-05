@@ -1,27 +1,22 @@
 /**
  * Per-daemon X25519 keypair + sealed-box transfer.
  *
- * Used to move a Claude SETUP-TOKEN between two of the user's own daemons
- * without the cloud ever reading it: the daemon on the machine with the
- * browser mints the token and SEALS it to the target daemon's public key; the
- * cloud relays only ciphertext (`/api/daemon/relay-credential`); the target
- * daemon opens it with its private key and stores it. See
- * docs/proposals/daemon-auth-loopback-forwarding.md §7.4.
+ * Identity key file I/O stays here (node KeyObject + 0600 PKCS#8 on disk).
+ * Sealed-box open/seal uses `@openllmsh/sdk/vault` cred-seal (WebCrypto), with
+ * a cached non-extractable CryptoKey imported from the same PKCS#8 bytes.
  *
- * Sealed box = ephemeral X25519 + ECDH → HKDF-SHA256 → AES-256-GCM. The
- * private key is generated once and persisted `0600` under the state dir; only
- * the public key (SPKI DER, base64) ever leaves the box, on the status push.
+ * `daemonX25519Dh` stays on node:crypto KeyObject — Noise_IK in mux-host needs
+ * a sync-friendly DH against raw 32-byte peers; reimplementing that in
+ * WebCrypto would add async on the handshake hot path without removing the
+ * KeyObject already required for disk I/O. Cited by the no-reimplementation
+ * allow-list for that reason.
  */
 import {
-  createCipheriv,
-  createDecipheriv,
   createPrivateKey,
   createPublicKey,
   diffieHellman,
   generateKeyPairSync,
-  hkdfSync,
   type KeyObject,
-  randomBytes,
 } from "node:crypto";
 import {
   linkSync,
@@ -31,11 +26,17 @@ import {
   writeFileSync,
 } from "node:fs";
 import { join } from "node:path";
+import type { TEphKeypair } from "@openllmsh/sdk/vault";
+import {
+  importX25519PrivateKey,
+  openCredSealed,
+  sealToDaemon,
+  generateEphKeypair as vaultGenerateEphKeypair,
+} from "@openllmsh/sdk/vault";
 import { stateDir } from "./env";
 import { logError } from "./logger";
 
 const privFile = (): string => join(stateDir(), "x25519-priv");
-const HKDF_INFO = Buffer.from("openllm-cred-seal-v1");
 
 const isErrnoException = (err: unknown): err is NodeJS.ErrnoException => {
   if (!(err instanceof Error)) return false;
@@ -99,28 +100,38 @@ const publicKeyB64Of = (privateKey: KeyObject): string =>
 
 type TLoadedKey = {
   readonly privateKey: KeyObject;
+  readonly pkcs8B64: string;
   /** True iff the key was loaded from disk or written by this load. */
   readonly persisted: boolean;
 };
 
 const ephemeral = (privateKey: KeyObject): TLoadedKey => ({
   privateKey,
+  pkcs8B64: Buffer.from(
+    privateKey.export({ format: "der", type: "pkcs8" }),
+  ).toString("base64"),
   persisted: false,
 });
+
+const loadedFromDer = (der: Buffer, persisted: boolean): TLoadedKey => {
+  const privateKey = createPrivateKey({
+    key: der,
+    format: "der",
+    type: "pkcs8",
+  });
+  return {
+    privateKey,
+    pkcs8B64: Buffer.from(der).toString("base64"),
+    persisted,
+  };
+};
 
 /** Read (or mint + persist) the X25519 private key at `path`. */
 const readOrMintKey = (path: string, dir: string): TLoadedKey => {
   try {
     const der = readFileSync(path);
     try {
-      return {
-        privateKey: createPrivateKey({
-          key: der,
-          format: "der",
-          type: "pkcs8",
-        }),
-        persisted: true,
-      };
+      return loadedFromDer(der, true);
     } catch (err) {
       // File exists but is not a usable PKCS#8 key — never overwrite it.
       logIdentityFailure(
@@ -147,28 +158,24 @@ const readOrMintKey = (path: string, dir: string): TLoadedKey => {
   const tmpPath = `${path}.${process.pid}.tmp`;
   try {
     mkdirSync(dir, { recursive: true });
-    writeFileSync(
-      tmpPath,
+    const der = Buffer.from(
       privateKey.export({ format: "der", type: "pkcs8" }),
-      { mode: 0o600 },
     );
+    writeFileSync(tmpPath, der, { mode: 0o600 });
     // link(2) fails with EEXIST instead of replacing — never clobber a
     // dest that appeared after the ENOENT read (first-boot race) or an
     // unreadable existing identity.
     linkSync(tmpPath, path);
-    return { privateKey, persisted: true };
+    return {
+      privateKey,
+      pkcs8B64: der.toString("base64"),
+      persisted: true,
+    };
   } catch (err) {
     if (isErrnoException(err) && err.code === "EEXIST") {
       try {
         const der = readFileSync(path);
-        return {
-          privateKey: createPrivateKey({
-            key: der,
-            format: "der",
-            type: "pkcs8",
-          }),
-          persisted: true,
-        };
+        return loadedFromDer(der, true);
       } catch (readErr) {
         logIdentityFailure(
           "identity private key exists but is unreadable — using ephemeral key, skip publishIdentity this run",
@@ -200,6 +207,8 @@ export type TIdentityKeyStore = {
   readonly load: () => TIdentityKey;
   /** The private key behind {@link load}. */
   readonly privateKey: () => KeyObject;
+  /** WebCrypto private key cached alongside the KeyObject (cred-seal). */
+  readonly cryptoPrivateKey: () => Promise<CryptoKey>;
 };
 
 /**
@@ -210,9 +219,17 @@ export type TIdentityKeyStore = {
 export const createIdentityKeyStore = (): TIdentityKeyStore => {
   const loaded = new Map<
     string,
-    TLoadedKey & { readonly publicKeyB64: string }
+    TLoadedKey & {
+      readonly publicKeyB64: string;
+      cryptoPrivateKey?: CryptoKey;
+      cryptoPrivateKeyPromise?: Promise<CryptoKey>;
+    }
   >();
-  const entry = (): TLoadedKey & { readonly publicKeyB64: string } => {
+  const entry = (): TLoadedKey & {
+    readonly publicKeyB64: string;
+    cryptoPrivateKey?: CryptoKey;
+    cryptoPrivateKeyPromise?: Promise<CryptoKey>;
+  } => {
     const path = privFile();
     const hit = loaded.get(path);
     if (hit !== undefined) return hit;
@@ -227,6 +244,22 @@ export const createIdentityKeyStore = (): TIdentityKeyStore => {
       return { publicKeyB64, persisted };
     },
     privateKey: (): KeyObject => entry().privateKey,
+    cryptoPrivateKey: (): Promise<CryptoKey> => {
+      const cur = entry();
+      if (cur.cryptoPrivateKey !== undefined) {
+        return Promise.resolve(cur.cryptoPrivateKey);
+      }
+      if (cur.cryptoPrivateKeyPromise !== undefined) {
+        return cur.cryptoPrivateKeyPromise;
+      }
+      const pending = importX25519PrivateKey(cur.pkcs8B64).then((key) => {
+        cur.cryptoPrivateKey = key;
+        cur.cryptoPrivateKeyPromise = undefined;
+        return key;
+      });
+      cur.cryptoPrivateKeyPromise = pending;
+      return pending;
+    },
   };
 };
 
@@ -247,6 +280,10 @@ export const daemonPublicKey = (): string => loadIdentityKey().publicKeyB64;
  * X25519(this daemon's private key, `remoteRaw`) — the static DH the Noise_IK
  * responder needs for agent streams on the relay mux (`mux-host.ts`). The
  * private key never leaves this module. Throws on a malformed peer key.
+ *
+ * Intentionally node:crypto (KeyObject) rather than vault WebCrypto: Noise
+ * wraps this in an async callback already, and the identity KeyObject is the
+ * durable form on disk. See module doc / no-reimplementation allow-list.
  */
 export const daemonX25519Dh = (remoteRaw: Uint8Array): Uint8Array => {
   if (remoteRaw.byteLength !== 32) {
@@ -265,89 +302,24 @@ export const daemonX25519Dh = (remoteRaw: Uint8Array): Uint8Array => {
   );
 };
 
-const deriveKey = (shared: Buffer): Buffer =>
-  Buffer.from(hkdfSync("sha256", shared, Buffer.alloc(0), HKDF_INFO, 32));
-
-/**
- * Seal `plaintext` to a recipient daemon's public key (SPKI DER, base64).
- * Output is base64(JSON{ epk, iv, ct }) — the cloud relays it opaquely.
- */
-export type TEphKeypair = {
-  readonly privateKey: KeyObject;
-  readonly publicKeyB64: string;
-};
+export type { TEphKeypair };
 
 /** Generate an ephemeral X25519 keypair for a one-shot sealed-box reply. */
-export const generateEphKeypair = (): TEphKeypair => {
-  const { privateKey, publicKey } = generateKeyPairSync("x25519");
-  return {
-    privateKey,
-    publicKeyB64: Buffer.from(
-      publicKey.export({ format: "der", type: "spki" }),
-    ).toString("base64"),
-  };
-};
+export const generateEphKeypair = (): Promise<TEphKeypair> =>
+  vaultGenerateEphKeypair();
 
 /** Open a sealed blob with an explicit recipient private key. Null on failure. */
 export const openSealedWith = (
-  privateKey: KeyObject,
+  privateKey: CryptoKey,
   sealedB64: string,
-): string | null => {
-  try {
-    const { epk, iv, ct } = JSON.parse(
-      Buffer.from(sealedB64, "base64").toString("utf8"),
-    ) as { epk: string; iv: string; ct: string };
-    const eph = createPublicKey({
-      key: Buffer.from(epk, "base64"),
-      format: "der",
-      type: "spki",
-    });
-    const shared = diffieHellman({ privateKey, publicKey: eph });
-    const key = deriveKey(shared);
-    const ctBuf = Buffer.from(ct, "base64");
-    const body = ctBuf.subarray(0, ctBuf.length - 16);
-    const tag = ctBuf.subarray(ctBuf.length - 16);
-    const decipher = createDecipheriv(
-      "aes-256-gcm",
-      key,
-      Buffer.from(iv, "base64"),
-    );
-    decipher.setAuthTag(tag);
-    return Buffer.concat([decipher.update(body), decipher.final()]).toString(
-      "utf8",
-    );
-  } catch {
-    return null;
-  }
-};
+): Promise<string | null> => openCredSealed(sealedB64, privateKey);
 
 /** Open a sealed blob with this daemon's long-lived private key. */
-export const openSealed = (sealedB64: string): string | null =>
-  openSealedWith(identityKeys.privateKey(), sealedB64);
+export const openSealed = async (sealedB64: string): Promise<string | null> =>
+  openCredSealed(sealedB64, await identityKeys.cryptoPrivateKey());
 
 /** Seal plaintext to a recipient daemon's public key (SPKI DER, base64). */
-export const sealTo = (recipientPubB64: string, plaintext: string): string => {
-  const recipient = createPublicKey({
-    key: Buffer.from(recipientPubB64, "base64"),
-    format: "der",
-    type: "spki",
-  });
-  const eph = generateEphKeypair();
-  const shared = diffieHellman({
-    privateKey: eph.privateKey,
-    publicKey: recipient,
-  });
-  const key = deriveKey(shared);
-  const iv = randomBytes(12);
-  const cipher = createCipheriv("aes-256-gcm", key, iv);
-  const body = Buffer.concat([
-    cipher.update(plaintext, "utf8"),
-    cipher.final(),
-  ]);
-  const packed = {
-    epk: eph.publicKeyB64,
-    iv: iv.toString("base64"),
-    ct: Buffer.concat([body, cipher.getAuthTag()]).toString("base64"),
-  };
-  return Buffer.from(JSON.stringify(packed)).toString("base64");
-};
+export const sealTo = (
+  recipientPubB64: string,
+  plaintext: string,
+): Promise<string> => sealToDaemon(recipientPubB64, plaintext);

@@ -7,7 +7,7 @@
  * single-shot path, and so this module can stay `@openllm/core`-free.
  */
 
-import { LOCAL_REQUIRES_DAEMON_ERROR_CODE } from "@openllmsh/protocol";
+import { LOCAL_REQUIRES_DAEMON_ERROR_CODE } from "@openllmsh/sdk/protocol";
 import { errorJson } from "./cors";
 import { isOAuthSlug } from "./delegation";
 import { passthroughToOrigin } from "./forward";

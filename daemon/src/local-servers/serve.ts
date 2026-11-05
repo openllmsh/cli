@@ -4,7 +4,7 @@
  * passthrough with the shared wire transforms.
  *
  * Deliberately `@openllm/core`-free and walker-import-free (walker imports
- * this module): uses `@openllmsh/wire` + client-encode + cloud-client only.
+ * this module): uses `@openllmsh/sdk/wire` + client-encode + cloud-client only.
  */
 import type {
   TChatCompletionChunk,
@@ -12,29 +12,29 @@ import type {
   TErrorEnvelope,
   TModelCaps,
   TModelSettings,
-} from "@openllmsh/protocol";
+} from "@openllmsh/sdk/protocol";
 import {
   ChatCompletionChunk,
   cooldownPolicyFor,
   isLocalServerSlug,
   LOCAL_REQUIRES_DAEMON_ERROR_CODE,
-} from "@openllmsh/protocol";
+} from "@openllmsh/sdk/protocol";
 import type {
   TAttemptOutcome,
   TAttemptUsage,
-} from "@openllmsh/wire/lib/attempt-outcome";
+} from "@openllmsh/sdk/wire/lib/attempt-outcome";
 import {
   classifyAttemptOutcome,
   isReadableProviderBody,
-} from "@openllmsh/wire/lib/attempt-outcome";
-import { classifyHopError } from "@openllmsh/wire/lib/error-class";
-import { decodeProviderEventStream } from "@openllmsh/wire/lib/streaming/provider-decode";
-import { createUsageObserver } from "@openllmsh/wire/lib/usage-observer";
+} from "@openllmsh/sdk/wire/lib/attempt-outcome";
+import { classifyHopError } from "@openllmsh/sdk/wire/lib/error-class";
+import { decodeProviderEventStream } from "@openllmsh/sdk/wire/lib/streaming/provider-decode";
+import { createUsageObserver } from "@openllmsh/sdk/wire/lib/usage-observer";
 import {
   buildUpstreamRequest,
   clientWireOf,
   UnsupportedContentError,
-} from "@openllmsh/wire/providers/upstream-request";
+} from "@openllmsh/sdk/wire/providers/upstream-request";
 import { beginHeldAttempt } from "../access-hold-context";
 import {
   deliverChunkStream,

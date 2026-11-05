@@ -11,11 +11,11 @@
  * answer — currently starts fresh; that's the documented follow-up.)
  */
 
-import type { TChatCompletionRequest } from "@openllmsh/protocol";
-import { TOOL_SESSION_HEADER } from "@openllmsh/protocol";
-import type { TAttemptOutcome } from "@openllmsh/wire/lib/attempt-outcome";
-import { responseToChunkStream } from "@openllmsh/wire/lib/streaming/response-stream";
-import { clientWireOf } from "@openllmsh/wire/providers/upstream-request";
+import type { TChatCompletionRequest } from "@openllmsh/sdk/protocol";
+import { TOOL_SESSION_HEADER } from "@openllmsh/sdk/protocol";
+import type { TAttemptOutcome } from "@openllmsh/sdk/wire/lib/attempt-outcome";
+import { responseToChunkStream } from "@openllmsh/sdk/wire/lib/streaming/response-stream";
+import { clientWireOf } from "@openllmsh/sdk/wire/providers/upstream-request";
 import { deliverJsonResponse, sseResponseForClient } from "../client-encode";
 import { lookupCatalogEntry } from "../config";
 import { attemptFromTokens } from "../record-attempt";

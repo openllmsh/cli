@@ -17,6 +17,8 @@ import {
   writeFileSync,
 } from "node:fs";
 import { dirname, join } from "node:path";
+import { createClient } from "@openllmsh/sdk/client";
+import { API_OPERATIONS } from "@openllmsh/sdk/openapi";
 import { daemonPort } from "./clients/gateway";
 import { CLI_VERSION, cliConfig, daemonStateDir } from "./env";
 import {
@@ -26,8 +28,6 @@ import {
   parseDoctorLocalReportResult,
   parseDoctorReportingStatus,
 } from "./generated/doctor-report-cli";
-import { callOperation } from "./sdk/client";
-import { API_OPERATIONS } from "./sdk/generated/operations";
 
 const LOCAL_TIMEOUT_MS = 4_000;
 const OFFLINE_ACCOUNT_PENDING =
@@ -308,18 +308,26 @@ const patchCloudPreference = async (enabled: boolean): Promise<boolean> => {
   const { gatewayUrl, apiKey } = cliConfig();
   if (apiKey.length === 0 || diagnosticsPreferenceOp === undefined)
     return false;
+  const client = createClient({
+    origin: gatewayUrl,
+    apiKey,
+    transport: {
+      fetch: globalThis.fetch.bind(globalThis),
+      websocket: WebSocket,
+    },
+  });
   try {
-    const res = await callOperation(
-      { baseUrl: gatewayUrl, apiKey },
-      diagnosticsPreferenceOp,
-      { body: { [C.extraKey]: enabled } },
-    );
+    const res = await client.http.call(diagnosticsPreferenceOp, {
+      body: { [C.extraKey]: enabled },
+    });
     if (!res.ok) return false;
     if (res.body === null || typeof res.body !== "object") return res.ok;
     const rec = res.body as Record<string, unknown>;
     return rec[C.extraKey] === enabled;
   } catch {
     return false;
+  } finally {
+    client.close();
   }
 };
 

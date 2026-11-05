@@ -20,8 +20,11 @@ import { arch, platform } from "node:os";
 import type {
   TProviderUsageSnapshot,
   TProviderUsageWindow,
-} from "@openllmsh/protocol";
-import { QUOTA_REJECT_PERCENT, QUOTA_WARN_PERCENT } from "@openllmsh/protocol";
+} from "@openllmsh/sdk/protocol";
+import {
+  QUOTA_REJECT_PERCENT,
+  QUOTA_WARN_PERCENT,
+} from "@openllmsh/sdk/protocol";
 import { antigravityTokenPath } from "../native-runtime/antigravity-acp";
 
 const OAUTH_TOKEN_URL = "https://oauth2.googleapis.com/token";

@@ -2,7 +2,7 @@
 
 > The headless **local daemon** — the daemon half (`openllm daemon`) of the
 > single source-free compiled `openllm` binary (coreless: built from
-> `@openllmsh/wire` + `@openllmsh/protocol` + `@openllmsh/tunnel`, NOT
+> `@openllmsh/sdk/wire` + `@openllmsh/sdk/protocol` + `@openllmsh/sdk/tunnel`, NOT
 > `@openllm/core`). A plain folder of `packages/cli` — its dependencies are
 > declared in `packages/cli/package.json` — that runs the **local-provider**
 > data plane on the user's machine: oauth subscription hops (vendor-CLI
@@ -83,10 +83,10 @@ API-key (BYOK) providers keep running on the cloud unchanged.
 
 ## Dependency boundary (load-bearing)
 
-The daemon links `@openllmsh/wire`, `@openllmsh/protocol`, `@openllmsh/tunnel`,
+The daemon links `@openllmsh/sdk/wire`, `@openllmsh/sdk/protocol`, `@openllmsh/sdk/tunnel`,
 and `effect` — it is **`@openllm/core`-free** (the §7.5 cut-over is done: the
 core-backed `dispatch.ts`/`encode.ts` are deleted and the walker is the
-sole data path). `@openllmsh/wire` is the dependency-light package of pure
+sole data path). `@openllmsh/sdk/wire` is the dependency-light package of pure
 wire-format transforms extracted from `core` (request/response/streaming
 adapters, the per-provider transforms, SSE decode/encode + accumulate);
 see
@@ -94,7 +94,7 @@ see
 A static invariant test
 (`tests/deployment/daemon-walker-coreless.test.ts`) asserts no daemon
 source imports `@openllm/core`. It must NOT link
-`@openllm/api`, `@openllm/db`, `@openllm/vault`,
+`@openllm/api`, `@openllm/db`, `@openllmsh/sdk/vault`,
 `drizzle`, `@neondatabase/serverless`, `@vercel/functions`, or `next` —
 those are cloud-only. The daemon holds **no DEK and decrypts no vault
 credential**; its only secret is the user's `sk-llm-...` key (for cloud
@@ -268,7 +268,7 @@ hop locally (delegate credential injected, vendor called directly), each
 `local_*` / `local_port_*` hop via `serveLocalHop` (plain HTTP to the
 discovered loopback server), and forwarding each API-key hop to the cloud
 (`forward.ts`, pinned). Every non-abort candidate failure before commitment
-walks via the same `@openllmsh/wire/lib/error-class` policy as the cloud;
+walks via the same `@openllmsh/sdk/wire/lib/error-class` policy as the cloud;
 routing never depends on provider-specific status/message allow-lists. The
 walker commits on first output, after which switching models is intentionally
 unsafe. On chain exhaustion the final hop's real upstream response is preserved.
@@ -315,7 +315,7 @@ the local-provider path. No vault, no DEK, no `TProviderDelegate`.
   only in v1) and continue the chain.
 
 **The manual mini-runner serves four subscription providers + cross-wire**
-(§9(a)) — it is built from the `@openllmsh/wire` transforms:
+(§9(a)) — it is built from the `@openllmsh/sdk/wire` transforms:
 
 | Provider | Upstream wire | Anthropic-wire client | OpenAI-wire client |
 | --- | --- | --- | --- |
@@ -334,7 +334,7 @@ upstream wire)` cell, including the passthrough-vs-transform decision and
 the Anthropic adaptive-thinking / `anthropic-beta` handling — is NOT
 open-coded here. The walker calls
 [`buildUpstreamRequest`](../wire/providers/upstream-request.ts) from
-`@openllmsh/wire`, the **single** recipe the cloud runner also calls. This is
+`@openllmsh/sdk/wire`, the **single** recipe the cloud runner also calls. This is
 load-bearing: the recipe used to be forked between the cloud's runner and
 this walker (which can't share `@openllm/core`), and the two drifted —
 dropping the client's `anthropic-beta` and skipping
@@ -346,7 +346,7 @@ The walker supplies only what's transport-local: the resolved
 `providerModelId`, the client's `stream` intent (the daemon PINS both off
 the signed plan; the cloud passthrough preserves the body's), and `baseHeaders` —
 the **ORIGINATOR's own headers** (denylist passthrough via
-`@openllmsh/wire/lib/forwarded-headers` `originatorHeadersFrom`), with the
+`@openllmsh/sdk/wire/lib/forwarded-headers` `originatorHeadersFrom`), with the
 delegate's CREDENTIAL-INTRINSIC headers (codex `chatgpt-account-id` — the
 user's own account; none for claude/kimi) + the refreshed bearer layered on
 top. Wire-derived headers (anthropic-version/-beta/content-type) are layered
@@ -354,14 +354,14 @@ last by the builder. The daemon forges NO CLI identity — a genuine vendor-CLI
 request reaches the vendor with its own headers, and an unsupported one is
 rejected upstream (terms compliance, see "Originator passthrough" below). On the RESPONSE
 side the walker decodes the upstream SSE/JSON to canonical chunks
-(`@openllmsh/wire/lib/streaming/provider-decode` — the `@openllm/core`-free
+(`@openllmsh/sdk/wire/lib/streaming/provider-decode` — the `@openllm/core`-free
 analogue of `providerEventStream`) and re-encodes to the client wire
 (`chunksToMessagesSseBytes` for Anthropic clients, `chunksToSseBytes` for
 OpenAI clients). `canWalkPlan` decides up front for the whole plan
 (declining only an unknown subscription provider with no upstream), so a
 chain is never half-attempted then bailed.
 
-> **Standing rule.** `@openllmsh/wire` owns wire transforms **and their
+> **Standing rule.** `@openllmsh/sdk/wire` owns wire transforms **and their
 > composition** (the request recipe + the response decode/encode). The
 > cloud runner and this walker are thin callers — neither re-derives the
 > recipe. A new provider/wire pairing is added in `upstream-request.ts`
@@ -787,7 +787,7 @@ peers carry the `mux2` channel-id envelope on every relay binary message
 explicit `rtc_nack` (seedgate / overloaded / disabled / not_capable) instead of
 silent signaling timeouts. Detail lives in
 `@packages/daemon-relay/ARCHITECTURE.md` (relay) and
-`@packages/tunnel/ARCHITECTURE.md` (codec / envelope / RTC helpers).
+`@packages/sdk/tunnel/ARCHITECTURE.md` (codec / envelope / RTC helpers).
 
 - `mux-host.ts` owns relay duplex/channel state, negotiates `channel_open` /
   `channel_open_ack`, receives mux OPEN frames, and dispatches via
@@ -960,7 +960,7 @@ daemon's `dpk` (from a device-control-signed attestation — the daemon itself
 seals nothing), plus either Noise_IK on the relay
 mux (second fresh grant, `use: "noise"` bound to the initiator's static key, as
 the message-1 payload; prologue
-`openllm-agent-secure-v1|<channel_id>|<stream_id>` from `@openllmsh/tunnel`) or a
+`openllm-agent-secure-v1|<channel_id>|<stream_id>` from `@openllmsh/sdk/tunnel`) or a
 gated DTLS session on RTC. Every other path resets `unauthorized`. Each engine
 adapter (`claude-code`, …) emits the same event stream to a unified UI rendered
 by the client. The engine runs with its normal permission model (approvals
@@ -1329,7 +1329,7 @@ real path: Claude Code → `claude_code`) reaches the vendor byte-for-byte, and 
 request in a shape/identity the vendor doesn't support is rejected upstream —
 which is the correct, compliant outcome (the daemon doesn't launder it). The
 denylist is single-sourced with the cloud's allow-list policy in
-[`@openllmsh/wire/lib/forwarded-headers`](../wire/lib/forwarded-headers.ts) (two
+[`@openllmsh/sdk/wire/lib/forwarded-headers`](../wire/lib/forwarded-headers.ts) (two
 policies, one home): the cloud is a multi-tenant BYOK proxy that must CURATE
 what reaches first-party providers; the local daemon, in front of the user's own
 subscription CLI, passes the originator through.

@@ -305,7 +305,7 @@ has_line_break "$ORIGIN" && die "OPENLLM_CLOUD_ORIGIN must not contain a line br
 # env file, else the default. Mirrors the ORIGIN precedence above. A malformed
 # selected value falls back to the default rather than partially parsing.
 #
-# `normalize_daemon_port` mirrors packages/protocol/daemon-port.ts's
+# `normalize_daemon_port` mirrors packages/sdk/protocol/daemon-port.ts's
 # `parseOpenllmDaemonPort` byte-for-byte: strip an inline `# comment` and one
 # layer of quotes, in the order that depends on whether the comment sits
 # INSIDE or OUTSIDE the quotes (`"59321 # local"` vs `"59321" # local` vs a

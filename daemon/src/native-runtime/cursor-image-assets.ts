@@ -7,11 +7,11 @@
 
 import { lstat, readFile, realpath, rm } from "node:fs/promises";
 import { isAbsolute, join, resolve, sep } from "node:path";
-import type { TInspectedImageMime } from "@openllmsh/wire/lib/canonical/image-signature";
+import type { TInspectedImageMime } from "@openllmsh/sdk/wire/lib/canonical/image-signature";
 import {
   IMAGE_INSPECT_MAX_BYTES,
   inspectImageBytes,
-} from "@openllmsh/wire/lib/canonical/image-signature";
+} from "@openllmsh/sdk/wire/lib/canonical/image-signature";
 
 export type TCursorNativeImageAsset = {
   readonly bytes: Uint8Array;

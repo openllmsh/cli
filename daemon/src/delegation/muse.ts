@@ -22,7 +22,7 @@ import type {
   TDaemonProviderConnection,
   TProviderModelEntry,
   TProviderUsageSnapshot,
-} from "@openllmsh/protocol";
+} from "@openllmsh/sdk/protocol";
 import { noteAuthStoreIdentityChange } from "../auth-user-action";
 import { cliInstallState } from "../cli-install";
 import { cliBin, cliConfigDir } from "../cli-paths";

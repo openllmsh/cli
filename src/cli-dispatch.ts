@@ -281,7 +281,9 @@ export const runCli = async (argv: readonly string[]): Promise<void> => {
     case "api": {
       if (wantsHelp(rest)) return usage(API_USAGE, 0);
       if (rest[0] === "--spec") {
-        const { default: spec } = await import("./sdk/generated/openapi.json");
+        const { default: spec } = await import(
+          "@openllmsh/sdk/openapi/spec.json"
+        );
         process.stdout.write(`${JSON.stringify(spec, null, 2)}\n`);
         process.exit(0);
       }

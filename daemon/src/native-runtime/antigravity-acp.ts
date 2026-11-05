@@ -47,7 +47,7 @@ import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import { join } from "node:path";
-import type { TChatCompletionChunk } from "@openllmsh/protocol";
+import type { TChatCompletionChunk } from "@openllmsh/sdk/protocol";
 import { daemonTempDir } from "../sandbox/working-set";
 import { DAEMON_VERSION } from "../version";
 import {

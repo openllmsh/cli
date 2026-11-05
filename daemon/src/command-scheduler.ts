@@ -6,7 +6,7 @@
  * idle continuation, and cancel flow mismatch NEVER invoke `job`. The host
  * maps {@link TScheduleResult} to an ack.
  */
-import type { TDaemonCommand } from "@openllmsh/protocol";
+import type { TDaemonCommand } from "@openllmsh/sdk/protocol";
 import { parseAccountKey, scopedSlug } from "./account-scope";
 import { isAccountIndex } from "./cli-paths";
 import { DELEGATES } from "./delegation";

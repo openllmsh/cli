@@ -17,7 +17,7 @@
  *     `POST /v1/tts` (JSON, voice fixed to `eve` → MP3).
  *
  * Options are validated against the verified per-provider format/voice
- * constants in `@openllmsh/protocol` (`CLAUDE_DICTATION_INPUT_FORMATS`,
+ * constants in `@openllmsh/sdk/protocol` (`CLAUDE_DICTATION_INPUT_FORMATS`,
  * `CODEX_*`, `GROK_*`) — an unsupported input encoding or an explicit
  * unsupported voice/output-format is rejected (415/400), never silently
  * dropped or forwarded to a wire that doesn't support it.
@@ -35,8 +35,8 @@ import {
   MEDIA_PERSISTENCE_BROWSER,
   MEDIA_PERSISTENCE_REQUEST_HEADER,
   MEDIA_PERSISTENCE_RESPONSE_HEADER,
-} from "@openllmsh/protocol";
-import { TUNNEL_MEDIA_MAX_BODY_BYTES } from "@openllmsh/tunnel";
+} from "@openllmsh/sdk/protocol";
+import { TUNNEL_MEDIA_MAX_BODY_BYTES } from "@openllmsh/sdk/tunnel";
 import type { TWebSocketFactory } from "./audio/claude-ws";
 import { runClaudeDictationSession } from "./audio/claude-ws";
 import {

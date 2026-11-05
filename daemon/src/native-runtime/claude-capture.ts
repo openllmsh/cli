@@ -36,12 +36,12 @@ import type {
   TChatCompletionChunk,
   TChatCompletionRequest,
   TErrorEnvelope,
-} from "@openllmsh/protocol";
-import type { TClassifierInput } from "@openllmsh/wire/lib/error-class";
-import { classifyHopError } from "@openllmsh/wire/lib/error-class";
-import { isRefusalChunk } from "@openllmsh/wire/lib/refusal";
-import { isMeaningfulChunk } from "@openllmsh/wire/lib/streaming/peek";
-import { decodeAnthropicEventStream } from "@openllmsh/wire/providers/anthropic/streaming";
+} from "@openllmsh/sdk/protocol";
+import type { TClassifierInput } from "@openllmsh/sdk/wire/lib/error-class";
+import { classifyHopError } from "@openllmsh/sdk/wire/lib/error-class";
+import { isRefusalChunk } from "@openllmsh/sdk/wire/lib/refusal";
+import { isMeaningfulChunk } from "@openllmsh/sdk/wire/lib/streaming/peek";
+import { decodeAnthropicEventStream } from "@openllmsh/sdk/wire/providers/anthropic/streaming";
 import { defaultUpstreamUrl } from "../delegation/auth-config";
 import { logError, safeDiagnosticMessage } from "../logger";
 import { createCaptureLoopbackGuard } from "./capture-loopback-guard";

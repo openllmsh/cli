@@ -2,14 +2,14 @@
  * Daemon adapter over protocol `decideMediaChainAdvance`. Do not fork policy.
  */
 
-import type { TMediaAttemptFacts } from "@openllmsh/protocol";
-import { decideMediaChainAdvance } from "@openllmsh/protocol";
+import type { TMediaAttemptFacts } from "@openllmsh/sdk/protocol";
+import { decideMediaChainAdvance } from "@openllmsh/sdk/protocol";
 
 export type {
   TMediaAdvanceDecision,
   TMediaAttemptFacts,
-} from "@openllmsh/protocol";
-export { decideMediaChainAdvance } from "@openllmsh/protocol";
+} from "@openllmsh/sdk/protocol";
+export { decideMediaChainAdvance } from "@openllmsh/sdk/protocol";
 
 export const mediaHopAdvances = (facts: TMediaAttemptFacts): boolean =>
   decideMediaChainAdvance(facts).action === "advance";

@@ -9,10 +9,10 @@
  */
 
 import { AsyncLocalStorage } from "node:async_hooks";
-import type { TOutputLimitSurface } from "@openllmsh/wire/features/output-limit-clamp";
-import { clampOutputLimitFields } from "@openllmsh/wire/features/output-limit-clamp";
-import type { TAttemptOutcome } from "@openllmsh/wire/lib/attempt-outcome";
-import { chargeForAttempt } from "@openllmsh/wire/lib/attempt-outcome";
+import type { TOutputLimitSurface } from "@openllmsh/sdk/wire/features/output-limit-clamp";
+import { clampOutputLimitFields } from "@openllmsh/sdk/wire/features/output-limit-clamp";
+import type { TAttemptOutcome } from "@openllmsh/sdk/wire/lib/attempt-outcome";
+import { chargeForAttempt } from "@openllmsh/sdk/wire/lib/attempt-outcome";
 
 /**
  * What the walk has reported for this hold. Hop paths (walker, native

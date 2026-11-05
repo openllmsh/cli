@@ -2,7 +2,7 @@
  * Daemon-wide agent runtime: the ONE dispatcher both front doors share, and
  * its registration on the mux host (which also turns on the `agent1` cap).
  */
-import type { TAgentEngine } from "@openllmsh/protocol";
+import type { TAgentEngine } from "@openllmsh/sdk/protocol";
 import { readClaudeHistory } from "../local-sessions/claude";
 import { setAgentStreamHandler } from "../mux-host";
 import {

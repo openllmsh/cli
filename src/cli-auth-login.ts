@@ -14,7 +14,8 @@
  * it (D19).
  *
  * No OAuth access/refresh tokens are retained — only the ordinary `sk-llm` key.
- * Crypto is local (`cli-auth-crypto.ts`); `@openllm/vault` is never imported.
+ * Crypto goes through `@openllmsh/sdk/client` vault session (cli-auth seal +
+ * X25519 keypairs composed over `@openllmsh/sdk/vault`).
  */
 
 import { spawn, spawnSync } from "node:child_process";
@@ -27,14 +28,10 @@ import {
 } from "node:fs";
 import { hostname as osHostname } from "node:os";
 import { dirname, join } from "node:path";
-import type { TCliAuthSealed } from "./cli-auth-crypto";
-import {
-  generateCliAuthKeypair,
-  generateResumableCliAuthKeypair,
-  importCliAuthPrivateKey,
-  openCliAuthSealed,
-  zero,
-} from "./cli-auth-crypto";
+import type { TOpenllmClient } from "@openllmsh/sdk/client";
+import { createClient } from "@openllmsh/sdk/client";
+import type { TCliAuthSealed } from "@openllmsh/sdk/vault";
+import { zero } from "@openllmsh/sdk/vault";
 import { CLI_VERSION } from "./cli-version";
 import { daemonInvocation } from "./daemon-delegation";
 import {
@@ -68,6 +65,30 @@ export const CLI_AUTH_MAX_BACKOFF_MS = 10_000;
 export const CLI_AUTH_LABEL_MAX_LENGTH = 80;
 /** Shape of the server's `user_code` — anything else is not printed. */
 const USER_CODE_DISPLAY = /^[A-Z]{4}-[A-Z]{4}$/;
+
+/**
+ * Vault session for CLI-auth crypto. The API key is empty until claim; only
+ * keypair / openCliAuth helpers are used here. Host injects Bun's fetch +
+ * WebSocket so the SDK stays sans-I/O. Always closes the ephemeral client.
+ */
+const withCliAuthVault = async <T>(
+  origin: string,
+  fn: (vault: TOpenllmClient["vault"]) => Promise<T>,
+): Promise<T> => {
+  const client = createClient({
+    origin,
+    apiKey: "",
+    transport: {
+      fetch: globalThis.fetch.bind(globalThis),
+      websocket: WebSocket,
+    },
+  });
+  try {
+    return await fn(client.vault);
+  } finally {
+    client.close();
+  }
+};
 
 /** Poll delay after `failures` consecutive network errors / 429s (D21). */
 export const cliAuthBackoffMs = (failures: number): number =>
@@ -1225,14 +1246,16 @@ const pollAndClaim = async (
         }
         let plaintext: Uint8Array;
         try {
-          plaintext = await openCliAuthSealed(
-            {
-              userId: claimed.body.user_id,
-              authorizationId: id,
-              recipientPublicKeyB64: session.publicKeyB64,
-            },
-            sealed,
-            session.privateKey,
+          plaintext = await withCliAuthVault(session.base, (vault) =>
+            vault.openCliAuth(
+              {
+                userId: claimed.body.user_id,
+                authorizationId: id,
+                recipientPublicKeyB64: session.publicKeyB64,
+              },
+              sealed,
+              session.privateKey,
+            ),
           );
         } catch {
           await cancelAuth(base, id, pollToken, r);
@@ -1293,7 +1316,9 @@ export const runCliAuthLogin = async (
   const base = origin.replace(/\/+$/, "");
   // Overall budget starts before create so a hanging create cannot outlive it.
   const deadline = r.now() + r.waitMs;
-  const pair = await generateCliAuthKeypair();
+  const pair = await withCliAuthVault(base, (vault) =>
+    vault.generateCliAuthKeypair(),
+  );
   const created = await createCliAuth(
     base,
     r,
@@ -1364,7 +1389,9 @@ export const startCliAuthNonInteractive = async (
 ): Promise<TCliAuthStartResult> => {
   const r = resolveIo(io);
   const base = origin.replace(/\/+$/, "");
-  const pair = await generateResumableCliAuthKeypair();
+  const pair = await withCliAuthVault(base, (vault) =>
+    vault.generateResumableCliAuthKeypair(),
+  );
   const created = await createCliAuth(
     base,
     r,
@@ -1478,7 +1505,9 @@ export const resumeCliAuthLogin = async (
   const r = resolveIo(io);
   let privateKey: CryptoKey;
   try {
-    privateKey = await importCliAuthPrivateKey(state.private_key_pkcs8);
+    privateKey = await withCliAuthVault(state.origin, (vault) =>
+      vault.importCliAuthPrivateKey(state.private_key_pkcs8),
+    );
   } catch {
     removeResumeState(id);
     return { ok: false, message: "[openllm] the saved sign-in is damaged.\n" };

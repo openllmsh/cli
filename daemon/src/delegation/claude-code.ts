@@ -32,8 +32,8 @@ import { join } from "node:path";
 import type {
   TDaemonProviderConnection,
   TProviderUsageSnapshot,
-} from "@openllmsh/protocol";
-import { MODEL_LIST_FETCH_TIMEOUT_MS } from "@openllmsh/protocol";
+} from "@openllmsh/sdk/protocol";
+import { MODEL_LIST_FETCH_TIMEOUT_MS } from "@openllmsh/sdk/protocol";
 import { accountCell } from "../account-scope";
 import { noteAuthStoreIdentityChange } from "../auth-user-action";
 import { cliInstallState } from "../cli-install";

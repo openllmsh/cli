@@ -60,7 +60,7 @@ import * as http2 from "node:http2";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { TChatCompletionChunk } from "@openllmsh/protocol";
+import type { TChatCompletionChunk } from "@openllmsh/sdk/protocol";
 import { providerDeclaresBridgeCapture } from "../execution-registry";
 import type {
   TCursorAgentServiceMethod,

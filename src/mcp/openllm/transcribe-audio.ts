@@ -5,9 +5,9 @@ import { chmod, mkdtemp, open, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import {
-  MEDIA_AUDIO_INPUT_FORMATS,
   MEDIA_DEFAULT_CLASS,
-} from "../../sdk/generated/inference-headers";
+  MediaAudioInputFormat,
+} from "@openllmsh/sdk/protocol";
 import type { TToolResult } from "../types";
 import {
   handleOpenllmTool,
@@ -28,7 +28,7 @@ type TAudioFormat = {
 };
 /** What a hop can be sent: a 16 kHz mono PCM16 WAV or a WebM/Opus stream. */
 type TConversionTarget = "wav16k" | "webm_opus";
-type TMediaAudioInputFormat = (typeof MEDIA_AUDIO_INPUT_FORMATS)[number];
+type TMediaAudioInputFormat = (typeof MediaAudioInputFormat.literals)[number];
 /** The `/v1/models` fields the chain walk reads. */
 type TTranscriptionCard = {
   readonly id: string;
@@ -41,7 +41,7 @@ type TTranscriptionCard = {
     readonly input_formats?: ReadonlyArray<string>;
   };
 };
-const [PCM_16K, WAV_16K, WEBM_OPUS] = MEDIA_AUDIO_INPUT_FORMATS;
+const [PCM_16K, WAV_16K, WEBM_OPUS] = MediaAudioInputFormat.literals;
 /** Injection is for hermetic subprocess tests, never populated from tool arguments. */
 export type TAudioConversionOptions = {
   ffmpegPath?: string | null;

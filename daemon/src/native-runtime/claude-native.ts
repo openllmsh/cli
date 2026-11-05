@@ -31,15 +31,15 @@
  */
 
 import { existsSync } from "node:fs";
-import type { TChatCompletionChunk, TUsage } from "@openllmsh/protocol";
-import { AnthropicStreamEvent } from "@openllmsh/protocol";
-import { isRefusalChunk } from "@openllmsh/wire/lib/refusal";
-import { isMeaningfulChunk } from "@openllmsh/wire/lib/streaming/peek";
-import { createUsageObserver } from "@openllmsh/wire/lib/usage-observer";
+import type { TChatCompletionChunk, TUsage } from "@openllmsh/sdk/protocol";
+import { AnthropicStreamEvent } from "@openllmsh/sdk/protocol";
+import { isRefusalChunk } from "@openllmsh/sdk/wire/lib/refusal";
+import { isMeaningfulChunk } from "@openllmsh/sdk/wire/lib/streaming/peek";
+import { createUsageObserver } from "@openllmsh/sdk/wire/lib/usage-observer";
 import {
   fromAnthropicStreamEvent,
   newAnthropicStreamState,
-} from "@openllmsh/wire/providers/anthropic/streaming";
+} from "@openllmsh/sdk/wire/providers/anthropic/streaming";
 import { Schema } from "effect";
 import { logError, safeDiagnosticMessage } from "../logger";
 import { runClaudeTextCapture } from "./claude-capture";
@@ -56,7 +56,7 @@ const decodeStreamEvent = Schema.decodeUnknownOption(AnthropicStreamEvent);
 
 /** Map an Anthropic `usage` object (from an `assistant` full-message line) to
  *  canonical usage, defensively — the daemon must never reject a real answer on
- *  a usage-shape mismatch. Mirrors `usageFor` in `@openllmsh/wire`. */
+ *  a usage-shape mismatch. Mirrors `usageFor` in `@openllmsh/sdk/wire`. */
 const usageFromAnthropic = (u: unknown): TUsage | undefined => {
   if (typeof u !== "object" || u === null) return undefined;
   const r = u as Record<string, unknown>;

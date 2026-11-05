@@ -33,12 +33,12 @@ import type {
   TRealtimeServerEvent,
   TRealtimeStreamOpenPayload,
   TStreamResetCode,
-} from "@openllmsh/protocol";
+} from "@openllmsh/sdk/protocol";
 import {
   parseRealtimeServerEvent,
   REALTIME_MAX_QUEUED_EVENTS,
   REALTIME_SESSION_MAX_LIFETIME_MS,
-} from "@openllmsh/protocol";
+} from "@openllmsh/sdk/protocol";
 import { beginHeldAttempt } from "./access-hold-context";
 import { fetchPlan, recordRequest } from "./cloud-client";
 import { getDelegate, isOAuthSlug } from "./delegation";
@@ -416,7 +416,7 @@ export const openRealtimeSession = async (
             return;
           }
           // Unknown/unsupported vendor events are dropped, never forwarded
-          // verbatim — the closed vocabulary in `@openllmsh/protocol/realtime`
+          // verbatim — the closed vocabulary in `@openllmsh/sdk/protocol/realtime`
           // is the entire supported subset (see
           // docs/research/subscription-provider-capabilities-2026-09-17.md).
           const event = parseRealtimeServerEvent(parsed);

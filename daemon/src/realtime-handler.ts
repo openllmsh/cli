@@ -24,19 +24,19 @@
 import type {
   TRealtimeClientEvent,
   TRealtimeStreamOpenPayload,
-} from "@openllmsh/protocol";
+} from "@openllmsh/sdk/protocol";
 import {
   parseRealtimeClientEvent,
   REALTIME_MAX_QUEUED_EVENTS,
   RealtimeStreamOpenPayload,
-} from "@openllmsh/protocol";
-import { encodeJsonPayload } from "@openllmsh/tunnel/codec";
-import type { TMuxStream } from "@openllmsh/tunnel/mux";
-import type { TServeRealtime } from "@openllmsh/tunnel/streams";
+} from "@openllmsh/sdk/protocol";
+import { encodeJsonPayload } from "@openllmsh/sdk/tunnel/codec";
+import type { TMuxStream } from "@openllmsh/sdk/tunnel/mux";
+import type { TServeRealtime } from "@openllmsh/sdk/tunnel/streams";
 import {
   pumpRealtimeEvents,
   sendRealtimeEvent,
-} from "@openllmsh/tunnel/streams";
+} from "@openllmsh/sdk/tunnel/streams";
 import { Result, Schema } from "effect";
 import { daemonEnv } from "./env";
 import type { TRealtimeSessionHandle } from "./realtime-session";

@@ -9,7 +9,7 @@
  * their documented default roots here.
  */
 import { dirname, join } from "node:path";
-import { DOCTOR_LAUNCHER_ADAPTERS } from "@openllmsh/protocol";
+import { DOCTOR_LAUNCHER_ADAPTERS } from "@openllmsh/sdk/protocol";
 import { misePaths } from "./mise-paths";
 
 /** The four shim adapters doctor + manager-resolution share — never re-list. */

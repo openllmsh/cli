@@ -9,7 +9,7 @@ import {
 import {
   DOCTOR_LOCAL_CAPABILITY_FILENAME,
   DOCTOR_LOCAL_CAPABILITY_HEADER,
-} from "@openllmsh/protocol";
+} from "@openllmsh/sdk/protocol";
 import type { TAtomicWrite } from "./files";
 import { atomicWriteText, doctorStatePath, readTextFile } from "./files";
 

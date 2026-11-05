@@ -4,7 +4,7 @@ import type {
   TDaemonCommandAck,
   TLocalAuthMethod,
   TLocalAuthRequest,
-} from "@openllmsh/protocol";
+} from "@openllmsh/sdk/protocol";
 import {
   AUTH_LOCAL_MAX_BODY_BYTES,
   AUTH_LOCAL_PATH,
@@ -12,7 +12,7 @@ import {
   DaemonCommand,
   PENDING_AUTH_TTL_MS,
   parseLocalAuthRequest,
-} from "@openllmsh/protocol";
+} from "@openllmsh/sdk/protocol";
 import { Schema } from "effect";
 import { readRoster } from "./account-roster";
 import { AccountKeyedMap } from "./account-scope";
@@ -452,7 +452,7 @@ const handleParsed = async (input: TLocalAuthRequest): Promise<Response> => {
           payload: {
             slug: provider,
             ...accountField,
-            sealed: sealTo(daemonPublicKey(), input.code),
+            sealed: await sealTo(daemonPublicKey(), input.code),
           },
         };
         break;

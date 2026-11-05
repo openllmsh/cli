@@ -1,9 +1,9 @@
 import { existsSync } from "node:fs";
-import type { TDoctorLocalPreference } from "@openllmsh/protocol";
+import type { TDoctorLocalPreference } from "@openllmsh/sdk/protocol";
 import {
   DOCTOR_LOCAL_OPT_OUT_FILENAME,
   parseDoctorLocalPreference,
-} from "@openllmsh/protocol";
+} from "@openllmsh/sdk/protocol";
 import type { TAtomicWrite } from "./files";
 import {
   atomicWriteText,

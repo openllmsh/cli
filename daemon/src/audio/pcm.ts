@@ -2,7 +2,7 @@
  * Bounded WAV / raw-PCM parsing for Claude's dictation WebSocket, which
  * accepts mono signed 16-bit little-endian PCM at 16kHz on the wire
  * (`CLAUDE_DICTATION_INPUT_FORMATS`: `pcm_s16le_16khz_mono` /
- * `wav_pcm16_16khz_mono` — see `@openllmsh/protocol/audio`). No ffmpeg, no
+ * `wav_pcm16_16khz_mono` — see `@openllmsh/sdk/protocol/audio`). No ffmpeg, no
  * `@openllm/core` import — pure byte-level parsing so the coreless daemon
  * stays coreless. An input that isn't one of those two exact shapes is
  * rejected explicitly (415) rather than resampled or guessed at.

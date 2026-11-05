@@ -263,32 +263,30 @@ skipped entirely for any invocation `brokerEligible` already rejects
 logic lives in `clients/session-picker.ts` (pure, unit-tested);
 `clients/session.ts` owns the terminal read.
 
-## 3. The generated SDK (why the mirror is self-contained)
+## 3. OpenAPI + MCP (owned by `@openllmsh/sdk`)
 
-`scripts/generate-sdk.ts` runs ONLY in the monorepo: it derives the OpenAPI
-doc via the exact same path as the served `/api/swagger`
-(`buildSanitizedSpec` in `packages/api/handlers/swagger.ts` — shared
-sanitize, so the SDK can never drift from the published spec), then emits
-COMMITTED artifacts into `src/sdk/generated/`:
+`scripts/generate-sdk-openapi.ts` runs ONLY in the monorepo: it derives the
+OpenAPI doc via the exact same path as the served `/api/swagger`
+(`buildSanitizedSpec` in `packages/api/handlers/swagger.ts` — shared sanitize,
+so the surface can never drift from the published spec), then emits COMMITTED
+artifacts into `packages/sdk/openapi/`:
 
 - `openapi.json` — the sanitized spec (also served by `openllm api --spec`).
 - `operations.ts` — a dependency-free typed table: one row per spec operation
   (method, path, params, body-presence). Deterministically sorted.
-- `subscription-providers.ts` — the protocol-owned subscription provider slugs
-  used by MCP discovery, generated without adding a runtime workspace dependency.
-- `src/generated/local-auth.ts` — the dependency-free protocol auth command
-  contract, copied by the same generator for CLI/MCP parsing and help. Both the
-  working-tree drift test and the push-time committed-tree guard cover it.
+- `call.ts` — `callOperation()`, the shared typed fetch wrapper.
 
-`src/mcp/openllm/tools.ts` derives one tool def per row and exports two
-surfaces: `openllmToolDefsAll` (**every** operation — the browser chat and the
-execution map use it) and `openllmToolDefs`, the MCP-listed subset. The MCP
-subset (`isMcpExposed`) keeps inference (`/v1/*`) + read-only ops and drops
-account/config/vault writes plus the raw `/plugins/*` HTTP mirrors (the curated
-`openllm-memory` group already covers those) — trimming ListTools
-to cut agent context. Execution still recognizes every operation, so a trimmed
-tool is never uncallable. Mutating operations carry explicit consent copy in
-their tool descriptions.
+Protocol-derived constants (`OPENLLM_*` headers, `OAUTH_PROVIDER_SLUGS`,
+`MEDIA_DEFAULT_CLASS`, `MediaAudioInputFormat`) are imported from
+`@openllmsh/sdk/protocol` — no generated copies. CLI-only generated copies
+still live under `src/generated/` (`local-auth.ts`, `doctor-report-cli.ts`).
+
+`@openllmsh/sdk/mcp` owns the native-API tool defs (`openllmToolDefsAll` for
+browser chat + execution, `openllmToolDefs` for the MCP-listed subset), memory
+tools, HTTP marketplace upstream dial, and `createMcpServer` over an injected
+transport. This package's `src/mcp/server.ts` is thin glue: `serveStdio`,
+onboarding/`requireCliApiKey`, local-auth + ffmpeg transcription, and optional
+stdio marketplace channels.
 
 **MCP uses the v2 server SDK** (`@modelcontextprotocol/server`):
 `McpServer.registerTool` registers only the tier/group-filtered tool set, with
@@ -300,8 +298,7 @@ tools cannot be called; logs stay on stderr.
 lists direct subscription catalog cards first. Compact `provider/model` IDs
 classify as subscription only when `provider` is absent; explicit
 `provider_type` / provider / alias metadata wins over an ID that merely looks
-namespaced. Provider slugs are generated from protocol's
-`SubscriptionProviderSlug` into `sdk/generated/subscription-providers.ts`.
+namespaced. Provider slugs come from protocol's `OAUTH_PROVIDER_SLUGS`.
 Aliases remain configurable fallback chains, not subscription guarantees.
 `provider_type` on HTTP cards is `subscription` or `api_key` (not a metered
 billing claim) and is omitted on aliases. The catalog expresses configured
@@ -345,7 +342,7 @@ timeout, other 4xx) ends the walk, so audio a provider may have accepted is
 never resent and never billed twice. An explicit `model` is the only hop tried, and an unreadable
 catalog falls back to one gateway-selected request. The constants come from the
 generated `sdk/generated/inference-headers.ts`, because CLI command code never
-imports `@openllmsh/protocol`. No codec is downloaded or bundled. Conversion is
+imports `@openllmsh/sdk/protocol`. No codec is downloaded or bundled. Conversion is
 no-shell, forced-demuxer, pipe-only input, time/diagnostic/output bounded, and
 writes to a private seekable file so WAV headers contain final sizes; cleanup
 runs on all outcomes.

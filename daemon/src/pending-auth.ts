@@ -13,7 +13,7 @@
  * it. Not a secret (a device code is single-use + short-lived), so no
  * persistence and nothing sensitive is held.
  */
-import { PENDING_AUTH_TTL_MS } from "@openllmsh/protocol";
+import { PENDING_AUTH_TTL_MS } from "@openllmsh/sdk/protocol";
 import { AccountKeyedMap } from "./account-scope";
 
 export type TPendingAuth = {

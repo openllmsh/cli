@@ -11,15 +11,15 @@ import type {
   TIceServer,
   TRelayFrame,
   TRtcNackReason,
-} from "@openllmsh/protocol";
-import { normalizeRtcNackReason } from "@openllmsh/protocol";
-import { MAX_PAYLOAD_BYTES } from "@openllmsh/tunnel/codec";
-import type { TMuxChannel } from "@openllmsh/tunnel/mux";
-import { createChannel } from "@openllmsh/tunnel/mux";
+} from "@openllmsh/sdk/protocol";
+import { normalizeRtcNackReason } from "@openllmsh/sdk/protocol";
+import { MAX_PAYLOAD_BYTES } from "@openllmsh/sdk/tunnel/codec";
+import type { TMuxChannel } from "@openllmsh/sdk/tunnel/mux";
+import { createChannel } from "@openllmsh/sdk/tunnel/mux";
 import {
   PEER_LINK_DEFAULTS,
   peerLinkFailureCache,
-} from "@openllmsh/tunnel/peer-link";
+} from "@openllmsh/sdk/tunnel/peer-link";
 import {
   decodeAnswerInner,
   encodeOfferInner,
@@ -32,10 +32,10 @@ import {
   sdpFingerprintsMatch,
   verifyAnswerInner,
   weriftIceServers,
-} from "@openllmsh/tunnel/rtc-auth";
-import type { TRtcDataChannelLike } from "@openllmsh/tunnel/rtc-duplex";
-import { rtcDuplex } from "@openllmsh/tunnel/rtc-duplex";
-import { preflightIceCandidate } from "@openllmsh/tunnel/rtc-ice";
+} from "@openllmsh/sdk/tunnel/rtc-auth";
+import type { TRtcDataChannelLike } from "@openllmsh/sdk/tunnel/rtc-duplex";
+import { rtcDuplex } from "@openllmsh/sdk/tunnel/rtc-duplex";
+import { preflightIceCandidate } from "@openllmsh/sdk/tunnel/rtc-ice";
 import type { RTCDataChannel, RTCIceCandidate } from "werift";
 import { RTCPeerConnection } from "werift";
 import type { TEphKeypair } from "./keypair";
@@ -359,7 +359,7 @@ export const createRtcClient = (): TRtcClient => {
     try {
       pc = new RTCPeerConnection({ iceServers: [...iceServers()] });
       const dc = pc.createDataChannel("mux", { ordered: true });
-      const eph = generateEphKeypair();
+      const eph = await generateEphKeypair();
       const channelId = crypto.randomUUID();
       session = {
         keyId,
@@ -452,7 +452,7 @@ export const createRtcClient = (): TRtcClient => {
         return;
       }
       session.fingerprint = fingerprint;
-      const proof = sealTo(
+      const proof = await sealTo(
         pubkey,
         encodeOfferInner({
           v: RTC_AUTH_VERSION,
@@ -498,7 +498,7 @@ export const createRtcClient = (): TRtcClient => {
       session.answered
     )
       return;
-    const opened = openSealedWith(
+    const opened = await openSealedWith(
       session.eph.privateKey,
       frame.fingerprint_proof,
     );

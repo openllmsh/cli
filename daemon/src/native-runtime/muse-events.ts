@@ -17,7 +17,7 @@
  * Completion is exactly-once.
  */
 
-import type { TChatCompletionChunk, TUsage } from "@openllmsh/protocol";
+import type { TChatCompletionChunk, TUsage } from "@openllmsh/sdk/protocol";
 import { serverSearchCallFromMuseToolCall } from "./muse-web-search";
 
 /** Official fold item fields this mapper actually reads. */

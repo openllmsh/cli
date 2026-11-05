@@ -20,7 +20,7 @@
  * an edit call has been run against it.
  */
 
-import type { TImageEditRequest } from "@openllmsh/protocol";
+import type { TImageEditRequest } from "@openllmsh/sdk/protocol";
 
 /** Only a missing provider implementation is an availability failure; invalid inputs are terminal. */
 export class ImageProviderUnavailableError extends Error {}

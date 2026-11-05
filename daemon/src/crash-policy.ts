@@ -19,7 +19,7 @@
  * Such an error says nothing about the health of this process. It is logged and
  * survived. Everything else still exits.
  */
-import { isStreamResetError } from "@openllmsh/tunnel";
+import { isStreamResetError } from "@openllmsh/sdk/tunnel";
 
 /**
  * Errno codes that describe the state of a REMOTE peer or the network path,

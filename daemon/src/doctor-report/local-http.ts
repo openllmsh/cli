@@ -6,7 +6,7 @@
 import type {
   TDoctorLocalPreference,
   TDoctorLocalReportRequest,
-} from "@openllmsh/protocol";
+} from "@openllmsh/sdk/protocol";
 import {
   DOCTOR_LOCAL_PREFERENCE_PATH,
   DOCTOR_LOCAL_REPORT_PATH,
@@ -14,7 +14,7 @@ import {
   DOCTOR_REPORT_MAX_BODY_BYTES,
   parseDoctorLocalPreference,
   parseDoctorLocalReportRequest,
-} from "@openllmsh/protocol";
+} from "@openllmsh/sdk/protocol";
 import {
   isLoopbackLocalHost,
   localJson as json,

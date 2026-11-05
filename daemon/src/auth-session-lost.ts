@@ -19,8 +19,8 @@ import type {
   TDaemonProviderAuthStatus,
   TDaemonProviderConnection,
   TSubscriptionProviderSlug,
-} from "@openllmsh/protocol";
-import { normalizeProviderConnection } from "@openllmsh/protocol";
+} from "@openllmsh/sdk/protocol";
+import { normalizeProviderConnection } from "@openllmsh/sdk/protocol";
 import { emitAuth } from "./auth-events";
 import { isOAuthSlug } from "./delegation";
 import { loginSlot } from "./delegation/login-flow";

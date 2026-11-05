@@ -4,9 +4,10 @@
  * The browser signs grants with the account DEVICE-CONTROL key — Ed25519,
  * derived from the recovery phrase and never from the DEK, so a compromised
  * cloud that unwraps the DEK cannot sign. This module verifies with
- * node:crypto only — the daemon package must NEVER import `@openllm/vault`,
- * and the daemon never holds DEK material. The pin comes from bootstrap
- * (`device_access_pubkey`); when null, seedgate enforcement is off.
+ * `@openllmsh/sdk/vault` `verifyDeviceGrant` (Ed25519 via noble) for signature
+ * checks — pin/nonce/FSM/env I/O stay here. The daemon never holds DEK
+ * material. The pin comes from bootstrap (`device_access_pubkey`); when null,
+ * seedgate enforcement is off.
  *
  * Pin rules ({@link TDeviceAccessVerify.setDeviceAccessPubkey}). A pin is
  * ANCHORED (agent-eligible) only when it comes from a local trust root:
@@ -32,8 +33,8 @@
  * never upgraded by the cloud, and an established pin never moves except
  * along a signed rotation chain or a local root.
  */
-import { createHash, createPublicKey, verify as nodeVerify } from "node:crypto";
-import type { TDeviceGrantUse } from "@openllmsh/tunnel";
+import { createHash, createPublicKey } from "node:crypto";
+import type { TDeviceGrantUse } from "@openllmsh/sdk/tunnel";
 import {
   buildDeviceControlRotationMessage,
   buildDeviceGrantMessage,
@@ -43,7 +44,8 @@ import {
   decodeDeviceControlRotation,
   decodeDeviceGrant,
   formatKeyFingerprint,
-} from "@openllmsh/tunnel";
+} from "@openllmsh/sdk/tunnel";
+import { verifyDeviceGrant } from "@openllmsh/sdk/vault";
 import { deviceAnchorFromEnvFile } from "./env";
 import { daemonPublicKey } from "./keypair";
 import { logWarn, safeDiagnosticMessage } from "./logger";
@@ -230,19 +232,19 @@ export type TDeviceAccessVerify = {
   readonly setDeviceAccessPubkey: (
     pubkey: string | null,
     options?: TSetDeviceAccessPubkeyOptions,
-  ) => TSetDeviceAccessPubkeyResult;
+  ) => Promise<TSetDeviceAccessPubkeyResult>;
   readonly checkDeviceGrant: (
     envelopeB64: string,
     expect: TCheckDeviceGrantExpect,
-  ) => TCheckDeviceGrantResult;
+  ) => Promise<TCheckDeviceGrantResult>;
   readonly enforceSeedGate: (
     grant: string | undefined,
     expect: TEnforceSeedGateExpect,
-  ) => TEnforceSeedGateResult;
+  ) => Promise<TEnforceSeedGateResult>;
   readonly enforceRtcSeedGate: (
     grant: string | undefined,
     expect: TEnforceSeedGateExpect & { readonly offerVersion: number },
-  ) => TEnforceSeedGateResult;
+  ) => Promise<TEnforceSeedGateResult>;
   /** Null when agent sessions may run now, else the refusal reason. */
   readonly agentRefusal: () => (typeof AGENT_PIN_REFUSALS)[number] | null;
   /** Drop the in-memory pin so the next read re-hydrates from disk. */
@@ -257,22 +259,7 @@ export const verifyDeviceGrantNode = (
   pubSpkiB64: string,
   message: Uint8Array,
   sigB64: string,
-): boolean => {
-  try {
-    const key = createPublicKey({
-      key: Buffer.from(pubSpkiB64, "base64"),
-      format: "der",
-      type: "spki",
-    });
-    if (key.asymmetricKeyType !== "ed25519") {
-      return false;
-    }
-    const sig = Buffer.from(sigB64, "base64");
-    return nodeVerify(null, Buffer.from(message), key, sig);
-  } catch {
-    return false;
-  }
-};
+): Promise<boolean> => verifyDeviceGrant(pubSpkiB64, message, sigB64);
 
 /**
  * Walk `rotations` (oldest first) from the pinned control key towards
@@ -282,11 +269,11 @@ export const verifyDeviceGrantNode = (
  * move the pin, only fail to. Returns the final generation when the chain
  * lands exactly on `target`, else null. Never throws.
  */
-export const walkDeviceControlRotations = (
+export const walkDeviceControlRotations = async (
   pinned: { readonly pubkey: string; readonly version: number | null },
   rotations: readonly string[],
   target: string,
-): { readonly version: number } | null => {
+): Promise<{ readonly version: number } | null> => {
   let current = pinned.pubkey;
   let version = pinned.version;
   for (const encoded of rotations.slice(0, DEVICE_CONTROL_ROTATION_CHAIN_MAX)) {
@@ -294,7 +281,7 @@ export const walkDeviceControlRotations = (
     if (statement === null || statement.old !== current) continue;
     if (version !== null && statement.cv <= version) continue;
     const msg = buildDeviceControlRotationMessage(statement);
-    if (!verifyDeviceGrantNode(current, msg, statement.sig)) continue;
+    if (!(await verifyDeviceGrantNode(current, msg, statement.sig))) continue;
     current = statement.new;
     version = statement.cv;
     if (current === target) return { version };
@@ -304,7 +291,7 @@ export const walkDeviceControlRotations = (
 
 /**
  * Fingerprint of a base64 SPKI key in the shared `keyFingerprint` format
- * (`@openllmsh/tunnel`), computed synchronously. Null when not base64.
+ * (`@openllmsh/sdk/tunnel`), computed synchronously. Null when not base64.
  */
 export const deviceKeyFingerprint = (spkiB64: string): string | null => {
   const der = Buffer.from(spkiB64, "base64");
@@ -434,10 +421,10 @@ export const createDeviceAccessVerify = (
   const validVersion = (v: number | null | undefined): number | null =>
     typeof v === "number" && Number.isInteger(v) && v >= 1 ? v : null;
 
-  const setDeviceAccessPubkey = (
+  const setDeviceAccessPubkey = async (
     pubkey: string | null,
     options?: TSetDeviceAccessPubkeyOptions,
-  ): TSetDeviceAccessPubkeyResult => {
+  ): Promise<TSetDeviceAccessPubkeyResult> => {
     const persist = options?.persist !== false;
     const log = options?.log !== false;
     const prevPin = hydrate();
@@ -522,7 +509,7 @@ export const createDeviceAccessVerify = (
       next = undefined;
     } else if (prevPin.kind === "control" && options?.rotations !== undefined) {
       rotationAttempted = options.rotations.length > 0;
-      const walked = walkDeviceControlRotations(
+      const walked = await walkDeviceControlRotations(
         { pubkey: prevPin.pubkey, version: prevPin.version },
         options.rotations,
         pubkey,
@@ -640,10 +627,10 @@ export const createDeviceAccessVerify = (
    * Full grant check: decode → rebuild message → ts window → nonce →
    * key_id/cid/aud/dpk → signature against the pinned pubkey.
    */
-  const checkDeviceGrant = (
+  const checkDeviceGrant = async (
     envelopeB64: string,
     expect: TCheckDeviceGrantExpect,
-  ): TCheckDeviceGrantResult => {
+  ): Promise<TCheckDeviceGrantResult> => {
     const pin = hydrate();
     if (pin === null) {
       return { ok: false, reason: "unprovisioned" };
@@ -727,7 +714,7 @@ export const createDeviceAccessVerify = (
       ...(envelope.use === undefined ? {} : { use: envelope.use }),
       ...(envelope.bind === undefined ? {} : { bind: envelope.bind }),
     });
-    if (!verifyDeviceGrantNode(pin.pubkey, msg, envelope.sig)) {
+    if (!(await verifyDeviceGrantNode(pin.pubkey, msg, envelope.sig))) {
       return { ok: false, reason: "bad_sig" };
     }
     // Signature verified — only then admit the nonce. Full map of still-valid
@@ -751,10 +738,10 @@ export const createDeviceAccessVerify = (
    * mux-host: they do not hold the device-control key with which to mint a
    * grant.
    */
-  const enforceSeedGate = (
+  const enforceSeedGate = async (
     grant: string | undefined,
     expect: TEnforceSeedGateExpect,
-  ): TEnforceSeedGateResult => {
+  ): Promise<TEnforceSeedGateResult> => {
     if (getDeviceAccessPubkey() === null) {
       return { mode: "reject", reason: "unprovisioned" };
     }
@@ -769,7 +756,7 @@ export const createDeviceAccessVerify = (
     if (grant === undefined || grant.length === 0) {
       return { mode: "reject", reason: "missing_grant" };
     }
-    const checked = checkDeviceGrant(grant, {
+    const checked = await checkDeviceGrant(grant, {
       use: expect.use,
       ...(expect.bind === undefined ? {} : { bind: expect.bind }),
       keyId: expect.keyId,
@@ -790,10 +777,10 @@ export const createDeviceAccessVerify = (
    * valid nested grant. Unprovisioned daemons fail closed rather than
    * accepting legacy v1 offers.
    */
-  const enforceRtcSeedGate = (
+  const enforceRtcSeedGate = async (
     grant: string | undefined,
     expect: TEnforceSeedGateExpect & { readonly offerVersion: number },
-  ): TEnforceSeedGateResult => {
+  ): Promise<TEnforceSeedGateResult> => {
     if (getDeviceAccessPubkey() === null) {
       return { mode: "reject", reason: "unprovisioned" };
     }
@@ -828,7 +815,7 @@ export const getDeviceAccessPin = (): TDeviceAccessPin | null =>
 export const setDeviceAccessPubkey = (
   pubkey: string | null,
   options?: TSetDeviceAccessPubkeyOptions,
-): TSetDeviceAccessPubkeyResult =>
+): Promise<TSetDeviceAccessPubkeyResult> =>
   active.setDeviceAccessPubkey(pubkey, options);
 
 /** Null when agent sessions may run now, else the refusal reason. */
@@ -842,14 +829,15 @@ export const invalidateDeviceAccessPin = (): void => active.invalidatePin();
 export const checkDeviceGrant = (
   envelopeB64: string,
   expect: TCheckDeviceGrantExpect,
-): TCheckDeviceGrantResult => active.checkDeviceGrant(envelopeB64, expect);
+): Promise<TCheckDeviceGrantResult> =>
+  active.checkDeviceGrant(envelopeB64, expect);
 
 export const enforceSeedGate = (
   grant: string | undefined,
   expect: TEnforceSeedGateExpect,
-): TEnforceSeedGateResult => active.enforceSeedGate(grant, expect);
+): Promise<TEnforceSeedGateResult> => active.enforceSeedGate(grant, expect);
 
 export const enforceRtcSeedGate = (
   grant: string | undefined,
   expect: TEnforceSeedGateExpect & { readonly offerVersion: number },
-): TEnforceSeedGateResult => active.enforceRtcSeedGate(grant, expect);
+): Promise<TEnforceSeedGateResult> => active.enforceRtcSeedGate(grant, expect);

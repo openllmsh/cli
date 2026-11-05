@@ -15,7 +15,7 @@ import type {
   TDaemonProviderConnection,
   TDaemonStatus,
   TProviderUsageSnapshot,
-} from "@openllmsh/protocol";
+} from "@openllmsh/sdk/protocol";
 import {
   DEVICE_SESSIONS_CONTROL_CAP,
   LOCAL_KEY_PROVIDER_PRESETS,
@@ -24,7 +24,7 @@ import {
   normalizeProviderConnection,
   TEAM_KEY_CUSTODY_CONTROL_CAP,
   TEAM_SERVE_CAP,
-} from "@openllmsh/protocol";
+} from "@openllmsh/sdk/protocol";
 import {
   pruneOrphanAccountDirs,
   setForgetProviderAccount,
@@ -926,7 +926,7 @@ const computeStatusFreshInner = async (
     pubkey: daemonPublicKey(),
     identity_conflict: hasIdentityConflict() || undefined,
     device_access_pin: deviceAccessPinReport() ?? undefined,
-    device_sessions: deviceSessionsReport(),
+    device_sessions: await deviceSessionsReport(),
     port: daemonPort(),
     sandbox: sandboxState(),
     team_psk: teamKeyEpochs(),

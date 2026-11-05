@@ -8,13 +8,13 @@
  */
 import { readFileSync, realpathSync, statSync } from "node:fs";
 import { basename, dirname, isAbsolute, join, resolve, sep } from "node:path";
-import type { TVendorCliInstall } from "@openllmsh/protocol";
+import type { TVendorCliInstall } from "@openllmsh/sdk/protocol";
 import {
   isOAuthProviderSlug,
   VENDOR_CLI_DETECTION_GRACE_MS,
   VENDOR_CLI_INSTALL_STALE_MS,
   VendorCliInstall,
-} from "@openllmsh/protocol";
+} from "@openllmsh/sdk/protocol";
 import { Result, Schema } from "effect";
 import { processStartTime } from "./child-supervisor";
 import { stateDir } from "./env";

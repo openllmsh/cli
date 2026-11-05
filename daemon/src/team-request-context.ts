@@ -10,7 +10,7 @@
  */
 
 import { AsyncLocalStorage } from "node:async_hooks";
-import type { TTeamGrant } from "@openllmsh/tunnel";
+import type { TTeamGrant } from "@openllmsh/sdk/tunnel";
 
 type TTeamGrantStore = {
   readonly token: string;

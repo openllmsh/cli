@@ -8,8 +8,8 @@
 
 import { readdirSync, readFileSync, rmSync, statSync } from "node:fs";
 import { join } from "node:path";
-import type { TDeviceSessionCli } from "@openllmsh/protocol";
-import { DeviceSessionCli, SESSION_ID_PATTERN } from "@openllmsh/protocol";
+import type { TDeviceSessionCli } from "@openllmsh/sdk/protocol";
+import { DeviceSessionCli, SESSION_ID_PATTERN } from "@openllmsh/sdk/protocol";
 import { Schema as S } from "effect";
 import { daemonSelfInvocation } from "../child-supervisor/self-exec";
 import type { TDeadlineBudget } from "../deadline-budget";

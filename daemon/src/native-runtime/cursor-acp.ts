@@ -51,8 +51,8 @@
 import { existsSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import { join } from "node:path";
-import type { TChatCompletionChunk, TUsage } from "@openllmsh/protocol";
-import { estimateBodyTokens } from "@openllmsh/wire/lib/canonical/token-estimate";
+import type { TChatCompletionChunk, TUsage } from "@openllmsh/sdk/protocol";
+import { estimateBodyTokens } from "@openllmsh/sdk/wire/lib/canonical/token-estimate";
 import type { TSupervisedChild } from "../child-supervisor";
 import { superviseSpawn } from "../child-supervisor";
 import { spawnCwd } from "../delegation/util";

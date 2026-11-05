@@ -26,7 +26,7 @@
  */
 import { rm } from "node:fs/promises";
 import { join } from "node:path";
-import type { TProviderUsageSnapshot } from "@openllmsh/protocol";
+import type { TProviderUsageSnapshot } from "@openllmsh/sdk/protocol";
 import { noteAuthStoreIdentityChange } from "../auth-user-action";
 import { cliInstallState } from "../cli-install";
 import { cliConfigDir } from "../cli-paths";

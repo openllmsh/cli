@@ -30,7 +30,7 @@ import { join } from "node:path";
 import type {
   TDaemonProviderConnection,
   TProviderUsageSnapshot,
-} from "@openllmsh/protocol";
+} from "@openllmsh/sdk/protocol";
 import { accountCell } from "../account-scope";
 import { noteAuthStoreIdentityChange } from "../auth-user-action";
 import { cliInstallState } from "../cli-install";

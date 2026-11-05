@@ -33,8 +33,11 @@
 // guards it.
 import "reflect-metadata";
 
-import { AGENT_HOOK_LOCAL_PATH, AUTH_LOCAL_PATH } from "@openllmsh/protocol";
-import { isStreamResetError } from "@openllmsh/tunnel";
+import {
+  AGENT_HOOK_LOCAL_PATH,
+  AUTH_LOCAL_PATH,
+} from "@openllmsh/sdk/protocol";
+import { isStreamResetError } from "@openllmsh/sdk/tunnel";
 import { handleLocalAgentHook } from "./agent/hook-endpoint";
 import type { TLocalAgentSocketData } from "./agent/loopback";
 import {

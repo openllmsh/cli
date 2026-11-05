@@ -7,7 +7,7 @@
  * the WebSocket transport (that would cycle: control-channel → control-relay
  * → delegates → login-flow).
  */
-import type { TAuthEvent } from "@openllmsh/protocol";
+import type { TAuthEvent } from "@openllmsh/sdk/protocol";
 import { withoutCommandReplayContext } from "./op-context";
 
 export type TAuthSink = {

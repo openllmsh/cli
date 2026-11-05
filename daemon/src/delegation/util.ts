@@ -24,7 +24,7 @@
 import type {
   TDaemonProviderObservationResult,
   TDaemonProviderReasonCode,
-} from "@openllmsh/protocol";
+} from "@openllmsh/sdk/protocol";
 
 export * from "./headless-login";
 export * from "./keychain";
@@ -44,9 +44,9 @@ export type {
   TDaemonProviderObservation,
   TDaemonProviderObservationResult,
   TDaemonProviderReasonCode,
-} from "@openllmsh/protocol";
+} from "@openllmsh/sdk/protocol";
 /** Shared daemon-status wire sentinel; preserves existing daemon import paths. */
-export { STATUS_CHECK_FAILED_DETAIL } from "@openllmsh/protocol";
+export { STATUS_CHECK_FAILED_DETAIL } from "@openllmsh/sdk/protocol";
 
 export const unknownObservation = (
   reason: TDaemonProviderReasonCode = "probe_failed",

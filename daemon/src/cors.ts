@@ -11,7 +11,7 @@ import {
   MEDIA_ERROR_RESPONSE_HEADER,
   MEDIA_PERSISTENCE_RESPONSE_HEADER,
   TOOL_SESSION_HEADER,
-} from "@openllmsh/protocol";
+} from "@openllmsh/sdk/protocol";
 import { daemonEnv, isDevMode } from "./env";
 
 /**

@@ -22,13 +22,13 @@ import type {
   TChatCompletionRequest,
   TCooldownReason,
   TExecutionSelection,
-} from "@openllmsh/protocol";
-import { formatActiveExecutionToken } from "@openllmsh/protocol";
-import { declaresAnthropicServerSearchTool } from "@openllmsh/wire/adapters/messages/request";
-import type { TAttemptOutcome } from "@openllmsh/wire/lib/attempt-outcome";
-import { accumulateChunksToResponse } from "@openllmsh/wire/lib/streaming/accumulate";
-import { partialUsageFrom } from "@openllmsh/wire/lib/streaming/upstream-error";
-import { clientWireOf } from "@openllmsh/wire/providers/upstream-request";
+} from "@openllmsh/sdk/protocol";
+import { formatActiveExecutionToken } from "@openllmsh/sdk/protocol";
+import { declaresAnthropicServerSearchTool } from "@openllmsh/sdk/wire/adapters/messages/request";
+import type { TAttemptOutcome } from "@openllmsh/sdk/wire/lib/attempt-outcome";
+import { accumulateChunksToResponse } from "@openllmsh/sdk/wire/lib/streaming/accumulate";
+import { partialUsageFrom } from "@openllmsh/sdk/wire/lib/streaming/upstream-error";
+import { clientWireOf } from "@openllmsh/sdk/wire/providers/upstream-request";
 import { cliBin, cliEnv } from "../cli-paths";
 import {
   deliverChunkStream,
@@ -1063,7 +1063,7 @@ const serveCapturedToolTurn = async (
   // path's `stream-json` — see `nativeToolExecutionIdentity`'s doc comment.
   // For claude_code this deliberately logs `registryDeclaresCapture: false`:
   // `agent-sdk` has no `<variant>-capture` form in the approved public
-  // vocabulary (@openllmsh/protocol's `BRIDGE_VARIANTS_WITH_CAPTURE_FORM`),
+  // vocabulary (@openllmsh/sdk/protocol's `BRIDGE_VARIANTS_WITH_CAPTURE_FORM`),
   // so the NEW registry correctly refuses it, even while today's LEGACY
   // `bridge-capture` selector still attaches capture to that exact engine
   // (09-implementation-plan.md §8.2, "Old Claude `bridge` cannot represent

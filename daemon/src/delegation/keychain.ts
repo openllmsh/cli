@@ -50,7 +50,7 @@ import type {
   TDoctorStoreOperation,
   TDoctorStoreResult,
   TDoctorStoreStage,
-} from "@openllmsh/protocol";
+} from "@openllmsh/sdk/protocol";
 import { superviseSpawn } from "../child-supervisor";
 import type { TChildSupervisor } from "../child-supervisor/supervisor";
 import type { TDeadlineBudget, TDeadlineTimebase } from "../deadline-budget";

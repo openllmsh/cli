@@ -56,7 +56,7 @@ export const TEAM_PLAN_WARM_REFRESH_MS = PLAN_CACHE_SOFT_REFRESH_MS;
 /** One supplier only keeps a small, demand-driven working set warm. */
 export const TEAM_PLAN_WARM_MAX_ENTRIES = 16;
 
-import type { TContextOverflowStrategy } from "@openllmsh/protocol";
+import type { TContextOverflowStrategy } from "@openllmsh/sdk/protocol";
 
 export type TCachedPlan = {
   readonly planParam: string;

@@ -46,14 +46,14 @@
  */
 
 import { existsSync } from "node:fs";
-import type { TChatCompletionChunk } from "@openllmsh/protocol";
-import { decodeProviderEventStream } from "@openllmsh/wire/lib/streaming/provider-decode";
-import type { TChatGptStreamEvent } from "@openllmsh/wire/providers/chatgpt/streaming";
+import type { TChatCompletionChunk } from "@openllmsh/sdk/protocol";
+import { decodeProviderEventStream } from "@openllmsh/sdk/wire/lib/streaming/provider-decode";
+import type { TChatGptStreamEvent } from "@openllmsh/sdk/wire/providers/chatgpt/streaming";
 import {
   chatGptEventToChunk,
   isChatGptResponsesTerminalEvent,
   newChatGptStreamState,
-} from "@openllmsh/wire/providers/chatgpt/streaming";
+} from "@openllmsh/sdk/wire/providers/chatgpt/streaming";
 import { Schema } from "effect";
 import { daemonTempDir } from "../sandbox/working-set";
 import {

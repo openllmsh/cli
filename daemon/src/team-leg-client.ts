@@ -1,7 +1,7 @@
-import type { TTunnelSurface } from "@openllmsh/protocol";
-import { TEAM_LEG_STREAM_DEADLINE_MS } from "@openllmsh/protocol";
-import { TEAM_LEG_INPUT_SLACK_TOKENS } from "@openllmsh/tunnel/team-grant";
-import { warmCapTokenCounter } from "@openllmsh/wire/lib/canonical/token-estimate";
+import type { TTunnelSurface } from "@openllmsh/sdk/protocol";
+import { TEAM_LEG_STREAM_DEADLINE_MS } from "@openllmsh/sdk/protocol";
+import { TEAM_LEG_INPUT_SLACK_TOKENS } from "@openllmsh/sdk/tunnel/team-grant";
+import { warmCapTokenCounter } from "@openllmsh/sdk/wire/lib/canonical/token-estimate";
 import { cloudFetch } from "./cloud-client";
 import { daemonEnv } from "./env";
 import {

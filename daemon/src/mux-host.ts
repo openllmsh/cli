@@ -1,4 +1,4 @@
-import type { TRelayFrame } from "@openllmsh/protocol";
+import type { TRelayFrame } from "@openllmsh/sdk/protocol";
 import {
   AGENT_CAP,
   MEDIA_HTTP_CAP,
@@ -10,35 +10,42 @@ import {
   streamOpenKindOf,
   TEAM_RTC_CAP,
   TEAM_SERVE_CAP,
-} from "@openllmsh/protocol";
+} from "@openllmsh/sdk/protocol";
 import {
   channelIdToBytes,
   decodeChannelEnvelope,
   encodeChannelEnvelopeWithTag,
-} from "@openllmsh/tunnel/channel-envelope";
-import { decodeJsonPayload, encodeJsonPayload } from "@openllmsh/tunnel/codec";
-import { noiseGrantBinding } from "@openllmsh/tunnel/device-grant";
-import type { TDuplex, TMuxChannel, TMuxStream } from "@openllmsh/tunnel/mux";
-import { createChannel } from "@openllmsh/tunnel/mux";
+} from "@openllmsh/sdk/tunnel/channel-envelope";
+import {
+  decodeJsonPayload,
+  encodeJsonPayload,
+} from "@openllmsh/sdk/tunnel/codec";
+import { noiseGrantBinding } from "@openllmsh/sdk/tunnel/device-grant";
+import type {
+  TDuplex,
+  TMuxChannel,
+  TMuxStream,
+} from "@openllmsh/sdk/tunnel/mux";
+import { createChannel } from "@openllmsh/sdk/tunnel/mux";
 import {
   PEER_LINK_DEFAULTS,
   peerLinkFailureCache,
-} from "@openllmsh/tunnel/peer-link";
+} from "@openllmsh/sdk/tunnel/peer-link";
 import type {
   TNoiseStaticKey,
   TSecureAuthorizeContext,
-} from "@openllmsh/tunnel/secure";
+} from "@openllmsh/sdk/tunnel/secure";
 import {
   SecureChannelError,
   secureMuxStream,
   x25519RawFromSpkiB64,
-} from "@openllmsh/tunnel/secure";
-import type { TServeAgent, TServeTunnel } from "@openllmsh/tunnel/streams";
+} from "@openllmsh/sdk/tunnel/secure";
+import type { TServeAgent, TServeTunnel } from "@openllmsh/sdk/tunnel/streams";
 import {
   AGENT_SECURE_PROLOGUE_INFO,
   agentSecurePrologue,
   serveStream,
-} from "@openllmsh/tunnel/streams";
+} from "@openllmsh/sdk/tunnel/streams";
 import { daemonUserId } from "./config";
 import {
   AGENT_PIN_REFUSALS,
@@ -345,7 +352,10 @@ const strictUtf8 = new TextDecoder("utf-8", { fatal: true });
  */
 const authorizeAgentHandshake =
   (channelId: string, isGated: () => boolean) =>
-  ({ payload, remoteStatic }: TSecureAuthorizeContext): Uint8Array | null => {
+  async ({
+    payload,
+    remoteStatic,
+  }: TSecureAuthorizeContext): Promise<Uint8Array | null> => {
     if (!isGated()) {
       logInfo("mux-host", "agent handshake refused: channel not seed-gated", {
         channelId,
@@ -361,7 +371,7 @@ const authorizeAgentHandshake =
     // A `noise` grant bound to the initiator's static key: the relay sees the
     // `channel_open` grant in plaintext, and a harvested grant of any other
     // use, or one bound to another initiator, is refused.
-    const gate = enforceSeedGate(grant, {
+    const gate = await enforceSeedGate(grant, {
       use: "noise",
       bind: noiseGrantBinding(remoteStatic),
       keyId: daemonApiKeyId(),
@@ -988,14 +998,14 @@ type TSeedGateOutcome = "ok" | "tunnel_only" | "reject";
  * only for a tunnel-only reason is re-checked without the agent requirements;
  * that second check spends the grant's nonce, so only a rebind asks for it.
  */
-const seedGateOutcomeOf = (
+const seedGateOutcomeOf = async (
   frame: {
     readonly channel_id: string;
     readonly grant?: string;
     readonly consumer?: "browser" | "daemon";
   },
   allowTunnelOnly: boolean,
-): TSeedGateOutcome => {
+): Promise<TSeedGateOutcome> => {
   if (frame.consumer === "daemon") return "reject";
   const expect = {
     use: "channel" as const,
@@ -1003,7 +1013,10 @@ const seedGateOutcomeOf = (
     cid: frame.channel_id,
     aud: daemonPublicKey(),
   };
-  const gate = enforceSeedGate(frame.grant, { ...expect, requireDpk: true });
+  const gate = await enforceSeedGate(frame.grant, {
+    ...expect,
+    requireDpk: true,
+  });
   if (gate.mode !== "reject") return "ok";
   logInfo("mux-host", "channel_open not seed-gated (agent refused)", {
     channelId: frame.channel_id,
@@ -1012,27 +1025,32 @@ const seedGateOutcomeOf = (
   if (!allowTunnelOnly || !MUX_TUNNEL_ONLY_REASONS.has(gate.reason)) {
     return "reject";
   }
-  return enforceSeedGate(frame.grant, expect).mode === "ok"
+  return (await enforceSeedGate(frame.grant, expect)).mode === "ok"
     ? "tunnel_only"
     : "reject";
 };
 
-const seedGateOf = (frame: {
+const seedGateOf = async (frame: {
   readonly channel_id: string;
   readonly grant?: string;
   readonly consumer?: "browser" | "daemon";
-}): boolean => seedGateOutcomeOf(frame, false) === "ok";
+}): Promise<boolean> => (await seedGateOutcomeOf(frame, false)) === "ok";
 
-/** Accept the relay-authorized channel. `mux2` allows several concurrent. */
+/**
+ * Accept the relay-authorized channel. `mux2` allows several concurrent.
+ * Returns a promise that settles when admission finishes — callers that only
+ * need fire-and-forget (the control-channel frame handler) may ignore it;
+ * tests must await so seed-gate verify completes before assertions.
+ */
 export const acceptChannel = (frame: {
   readonly channel_id: string;
   readonly grant?: string;
   readonly team_grant?: string;
   readonly peer_user_id?: string;
   readonly consumer?: "browser" | "daemon";
-}): void => {
+}): Promise<void> => {
   // An admission throw must still answer the peer, or its open hangs.
-  acceptChannelAsync(frame).catch((err: unknown) => {
+  return acceptChannelAsync(frame).catch((err: unknown) => {
     logWarn("mux-host", safeDiagnosticMessage`channel_open admission threw`, {
       channelId: frame.channel_id,
       err: err instanceof Error ? err.message : String(err),
@@ -1182,7 +1200,7 @@ const acceptChannelAsync = async (frame: {
     // invalidate a control-signed browser grant for the tunnel/realtime kinds,
     // so a tunnel-only refusal still authorizes this rebind. The channel is
     // then left un-gated below, which keeps agent streams refused.
-    const outcome = seedGateOutcomeOf(frame, existing.seedGated);
+    const outcome = await seedGateOutcomeOf(frame, existing.seedGated);
     const gated = outcome === "ok";
     if (existing.seedGated && outcome === "reject") {
       send({
@@ -1210,7 +1228,7 @@ const acceptChannelAsync = async (frame: {
   // A map-resident record with a null mux sink is a closed shell that never
   // got reaped — drop it so the re-open registers fresh below.
   if (existing !== undefined) channels.delete(frame.channel_id);
-  const seedGated = seedGateOf(frame);
+  const seedGated = await seedGateOf(frame);
   const record = registerChannel(frame.channel_id, null, "daemon");
   record.seedGated = seedGated;
   record.teamGranted = teamGranted;

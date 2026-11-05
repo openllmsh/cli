@@ -11,6 +11,7 @@
  * actually served the request, usage, finish reason and structured errors.
  */
 
+import { createClient } from "@openllmsh/sdk/client";
 import { CLI_VERSION } from "./cli-version";
 import { resolveGateway } from "./clients/gateway";
 import { requireCliApiKey } from "./onboarding";
@@ -283,22 +284,29 @@ export const runChat = async (args: readonly string[]): Promise<number> => {
     (parsed.format === "text" && parsed.stream);
   let res: Response;
   try {
-    res = await fetch(`${gateway.base}/v1/chat/completions`, {
-      method: "POST",
-      headers: {
-        authorization: `Bearer ${gateway.apiKey}`,
-        "content-type": "application/json",
-        "user-agent": PROMPT_USER_AGENT,
+    const client = createClient({
+      origin: gateway.base,
+      apiKey: gateway.apiKey,
+      transport: {
+        fetch: globalThis.fetch.bind(globalThis),
+        websocket: WebSocket,
       },
-      body: JSON.stringify({
-        model: parsed.model,
-        messages,
-        stream,
-        ...(stream && structured
-          ? { stream_options: { include_usage: true } }
-          : {}),
-      }),
     });
+    try {
+      res = await client.chat.completions.create(
+        {
+          model: parsed.model,
+          messages,
+          stream,
+          ...(stream && structured
+            ? { stream_options: { include_usage: true } }
+            : {}),
+        },
+        { headers: { "user-agent": PROMPT_USER_AGENT } },
+      );
+    } finally {
+      client.close();
+    }
   } catch (error) {
     return fail(
       null,

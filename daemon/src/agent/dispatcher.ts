@@ -19,14 +19,14 @@ import type {
   TAgentEngine,
   TAgentEvent,
   TAgentItem,
-} from "@openllmsh/protocol";
+} from "@openllmsh/sdk/protocol";
 import {
   AGENT_SESSION_ID_PATTERN,
   AGENT_SWITCH_MODEL_PATTERN,
   encodeAgentLine,
   parseAgentEvent,
   SESSION_ID_PATTERN,
-} from "@openllmsh/protocol";
+} from "@openllmsh/sdk/protocol";
 import { logError, logInfo } from "../logger";
 import {
   AGENT_TOOL_OUTPUT_MAX_CHARS,

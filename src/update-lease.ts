@@ -23,7 +23,7 @@
  *
  * Node built-ins only: the CLI half imports this, and so does the daemon.
  * The wire shape is mirrored by `DaemonUpdateState` in
- * `packages/protocol/daemon.ts` and by the desktop app's reader
+ * `packages/sdk/protocol/daemon.ts` and by the desktop app's reader
  * (`packages/native/src-tauri/src/update_lease.rs`); a parity test pins all
  * three to this file.
  */

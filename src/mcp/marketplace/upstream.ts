@@ -1,34 +1,31 @@
 /**
- * Marketplace integrations served THROUGH the one `openllm` MCP server.
- * Each enabled integration (`/api/marketplace/launch`) is dialled as an
- * upstream MCP server — Streamable HTTP for remote entries (BYOK vendor URL
- * or the gateway's metered `/api/marketplace/mcp/<id>` proxy), stdio for
- * package entries — and its tools are re-exported as `<id>__<tool>`. Clients
- * therefore carry a single `openllm` entry; secrets stay in this process.
+ * CLI marketplace upstream dialer. HTTP/SSE remotes go through
+ * `@openllmsh/sdk/mcp` (`connectUpstream` / `connectUpstreams`); this module
+ * only adds the stdio transport the compiled CLI can spawn, and fans both
+ * kinds into one `<id>__<tool>` surface.
  *
  * A minimal JSON-RPC client: initialize → tools/list → tools/call. Every
  * upstream fails open on its own — a dead vendor drops only its tools.
  */
 
 import type { CallToolResult } from "@modelcontextprotocol/server";
-// `cli-version`, not `env`: the browser chat dials upstreams through this
-// module too, and `env` pulls in node:fs.
+import type {
+  TMarketplaceLaunchServer,
+  TUpstream,
+  TUpstreamTool,
+} from "@openllmsh/sdk/mcp";
+import {
+  CALL_TIMEOUT_MS,
+  CONNECT_TIMEOUT_MS,
+  connectUpstream as connectHttpUpstream,
+  connectUpstreams as connectHttpUpstreams,
+  UPSTREAM_TOOL_SEPARATOR,
+  upstreamToolName,
+} from "@openllmsh/sdk/mcp";
 import { CLI_VERSION } from "../../cli-version";
-import type { TMarketplaceLaunchServer } from "../../clients/marketplace";
 
-export type TUpstreamTool = {
-  readonly name: string;
-  readonly description?: string;
-  readonly inputSchema: Record<string, unknown>;
-  readonly annotations?: Record<string, unknown>;
-};
-
-export type TUpstream = {
-  readonly id: string;
-  readonly tools: readonly TUpstreamTool[];
-  call(name: string, args: Record<string, unknown>): Promise<CallToolResult>;
-  close(): Promise<void>;
-};
+export type { TUpstream, TUpstreamTool };
+export { UPSTREAM_TOOL_SEPARATOR, upstreamToolName };
 
 type TRpc = (
   method: string,
@@ -42,15 +39,7 @@ type TChannel = {
 };
 
 const PROTOCOL_VERSION = "2025-06-18";
-const CONNECT_TIMEOUT_MS = 5_000;
-const CALL_TIMEOUT_MS = 120_000;
 const MAX_TOOL_PAGES = 10;
-
-/** Separator between integration id and its tool name. */
-export const UPSTREAM_TOOL_SEPARATOR = "__";
-
-export const upstreamToolName = (id: string, tool: string): string =>
-  `${id}${UPSTREAM_TOOL_SEPARATOR}${tool}`;
 
 type TRpcMessage = {
   id?: unknown;
@@ -62,87 +51,6 @@ const unwrap = (msg: TRpcMessage): unknown => {
   if (msg.error !== undefined)
     throw new Error(msg.error.message ?? "upstream error");
   return msg.result;
-};
-
-/** Pick the response for `id` out of an SSE body. */
-const fromSse = (text: string, id: number): TRpcMessage | undefined => {
-  for (const event of text.split(/\r?\n\r?\n/)) {
-    const data = event
-      .split(/\r?\n/)
-      .filter((l) => l.startsWith("data:"))
-      .map((l) => l.slice(5).trimStart())
-      .join("\n");
-    if (data.length === 0) continue;
-    try {
-      const msg = JSON.parse(data) as TRpcMessage;
-      if (msg.id === id) return msg;
-    } catch {
-      // Not JSON — skip the event.
-    }
-  }
-  return undefined;
-};
-
-const httpChannel = (server: TMarketplaceLaunchServer): TChannel => {
-  const url = server.url ?? "";
-  let sessionId: string | undefined;
-  let nextId = 0;
-  const post = async (
-    body: Record<string, unknown>,
-    timeoutMs: number,
-  ): Promise<Response> => {
-    const res = await fetch(url, {
-      method: "POST",
-      headers: {
-        ...server.headers,
-        "content-type": "application/json",
-        accept: "application/json, text/event-stream",
-        "mcp-protocol-version": PROTOCOL_VERSION,
-        ...(sessionId === undefined ? {} : { "mcp-session-id": sessionId }),
-      },
-      body: JSON.stringify({ jsonrpc: "2.0", ...body }),
-      signal: AbortSignal.timeout(timeoutMs),
-    });
-    sessionId = res.headers.get("mcp-session-id") ?? sessionId;
-    return res;
-  };
-  const rpc: TRpc = async (method, params = {}) => {
-    const id = ++nextId;
-    const timeout =
-      method === "tools/call" ? CALL_TIMEOUT_MS : CONNECT_TIMEOUT_MS;
-    const res = await post({ id, method, params }, timeout);
-    const text = await res.text();
-    let msg: TRpcMessage | undefined;
-    try {
-      msg = (res.headers.get("content-type") ?? "").includes(
-        "text/event-stream",
-      )
-        ? fromSse(text, id)
-        : (JSON.parse(text) as TRpcMessage);
-    } catch {
-      msg = undefined;
-    }
-    // A non-2xx without a JSON-RPC body reports the status, not a parse error.
-    if (msg === undefined)
-      throw new Error(
-        res.ok ? "upstream sent no response" : `upstream HTTP ${res.status}`,
-      );
-    return unwrap(msg);
-  };
-  return {
-    rpc,
-    notify: async (method) => {
-      await post({ method }, CONNECT_TIMEOUT_MS).then((r) => r.body?.cancel());
-    },
-    close: async () => {
-      if (sessionId === undefined) return;
-      await fetch(url, {
-        method: "DELETE",
-        headers: { ...server.headers, "mcp-session-id": sessionId },
-        signal: AbortSignal.timeout(CONNECT_TIMEOUT_MS),
-      }).catch(() => undefined);
-    },
-  };
 };
 
 const stdioChannel = (server: TMarketplaceLaunchServer): TChannel => {
@@ -257,14 +165,13 @@ const errorResult = (text: string): CallToolResult => ({
   isError: true,
 });
 
-/** Dial one upstream; rejects on any handshake failure. */
-export const connectUpstream = async (
+/** Dial one stdio upstream; rejects on any handshake failure. */
+const connectStdioUpstream = async (
   server: TMarketplaceLaunchServer,
 ): Promise<TUpstream> => {
-  const remote = server.transport !== "stdio";
-  if (remote ? server.url === undefined : server.command === undefined)
+  if (server.command === undefined)
     throw new Error(`${server.id}: incomplete launch entry`);
-  const channel = remote ? httpChannel(server) : stdioChannel(server);
+  const channel = stdioChannel(server);
   try {
     await channel.rpc("initialize", {
       protocolVersion: PROTOCOL_VERSION,
@@ -304,16 +211,40 @@ export const connectUpstream = async (
   }
 };
 
+/** Dial one upstream (HTTP/SSE via SDK, stdio here); rejects on handshake failure. */
+export const connectUpstream = async (
+  server: TMarketplaceLaunchServer,
+): Promise<TUpstream> => {
+  if (server.transport === "stdio") return connectStdioUpstream(server);
+  return connectHttpUpstream(server, { clientVersion: CLI_VERSION });
+};
+
 /** Dial every upstream in parallel; failures are logged and dropped. */
 export const connectUpstreams = async (
   servers: readonly TMarketplaceLaunchServer[],
 ): Promise<readonly TUpstream[]> => {
-  const settled = await Promise.allSettled(servers.map(connectUpstream));
-  return settled.flatMap((r, i) => {
+  const remote = servers.filter((server) => server.transport !== "stdio");
+  const local = servers.filter((server) => server.transport === "stdio");
+  const [httpUpstreams, stdioSettled] = await Promise.all([
+    connectHttpUpstreams(remote, {
+      clientVersion: CLI_VERSION,
+      onWarn: (message) => console.warn(message),
+    }),
+    Promise.allSettled(local.map(connectStdioUpstream)),
+  ]);
+  const stdioUpstreams = stdioSettled.flatMap((r, i) => {
     if (r.status === "fulfilled") return [r.value];
     console.warn(
-      `[MCP] marketplace ${servers[i]?.id}: ${r.reason instanceof Error ? r.reason.message : String(r.reason)}`,
+      `[MCP] marketplace ${local[i]?.id}: ${r.reason instanceof Error ? r.reason.message : String(r.reason)}`,
     );
     return [];
+  });
+  // Preserve launch order: walk the original list and pick from each pool.
+  const byId = new Map(
+    [...httpUpstreams, ...stdioUpstreams].map((u) => [u.id, u]),
+  );
+  return servers.flatMap((server) => {
+    const upstream = byId.get(server.id);
+    return upstream === undefined ? [] : [upstream];
   });
 };

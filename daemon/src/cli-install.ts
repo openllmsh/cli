@@ -27,7 +27,7 @@ import {
 import { mkdir, rm } from "node:fs/promises";
 import { platform } from "node:os";
 import { basename, dirname, isAbsolute, join } from "node:path";
-import { projectDoctorOutcomeLedger } from "@openllmsh/protocol";
+import { projectDoctorOutcomeLedger } from "@openllmsh/sdk/protocol";
 import type { TCliProvider } from "./cli-paths";
 import {
   cliBin,

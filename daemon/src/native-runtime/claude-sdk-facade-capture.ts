@@ -38,7 +38,7 @@
  */
 
 import { existsSync } from "node:fs";
-import type { TChatCompletionChunk } from "@openllmsh/protocol";
+import type { TChatCompletionChunk } from "@openllmsh/sdk/protocol";
 import { logError, safeDiagnosticMessage } from "../logger";
 import {
   claudeCaptureDestinationPolicy,

@@ -13,20 +13,20 @@ import type {
   TChatCompletionChunk,
   TChatCompletionResponse,
   THeartbeatOptions,
-} from "@openllmsh/protocol";
-import { toAnthropicMessagesResponse } from "@openllmsh/wire/adapters/messages/response";
-import { chunksToMessagesSseBytes } from "@openllmsh/wire/adapters/messages/streaming";
+} from "@openllmsh/sdk/protocol";
+import { toAnthropicMessagesResponse } from "@openllmsh/sdk/wire/adapters/messages/response";
+import { chunksToMessagesSseBytes } from "@openllmsh/sdk/wire/adapters/messages/streaming";
 import {
   chunksToResponsesSseBytes,
   toResponsesResponse,
-} from "@openllmsh/wire/adapters/responses";
-import { accumulateChunksToResponse } from "@openllmsh/wire/lib/streaming/accumulate";
-import { chunksToSseBytes } from "@openllmsh/wire/lib/streaming/provider-decode";
-import { withFrameAlignedHeartbeat } from "@openllmsh/wire/lib/streaming/sse";
+} from "@openllmsh/sdk/wire/adapters/responses";
+import { accumulateChunksToResponse } from "@openllmsh/sdk/wire/lib/streaming/accumulate";
+import { chunksToSseBytes } from "@openllmsh/sdk/wire/lib/streaming/provider-decode";
+import { withFrameAlignedHeartbeat } from "@openllmsh/sdk/wire/lib/streaming/sse";
 import {
   stripIsolationFromChunks,
   stripIsolationFromResponse,
-} from "@openllmsh/wire/lib/strip-subagent-isolation";
+} from "@openllmsh/sdk/wire/lib/strip-subagent-isolation";
 
 export type TClientSurface = "chat_completions" | "messages" | "responses";
 

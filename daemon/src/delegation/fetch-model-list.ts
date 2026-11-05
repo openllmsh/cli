@@ -1,5 +1,5 @@
-import type { TProviderModelEntry } from "@openllmsh/protocol";
-import { MODEL_LIST_FETCH_TIMEOUT_MS } from "@openllmsh/protocol";
+import type { TProviderModelEntry } from "@openllmsh/sdk/protocol";
+import { MODEL_LIST_FETCH_TIMEOUT_MS } from "@openllmsh/sdk/protocol";
 import type {
   TFetchModelListDetailed,
   TListModelsNullReason,

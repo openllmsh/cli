@@ -17,7 +17,7 @@
  * No new conversation_id layer. Request-private capture correlation only.
  */
 
-import type { TChatCompletionRequest } from "@openllmsh/protocol";
+import type { TChatCompletionRequest } from "@openllmsh/sdk/protocol";
 import { renderSeed } from "./session-store";
 import type {
   TNativeHistoryToolCall,

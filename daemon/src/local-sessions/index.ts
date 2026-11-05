@@ -3,8 +3,11 @@
  * in-memory device PTYs, merged for `list_local_sessions`.
  */
 
-import type { TDeviceSessionCli, TLocalCliSession } from "@openllmsh/protocol";
-import { LISTABLE_SESSION_CLIS } from "@openllmsh/protocol";
+import type {
+  TDeviceSessionCli,
+  TLocalCliSession,
+} from "@openllmsh/sdk/protocol";
+import { LISTABLE_SESSION_CLIS } from "@openllmsh/sdk/protocol";
 import { readClaudeHistory, readClaudeLiveSessionIds } from "./claude";
 import { readCodexHistory } from "./codex";
 import { readGrokHistory } from "./grok";

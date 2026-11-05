@@ -6,7 +6,7 @@ import type {
   TVideoIdPayload,
   TVideoJob,
   TVideoJobStatus,
-} from "@openllmsh/protocol";
+} from "@openllmsh/sdk/protocol";
 import {
   aspectRatioFromDimensions,
   decodeVideoId,
@@ -25,8 +25,8 @@ import {
   VIDEO_INPUT_ERROR,
   VideoGenerationRequest,
   videoInputReceiptFromCounts,
-} from "@openllmsh/protocol";
-import { originatorHeadersFrom } from "@openllmsh/wire/lib/forwarded-headers";
+} from "@openllmsh/sdk/protocol";
+import { originatorHeadersFrom } from "@openllmsh/sdk/wire/lib/forwarded-headers";
 import { Schema } from "effect";
 import type { TUploadMediaDiagnostic } from "./cloud-client";
 import { signVideoJobId, uploadMedia } from "./cloud-client";

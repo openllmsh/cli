@@ -70,7 +70,10 @@ import {
 } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join } from "node:path";
-import { bearerApiKeyOf, parseOpenllmDaemonPort } from "@openllmsh/protocol";
+import {
+  bearerApiKeyOf,
+  parseOpenllmDaemonPort,
+} from "@openllmsh/sdk/protocol";
 // NOTE: logger.ts imports `stateDir` from this module — a benign cycle, since
 // both sides only dereference the other's exports lazily inside functions.
 import {

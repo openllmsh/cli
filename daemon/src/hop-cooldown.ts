@@ -1,8 +1,8 @@
 import type {
   TAuthRefreshCooldownReason,
   TCooldownReason,
-} from "@openllmsh/protocol";
-import { cooldownPolicyFor } from "@openllmsh/protocol";
+} from "@openllmsh/sdk/protocol";
+import { cooldownPolicyFor } from "@openllmsh/sdk/protocol";
 import { scopedSlug } from "./account-scope";
 import { runWithAccount } from "./op-context";
 import { stateScoped } from "./state-scoped";
