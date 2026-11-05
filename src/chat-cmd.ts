@@ -11,6 +11,7 @@
  * actually served the request, usage, finish reason and structured errors.
  */
 
+import { createClient } from "@openllmsh/sdk/client";
 import { CLI_VERSION } from "./cli-version";
 import { resolveGateway } from "./clients/gateway";
 import { requireCliApiKey } from "./onboarding";
@@ -283,22 +284,48 @@ export const runChat = async (args: readonly string[]): Promise<number> => {
     (parsed.format === "text" && parsed.stream);
   let res: Response;
   try {
-    res = await fetch(`${gateway.base}/v1/chat/completions`, {
-      method: "POST",
-      headers: {
-        authorization: `Bearer ${gateway.apiKey}`,
-        "content-type": "application/json",
-        "user-agent": PROMPT_USER_AGENT,
+    const client = createClient({
+      origin: gateway.base,
+      apiKey: gateway.apiKey,
+      transport: {
+        fetch: globalThis.fetch.bind(globalThis),
+        websocket: WebSocket,
       },
-      body: JSON.stringify({
-        model: parsed.model,
-        messages,
-        stream,
-        ...(stream && structured
-          ? { stream_options: { include_usage: true } }
-          : {}),
-      }),
     });
+    try {
+      if (stream) {
+        const streamed = await client.chat.completions.create(
+          {
+            model: parsed.model,
+            messages,
+            stream: true,
+            ...(structured ? { stream_options: { include_usage: true } } : {}),
+          },
+          { headers: { "user-agent": PROMPT_USER_AGENT } },
+        );
+        if (!(streamed instanceof Response)) {
+          return fail(null, `request to ${gateway.base} failed: bad response`);
+        }
+        res = streamed;
+      } else {
+        // Non-stream: still use the raw request so we keep Response semantics
+        // (status/body text) that the rest of this command expects.
+        res = await client.http.request("/v1/chat/completions", {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            "user-agent": PROMPT_USER_AGENT,
+          },
+          body: JSON.stringify({
+            model: parsed.model,
+            messages,
+            stream: false,
+          }),
+        });
+      }
+    } finally {
+      client.close();
+    }
   } catch (error) {
     return fail(
       null,

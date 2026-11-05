@@ -9,9 +9,10 @@ import {
   writeFileSync,
 } from "node:fs";
 import { dirname, join } from "node:path";
+import { createClient } from "@openllmsh/sdk/client";
 import type { SaveOptions } from "@openllmsh/sdk/mcp";
 import { MemoryClient } from "@openllmsh/sdk/mcp";
-import { API_OPERATIONS, callOperation } from "@openllmsh/sdk/openapi";
+import { API_OPERATIONS } from "@openllmsh/sdk/openapi";
 import { CLI_VERSION } from "../cli-version";
 import type { TCliConfig } from "../env";
 import { cliConfig, openllmDir } from "../env";
@@ -550,35 +551,43 @@ export const runMemoryExtraction = async (input: unknown): Promise<void> => {
         stage: "inference",
         code: "missing_operation",
       });
-    const response = await callOperation(
-      {
-        baseUrl: process.env.OPENLLM_INFERENCE_ORIGIN || config.gatewayUrl,
-        apiKey: config.apiKey,
-      },
-      operation,
-      {
-        body: {
-          model: memoryEnv("AUTO_MODEL") || "lite",
-          messages: [
-            { role: "system", content: MEMORY_EXTRACTION_PROMPT },
-            { role: "user", content: userBlock },
-          ],
-          // No `temperature`: the `lite` chain leads with subscription hops
-          // whose native runtimes have no sampling knob and decline it.
-          max_tokens: 700,
-        },
-      },
-      {
-        timeoutMs:
-          numeric(
-            memoryEnv("AUTO_TIMEOUT"),
-            DEFAULT_EXTRACT_TIMEOUT_S,
-            1,
-            300,
-          ) * 1000,
+    const ollm = createClient({
+      origin: process.env.OPENLLM_INFERENCE_ORIGIN || config.gatewayUrl,
+      apiKey: config.apiKey,
+      transport: {
         fetch: memoryHookTransport(),
+        websocket: WebSocket,
       },
-    );
+    });
+    let response: Awaited<ReturnType<typeof ollm.http.call>>;
+    try {
+      response = await ollm.http.call(
+        operation,
+        {
+          body: {
+            model: memoryEnv("AUTO_MODEL") || "lite",
+            messages: [
+              { role: "system", content: MEMORY_EXTRACTION_PROMPT },
+              { role: "user", content: userBlock },
+            ],
+            // No `temperature`: the `lite` chain leads with subscription hops
+            // whose native runtimes have no sampling knob and decline it.
+            max_tokens: 700,
+          },
+        },
+        {
+          timeoutMs:
+            numeric(
+              memoryEnv("AUTO_TIMEOUT"),
+              DEFAULT_EXTRACT_TIMEOUT_S,
+              1,
+              300,
+            ) * 1000,
+        },
+      );
+    } finally {
+      ollm.close();
+    }
     const extraction = extractionOf(response.body);
     const mutations = cloudClient(config, 5000);
     let saved = 0;
