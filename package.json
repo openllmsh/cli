@@ -13,7 +13,6 @@
   "scripts": {
     "compile": "bun scripts/compile.ts",
     "compile:host": "bun scripts/compile.ts --host",
-    "generate:sdk": "bun ../../scripts/generate-sdk-openapi.ts",
     "verify": "bun scripts/verify.ts"
   },
   "dependencies": {
