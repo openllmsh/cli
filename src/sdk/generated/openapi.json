@@ -32690,6 +32690,9 @@
                               }
                             ]
                           },
+                          "secret_outdated": {
+                            "type": "boolean"
+                          },
                           "created_at": {
                             "type": "string"
                           }
@@ -32708,6 +32711,7 @@
                           "logo_source",
                           "review",
                           "sealed",
+                          "secret_outdated",
                           "created_at"
                         ],
                         "additionalProperties": false
@@ -33397,6 +33401,9 @@
                             }
                           ]
                         },
+                        "secret_outdated": {
+                          "type": "boolean"
+                        },
                         "created_at": {
                           "type": "string"
                         }
@@ -33415,6 +33422,7 @@
                         "logo_source",
                         "review",
                         "sealed",
+                        "secret_outdated",
                         "created_at"
                       ],
                       "additionalProperties": false
@@ -34192,6 +34200,9 @@
                         }
                       ]
                     },
+                    "secret_outdated": {
+                      "type": "boolean"
+                    },
                     "created_at": {
                       "type": "string"
                     }
@@ -34210,6 +34221,7 @@
                     "logo_source",
                     "review",
                     "sealed",
+                    "secret_outdated",
                     "created_at"
                   ],
                   "additionalProperties": false
@@ -35910,6 +35922,9 @@
                         }
                       ]
                     },
+                    "secret_outdated": {
+                      "type": "boolean"
+                    },
                     "created_at": {
                       "type": "string"
                     }
@@ -35928,6 +35943,7 @@
                     "logo_source",
                     "review",
                     "sealed",
+                    "secret_outdated",
                     "created_at"
                   ],
                   "additionalProperties": false
@@ -36507,6 +36523,9 @@
                         }
                       ]
                     },
+                    "from_session": {
+                      "type": "boolean"
+                    },
                     "created_at": {
                       "type": "string"
                     },
@@ -36531,6 +36550,7 @@
                     "status",
                     "review_note",
                     "client_id",
+                    "from_session",
                     "created_at",
                     "reviewed_at"
                   ],
@@ -37083,6 +37103,9 @@
                               }
                             ]
                           },
+                          "from_session": {
+                            "type": "boolean"
+                          },
                           "created_at": {
                             "type": "string"
                           },
@@ -37107,6 +37130,7 @@
                           "status",
                           "review_note",
                           "client_id",
+                          "from_session",
                           "created_at",
                           "reviewed_at"
                         ],
@@ -38105,19 +38129,13 @@
                     ]
                   },
                   "redirect_uris": {
-                    "anyOf": [
-                      {
-                        "type": "array",
-                        "items": {
-                          "type": "string",
-                          "maxLength": 2048
-                        },
-                        "maxItems": 5
-                      },
-                      {
-                        "type": "null"
-                      }
-                    ]
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "maxLength": 2048
+                    },
+                    "minItems": 1,
+                    "maxItems": 5
                   },
                   "description": {
                     "type": "string",
@@ -38142,6 +38160,7 @@
                 "required": [
                   "email",
                   "name",
+                  "redirect_uris",
                   "description"
                 ],
                 "additionalProperties": false
