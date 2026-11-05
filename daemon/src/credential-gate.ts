@@ -1,5 +1,8 @@
 import type { TCredentialGateMode } from "@openllmsh/sdk/protocol";
-import { isUsableOpenllmApiKey } from "@openllmsh/sdk/protocol";
+import {
+  isUsableOpenllmApiKey,
+  OPENLLM_API_KEY_PREFIX,
+} from "@openllmsh/sdk/protocol";
 import {
   applyPersistedApiKey,
   daemonEnv,
@@ -36,6 +39,30 @@ const signInUrl = (): string => `${daemonEnv().cloudOrigin}/sign-in`;
 
 export const missingKeyDiagnostic = (): string =>
   `[openllm] API key required.\nRun \`openllm login\` in a terminal to sign in through the browser (${signInUrl()}), or \`openllm login --api-key\` to paste a key.\n`;
+
+export type TLoopbackCallerKey =
+  | { readonly ok: true; readonly key: string }
+  | { readonly ok: false; readonly message: string };
+
+/**
+ * The key a DIRECT loopback request runs as. A bearer that claims to be an
+ * OpenLLM key (`sk-llm-` prefix) is the caller's own, even when malformed or
+ * revoked: the cloud rejects it, and it never falls back to the saved key.
+ * A missing bearer or a client placeholder (`dummy-key`, `ollama`, …) runs
+ * as the daemon's saved key — a local process can already read that file.
+ * Never use this for tunneled or non-loopback requests.
+ */
+export const resolveLoopbackCallerKey = (
+  authorization: string | null,
+): TLoopbackCallerKey => {
+  const bearer = authorization?.match(/^Bearer\s+(\S+)$/i)?.[1];
+  if (bearer?.startsWith(OPENLLM_API_KEY_PREFIX)) {
+    return { ok: true, key: bearer };
+  }
+  const saved = daemonEnv().apiKey?.trim();
+  if (saved !== undefined && saved.length > 0) return { ok: true, key: saved };
+  return { ok: false, message: missingKeyDiagnostic().trim() };
+};
 
 /** Make an inherited key durable in the service's env file. The anchor line
  *  is left alone: anchors are written by `openllm login` / `openllm daemon

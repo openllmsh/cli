@@ -57,6 +57,7 @@ import {
 } from "./config";
 import { notePresenceActivity } from "./control-channel";
 import { corsHeaders, errorJson, isPreflight, preflightResponse } from "./cors";
+import { resolveLoopbackCallerKey } from "./credential-gate";
 import { isOAuthSlug } from "./delegation";
 import { runEmbeddings } from "./embeddings-walker";
 import { forwardToCloud, passthroughToOrigin } from "./forward";
@@ -177,22 +178,32 @@ export const handleInference = async (
 };
 
 const handleInferenceIn = async (
-  req: Request,
+  inbound: Request,
   session: HoldSession,
   direct: boolean,
 ): Promise<Response> => {
   // CORS/PNA preflight — the dashboard fetches this surface cross-origin
   // (HTTPS page → http://127.0.0.1) for subscription models.
-  if (isPreflight(req)) return preflightResponse(req);
+  if (isPreflight(inbound)) return preflightResponse(inbound);
 
-  const hopGrant = direct ? null : req.headers.get(HOP_GRANT_HEADER);
+  const hopGrant = direct ? null : inbound.headers.get(HOP_GRANT_HEADER);
   const teamGrantToken = currentTeamGrantToken();
-  const authorization = req.headers.get("authorization");
-  const callerKey = direct
-    ? authorization?.match(/^Bearer\s+(\S+)$/i)?.[1]
-    : undefined;
-  if (direct && callerKey === undefined) {
-    return withCors(req, errorJson(401, "Missing bearer token", "auth_error"));
+  let callerKey: string | undefined;
+  let req = inbound;
+  if (direct) {
+    // Loopback only: a keyless or placeholder bearer runs as the saved key.
+    const resolved = resolveLoopbackCallerKey(
+      inbound.headers.get("authorization"),
+    );
+    if (!resolved.ok) {
+      return withCors(inbound, errorJson(401, resolved.message, "auth_error"));
+    }
+    callerKey = resolved.key;
+    // Every passthrough forwards the inbound header, so replace it: a
+    // placeholder bearer must never reach the cloud.
+    const headers = new Headers(inbound.headers);
+    headers.set("authorization", `Bearer ${callerKey}`);
+    req = new Request(inbound, { headers });
   }
 
   // A client pointed DIRECTLY at the daemon port is the strongest possible
