@@ -12,6 +12,7 @@ import {
   readSync,
 } from "node:fs";
 import { join } from "node:path";
+import { CLI_VERSION } from "./cli-version";
 import type { TCliConfig } from "./env";
 import { cliConfig } from "./env";
 import { sessionHostDir } from "./session-host";
@@ -375,6 +376,7 @@ export const runAdHookCommand = async (
         headers: {
           authorization: `Bearer ${config.apiKey}`,
           "content-type": "application/json",
+          "user-agent": `OpenLLM/${CLI_VERSION} (${process.platform} ${process.arch})`,
         },
         body: JSON.stringify({
           session_id: input.sessionId,
