@@ -1,7 +1,8 @@
 ## OpenLLM tools
 
 ### Cross-session memory
-- `mcp__openllm__memory` (action: "save" | "forget") and `mcp__openllm__recall`
+- `mcp__openllm__openllm-memory__memory` (action: "save" | "forget") and
+  `mcp__openllm__openllm-memory__recall`
   are for remembering things across conversations. If the user asks to bring
   existing memory files into OpenLLM, run `openllm exec memory import [path]`
   (reads only; `--dry-run` previews).
