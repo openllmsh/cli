@@ -121,6 +121,7 @@ packages/sdk/vault/passkey.ts
 packages/sdk/vault/phrase.ts
 packages/sdk/vault/pin.ts
 packages/sdk/vault/public-key-seal.ts
+packages/sdk/vault/seed.ts
 packages/sdk/vault/team.ts
 packages/sdk/vault/wrapped.ts
 packages/sdk/wire/adapters/messages/anthropic-map.ts
