@@ -44,12 +44,12 @@ const PROD_ORIGINS: ReadonlySet<string> = new Set([
 
 /**
  * OpenLLM's own Vercel preview deployments:
- *   `openllm-<hash>-quantide.vercel.app`
- *   `openllm-git-<branch>-quantide.vercel.app`
- * Anchored to the `openllm` project + `quantide` team so a stranger's
+ *   `openllm-<hash>-openllm.vercel.app`
+ *   `openllm-git-<branch>-openllm.vercel.app`
+ * Anchored to the `openllm` project + `openllm` team so a stranger's
  * `*.vercel.app` can't reach the daemon's localhost control surface.
  */
-const PREVIEW_ORIGIN = /^https:\/\/openllm-[a-z0-9-]+-quantide\.vercel\.app$/;
+const PREVIEW_ORIGIN = /^https:\/\/openllm-[a-z0-9-]+-openllm\.vercel\.app$/;
 
 /** A real `http(s)://localhost[:port]` origin — parsed, not substring-matched, so
  *  `https://localhost.attacker.com` / `https://evil-localhost.io` can't slip past

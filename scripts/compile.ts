@@ -80,12 +80,12 @@ export const COMPILE_BUN_FLAGS = [
 ] as const;
 
 // OpenLLM's own Vercel preview deployments, anchored to the `openllm` project +
-// `quantide` team — the hostname-level twin of `PREVIEW_ORIGIN` in
+// `openllm` team — the hostname-level twin of `PREVIEW_ORIGIN` in
 // `packages/cli/daemon/src/cors.ts` (keep the two in sync). A bare
 // `.endsWith(".vercel.app")` would let a poisoned build env bake ANY stranger's
 // `*.vercel.app` origin into shipped binaries.
 export const OPENLLM_PREVIEW_HOST =
-  /^openllm-[a-z0-9-]+-quantide\.vercel\.app$/;
+  /^openllm-[a-z0-9-]+-openllm\.vercel\.app$/;
 
 export const isAllowedCloudHost = (host: string): boolean =>
   host === "localhost" ||
@@ -104,7 +104,7 @@ export const isAllowedCloudHost = (host: string): boolean =>
  * - the default      → accepted verbatim.
  * - `https://` with a hostname that is `openllm.sh`, a `*.openllm.sh`
  *   subdomain (e.g. `dev.openllm.sh` staging), or an OpenLLM-owned
- *   `openllm-<...>-quantide.vercel.app` preview → accepted (the documented
+ *   `openllm-<...>-openllm.vercel.app` preview → accepted (the documented
  *   dev/preview/self-host workflow; `dist.ts` bakes whatever
  *   `OPENLLM_CLOUD_ORIGIN` is set when packaging a self-host build).
  * - `http://` ONLY for `localhost` / `127.0.0.1` (local dev).
@@ -134,7 +134,7 @@ const resolveCloudOrigin = (): string => {
   if (!schemeOk || !isAllowedCloudHost(url.hostname)) {
     throw new Error(
       `OPENLLM_CLOUD_ORIGIN (${raw}) is not allow-listed — must be https://openllm.sh, ` +
-        `a *.openllm.sh subdomain, an openllm-<...>-quantide.vercel.app preview, ` +
+        `a *.openllm.sh subdomain, an openllm-<...>-openllm.vercel.app preview, ` +
         `or http://localhost|127.0.0.1; ` +
         `refusing to bake an unrecognised cloud origin into the CLI binary`,
     );
