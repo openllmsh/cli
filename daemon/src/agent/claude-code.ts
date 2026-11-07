@@ -1016,6 +1016,35 @@ const TRUST_PROMPT = /trustthefilesinthisfolder|doyoutrust|itrustthisfolder/i;
 /** Newer Claude lists "No, exit" first, with the cursor on it. */
 const TRUST_CURSOR_ON_NO = /❯(?:\d+\.)?No\b/;
 const DOWN_ARROW = "\x1b[B";
+const UP_ARROW = "\x1b[A";
+/**
+ * First-run onboarding's "Detected a custom API key in your environment · Do
+ * you want to use this API key?" (an `ANTHROPIC_API_KEY` Claude has never
+ * seen, e.g. from the user's own settings `env`). It lists "Yes", then "No
+ * (recommended)" with the cursor on No. Asked on the web like folder trust.
+ */
+const API_KEY_PROMPT = /doyouwanttousethisapikey\?/i;
+const API_KEY_CURSOR_ON_NO = /❯(?:\d+\.)?No\(/;
+/**
+ * The rest of Claude's first-run onboarding: screens with nothing to decide
+ * for the session, answered with their default so a fresh install doesn't
+ * stall before `SessionStart`. Theme: Enter keeps the highlighted theme
+ * (`/theme` changes it later). Security notes: Enter continues. Terminal
+ * setup: Esc is its "skip" (it would otherwise edit terminal settings).
+ */
+const ONBOARDING_SCREENS: readonly {
+  readonly id: string;
+  readonly pattern: RegExp;
+  readonly key: string;
+}[] = [
+  { id: "theme", pattern: /tochangethislater,run\/theme/i, key: "\r" },
+  { id: "security", pattern: /securitynotes:/i, key: "\r" },
+  {
+    id: "terminal-setup",
+    pattern: /useclaudecode'sterminalsetup\?/i,
+    key: "\x1b",
+  },
+];
 /**
  * Claude Code's `chat:queueSubmit` (ctrl+x enter): queue what's in the input
  * on the running turn. Claude folds it in at the next tool boundary and never
@@ -1047,6 +1076,7 @@ type TPending =
       readonly resolve: (reply: TJson | null) => void;
     }
   | { readonly kind: "trust" }
+  | { readonly kind: "api-key" }
   | { readonly kind: "model"; readonly model: string };
 
 export type TClaudeTuiDeps = {
@@ -1108,6 +1138,9 @@ export const createClaudeTuiSession = (
   const pending = new Map<string, TPending>();
   let trustRequestId: string | null = null;
   let trustAnswered = false;
+  let apiKeyAnswered = false;
+  /** Onboarding screens already answered with their default. */
+  const onboardingAnswered = new Set<string>();
   let trustSeenAt = 0;
   /** Whitespace-free, ANSI-stripped recent screen text (trust detection only). */
   let recentScreen = "";
@@ -1427,7 +1460,11 @@ export const createClaudeTuiSession = (
       pump();
     } catch {}
     for (const [id, request] of pending) {
-      if (request.kind !== "trust" && request.kind !== "model")
+      if (
+        request.kind !== "trust" &&
+        request.kind !== "api-key" &&
+        request.kind !== "model"
+      )
         request.resolve(null);
       emit({ type: "request.resolved", request_id: id, decision: "cancel" });
     }
@@ -1493,7 +1530,36 @@ export const createClaudeTuiSession = (
       recentScreen +
       new TextDecoder().decode(bytes).replace(ANSI, "").replace(/\s+/g, "")
     ).slice(-4096);
-    if (trustRequestId !== null || !TRUST_PROMPT.test(recentScreen)) return;
+    if (trustRequestId !== null) return;
+    const screen = ONBOARDING_SCREENS.find(
+      (entry) =>
+        !onboardingAnswered.has(entry.id) && entry.pattern.test(recentScreen),
+    );
+    if (screen !== undefined) {
+      onboardingAnswered.add(screen.id);
+      recentScreen = "";
+      // Same mount delay as a trust answer: keys typed earlier are lost.
+      setTimeout(() => {
+        if (!ended) writeText(screen.key);
+      }, deps.trustAnswerDelayMs ?? TRUST_ANSWER_MIN_DELAY_MS);
+      return;
+    }
+    if (!apiKeyAnswered && API_KEY_PROMPT.test(recentScreen)) {
+      requestCounter += 1;
+      trustRequestId = `apikey${requestCounter}`;
+      trustSeenAt = Date.now();
+      pending.set(trustRequestId, { kind: "api-key" });
+      emit({
+        type: "request.opened",
+        request_id: trustRequestId,
+        request_kind: "other",
+        title: "Use this API key?",
+        detail:
+          "Claude Code found an ANTHROPIC_API_KEY in its environment and asks whether to use it. Decline to keep the session on OpenLLM (recommended).",
+      });
+      return;
+    }
+    if (!TRUST_PROMPT.test(recentScreen)) return;
     requestCounter += 1;
     trustRequestId = `trust${requestCounter}`;
     trustSeenAt = Date.now();
@@ -1684,7 +1750,8 @@ export const createClaudeTuiSession = (
       maybeReady();
       if (!ready && readyTimer === undefined) {
         readyMaxTimer = setTimeout(() => {
-          if (ready || ended || started) return;
+          // An open startup request is already asking on the web.
+          if (ready || ended || started || trustRequestId !== null) return;
           // Never paste blind: a dialog would take the keystrokes. Say where
           // the session is waiting; SessionStart still opens input later.
           emit({
@@ -1997,6 +2064,50 @@ export const createClaudeTuiSession = (
             message: "Model not switched.",
           });
         }
+        return true;
+      }
+      if (request.kind === "api-key") {
+        if (command.decision === undefined) {
+          pending.set(command.request_id, request);
+          return false;
+        }
+        trustRequestId = null;
+        apiKeyAnswered = true;
+        const accept =
+          command.decision === "accept" ||
+          command.decision === "accept_for_session";
+        // The cursor starts on "No (recommended)"; Yes is the row above it.
+        // Esc is its cancel (= No) when the cursor wasn't seen.
+        const onNo = API_KEY_CURSOR_ON_NO.test(recentScreen);
+        const keys = accept
+          ? onNo
+            ? [UP_ARROW, "\r"]
+            : ["\r"]
+          : onNo
+            ? ["\r"]
+            : [ESC];
+        recentScreen = "";
+        const wait = Math.max(
+          0,
+          trustSeenAt +
+            (deps.trustAnswerDelayMs ?? TRUST_ANSWER_MIN_DELAY_MS) -
+            Date.now(),
+        );
+        setTimeout(() => {
+          if (ended) return;
+          writeText(keys[0] ?? "");
+          const second = keys[1];
+          if (second !== undefined)
+            setTimeout(() => {
+              if (!ended) writeText(second);
+            }, submitDelayMs);
+        }, wait);
+        emit({
+          type: "request.resolved",
+          request_id: command.request_id,
+          decision: accept ? "accept" : "decline",
+        });
+        maybeReady();
         return true;
       }
       if (request.kind === "trust") {
