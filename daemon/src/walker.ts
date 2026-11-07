@@ -3073,6 +3073,15 @@ const walkPlan = async (
       staleCapMs: GATE_STALE_CAP_MS,
       now,
     });
+    if (order.length === 0 && signedIn.length > 0) {
+      // Every local account is exhausted or cooling. Another device of this
+      // user may hold a different account with quota — ask it before dialling
+      // a dead account here (or advancing the plan).
+      const tunneled = await tryFleetTunnel(hop, args);
+      if (tunneled !== null) {
+        return { response: tunneled, servedLocally: false };
+      }
+    }
     if (order.length === 0 && finalHop && fallbackIndex !== undefined) {
       order = [fallbackIndex];
     }
@@ -3225,16 +3234,39 @@ const walkPlan = async (
       return HOP_CONTINUE;
     }
 
+    const gateSnapshot = await usageForActiveAccount(
+      hop.provider,
+      accountHashByProvider,
+      connectedByProvider,
+    );
+    const gateMeter = lookupCatalogEntry(hop.modelId)?.subscription_meter;
+    const gateNow = Date.now();
+    // This device's only account is exhausted or cooling: another device of
+    // this user may hold a different account with quota — ask it before
+    // dialling a dead account (the final hop) or advancing the plan. The
+    // multi-account loop owns this decision itself (`fleetFallback: false`).
+    if (
+      opts.fleetFallback !== false &&
+      (isHopCoolingDown(hop.provider, hop.modelId, gateNow) ||
+        quotaGateDecision({
+          snapshot: gateSnapshot,
+          meter: gateMeter,
+          finalHop: false,
+          staleCapMs: GATE_STALE_CAP_MS,
+          now: gateNow,
+        }).kind === "skip")
+    ) {
+      const tunneled = await tryFleetTunnel(hop, args);
+      if (tunneled !== null) {
+        return { response: tunneled, servedLocally: false };
+      }
+    }
     const decision = quotaGateDecision({
-      snapshot: await usageForActiveAccount(
-        hop.provider,
-        accountHashByProvider,
-        connectedByProvider,
-      ),
-      meter: lookupCatalogEntry(hop.modelId)?.subscription_meter,
+      snapshot: gateSnapshot,
+      meter: gateMeter,
       finalHop,
       staleCapMs: GATE_STALE_CAP_MS,
-      now: Date.now(),
+      now: gateNow,
     });
     if (decision.kind === "skip") {
       lastError = decision.reason;
@@ -3369,6 +3401,7 @@ const walkPlan = async (
             return serveSubscriptionHop(hop, finalHop, {
               forceContextAttempt,
               retryAttempt: 1,
+              fleetFallback: opts.fleetFallback,
             });
           }
           const reason = `native hop ${hop.modelId} returned ${native.status}`;
@@ -3539,6 +3572,7 @@ const walkPlan = async (
         return serveSubscriptionHop(hop, finalHop, {
           forceContextAttempt,
           retryAttempt: 1,
+          fleetFallback: opts.fleetFallback,
         });
       }
       addHopFailure(
@@ -4015,6 +4049,9 @@ const walkPlan = async (
           const served = await serveSubscriptionHop(hop, false, {
             forceContextAttempt: false,
             retryAttempt: 0,
+            // The recovery pass re-dials THIS device's cooling account on
+            // purpose; it must not be diverted to a peer.
+            fleetFallback: false,
           });
           // A bypass failure re-marks the hop with THIS walk's session key (setter ==
           // mine), so it can never be reconsidered here — at-most-once, no loop. A

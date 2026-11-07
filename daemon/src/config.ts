@@ -248,10 +248,14 @@ export const planCacheEnabled = (): boolean => snapshot.plan_cache === true;
  * back to itself.
  */
 export const fleetSubscriptionServerFor = (provider: string): string | null => {
-  const keyId =
-    snapshot.fleet_subscriptions?.find((f) => f.provider === provider)
-      ?.key_id ?? null;
-  return keyId === daemonApiKeyId() ? null : keyId;
+  // Skip THIS device, not the whole list: when this device is listed first,
+  // a peer listed after it is still a valid server.
+  const self = daemonApiKeyId();
+  return (
+    snapshot.fleet_subscriptions?.find(
+      (f) => f.provider === provider && f.key_id !== self,
+    )?.key_id ?? null
+  );
 };
 
 /** Serving daemon X25519 pubkey for a fleet peer, when its bootstrap status supplied one. */
