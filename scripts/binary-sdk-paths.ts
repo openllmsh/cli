@@ -85,7 +85,20 @@ export const readBinarySdkPaths = (): readonly string[] =>
     .map((line) => line.trim())
     .filter((line) => line.length > 0);
 
-if (import.meta.main) {
+if (import.meta.main && process.argv.includes("--check")) {
+  // Side-effect-free drift check for the pre-push hook: `bun test --changed`
+  // never selects the parity test, which imports none of the SDK files it
+  // gates, so a new SDK file the binary compiles in would slip through.
+  const expected = renderBinarySdkPaths(await computeBinarySdkPaths());
+  const committed = renderBinarySdkPaths(readBinarySdkPaths());
+  if (expected !== committed) {
+    process.stderr.write(
+      `[binary-sdk-paths] ${BINARY_SDK_PATHS_FILE} is stale — run \`bun run build:cli-binary-paths\` and commit it.\n`,
+    );
+    process.exit(1);
+  }
+  process.stdout.write(`[binary-sdk-paths] OK — ${BINARY_SDK_PATHS_FILE} matches the binary's closure\n`);
+} else if (import.meta.main) {
   const paths = await computeBinarySdkPaths();
   writeFileSync(
     join(REPO_ROOT, BINARY_SDK_PATHS_FILE),

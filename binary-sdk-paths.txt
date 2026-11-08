@@ -44,6 +44,7 @@ packages/sdk/protocol/image-edit-parse.ts
 packages/sdk/protocol/images.ts
 packages/sdk/protocol/index.ts
 packages/sdk/protocol/inference-headers.ts
+packages/sdk/protocol/keepalive.ts
 packages/sdk/protocol/local-auth.ts
 packages/sdk/protocol/local-device-control.ts
 packages/sdk/protocol/local-provider.ts
