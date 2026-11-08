@@ -176,13 +176,17 @@ const withPrivateInput = async <T>(
   }
 };
 
-/** Forced demuxer + file-only protocols: no playlist/network indirection,
- *  and the only file ffmpeg is handed is our private copy. */
+/** Forced demuxer + file-only protocol: no playlist, network or concat
+ *  indirection. `file` would let a container reference OTHER local files;
+ *  of the forced demuxers only mov can (data references), so they are
+ *  pinned off, and ffmpeg runs in the private dir so nothing resolves
+ *  relative to the caller's cwd. */
 const inputArgs = (demuxer: TDemuxer, inputPath: string): string[] => [
   "-hide_banner",
   "-nostdin",
   "-protocol_whitelist",
   "file",
+  ...(demuxer === "mov" ? ["-enable_drefs", "0"] : []),
   "-f",
   demuxer,
   "-i",
@@ -196,9 +200,11 @@ const runFfmpeg = (
   args: ReadonlyArray<string>,
   timeoutMs: number,
   maxStderrBytes: number,
+  cwd: string,
 ): Promise<TFfmpegRun> =>
   new Promise<TFfmpegRun>((resolveRun, rejectRun): void => {
     const child = spawn(executable, args, {
+      cwd,
       shell: false,
       stdio: ["ignore", "ignore", "pipe"],
     });
@@ -289,6 +295,7 @@ export const convertAudio = async (
       ],
       options.timeoutMs ?? CONVERSION_TIMEOUT_MS,
       MAX_STDERR_BYTES,
+      dir,
     );
     if (run.code !== 0) throw new Error(CONVERSION_FAILED);
     const bytes = await readBoundedAudio(output, maxBytes);

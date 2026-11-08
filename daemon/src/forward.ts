@@ -49,7 +49,8 @@ const WHOLE_BODY_PATHS: ReadonlySet<string> = new Set([
 
 /** The header budget for a request to this origin path. */
 export const originHeaderTimeoutFor = (pathname: string): number =>
-  WHOLE_BODY_PATHS.has(pathname)
+  // The listener also serves `/api/v1/*`, forwarded with the prefix intact.
+  WHOLE_BODY_PATHS.has(pathname.replace(/^\/api(?=\/v1\/)/, ""))
     ? Math.max(originHeaderTimeoutMs(), WHOLE_BODY_ORIGIN_TIMEOUT_MS)
     : originHeaderTimeoutMs();
 
