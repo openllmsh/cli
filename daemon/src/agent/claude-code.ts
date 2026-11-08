@@ -1027,8 +1027,9 @@ const API_KEY_PROMPT = /doyouwanttousethisapikey\?/i;
 /**
  * The "WARNING: Claude Code running in Bypass Permissions mode" screen Claude
  * shows once per machine when launched with `--dangerously-skip-permissions`.
- * It only appears when the session was granted skip-permissions (the picker
- * / `-d` gate that choice), so it is accepted on the user's behalf. It lists
+ * Accepted on the user's behalf ONLY when this session holds the grant (the
+ * picker / `-d`, or a resume of a session started that way); Claude's own
+ * settings selecting bypass mode never count as one. It lists
  * "No, exit" first with the cursor on it, then "Yes, I accept". Left alone it
  * stalled the session until the ready timeout reported "sign-in or a dialog".
  */
@@ -1546,6 +1547,7 @@ export const createClaudeTuiSession = (
     ).slice(-4096);
     if (trustRequestId !== null) return;
     if (
+      options.skipPermissions &&
       !bypassAnswered &&
       BYPASS_PROMPT.test(recentScreen) &&
       BYPASS_ACCEPT_OPTION.test(recentScreen)

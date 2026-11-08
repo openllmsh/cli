@@ -67,9 +67,10 @@ const deleteSession = async (
       message: "The session's process did not stop.",
     };
   deleteAgentAttachments(sessionId);
-  forgetSkipPermissions(sessionId);
   const result = deleteClaudeSessionFiles({ sessionId, cwd: null });
-  return result.ok ? { ok: true } : result;
+  if (!result.ok) return result;
+  forgetSkipPermissions(sessionId);
+  return { ok: true };
 };
 
 const runAttachmentReaper = (): void => {

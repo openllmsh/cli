@@ -376,7 +376,6 @@ export const runSessionHost = (
   const resumedId = args.resumeSessionId ?? resumedIdOf(args.vendorArgs);
   const dangerous =
     args.dangerous ||
-    skipPermissionsRemembered(args.id) ||
     (resumedId !== null && skipPermissionsRemembered(resumedId));
   const root = join(stateDir(), "sessions");
   const claim = join(root, `.${args.id}.claim`);
