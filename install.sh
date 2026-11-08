@@ -458,6 +458,18 @@ find_available_port() {
   return 1
 }
 
+# Is an OpenLLM daemon (this machine's, sharing ~/.openllm) answering on $1?
+# `/status` is its unauthenticated loopback route and reports its own port.
+openllm_daemon_on_port() {
+  local body
+  has_command curl || return 1
+  body="$(curl -fsS --noproxy '*' --max-time 2 "http://127.0.0.1:$1/status" 2>/dev/null)" || return 1
+  case "$body" in
+    *"\"port\":$1,"*|*"\"port\":$1}"*) return 0 ;;
+  esac
+  return 1
+}
+
 DAEMON_PORT="${OPENLLM_DAEMON_PORT:-}"
 if [ -n "$DAEMON_PORT" ]; then
   if NORMALIZED_PORT="$(normalize_daemon_port "$DAEMON_PORT")"; then
@@ -479,6 +491,13 @@ fi
 # Neither an explicit nor a persisted port exists yet — a genuinely
 # first-ever choice, never a reassignment. Probe the default and, only here,
 # walk forward to the next free port in a small bounded range.
+# An env file holding only some values (say, a hand-set OPENLLM_CLOUD_ORIGIN)
+# must not change the defaults: when an OpenLLM daemon already answers on the
+# default port, that is this install's daemon — keep it there instead of
+# walking away from our own listener.
+if [ -z "$DAEMON_PORT" ] && openllm_daemon_on_port "$DEFAULT_DAEMON_PORT"; then
+  DAEMON_PORT="$DEFAULT_DAEMON_PORT"
+fi
 if [ -z "$DAEMON_PORT" ]; then
   if RESOLVED_PORT="$(find_available_port "$DEFAULT_DAEMON_PORT" "$PORT_SCAN_LIMIT")"; then
     DAEMON_PORT="$RESOLVED_PORT"
