@@ -28,10 +28,12 @@ import {
 } from "@openllmsh/sdk/wire/features/account-rank";
 import { GATE_STALE_CAP_MS } from "@openllmsh/sdk/wire/features/quota-gate";
 import { readRoster } from "./account-roster";
+import { AccountKeyedMap } from "./account-scope";
 import type { TCliProvider } from "./cli-paths";
 import { lookupCatalogEntry } from "./config";
 import { getDelegate } from "./delegation";
 import { isHopCoolingDown, markHopCooldown } from "./hop-cooldown";
+import { mediaHttpErrorCode } from "./media-retry";
 import { runWithAccount } from "./op-context";
 import { peekUsageForQuotaGate, sampleUsageOnExhaustion } from "./usage-cache";
 
@@ -191,10 +193,18 @@ export const planSubscriptionAccounts = async (
 export const accountCooldownReasonFor = (
   status: number,
 ): TCooldownReason | undefined => {
-  if (status === 402) return "quota_exhausted";
-  if (status === 429) return "rate_limit";
-  if (status === 401 || status === 403) return "auth";
-  return undefined;
+  // One classifier for media statuses (`mediaHttpErrorCode`); only its
+  // account-level codes map to a cooldown.
+  switch (mediaHttpErrorCode(status)) {
+    case "quota_exhausted":
+      return "quota_exhausted";
+    case "rate_limited":
+      return "rate_limit";
+    case "auth_error":
+      return "auth";
+    default:
+      return undefined;
+  }
 };
 
 /**
@@ -292,9 +302,16 @@ export type TAccountAttempt<TResult> = {
   readonly release?: () => Promise<void> | void;
 };
 
-export type TAccountAttemptContext = {
-  /** Other accounts still to try after this one. */
-  readonly siblingsRemaining: number;
+export type TServeAcrossAccountsOptions<TResult> = {
+  /** The plan's last hop: never-drop-all dials the least-bad account. */
+  readonly finalHop: boolean;
+  /** Stop trying further accounts once the client has gone. */
+  readonly signal: AbortSignal;
+  /**
+   * The result when every signed-in account is cooling or exhausted on a
+   * non-final hop — no dial; the caller advances the plan with it.
+   */
+  readonly exhausted: () => TResult;
 };
 
 /**
@@ -305,16 +322,24 @@ export type TAccountAttemptContext = {
  *
  * A single-account provider, or one with no signed-in account, is dialled once
  * on the ambient account, as before. When every signed-in account is cooling
- * or exhausted the least-bad one is still dialled for a real upstream answer.
+ * or exhausted, a non-final hop is skipped (`exhausted`) and the final hop
+ * still dials the least-bad account for a real upstream answer — as chat.
  */
 export const serveAcrossAccounts = async <TResult>(
   hop: THopRef,
-  attempt: (ctx: TAccountAttemptContext) => Promise<TAccountAttempt<TResult>>,
+  attempt: () => Promise<TAccountAttempt<TResult>>,
+  options: TServeAcrossAccountsOptions<TResult>,
 ): Promise<TResult> => {
+  const { finalHop, signal } = options;
+  // Keyed per account (ambient `runWithAccount`): a plain Map would hand every
+  // account the first one's auth and usage.
   const plan = await planSubscriptionAccounts(hop, {
-    connectedByProvider: new Map(),
-    accountHashByProvider: new Map(),
+    connectedByProvider: new AccountKeyedMap(),
+    accountHashByProvider: new AccountKeyedMap(),
   });
+  if (plan !== null && plan.signedIn.length > 0 && plan.ranked.length === 0) {
+    if (!finalHop) return options.exhausted();
+  }
   const order =
     plan === null || plan.signedIn.length === 0
       ? null
@@ -324,7 +349,7 @@ export const serveAcrossAccounts = async <TResult>(
           ? [plan.fallbackIndex]
           : null;
   if (order === null) {
-    const only = await attempt({ siblingsRemaining: 0 });
+    const only = await attempt();
     coolOnFailure(hop, only.failure);
     return only.result;
   }
@@ -333,11 +358,15 @@ export const serveAcrossAccounts = async <TResult>(
     if (index === undefined) throw new Error("account order exhausted");
     const siblingsRemaining = order.length - 1 - i;
     const dialed = await runWithAccount(index, async () => {
-      const outcome = await attempt({ siblingsRemaining });
+      const outcome = await attempt();
       coolOnFailure(hop, outcome.failure);
       return outcome;
     });
-    if (siblingsRemaining === 0 || dialed.failure === undefined) {
+    if (
+      siblingsRemaining === 0 ||
+      dialed.failure === undefined ||
+      signal.aborted
+    ) {
       return dialed.result;
     }
     await dialed.release?.();

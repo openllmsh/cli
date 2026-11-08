@@ -576,6 +576,16 @@ export const runVideoCreate = async (args: TWalkArgs): Promise<Response> => {
         });
         return mediaDialAttempt({ acquired, resp, accountIndex });
       },
+      {
+        finalHop: last,
+        signal: args.req.signal,
+        // Every account cooling/exhausted: advance like a missing credential.
+        exhausted: () => ({
+          acquired: "retry" as const,
+          resp: null,
+          accountIndex: currentAccountIndex(),
+        }),
+      },
     );
     const { acquired: upstream, resp } = dialed;
     if (upstream === "retry") {

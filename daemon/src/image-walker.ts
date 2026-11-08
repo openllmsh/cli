@@ -710,6 +710,12 @@ export const runImageWalker = async (args: TWalkArgs): Promise<Response> => {
           });
           return mediaDialAttempt({ acquired, resp });
         },
+        {
+          finalHop: last,
+          signal: args.req.signal,
+          // Every account cooling/exhausted: advance like a missing credential.
+          exhausted: () => ({ acquired: "retry" as const, resp: null }),
+        },
       );
       if (acquired === "retry") {
         if (
@@ -1133,6 +1139,12 @@ export const runImageEditWalker = async (
           signal: args.req.signal,
         });
         return mediaDialAttempt({ acquired, resp });
+      },
+      {
+        finalHop: last,
+        signal: args.req.signal,
+        // Every account cooling/exhausted: advance like a missing credential.
+        exhausted: () => ({ acquired: "retry" as const, resp: null }),
       },
     );
     if (acquired === "retry") {

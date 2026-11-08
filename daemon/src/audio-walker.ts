@@ -539,7 +539,8 @@ export const runAudioTranscriptionWalker = async (
           );
     // One dial per signed-in account: a 402/429/401/403 from one account
     // moves on to the next (`serveAcrossAccounts`). claude_code streams over
-    // a WebSocket below, so only its credential is acquired per account.
+    // a WebSocket below, so only its credential is acquired per account: a
+    // dictation session failure carries no HTTP status to classify.
     const dialed = await serveAcrossAccounts(
       hop,
       async (): Promise<TAccountAttempt<TAudioDial>> => {
@@ -566,6 +567,12 @@ export const runAudioTranscriptionWalker = async (
           signal: args.req.signal,
         });
         return mediaDialAttempt({ acquired, resp, startedAt });
+      },
+      {
+        finalHop: last,
+        signal: args.req.signal,
+        // Every account cooling/exhausted: advance like a missing credential.
+        exhausted: () => ({ acquired: "retry" as const, resp: null, startedAt: 0 }),
       },
     );
     const acquired = dialed.acquired;
@@ -1036,6 +1043,12 @@ export const runAudioSpeechWalker = async (
           signal: args.req.signal,
         });
         return mediaDialAttempt({ acquired, resp, startedAt });
+      },
+      {
+        finalHop: last,
+        signal: args.req.signal,
+        // Every account cooling/exhausted: advance like a missing credential.
+        exhausted: () => ({ acquired: "retry" as const, resp: null, startedAt: 0 }),
       },
     );
     const acquired = dialed.acquired;
