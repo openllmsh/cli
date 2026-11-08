@@ -356,7 +356,7 @@ The adapter uploads the bytes as multipart (`uploadTranscription` in
 up to `TRANSCRIPTION_TIMEOUT_MS` (300 s, the gateway's `maxDuration`) rather
 than the generic 120 s tool ceiling, and redacts echoed audio. It opts in to
 **keepalive** (`x-openllm-keepalive: 1`, `@openllmsh/sdk/protocol`
-`keepalive.ts`): an answer ready within 60 s comes back unchanged with its real
+`keepalive.ts`): an answer ready within 30 s comes back unchanged with its real
 status, while a slower one gets `200` at once, a space every 20 s, then an
 envelope carrying the real status, `x-openllm-*` headers and body, which
 `unwrapKeepaliveResponse` turns back into that response. Without it, the edge

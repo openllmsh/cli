@@ -19,7 +19,7 @@ type TDemuxer = "wav" | "ogg" | "flac" | "mp3" | "matroska" | "mov";
 type TAudioFormat = {
   mime: string;
   demuxer: TDemuxer;
-  /** Set when an API-key upload needs WAV (historical: Ogg/FLAC/MP4). */
+  /** Set when an API-key upload must be re-encoded (Ogg/FLAC/MP4 → WebM/Opus). */
   convert?: "ogg" | "flac" | "mov";
 };
 /** What a hop can be sent: a 16 kHz mono PCM16 WAV or a WebM/Opus stream. */
@@ -416,12 +416,11 @@ const MIME_OF: Record<TConversionTarget, string> = {
   webm_opus: "audio/webm",
 };
 
-/** What to convert to for a hop with these declared formats; a hop that
- *  declares none (API-key) takes WAV. */
+/** What to convert to for a hop with these declared formats (a hop that
+ *  declares none goes through {@link legacyUpload}). */
 const conversionTargetFor = (
-  formats: ReadonlyArray<string> | undefined,
+  formats: ReadonlyArray<string>,
 ): TConversionTarget => {
-  if (formats === undefined || formats.length === 0) return "wav16k";
   if (formats.includes(WAV_16K) || formats.includes(PCM_16K)) return "wav16k";
   if (formats.includes(WEBM_OPUS)) return "webm_opus";
   throw new Error(`cannot produce any accepted format (${formats.join(", ")})`);
@@ -519,21 +518,18 @@ const sendTranscription = async (
   if (fields.model !== undefined) form.set("model", fields.model);
   if (fields.language !== undefined) form.set("language", fields.language);
   const result = await uploadTranscription(form, config);
-  // Some upstream validation errors echo the request. Never send audio back
-  // into the model's context.
-  const encoded = upload.bytes.toString("base64");
+  // Some upstream validation errors echo a data URL. Never send audio back
+  // into the model's context (the multipart upload itself carries none).
   return {
     ...result,
     content: result.content.map((content) =>
       content.type === "text"
         ? {
             ...content,
-            text: content.text
-              .replaceAll(encoded, "[audio omitted]")
-              .replace(
-                /data:[^\s;,]+;base64,[A-Za-z0-9+/=]+/g,
-                "[audio omitted]",
-              ),
+            text: content.text.replace(
+              /data:[^\s;,]+;base64,[A-Za-z0-9+/=]+/g,
+              "[audio omitted]",
+            ),
           }
         : content,
     ),
