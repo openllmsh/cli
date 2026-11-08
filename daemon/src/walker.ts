@@ -2833,10 +2833,9 @@ const walkPlan = async (
       // A NEW/changed `auth` mark on a subscription hop: push status now so
       // the dashboard overlay does not wait for the 15s watcher. Repeated
       // identical marks (in-place retry) do not re-arm. Never refresh.
+      // (`noteAccountFailure` already invalidated and pushed status.)
       if (changed && cooldownReason === "auth" && isOAuthSlug(hop.provider)) {
-        getDelegate(hop.provider)?.invalidateStatusObservation?.();
         args.onAuthCooldownStatusPush?.();
-        requestStatusPush();
       }
     }
     reportHopFailure(hop, reason, status, cooldownReason);

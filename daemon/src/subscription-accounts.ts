@@ -29,9 +29,10 @@ import {
 import { GATE_STALE_CAP_MS } from "@openllmsh/sdk/wire/features/quota-gate";
 import { readRoster } from "./account-roster";
 import { AccountKeyedMap } from "./account-scope";
+import { requestStatusPush } from "./auth-events";
 import type { TCliProvider } from "./cli-paths";
 import { lookupCatalogEntry } from "./config";
-import { getDelegate } from "./delegation";
+import { getDelegate, isOAuthSlug } from "./delegation";
 import { isHopCoolingDown, markHopCooldown } from "./hop-cooldown";
 import { mediaHttpErrorCode } from "./media-retry";
 import { runWithAccount } from "./op-context";
@@ -211,7 +212,8 @@ export const accountCooldownReasonFor = (
  * Cool the ambient account for this hop and, on `quota_exhausted`, sample its
  * usage at once so the quota gate has a rejected snapshot to rank on — an
  * exhausted account emits no successful request, so nothing else would
- * re-sample it. Returns whether the cooldown mark changed.
+ * re-sample it. A changed `auth` mark pushes status. Returns whether the
+ * cooldown mark changed.
  */
 export const noteAccountFailure = (
   hop: THopRef,
@@ -238,6 +240,13 @@ export const noteAccountFailure = (
         opts.accountHash ?? undefined,
       );
     }
+  }
+  // A NEW/changed `auth` mark on a subscription hop: push status now so the
+  // dashboard overlay does not wait for the 15s watcher. Repeated identical
+  // marks do not re-arm. Never refresh.
+  if (changed && reason === "auth" && isOAuthSlug(hop.provider)) {
+    getDelegate(hop.provider)?.invalidateStatusObservation?.();
+    requestStatusPush();
   }
   return changed;
 };
