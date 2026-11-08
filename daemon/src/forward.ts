@@ -12,8 +12,10 @@
  * already validates for `/v1/*`.
  */
 import {
+  KEEPALIVE_REQUEST_HEADER,
   MEDIA_PERSISTENCE_REQUEST_HEADER,
   TUNNELED_REQUEST_HEADER,
+  unwrapKeepaliveResponse,
 } from "@openllmsh/sdk/protocol";
 import { CLOUD_FETCH_TIMEOUT_MS } from "./cloud-client";
 import { errorJson } from "./cors";
@@ -38,6 +40,31 @@ export const originHeaderTimeoutMs = (): number => {
   return Number.isSafeInteger(n) && n > 0 ? n : CLOUD_FETCH_TIMEOUT_MS;
 };
 
+/** Audio endpoints answer with one whole body, so their headers arrive only
+ *  once the provider has finished — a minute of audio can take ~30 s. They
+ *  get the cloud function's own ceiling (`maxDuration = 300`) instead. */
+export const WHOLE_BODY_ORIGIN_TIMEOUT_MS = 300_000;
+const WHOLE_BODY_PATHS: ReadonlySet<string> = new Set([
+  "/v1/audio/transcriptions",
+  "/v1/audio/speech",
+]);
+
+/** Whole-body surfaces whose origin answers keepalive (JSON only: speech
+ *  returns audio bytes, which leading spaces would corrupt). */
+const KEEPALIVE_PATHS: ReadonlySet<string> = new Set([
+  "/v1/audio/transcriptions",
+]);
+
+/** The listener also serves `/api/v1/*`, forwarded with the prefix intact. */
+const normalizedPath = (pathname: string): string =>
+  pathname.replace(/^\/api(?=\/v1\/)/, "");
+
+/** The header budget for a request to this origin path. */
+export const originHeaderTimeoutFor = (pathname: string): number =>
+  WHOLE_BODY_PATHS.has(normalizedPath(pathname))
+    ? Math.max(originHeaderTimeoutMs(), WHOLE_BODY_ORIGIN_TIMEOUT_MS)
+    : originHeaderTimeoutMs();
+
 const headerTimeoutAbort = (): Error => {
   const err = new Error("origin header timeout");
   err.name = "TimeoutError";
@@ -50,16 +77,30 @@ const fetchOrigin = async (
   inbound: Request,
 ): Promise<Response> => {
   const headerTimeout = new AbortController();
-  const timer = setTimeout(() => {
-    if (!headerTimeout.signal.aborted) {
-      headerTimeout.abort(headerTimeoutAbort());
-    }
-  }, originHeaderTimeoutMs());
+  const timer = setTimeout(
+    () => {
+      if (!headerTimeout.signal.aborted) {
+        headerTimeout.abort(headerTimeoutAbort());
+      }
+    },
+    originHeaderTimeoutFor(new URL(target).pathname),
+  );
   const signal = AbortSignal.any([inbound.signal, headerTimeout.signal]);
+  // A transcription answers one whole body, which the edge proxy in front
+  // of origin cuts after ~100 s of silence. Opt in to keepalive for every
+  // caller; one that didn't ask for it gets the real response back.
+  const headers = new Headers(init.headers);
+  const callerOptedIn = headers.get(KEEPALIVE_REQUEST_HEADER) === "1";
+  const keepalive = KEEPALIVE_PATHS.has(
+    normalizedPath(new URL(target).pathname),
+  );
+  if (keepalive) headers.set(KEEPALIVE_REQUEST_HEADER, "1");
   try {
-    const resp = await fetch(target, { ...init, signal });
+    const resp = await fetch(target, { ...init, headers, signal });
     clearTimeout(timer);
-    return stripHopByHopResponseHeaders(resp);
+    return stripHopByHopResponseHeaders(
+      keepalive && !callerOptedIn ? await unwrapKeepaliveResponse(resp) : resp,
+    );
   } catch (err) {
     clearTimeout(timer);
     const kind = classifyOriginThrow(err, inbound.signal);
