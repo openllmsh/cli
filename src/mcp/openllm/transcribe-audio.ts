@@ -241,6 +241,15 @@ const runFfmpeg = (
 const CONVERSION_FAILED =
   "Audio conversion failed: ffmpeg couldn't decode this audio (the file may be damaged, or its codec missing from this ffmpeg build).";
 
+/** This ffmpeg build lacks the encoder for `target` (e.g. no libopus). */
+class MissingEncoderError extends Error {
+  constructor(target: TConversionTarget) {
+    super(
+      `This ffmpeg build has no ${target === "webm_opus" ? "Opus (libopus)" : "PCM"} encoder; install an ffmpeg with it, then retry.`,
+    );
+  }
+}
+
 const encodeArgs = (target: TConversionTarget): string[] => [
   "-map",
   "0:a:0",
@@ -297,7 +306,10 @@ export const convertAudio = async (
       MAX_STDERR_BYTES,
       dir,
     );
-    if (run.code !== 0) throw new Error(CONVERSION_FAILED);
+    if (run.code !== 0)
+      throw /Encoder not found|Unknown encoder/.test(run.stderr)
+        ? new MissingEncoderError(target)
+        : new Error(CONVERSION_FAILED);
     const bytes = await readBoundedAudio(output, maxBytes);
     checkConverted(bytes, target);
     return bytes;
@@ -358,17 +370,28 @@ const rankTranscriptionCards = (
  *  which on a slow uplink plus the provider's longer work on PCM ran past
  *  the edge proxy's ~100 s response limit, while the same audio as
  *  WebM/Opus is ~1.2 MB. */
-const legacyUpload = async (source: TSource): Promise<TUpload> =>
-  source.format.convert === undefined
-    ? { mime: source.format.mime, bytes: source.bytes }
-    : {
-        mime: MIME_OF.webm_opus,
-        bytes: await convertAudio(
-          source.bytes,
-          source.format.demuxer,
-          "webm_opus",
-        ),
-      };
+const legacyUpload = async (source: TSource): Promise<TUpload> => {
+  if (source.format.convert === undefined)
+    return { mime: source.format.mime, bytes: source.bytes };
+  try {
+    return {
+      mime: MIME_OF.webm_opus,
+      bytes: await convertAudio(
+        source.bytes,
+        source.format.demuxer,
+        "webm_opus",
+      ),
+    };
+  } catch (error) {
+    // An ffmpeg built without libopus still decodes; send WAV instead.
+    // Any other failure is the audio's, and WAV would fail the same way.
+    if (!(error instanceof MissingEncoderError)) throw error;
+    return {
+      mime: MIME_OF.wav16k,
+      bytes: await convertAudio(source.bytes, source.format.demuxer, "wav16k"),
+    };
+  }
+};
 
 /** The audio as a hop with these declared formats accepts it: passed
  *  through when it already matches, otherwise converted with ffmpeg. */
