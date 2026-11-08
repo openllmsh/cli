@@ -35,19 +35,16 @@
 #                          Re-running install with a new anchor rotates it.
 #                          The anchor is the sessions opt-in — an anchored
 #                          device serves agent sessions by default.
-#   OPENLLM_DAEMON_PORT    local daemon port (default 8787; if unset AND
-#                          nothing is already persisted, and 8787 is taken on
-#                          this machine, the installer walks forward to the
-#                          next free port nearby and persists that instead —
-#                          an explicit or already-persisted port is never
-#                          probed or changed)
+#   OPENLLM_DAEMON_PORT    local daemon port (default 8787). Unset / empty in
+#                          the process env AND absent from the env file → the
+#                          default, exactly like every other missing setting.
+#                          An explicit or already-persisted port is kept as-is
+#                          (never probed or reassigned).
 #   OPENLLM_SKIP_SHELL_SETUP     set to skip `openllm setup` + completion install
 #                                (PATH symlinks / shell rc / completion stay untouched)
 #   OPENLLM_SKIP_VENDOR_CLIS     set to skip vendor CLI provisioning (opt-out;
 #                                Full installs vendors by default, including
 #                                headless / curl|bash)
-#   OPENLLM_VENDOR_WAIT_SEC      max seconds to wait for vendor installers (default 600;
-#                                a "still installing …" line every 20 s meanwhile)
 #   OPENLLM_ONLY_VENDOR_CLIS     comma-separated subscription slugs to provision
 #                                (e.g. claude_code,chatgpt); unset = all vendors
 #   OPENLLM_SETUP_MODE           product setup mode: `full` or `minimal`.
@@ -83,11 +80,12 @@
 #
 # This is the ONLY shell installer. In full mode it also provisions any missing
 # vendor subscription CLIs (claude / codex / kimi / grok / cursor-agent / muse)
-# via each vendor's official installer — skip if already present — and waits a
-# bounded time for those installers before starting the daemon. Google
-# Antigravity has no installer script, so the latest official ACP agent release
-# (resolved from the ACP registry) is downloaded and unpacked under
-# ~/.openllm/vendor/antigravity. It never edits a third-party client config:
+# via each vendor's official installer — skip if already present — in the
+# background, never awaited: the daemon starts as soon as the binary and env
+# are in place. Google Antigravity has no installer script, so the latest
+# official ACP agent release (resolved from the ACP registry) is downloaded
+# and unpacked under ~/.openllm/vendor/antigravity. It never edits a
+# third-party client config:
 # `openllm <client>` applies OpenLLM at run time instead. The only files it
 # writes outside ~/.openllm (besides what a vendor installer itself does) are
 # the PATH symlinks and the ONE marked block in your shell rc that
@@ -342,11 +340,11 @@ normalize_daemon_port() {
   printf '%s' "$stripped"
 }
 
-# Default port + the bounded range the auto-increment scan below may walk
-# into (8787-8796) — only reached when no explicit/persisted port exists yet
-# (see the DAEMON_PORT resolution below); an explicit or persisted port is
-# never probed or reassigned.
+# Compiled default when OPENLLM_DAEMON_PORT is unset in both the process env
+# and the env file. An explicit or persisted port is never probed or changed.
 DEFAULT_DAEMON_PORT=8787
+# Kept for the port_is_free / find_available_port helpers (tests + diagnostics);
+# missing-port resolution no longer scans — it uses DEFAULT_DAEMON_PORT.
 PORT_SCAN_LIMIT=10
 
 # Is 127.0.0.1:$port free to bind? Returns 0 free, 1 occupied, 2 unverifiable
@@ -488,26 +486,13 @@ if [ -z "$DAEMON_PORT" ]; then
     NORMALIZED_PORT="$(normalize_daemon_port "$RAW_PERSISTED_PORT")" && DAEMON_PORT="$NORMALIZED_PORT"
   fi
 fi
-# Neither an explicit nor a persisted port exists yet — a genuinely
-# first-ever choice, never a reassignment. Probe the default and, only here,
-# walk forward to the next free port in a small bounded range.
-# An env file holding only some values (say, a hand-set OPENLLM_CLOUD_ORIGIN)
-# must not change the defaults: when an OpenLLM daemon already answers on the
-# default port, that is this install's daemon — keep it there instead of
-# walking away from our own listener.
-if [ -z "$DAEMON_PORT" ] && openllm_daemon_on_port "$DEFAULT_DAEMON_PORT"; then
-  DAEMON_PORT="$DEFAULT_DAEMON_PORT"
-fi
+# Neither an explicit nor a persisted port exists yet — use the compiled
+# default. Mirrors ORIGIN above: an env file that only holds some values
+# (e.g. a hand-set OPENLLM_CLOUD_ORIGIN) must leave every other setting at
+# its default. Never scan, and never die with "no free port" for a missing
+# setting — that is what an origin-only ~/.openllm/.env used to trigger.
 if [ -z "$DAEMON_PORT" ]; then
-  if RESOLVED_PORT="$(find_available_port "$DEFAULT_DAEMON_PORT" "$PORT_SCAN_LIMIT")"; then
-    DAEMON_PORT="$RESOLVED_PORT"
-  else
-    SCAN_RC=$?
-    if [ "$SCAN_RC" -eq 2 ]; then
-      die "could not verify any port's availability near $DEFAULT_DAEMON_PORT (no python3, no timeout+/dev/tcp, no nc) — set OPENLLM_DAEMON_PORT to choose one explicitly"
-    fi
-    die "no free port found for the daemon in $DEFAULT_DAEMON_PORT-$((DEFAULT_DAEMON_PORT + PORT_SCAN_LIMIT - 1)) — set OPENLLM_DAEMON_PORT to choose one"
-  fi
+  DAEMON_PORT="$DEFAULT_DAEMON_PORT"
 fi
 case "$INSTALL_MODE" in
   install|update) ;;
@@ -757,10 +742,17 @@ install_component() {
   local dl="$BIN_DIR/.$name.download.$$"
   local bin="$BIN_DIR/.$name.bin.$$"
   trap 'rm -f "$dl" "$bin"' RETURN
-  if [ -t 2 ]; then
-    curl -fL --progress-bar "$url" -o "$dl" || die "download failed: $url"
-  else
-    curl -fsSL "$url" -o "$dl" || die "download failed: $url"
+  # Bounded download: a stalled mirror must not hang the installer (or the
+  # desktop pair waiter) indefinitely. Progress goes to stderr so a non-TTY
+  # desktop log still shows movement; -s would hide it.
+  local dl_connect_sec="${OPENLLM_DOWNLOAD_CONNECT_TIMEOUT_SEC:-30}"
+  local dl_max_sec="${OPENLLM_DOWNLOAD_MAX_TIME_SEC:-600}"
+  case "$dl_connect_sec" in ''|*[!0-9]*) dl_connect_sec=30 ;; esac
+  case "$dl_max_sec" in ''|*[!0-9]*) dl_max_sec=600 ;; esac
+  echo "  fetching $name (connect ≤${dl_connect_sec}s, total ≤${dl_max_sec}s)…"
+  if ! curl -fL --connect-timeout "$dl_connect_sec" --max-time "$dl_max_sec" \
+      --progress-bar "$url" -o "$dl"; then
+    die "download failed or timed out after ${dl_max_sec}s: $url"
   fi
 
   # Assets are gzipped; the pinned digest is over the DECOMPRESSED binary, so
@@ -1000,17 +992,18 @@ if [ -z "$API_KEY" ] && [ "$INSTALL_MODE" != update ]; then
   fi
 fi
 
-# --- provision the vendor subscription CLIs (awaited, bounded) -------------
+# --- provision the vendor subscription CLIs (background, never awaited) ----
 # The daemon RUNS the official vendor CLIs but never INSTALLS them (it runs
 # under an OS sandbox that intentionally can't touch shell rc files). So THIS
 # script — run by the user, unsandboxed, with a real HOME/PATH/rc — is where a
-# missing CLI gets installed: launch each official installer, then wait with a
-# bounded timeout before daemon start. Each native installer does its own
-# normal rc/PATH edit. The daemon only LINKS its isolated run-view to whatever
-# lands (see cli-install.ts) — symlink self-heal is separate and needs no write
-# grant on the host CLI dirs. Logged to ~/.openllm/cli-install.log. Full setup
-# only, and only AFTER authentication succeeds (or a usable key was already
-# present). Minimal / update / keyless installs never reach here.
+# missing CLI gets installed: launch each official installer in the background
+# and move on. The daemon starts as soon as the binary + env are ready; vendor
+# CLIs must never delay that. Each native installer does its own normal
+# rc/PATH edit. The daemon only LINKS its isolated run-view to whatever lands
+# (see cli-install.ts) — symlink self-heal is separate and needs no write grant
+# on the host CLI dirs. Logged to ~/.openllm/cli-install.log. Full setup only,
+# and only AFTER authentication succeeds (or a usable key was already present).
+# Minimal / update / keyless installs never reach here.
 #
 # Progress is tracked in per-provider JSON under
 # `$OPENLLM_DIR/vendor-cli-install/<slug>.json` (protocol subscription slugs).
@@ -1667,6 +1660,10 @@ launch_vendor_cli_install() {
     return 1
   fi
   vendor_cli_release_lock "$slug"
+  # Detach from this shell's job table so a later exit (or the desktop app
+  # closing its wait on this script) cannot SIGHUP the vendor installer. The
+  # worker already redirects to cli-install.log; disown only drops job control.
+  disown "$worker_pid" 2>/dev/null || true
   VENDOR_LAST_PID="$worker_pid"
 }
 
@@ -1843,8 +1840,6 @@ provision_antigravity() {
 VENDOR_FAILED_NAMES=""
 VENDOR_PENDING_NAMES=""
 VENDOR_REAPED_NAMES=""
-# Seconds between "still installing …" lines while provision_clis waits.
-VENDOR_WAIT_PROGRESS_SEC=20
 
 # How to retry vendor provisioning after a skip / failure / interrupt.
 vendor_cli_retry_hint() {
@@ -1999,92 +1994,42 @@ provision_clis() {
         ;;
     esac
   fi
-  # Bounded wait: never let a stuck vendor installer hang full setup forever.
-  # Preserve auth → vendors → daemon order by finishing (or timing out) here
-  # before the caller starts the daemon. Poll instead of `wait`/timeout(1) so
-  # this stays portable on macOS Bash 3.2 without depending on GNU coreutils.
-  local wait_sec="${OPENLLM_VENDOR_WAIT_SEC:-600}"
-  case "$wait_sec" in
-    ''|*[!0-9]*) wait_sec=600 ;;
-  esac
-  local wait_started deadline now next_progress timed_out=0 running idx
-  wait_started="$(date +%s)"
-  deadline=$((wait_started + wait_sec))
-  next_progress=$((wait_started + VENDOR_WAIT_PROGRESS_SEC))
+  # Never await vendor installers — the daemon must start as soon as the
+  # binary and env are ready. Workers are already backgrounded + disowned;
+  # progress lives in ~/.openllm/vendor-cli-install/*.json and cli-install.log.
   if [ "${#owned_pids[@]}" -gt 0 ]; then
-    # Ctrl-C / TERM while waiting: stop only the workers this run owns (the
-    # handler reads owned_* through bash's dynamic scope), say what is saved
-    # and how to finish, and exit nonzero. Scoped to the wait — cleared below.
-    trap 'vendor_cli_on_wait_signal INT' INT
-    trap 'vendor_cli_on_wait_signal TERM' TERM
-    while true; do
-      running=""
-      idx=0
-      while [ "$idx" -lt "${#owned_pids[@]}" ]; do
-        if kill -0 "${owned_pids[$idx]}" 2>/dev/null; then
-          running="${running:+$running, }${owned_names[$idx]}"
-        fi
-        idx=$((idx + 1))
-      done
-      [ -n "$running" ] || break
-      now="$(date +%s)"
-      if [ "$now" -ge "$deadline" ]; then
-        timed_out=1
-        break
-      fi
-      # A long vendor install must not look like a hang.
-      if [ "$now" -ge "$next_progress" ]; then
-        echo "  still installing ${running}… ($((now - wait_started))s)" >&2
-        next_progress=$((now + VENDOR_WAIT_PROGRESS_SEC))
-      fi
-      sleep 1
-    done
-    idx=0
+    local running="" idx=0
     while [ "$idx" -lt "${#owned_pids[@]}" ]; do
-      if ! kill -0 "${owned_pids[$idx]}" 2>/dev/null; then
-        if ! wait "${owned_pids[$idx]}" 2>/dev/null; then
-          failed=1
-          VENDOR_FAILED_NAMES="${VENDOR_FAILED_NAMES:+$VENDOR_FAILED_NAMES, }${owned_names[$idx]}"
-        fi
-      fi
+      running="${running:+$running, }${owned_names[$idx]}"
       idx=$((idx + 1))
     done
+    echo "  Vendor CLIs: installing in the background (${running}) — see $OPENLLM_DIR/cli-install.log" >&2
   fi
-  if [ "$timed_out" = 1 ]; then
-    # Reap only the workers THIS provision_clis owns, then persist wire-valid
-    # `interrupted` for those that were still live at the deadline. Unrelated
-    # preexisting / sibling records in the state dir are left untouched.
-    vendor_cli_reap_owned
-    trap - INT TERM
-    echo "  Vendor CLIs: install timed out after ${wait_sec}s${VENDOR_REAPED_NAMES:+ ($VENDOR_REAPED_NAMES)} — see $OPENLLM_DIR/cli-install.log" >&2
-    return 2
-  fi
-  trap - INT TERM
+  # Launch-time failures only (a worker that could not be started). In-flight
+  # workers are not failures of this install.
   [ "$failed" = 0 ] || return 1
   [ "$pending" = 0 ] || return 3
   return 0
 }
-# Awaited vendor install keeps auth → vendors → daemon ordering. Skipped on a
-# manual update: rerunning every vendor's installer is a first-install action
-# the user didn't ask for. Also skipped without a usable API key —
-# authentication comes first. Full setup (the default, including headless)
-# provisions vendors; OPENLLM_SKIP_VENDOR_CLIS opts out. A provider another
-# installer already has in flight is left to it (pending), and a failed or
-# timed-out vendor installer is reported as a warning — none of these fail the
-# run once the daemon is up (see the exit status at the end).
+# Background vendor install: launch missing CLIs, then start the daemon without
+# waiting. Skipped on a manual update: rerunning every vendor's installer is a
+# first-install action the user didn't ask for. Also skipped without a usable
+# API key — authentication comes first. Full setup (the default, including
+# headless) provisions vendors; OPENLLM_SKIP_VENDOR_CLIS opts out. A provider
+# another installer already has in flight is left to it (pending). Launch
+# failures are a warning — none of these fail the run once the daemon is up.
 VENDOR_PROVISIONED=0
 VENDOR_FAILED=0
-VENDOR_TIMED_OUT=0
 VENDOR_PENDING=0
+VENDOR_BACKGROUND=0
 if [ "$INSTALL_MODE" != update ] && [ "$SETUP_MODE" != minimal ] && [ -n "$API_KEY" ] && [ -z "${OPENLLM_SKIP_VENDOR_CLIS:-}" ]; then
   VENDOR_PROVISIONED=1
   # `||` keeps a nonzero provision_clis status off the `set -e` path so we
-  # still start the daemon and report timeout/failure/pending distinctly.
+  # still start the daemon and report launch-failure/pending distinctly.
   VENDOR_RC=0
   provision_clis || VENDOR_RC=$?
   case "$VENDOR_RC" in
-    0) ;;
-    2) VENDOR_TIMED_OUT=1; VENDOR_FAILED=1 ;;
+    0) VENDOR_BACKGROUND=1 ;;
     3) VENDOR_PENDING=1 ;;
     *) VENDOR_FAILED=1 ;;
   esac
@@ -2108,12 +2053,13 @@ restart_for_new_binary() {
   fi
 }
 
-# --- start / reconcile the service (after auth + vendors) ------------------
+# --- start / reconcile the service (after auth; vendors may still be running) -
 # `openllm daemon start` owns service registration (launchd / systemd user unit,
 # restart-on-crash, boot start, linger). Full setup only starts once a usable
 # key exists. Minimal setup never STARTS a stopped daemon; an update that
 # replaced the binary does restart one that is already running (a daemon the
-# user started by hand would otherwise keep serving the old code).
+# user started by hand would otherwise keep serving the old code). Vendor CLI
+# installs continue in the background and must not gate this step.
 DAEMON_STARTED=0
 DAEMON_START_FAILED=0
 case " $INSTALLED_COMPONENTS " in
@@ -2167,14 +2113,7 @@ fi
 print_vendor_summary() {
   local log="$OPENLLM_DIR/cli-install.log" what=""
   if [ "$VENDOR_FAILED" = 1 ]; then
-    if [ "$VENDOR_TIMED_OUT" = 1 ]; then
-      what="timed out${VENDOR_REAPED_NAMES:+: $VENDOR_REAPED_NAMES}"
-      if [ -n "$VENDOR_FAILED_NAMES" ]; then
-        what="$what; failed: $VENDOR_FAILED_NAMES"
-      fi
-    else
-      what="failed${VENDOR_FAILED_NAMES:+: $VENDOR_FAILED_NAMES}"
-    fi
+    what="failed to launch${VENDOR_FAILED_NAMES:+: $VENDOR_FAILED_NAMES}"
     {
       echo
       if [ "$DAEMON_STARTED" = 1 ]; then
@@ -2190,6 +2129,11 @@ print_vendor_summary() {
     cat <<EOF
 Another installer is still installing: $VENDOR_PENDING_NAMES. It keeps going
 in the background (see $log); if a CLI is still missing afterwards, $(vendor_cli_retry_hint).
+EOF
+  elif [ "$VENDOR_BACKGROUND" = 1 ]; then
+    cat <<EOF
+Vendor CLIs are installing in the background (see $log).
+Open the dashboard's Providers tab to connect your vendor accounts once each CLI is ready.
 EOF
   elif [ "$VENDOR_PROVISIONED" = 1 ]; then
     cat <<EOF
