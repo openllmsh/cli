@@ -1,7 +1,7 @@
 /** CLI-only local audio boundary. Never import this from browser-shared tools.ts. */
 import { spawn } from "node:child_process";
 import { constants } from "node:fs";
-import { chmod, mkdtemp, open, rm } from "node:fs/promises";
+import { chmod, mkdtemp, open, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import {
@@ -9,11 +9,7 @@ import {
   MediaAudioInputFormat,
 } from "@openllmsh/sdk/protocol";
 import type { TToolResult } from "../types";
-import {
-  handleOpenllmTool,
-  MAX_TRANSCRIPTION_BYTES,
-  TRANSCRIPTION_TOOL_NAME,
-} from "./tools";
+import { MAX_TRANSCRIPTION_BYTES, uploadTranscription } from "./tools";
 
 const CONVERSION_TIMEOUT_MS = 30_000;
 const MAX_STDERR_BYTES = 8192;
@@ -149,116 +145,156 @@ const MUXER: Record<TConversionTarget, string> = {
   webm_opus: "webm",
 };
 
-export const convertAudio = async (
-  input: Buffer,
-  demuxer: TDemuxer,
-  target: TConversionTarget,
-  options: TAudioConversionOptions = {},
-): Promise<Buffer> => {
+const ffmpegExecutable = (options: TAudioConversionOptions): string => {
   const executable =
     options.ffmpegPath === undefined ? Bun.which("ffmpeg") : options.ffmpegPath;
   if (!executable)
     throw new Error(
       "Converting this audio for the selected model requires ffmpeg. Install ffmpeg and ensure it is on PATH, then retry.",
     );
-  const maxBytes = options.maxBytes ?? MAX_TRANSCRIPTION_BYTES;
+  return executable;
+};
+
+/** Runs `fn` with the input written to a private (0700 dir, 0600 file) temp
+ *  file. ffmpeg reads a FILE, not a pipe: an M4A whose `moov` index follows
+ *  the audio (Apple Notes, Voice Memos) can only be read by seeking. */
+const withPrivateInput = async <T>(
+  input: Buffer,
+  options: TAudioConversionOptions,
+  fn: (dir: string, inputPath: string) => Promise<T>,
+): Promise<T> => {
   const dir = await mkdtemp(
     join(options.tempRoot ?? tmpdir(), "openllm-audio-"),
   );
   try {
     await chmod(dir, 0o700);
-    const output = join(dir, `audio.${MUXER[target]}`);
-    const file = await open(output, "wx", 0o600);
-    await file.close();
-    await new Promise<void>((resolveConversion, rejectConversion): void => {
-      // Forced demuxer + pipe-only INPUT protocols prohibit playlist/network/file indirection.
-      // Output is a private seekable file so ffmpeg finalizes real RIFF/data sizes.
-      const child = spawn(
-        executable,
-        [
-          "-hide_banner",
-          "-loglevel",
-          "error",
-          "-nostdin",
-          "-y",
-          "-protocol_whitelist",
-          "pipe",
-          "-f",
-          demuxer,
-          "-i",
-          "pipe:0",
-          "-map",
-          "0:a:0",
-          "-vn",
-          "-sn",
-          "-dn",
-          "-map_metadata",
-          "-1",
-          "-ac",
-          "1",
-          ...ENCODE_ARGS[target],
-          "-threads",
-          "1",
-          "-fs",
-          String(maxBytes + 1),
-          "-f",
-          MUXER[target],
-          output,
-        ],
-        { shell: false, stdio: ["pipe", "ignore", "pipe"] },
-      );
-      let failure: string | undefined;
-      let stderrBytes = 0;
-      const fail = (message: string): void => {
-        failure ??= message;
-        child.kill("SIGKILL");
-      };
-      const timer = setTimeout(
-        () => fail("Audio conversion timed out; use a shorter recording."),
-        options.timeoutMs ?? CONVERSION_TIMEOUT_MS,
-      );
-      child.stderr.on("data", (chunk: Buffer): void => {
-        stderrBytes += chunk.length;
-        if (stderrBytes > MAX_STDERR_BYTES)
-          fail("Audio conversion failed (excessive diagnostic output).");
-      });
-      child.on("error", (): void => {
-        failure =
-          "Unable to start ffmpeg. Install ffmpeg and ensure it is executable on PATH.";
-      });
-      child.stdin.on("error", (): void => {
-        /* Early decoder exit; close handles the sanitized error. */
-      });
-      child.on("close", (code): void => {
-        clearTimeout(timer);
-        if (failure || code !== 0)
-          rejectConversion(
-            new Error(
-              failure ??
-                "Audio conversion failed. The audio may be malformed or its codec unsupported by ffmpeg.",
-            ),
-          );
-        else resolveConversion();
-      });
-      child.stdin.end(input);
-    });
-    const bytes = await readBoundedAudio(output, maxBytes);
-    if (target === "wav16k") {
-      const outputFormat = formatOf(bytes);
-      if (
-        outputFormat.mime !== "audio/wav" ||
-        outputFormat.convert !== undefined
-      )
-        throw new Error("Audio conversion did not produce valid WAV audio.");
-    } else if (inputFormatOf(bytes, "audio/webm") !== "webm_opus") {
-      throw new Error(
-        "Audio conversion did not produce valid WebM/Opus audio.",
-      );
-    }
-    return bytes;
+    const inputPath = join(dir, "input");
+    await writeFile(inputPath, input, { flag: "wx", mode: 0o600 });
+    return await fn(dir, inputPath);
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
+};
+
+/** Forced demuxer + file-only protocols: no playlist/network indirection,
+ *  and the only file ffmpeg is handed is our private copy. */
+const inputArgs = (demuxer: TDemuxer, inputPath: string): string[] => [
+  "-hide_banner",
+  "-nostdin",
+  "-protocol_whitelist",
+  "file",
+  "-f",
+  demuxer,
+  "-i",
+  inputPath,
+];
+
+type TFfmpegRun = { readonly code: number | null; readonly stderr: string };
+
+const runFfmpeg = (
+  executable: string,
+  args: ReadonlyArray<string>,
+  timeoutMs: number,
+  maxStderrBytes: number,
+): Promise<TFfmpegRun> =>
+  new Promise<TFfmpegRun>((resolveRun, rejectRun): void => {
+    const child = spawn(executable, args, {
+      shell: false,
+      stdio: ["ignore", "ignore", "pipe"],
+    });
+    let failure: string | undefined;
+    const stderr: Buffer[] = [];
+    let stderrBytes = 0;
+    const fail = (message: string): void => {
+      failure ??= message;
+      child.kill("SIGKILL");
+    };
+    const timer = setTimeout(
+      () => fail("Audio conversion timed out; use a shorter recording."),
+      timeoutMs,
+    );
+    child.stderr.on("data", (chunk: Buffer): void => {
+      stderrBytes += chunk.length;
+      if (stderrBytes > maxStderrBytes)
+        fail("Audio conversion failed (excessive diagnostic output).");
+      else stderr.push(chunk);
+    });
+    child.on("error", (): void => {
+      failure =
+        "Unable to start ffmpeg. Install ffmpeg and ensure it is executable on PATH.";
+    });
+    child.on("close", (code): void => {
+      clearTimeout(timer);
+      if (failure) rejectRun(new Error(failure));
+      else resolveRun({ code, stderr: Buffer.concat(stderr).toString("utf8") });
+    });
+  });
+
+/** A conversion failure is its own error, never the format error: the file
+ *  was recognised, ffmpeg just couldn't decode it. */
+const CONVERSION_FAILED =
+  "Audio conversion failed: ffmpeg couldn't decode this audio (the file may be damaged, or its codec missing from this ffmpeg build).";
+
+const encodeArgs = (target: TConversionTarget): string[] => [
+  "-map",
+  "0:a:0",
+  "-vn",
+  "-sn",
+  "-dn",
+  "-map_metadata",
+  "-1",
+  "-ac",
+  "1",
+  ...ENCODE_ARGS[target],
+  "-threads",
+  "1",
+];
+
+const checkConverted = (bytes: Buffer, target: TConversionTarget): void => {
+  if (target === "wav16k") {
+    const outputFormat = formatOf(bytes);
+    if (outputFormat.mime !== "audio/wav" || outputFormat.convert !== undefined)
+      throw new Error("Audio conversion did not produce valid WAV audio.");
+  } else if (inputFormatOf(bytes, "audio/webm") !== "webm_opus") {
+    throw new Error("Audio conversion did not produce valid WebM/Opus audio.");
+  }
+};
+
+export const convertAudio = async (
+  input: Buffer,
+  demuxer: TDemuxer,
+  target: TConversionTarget,
+  options: TAudioConversionOptions = {},
+): Promise<Buffer> => {
+  const executable = ffmpegExecutable(options);
+  const maxBytes = options.maxBytes ?? MAX_TRANSCRIPTION_BYTES;
+  return withPrivateInput(input, options, async (dir, inputPath) => {
+    // Output is a private seekable file so ffmpeg finalizes real RIFF/data sizes.
+    const output = join(dir, `audio.${MUXER[target]}`);
+    const file = await open(output, "wx", 0o600);
+    await file.close();
+    const run = await runFfmpeg(
+      executable,
+      [
+        ...inputArgs(demuxer, inputPath),
+        "-loglevel",
+        "error",
+        "-y",
+        ...encodeArgs(target),
+        "-fs",
+        String(maxBytes + 1),
+        "-f",
+        MUXER[target],
+        output,
+      ],
+      options.timeoutMs ?? CONVERSION_TIMEOUT_MS,
+      MAX_STDERR_BYTES,
+    );
+    if (run.code !== 0) throw new Error(CONVERSION_FAILED);
+    const bytes = await readBoundedAudio(output, maxBytes);
+    checkConverted(bytes, target);
+    return bytes;
+  });
 };
 
 type TUpload = { readonly mime: string; readonly bytes: Buffer };
@@ -310,13 +346,21 @@ const rankTranscriptionCards = (
           (b.tier_rank ?? Number.MAX_SAFE_INTEGER),
     );
 
-/** API-key hops take almost anything; only Ogg/FLAC/MP4 are re-encoded. */
+/** API-key hops take almost anything; only Ogg/FLAC/MP4 are re-encoded,
+ *  and to WebM/Opus rather than WAV: 5 minutes of 16 kHz WAV is ~10 MB,
+ *  which on a slow uplink plus the provider's longer work on PCM ran past
+ *  the edge proxy's ~100 s response limit, while the same audio as
+ *  WebM/Opus is ~1.2 MB. */
 const legacyUpload = async (source: TSource): Promise<TUpload> =>
   source.format.convert === undefined
     ? { mime: source.format.mime, bytes: source.bytes }
     : {
-        mime: "audio/wav",
-        bytes: await convertAudioToWav(source.bytes, source.format.convert),
+        mime: MIME_OF.webm_opus,
+        bytes: await convertAudio(
+          source.bytes,
+          source.format.demuxer,
+          "webm_opus",
+        ),
       };
 
 /** The audio as a hop with these declared formats accepts it: passed
@@ -330,20 +374,27 @@ const uploadFor = async (
   const current = inputFormatOf(source.bytes, source.format.mime);
   if (current !== "unknown" && formats.includes(current))
     return { mime: source.format.mime, bytes: source.bytes };
-  const target: TConversionTarget | null =
-    formats.includes(WAV_16K) || formats.includes(PCM_16K)
-      ? "wav16k"
-      : formats.includes(WEBM_OPUS)
-        ? "webm_opus"
-        : null;
-  if (target === null)
-    throw new Error(
-      `cannot produce any accepted format (${formats.join(", ")})`,
-    );
+  const target = conversionTargetFor(formats);
   return {
-    mime: target === "wav16k" ? "audio/wav" : "audio/webm",
+    mime: MIME_OF[target],
     bytes: await convertAudio(source.bytes, source.format.demuxer, target),
   };
+};
+
+const MIME_OF: Record<TConversionTarget, string> = {
+  wav16k: "audio/wav",
+  webm_opus: "audio/webm",
+};
+
+/** What to convert to for a hop with these declared formats; a hop that
+ *  declares none (API-key) takes WAV. */
+const conversionTargetFor = (
+  formats: ReadonlyArray<string> | undefined,
+): TConversionTarget => {
+  if (formats === undefined || formats.length === 0) return "wav16k";
+  if (formats.includes(WAV_16K) || formats.includes(PCM_16K)) return "wav16k";
+  if (formats.includes(WEBM_OPUS)) return "webm_opus";
+  throw new Error(`cannot produce any accepted format (${formats.join(", ")})`);
 };
 
 const isTranscriptionCard = (value: unknown): value is TTranscriptionCard =>
@@ -418,19 +469,29 @@ const refusedBeforeAcceptance = (text: string): boolean => {
   }
 };
 
+const EXTENSION_OF: Record<string, string> = {
+  "audio/wav": "wav",
+  "audio/mpeg": "mp3",
+  "audio/webm": "webm",
+};
+
 const sendTranscription = async (
   upload: TUpload,
-  fields: { readonly model?: string; readonly language?: unknown },
-  config: Parameters<typeof handleOpenllmTool>[2],
+  fields: { readonly model?: string; readonly language?: string },
+  config: Parameters<typeof uploadTranscription>[1],
 ): Promise<TToolResult> => {
-  const encoded = upload.bytes.toString("base64");
-  const result = await handleOpenllmTool(
-    TRANSCRIPTION_TOOL_NAME,
-    { body: { file: `data:${upload.mime};base64,${encoded}`, ...fields } },
-    config,
+  const form = new FormData();
+  form.set(
+    "file",
+    new Blob([new Uint8Array(upload.bytes)], { type: upload.mime }),
+    `audio.${EXTENSION_OF[upload.mime] ?? "bin"}`,
   );
-  // Some upstream validation errors echo the request. Never send its audio back
-  // into the model's context, even though the ordinary shared handler can.
+  if (fields.model !== undefined) form.set("model", fields.model);
+  if (fields.language !== undefined) form.set("language", fields.language);
+  const result = await uploadTranscription(form, config);
+  // Some upstream validation errors echo the request. Never send audio back
+  // into the model's context.
+  const encoded = upload.bytes.toString("base64");
   return {
     ...result,
     content: result.content.map((content) =>
@@ -451,7 +512,7 @@ const sendTranscription = async (
 
 export const transcribeAudio = async (
   args: Record<string, unknown>,
-  config: Parameters<typeof handleOpenllmTool>[2],
+  config: Parameters<typeof uploadTranscription>[1],
 ): Promise<TToolResult> => {
   try {
     if (
@@ -485,7 +546,7 @@ export const transcribeAudio = async (
     }
     const source = { bytes, format: formatOf(bytes) };
     const language =
-      args.language === undefined ? {} : { language: args.language };
+      typeof args.language === "string" ? { language: args.language } : {};
     const model = typeof args.model === "string" ? args.model : undefined;
     const cards = await transcriptionCards(config);
     // No catalog (older gateway, network blip): let the gateway pick, the

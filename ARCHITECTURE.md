@@ -333,7 +333,9 @@ gateway's media default does (`default_tiers` `media`, host-included first, then
 For a hop declaring `audio_support.input_formats` it passes the bytes through
 when they already match, and otherwise converts them with **system ffmpeg on
 PATH** to mono 16 kHz PCM16 WAV or WebM/Opus. A hop without declared formats
-(API-key) gets WAV/MP3/WebM as-is, and Ogg/FLAC/MP4 as 16 kHz WAV. One conversion
+(API-key) gets WAV/MP3/WebM as-is, and Ogg/FLAC/MP4 as WebM/Opus (compact:
+16 kHz WAV is ~10 MB per 5 minutes, which outran the edge proxy's ~100 s
+response limit). One conversion
 is reused by every hop that wants it. A failed conversion moves on to the next
 model, and so does a hop refused before acceptance (401/404/415/429, or a
 400/403 whose gateway `error.type` is pre-dispatch, e.g.
@@ -343,12 +345,18 @@ never resent and never billed twice. An explicit `model` is the only hop tried, 
 catalog falls back to one gateway-selected request. The constants come from the
 generated `sdk/generated/inference-headers.ts`, because CLI command code never
 imports `@openllmsh/sdk/protocol`. No codec is downloaded or bundled. Conversion is
-no-shell, forced-demuxer, pipe-only input, time/diagnostic/output bounded, and
-writes to a private seekable file so WAV headers contain final sizes; cleanup
-runs on all outcomes.
+no-shell, forced-demuxer, file-only protocol over a private 0600 copy of the
+input (a pipe can't be seeked, and an M4A whose `moov` follows `mdat` — Apple
+Notes, Voice Memos — needs seeking), time/diagnostic/output bounded, and writes
+to a private seekable file so WAV headers contain final sizes; cleanup runs on
+all outcomes. A decode failure says so; it is never the format error.
 Converted audio is capped at 25 MiB too, and overflow is an error, not truncation.
-The adapter constructs the data URL internally, redacts echoed audio, and reuses
-`handleOpenllmTool` / `callOperation` for auth and transport. An absent model
+The adapter uploads the bytes as multipart (`uploadTranscription` in
+`@openllmsh/sdk/mcp`, never a base64 data URL, which is a third larger), waits
+up to `TRANSCRIPTION_TIMEOUT_MS` (300 s, the gateway's `maxDuration`) rather
+than the generic 120 s tool ceiling, and redacts echoed audio. The daemon gives
+whole-body audio endpoints the same 300 s header budget
+(`originHeaderTimeoutFor`). An absent model
 stays absent so the gateway can apply the catalog media default chain
 (same omit-`model` contract as the other media tools); supplied
 model/language pass unchanged. HTTP data-URL/multipart contracts and the daemon's

@@ -38,6 +38,21 @@ export const originHeaderTimeoutMs = (): number => {
   return Number.isSafeInteger(n) && n > 0 ? n : CLOUD_FETCH_TIMEOUT_MS;
 };
 
+/** Audio endpoints answer with one whole body, so their headers arrive only
+ *  once the provider has finished — a minute of audio can take ~30 s. They
+ *  get the cloud function's own ceiling (`maxDuration = 300`) instead. */
+export const WHOLE_BODY_ORIGIN_TIMEOUT_MS = 300_000;
+const WHOLE_BODY_PATHS: ReadonlySet<string> = new Set([
+  "/v1/audio/transcriptions",
+  "/v1/audio/speech",
+]);
+
+/** The header budget for a request to this origin path. */
+export const originHeaderTimeoutFor = (pathname: string): number =>
+  WHOLE_BODY_PATHS.has(pathname)
+    ? Math.max(originHeaderTimeoutMs(), WHOLE_BODY_ORIGIN_TIMEOUT_MS)
+    : originHeaderTimeoutMs();
+
 const headerTimeoutAbort = (): Error => {
   const err = new Error("origin header timeout");
   err.name = "TimeoutError";
@@ -50,11 +65,14 @@ const fetchOrigin = async (
   inbound: Request,
 ): Promise<Response> => {
   const headerTimeout = new AbortController();
-  const timer = setTimeout(() => {
-    if (!headerTimeout.signal.aborted) {
-      headerTimeout.abort(headerTimeoutAbort());
-    }
-  }, originHeaderTimeoutMs());
+  const timer = setTimeout(
+    () => {
+      if (!headerTimeout.signal.aborted) {
+        headerTimeout.abort(headerTimeoutAbort());
+      }
+    },
+    originHeaderTimeoutFor(new URL(target).pathname),
+  );
   const signal = AbortSignal.any([inbound.signal, headerTimeout.signal]);
   try {
     const resp = await fetch(target, { ...init, signal });
