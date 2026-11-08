@@ -251,6 +251,16 @@ const launchDurableSessionHost = async (args: {
   const cli = args.client.daemonCli;
   if (cli === undefined) return null;
   const id = crypto.randomUUID();
+  // The vendor's own skip flag typed after the client (`openllm claude
+  // --dangerously-skip-permissions`) means the same as `-d`. The host only
+  // accepts the grant on `--dangerous` (vendor args can't smuggle it), and
+  // only that grant is remembered for the session's later resumes.
+  const vendorFlag = args.client.dangerousFlag;
+  const askedViaVendorFlag =
+    vendorFlag !== undefined && args.forwarded.includes(vendorFlag);
+  const vendorArgs = askedViaVendorFlag
+    ? args.forwarded.filter((arg) => arg !== vendorFlag)
+    : args.forwarded;
   const terminalCols = process.stdout.columns ?? 80;
   const terminalRows = process.stdout.rows ?? 24;
   const argv = sessionHostSpawnArgv({
@@ -260,8 +270,8 @@ const launchDurableSessionHost = async (args: {
     rows: terminalRows,
     cwd: process.cwd(),
     title: basename(process.cwd()),
-    dangerous: args.dangerous,
-    vendorArgs: args.forwarded,
+    dangerous: args.dangerous || askedViaVendorFlag,
+    vendorArgs,
   });
   if (argv === null) return null;
   const spawned = spawnSessionHost({ invocation: daemonInvocation(), argv });

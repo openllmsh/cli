@@ -1024,6 +1024,18 @@ const UP_ARROW = "\x1b[A";
  * (recommended)" with the cursor on No. Asked on the web like folder trust.
  */
 const API_KEY_PROMPT = /doyouwanttousethisapikey\?/i;
+/**
+ * The "WARNING: Claude Code running in Bypass Permissions mode" screen Claude
+ * shows once per machine when launched with `--dangerously-skip-permissions`.
+ * It only appears when the session was granted skip-permissions (the picker
+ * / `-d` gate that choice), so it is accepted on the user's behalf. It lists
+ * "No, exit" first with the cursor on it, then "Yes, I accept". Left alone it
+ * stalled the session until the ready timeout reported "sign-in or a dialog".
+ */
+const BYPASS_PROMPT = /runninginbypasspermissionsmode/i;
+/** The choice list has painted (the dialog takes keys once it's mounted). */
+const BYPASS_ACCEPT_OPTION = /yes,iaccept/i;
+const BYPASS_CURSOR_ON_NO = /❯(?:\d+\.)?No,exit/i;
 const API_KEY_CURSOR_ON_NO = /❯(?:\d+\.)?No\(/;
 /**
  * The rest of Claude's first-run onboarding: screens with nothing to decide
@@ -1141,6 +1153,8 @@ export const createClaudeTuiSession = (
   let apiKeyAnswered = false;
   /** Onboarding screens already answered with their default. */
   const onboardingAnswered = new Set<string>();
+  /** The bypass-permissions warning was accepted (once per session). */
+  let bypassAnswered = false;
   let trustSeenAt = 0;
   /** Whitespace-free, ANSI-stripped recent screen text (trust detection only). */
   let recentScreen = "";
@@ -1531,6 +1545,27 @@ export const createClaudeTuiSession = (
       new TextDecoder().decode(bytes).replace(ANSI, "").replace(/\s+/g, "")
     ).slice(-4096);
     if (trustRequestId !== null) return;
+    if (
+      !bypassAnswered &&
+      BYPASS_PROMPT.test(recentScreen) &&
+      BYPASS_ACCEPT_OPTION.test(recentScreen)
+    ) {
+      bypassAnswered = true;
+      const keys = BYPASS_CURSOR_ON_NO.test(recentScreen)
+        ? [DOWN_ARROW, "\r"]
+        : ["\r"];
+      recentScreen = "";
+      setTimeout(() => {
+        if (ended) return;
+        writeText(keys[0] ?? "");
+        const second = keys[1];
+        if (second !== undefined)
+          setTimeout(() => {
+            if (!ended) writeText(second);
+          }, submitDelayMs);
+      }, deps.trustAnswerDelayMs ?? TRUST_ANSWER_MIN_DELAY_MS);
+      return;
+    }
     const screen = ONBOARDING_SCREENS.find(
       (entry) =>
         !onboardingAnswered.has(entry.id) && entry.pattern.test(recentScreen),

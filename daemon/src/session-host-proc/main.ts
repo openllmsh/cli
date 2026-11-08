@@ -29,6 +29,11 @@ import {
   encodeJsonPayload,
 } from "@openllmsh/sdk/tunnel/codec";
 import { Schema as S } from "effect";
+import {
+  rememberSkipPermissions,
+  resumedIdOf,
+  skipPermissionsRemembered,
+} from "../agent/skip-permissions-pref";
 import { stateDir } from "../env";
 import type {
   TActivityProbe,
@@ -86,6 +91,8 @@ export type TSessionHostMeta = {
   readonly startedAtMs: number;
   readonly processStartTime: string;
   readonly generation: number;
+  /** Launched with skip-permissions (asked for, or kept from its start). */
+  readonly dangerous?: boolean;
 };
 
 type TSocketData = {
@@ -364,6 +371,13 @@ export const runSessionHost = (
   options: TSessionHostOptions = {},
 ): void => {
   const directory = sessionHostDir(args.id);
+  // Skip-permissions sticks to a session: a resume (web or terminal) of one
+  // that was started with it runs the same way.
+  const resumedId = args.resumeSessionId ?? resumedIdOf(args.vendorArgs);
+  const dangerous =
+    args.dangerous ||
+    skipPermissionsRemembered(args.id) ||
+    (resumedId !== null && skipPermissionsRemembered(resumedId));
   const root = join(stateDir(), "sessions");
   const claim = join(root, `.${args.id}.claim`);
   const stagingDirectory = join(root, `.${args.id}.${process.pid}.staging`);
@@ -483,7 +497,12 @@ export const runSessionHost = (
         startedAtMs: session.startedAtMs,
         processStartTime: ownProcessStartTime,
         generation: session.generation,
+        ...(dangerous ? { dangerous: true } : {}),
       };
+      if (dangerous) {
+        for (const id of [args.id, session.vendorSessionId, resumedId])
+          if (id !== null) rememberSkipPermissions(id);
+      }
       writeMeta();
     },
     onEnd: () => exit(),
@@ -499,7 +518,7 @@ export const runSessionHost = (
       mode: "spawn",
       ...(args.cwd === undefined ? {} : { cwd: args.cwd }),
       ...(args.title === undefined ? {} : { title: args.title }),
-      ...(args.dangerous ? { dangerous: true } : {}),
+      ...(dangerous ? { dangerous: true } : {}),
       ...(args.resumeSessionId === undefined
         ? {}
         : { resume_session_id: args.resumeSessionId }),

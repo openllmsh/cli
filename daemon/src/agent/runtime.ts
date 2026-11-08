@@ -18,6 +18,7 @@ import {
 import type { TAgentDispatcher } from "./dispatcher";
 import { createAgentDispatcher } from "./dispatcher";
 import { createAgentStreamHandler } from "./mux-front";
+import { forgetSkipPermissions } from "./skip-permissions-pref";
 
 let dispatcher: TAgentDispatcher | null = null;
 let attachmentReaper: ReturnType<typeof setInterval> | undefined;
@@ -66,6 +67,7 @@ const deleteSession = async (
       message: "The session's process did not stop.",
     };
   deleteAgentAttachments(sessionId);
+  forgetSkipPermissions(sessionId);
   const result = deleteClaudeSessionFiles({ sessionId, cwd: null });
   return result.ok ? { ok: true } : result;
 };

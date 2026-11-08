@@ -42,6 +42,7 @@ import {
   shrinkAgentItem,
   turnIdOfCursor,
 } from "./history-window";
+import { skipPermissionsRemembered } from "./skip-permissions-pref";
 import type {
   TAgentConnection,
   TAgentConsumer,
@@ -77,6 +78,11 @@ export type TAgentDispatcherOptions = {
     engine: TAgentEngine,
     sessionId: string,
   ) => string | undefined;
+  /**
+   * Whether a persisted session was started with skip-permissions, so an
+   * `attach` → resume keeps it. Defaults to the device's own record.
+   */
+  readonly skipPermissionsRemembered?: (sessionId: string) => boolean;
   /**
    * Remove one session from the device after its dispatcher process (if
    * any) was killed: stop a terminal host, drop attachments, transcript and
@@ -662,7 +668,13 @@ export const createAgentDispatcher = (
                   options.resumeCwdOf?.(engine, command.session_id) ??
                     homedir(),
                 ) ?? homedir(),
-              skipPermissions: false,
+              // Resume in the mode the session was started in: the web's
+              // record of it, or the device's (a terminal `-d` start).
+              skipPermissions:
+                command.skip_permissions === true ||
+                (
+                  options.skipPermissionsRemembered ?? skipPermissionsRemembered
+                )(command.session_id),
               state,
               commandId,
             });
