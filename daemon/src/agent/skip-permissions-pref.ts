@@ -14,7 +14,7 @@ import { join } from "node:path";
 import { stateDir } from "../env";
 
 /** Session / vendor ids are UUID-like; nothing path-shaped gets through. */
-const MARKER_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
+const MARKER_ID_PATTERN = /^[A-Za-z0-9_][A-Za-z0-9_-]{0,127}$/;
 
 const markerDir = (): string => join(stateDir(), "agent-skip-permissions");
 
