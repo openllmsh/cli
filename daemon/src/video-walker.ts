@@ -43,6 +43,9 @@ import {
   MediaProviderUnavailableError,
 } from "./media-input-error";
 import { mediaHopAdvances, mediaHttpErrorCode } from "./media-retry";
+import { currentAccountIndex, runWithAccount } from "./op-context";
+import type { TAccountAttempt } from "./subscription-accounts";
+import { mediaDialAttempt, serveAcrossAccounts } from "./subscription-accounts";
 import type { TWalkArgs } from "./walker";
 import {
   coolHopAfterStaleRefresh,
@@ -98,6 +101,32 @@ export const acquireVideoUpstream = async (
   }
 };
 
+/** One account's create dial: its credential, response and account index. */
+type TVideoDial = {
+  readonly acquired: TVideoUpstream | "retry";
+  readonly resp: Response | null;
+  readonly accountIndex: number;
+};
+
+/** Provider account that created each recent upstream job (bounded, LRU-ish). */
+const VIDEO_JOB_ACCOUNTS_MAX = 512;
+const videoJobAccounts = new Map<string, number>();
+const videoJobKey = (provider: string, upstreamId: string): string =>
+  `${provider}|${upstreamId}`;
+const rememberVideoJobAccount = (
+  provider: string,
+  upstreamId: string,
+  accountIndex: number,
+): void => {
+  const key = videoJobKey(provider, upstreamId);
+  videoJobAccounts.delete(key);
+  videoJobAccounts.set(key, accountIndex);
+  if (videoJobAccounts.size > VIDEO_JOB_ACCOUNTS_MAX) {
+    const oldest = videoJobAccounts.keys().next().value;
+    if (oldest !== undefined) videoJobAccounts.delete(oldest);
+  }
+};
+
 const hopForVideoJob = (
   args: TWalkArgs,
   payload: TVideoIdPayload,
@@ -124,7 +153,13 @@ const followVideoJob = async (
   if (hop === undefined) {
     return errorJson(403, "Signed plan does not cover this video job");
   }
-  const upstream = await acquireVideoUpstream(payload.p, args, hop);
+  // The job lives on the account that accepted it. A daemon restart forgets
+  // that, and the ambient account is used, as before.
+  const upstream = await runWithAccount(
+    videoJobAccounts.get(videoJobKey(payload.p, payload.u)) ??
+      currentAccountIndex(),
+    () => acquireVideoUpstream(payload.p, args, hop),
+  );
   if (upstream === "retry") {
     return errorJson(404, `No video credential available for ${payload.p}`);
   }
@@ -472,23 +507,6 @@ export const runVideoCreate = async (args: TWalkArgs): Promise<Response> => {
       }
       return stamp(forwarded);
     }
-    const upstream = await acquireVideoUpstream(hop.provider, args, hop);
-    if (upstream === "retry") {
-      lastError = errorJson(
-        404,
-        `No video credential available for ${hop.provider}`,
-      );
-      if (
-        !last &&
-        mediaHopAdvances({
-          dispatched: false,
-          errorCode: "missing_credential",
-        })
-      ) {
-        continue;
-      }
-      return stamp(lastError);
-    }
     attempted.push(hop.modelId);
     let body: Record<string, unknown>;
     try {
@@ -532,16 +550,50 @@ export const runVideoCreate = async (args: TWalkArgs): Promise<Response> => {
       }
       return stamp(lastError);
     }
-    const resp = await postUpstream(`${upstream.url}/videos/generations`, {
-      method: "POST",
-      headers: {
-        ...upstream.headers,
-        "content-type": "application/json",
-        accept: "application/json",
+    // One dial per signed-in account: a 402/429/401/403 from one account
+    // moves on to the next (`serveAcrossAccounts`). The account that
+    // accepted the job is remembered so its poll/content/cancel use it too.
+    const dialed = await serveAcrossAccounts(
+      hop,
+      async (): Promise<TAccountAttempt<TVideoDial>> => {
+        const acquired = await acquireVideoUpstream(hop.provider, args, hop);
+        const accountIndex = currentAccountIndex();
+        if (acquired === "retry") {
+          return {
+            result: { acquired, resp: null, accountIndex },
+            failure: { kind: "no_credential" },
+          };
+        }
+        const resp = await postUpstream(`${acquired.url}/videos/generations`, {
+          method: "POST",
+          headers: {
+            ...acquired.headers,
+            "content-type": "application/json",
+            accept: "application/json",
+          },
+          body: JSON.stringify(body),
+          signal: args.req.signal,
+        });
+        return mediaDialAttempt({ acquired, resp, accountIndex });
       },
-      body: JSON.stringify(body),
-      signal: args.req.signal,
-    });
+    );
+    const { acquired: upstream, resp } = dialed;
+    if (upstream === "retry") {
+      lastError = errorJson(
+        404,
+        `No video credential available for ${hop.provider}`,
+      );
+      if (
+        !last &&
+        mediaHopAdvances({
+          dispatched: false,
+          errorCode: "missing_credential",
+        })
+      ) {
+        continue;
+      }
+      return stamp(lastError);
+    }
     if (resp === null) {
       return stamp(
         args.req.signal.aborted
@@ -596,6 +648,7 @@ export const runVideoCreate = async (args: TWalkArgs): Promise<Response> => {
         errorJson(502, "upstream video provider returned no request_id"),
       );
     }
+    rememberVideoJobAccount(hop.provider, requestId, dialed.accountIndex);
     const createdAt = Math.floor(Date.now() / 1000);
     reportVideo(
       args,

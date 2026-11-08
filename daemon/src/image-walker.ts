@@ -46,6 +46,8 @@ import {
   MediaInputError,
 } from "./media-input-error";
 import { mediaHopAdvances, mediaHttpErrorCode } from "./media-retry";
+import type { TAccountAttempt } from "./subscription-accounts";
+import { mediaDialAttempt, serveAcrossAccounts } from "./subscription-accounts";
 import type { TWalkArgs } from "./walker";
 import {
   coolHopAfterStaleRefresh,
@@ -65,6 +67,12 @@ type TImageUpstream = {
   readonly headers: Record<string, string>;
   readonly url: string;
   readonly accountHash: string | null;
+};
+
+/** One account's dial: its credential and the upstream response (if sent). */
+type TImageDial = {
+  readonly acquired: TImageUpstream | "retry";
+  readonly resp: Response | null;
 };
 
 // `url` is optional: the b64-only fallback below (storage unavailable, caller
@@ -678,7 +686,31 @@ export const runImageWalker = async (args: TWalkArgs): Promise<Response> => {
           hop.modelId,
         );
       }
-      const acquired = await acquireImageUpstream(hop.provider, args, hop);
+      // One dial per signed-in account: a 402/429/401/403 from one account
+      // moves on to the next (`serveAcrossAccounts`).
+      const { acquired, resp } = await serveAcrossAccounts(
+        hop,
+        async (): Promise<TAccountAttempt<TImageDial>> => {
+          const acquired = await acquireImageUpstream(hop.provider, args, hop);
+          if (acquired === "retry") {
+            return {
+              result: { acquired, resp: null },
+              failure: { kind: "no_credential" },
+            };
+          }
+          const resp = await postUpstream(acquired.url, {
+            method: "POST",
+            headers: {
+              ...acquired.headers,
+              "content-type": "application/json",
+              accept: "application/json",
+            },
+            body: JSON.stringify(upstreamBody),
+            signal: args.req.signal,
+          });
+          return mediaDialAttempt({ acquired, resp });
+        },
+      );
       if (acquired === "retry") {
         if (
           !last &&
@@ -693,17 +725,6 @@ export const runImageWalker = async (args: TWalkArgs): Promise<Response> => {
           hop.modelId,
         );
       }
-
-      const resp = await postUpstream(acquired.url, {
-        method: "POST",
-        headers: {
-          ...acquired.headers,
-          "content-type": "application/json",
-          accept: "application/json",
-        },
-        body: JSON.stringify(upstreamBody),
-        signal: args.req.signal,
-      });
       if (resp === null) {
         const terminal = args.req.signal.aborted
           ? errorJson(499, "client aborted request")
@@ -1085,7 +1106,35 @@ export const runImageEditWalker = async (
       if (!last && mediaHopAdvances({ dispatched: false, errorCode })) continue;
       return stamp(lastError, hop.modelId);
     }
-    const acquired = await acquireImageEditUpstream(hop.provider, args, hop);
+    // One dial per signed-in account: a 402/429/401/403 from one account
+    // moves on to the next (`serveAcrossAccounts`).
+    const { acquired, resp } = await serveAcrossAccounts(
+      hop,
+      async (): Promise<TAccountAttempt<TImageDial>> => {
+        const acquired = await acquireImageEditUpstream(
+          hop.provider,
+          args,
+          hop,
+        );
+        if (acquired === "retry") {
+          return {
+            result: { acquired, resp: null },
+            failure: { kind: "no_credential" },
+          };
+        }
+        const resp = await postUpstream(acquired.url, {
+          method: "POST",
+          headers: {
+            ...acquired.headers,
+            "content-type": "application/json",
+            accept: "application/json",
+          },
+          body: JSON.stringify(upstreamBody),
+          signal: args.req.signal,
+        });
+        return mediaDialAttempt({ acquired, resp });
+      },
+    );
     if (acquired === "retry") {
       if (
         !last &&
@@ -1103,16 +1152,6 @@ export const runImageEditWalker = async (
         hop.modelId,
       );
     }
-    const resp = await postUpstream(acquired.url, {
-      method: "POST",
-      headers: {
-        ...acquired.headers,
-        "content-type": "application/json",
-        accept: "application/json",
-      },
-      body: JSON.stringify(upstreamBody),
-      signal: args.req.signal,
-    });
     if (resp === null) {
       return stamp(
         args.req.signal.aborted

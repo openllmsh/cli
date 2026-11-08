@@ -55,6 +55,8 @@ import { forwardMediaHopToCloud } from "./media-cloud-forward";
 import { mediaHopAdvances, mediaHttpErrorCode } from "./media-retry";
 import type { TParsedMultipart, TParsedMultipartFile } from "./multipart";
 import { multipartFile } from "./multipart";
+import type { TAccountAttempt } from "./subscription-accounts";
+import { mediaDialAttempt, serveAcrossAccounts } from "./subscription-accounts";
 import type { TWalkArgs } from "./walker";
 import {
   coolHopAfterStaleRefresh,
@@ -74,6 +76,13 @@ type TAudioUpstream = {
   readonly headers: Record<string, string>;
   readonly url: string;
   readonly accountHash: string | null;
+};
+
+/** One account's dial: its credential and the upstream response (if sent). */
+type TAudioDial = {
+  readonly acquired: TAudioUpstream | "retry";
+  readonly resp: Response | null;
+  readonly startedAt: number;
 };
 
 const delegateHookFor = (
@@ -504,12 +513,62 @@ export const runAudioTranscriptionWalker = async (
     }
 
     attempted.push(hop.modelId);
-    const acquired = await acquireAudioUpstream(
-      "transcription",
-      hop.provider,
-      args,
+    // Both verified subscription STT recipes ALWAYS sent an explicit
+    // `language: en` (docs/research/subscription-provider-capabilities-
+    // 2026-09-17.md: grok's "Working fields: file=input.wav, language=en,
+    // format=true"; chatgpt's "Working form fields: file: input.webm,
+    // language: en"). Grok's `/v1/stt` outright REJECTS a request missing it
+    // (400 `Field 'language' is required when 'format' is true`) — verified
+    // live. The OpenAI-compatible `/v1/audio/transcriptions` contract treats
+    // `language` as fully optional, so every caller that omits it (the common
+    // case) needs a server-side default here, never a bare pass-through of
+    // `undefined`, for either provider. An explicit caller-supplied language
+    // still wins.
+    const form =
+      hop.provider === "grok"
+        ? buildTranscriptionForm(
+            normalized.file,
+            format,
+            normalized.language ?? "en",
+            { format: "true" },
+          )
+        : buildTranscriptionForm(
+            normalized.file,
+            format,
+            normalized.language ?? "en",
+          );
+    // One dial per signed-in account: a 402/429/401/403 from one account
+    // moves on to the next (`serveAcrossAccounts`). claude_code streams over
+    // a WebSocket below, so only its credential is acquired per account.
+    const dialed = await serveAcrossAccounts(
       hop,
+      async (): Promise<TAccountAttempt<TAudioDial>> => {
+        const acquired = await acquireAudioUpstream(
+          "transcription",
+          hop.provider,
+          args,
+          hop,
+        );
+        const startedAt = Date.now();
+        if (acquired === "retry") {
+          return {
+            result: { acquired, resp: null, startedAt },
+            failure: { kind: "no_credential" },
+          };
+        }
+        if (hop.provider === "claude_code") {
+          return { result: { acquired, resp: null, startedAt } };
+        }
+        const resp = await postUpstream(acquired.url, {
+          method: "POST",
+          headers: { ...acquired.headers, accept: "application/json" },
+          body: form,
+          signal: args.req.signal,
+        });
+        return mediaDialAttempt({ acquired, resp, startedAt });
+      },
     );
+    const acquired = dialed.acquired;
     if (acquired === "retry") {
       lastError = errorJson(
         404,
@@ -592,38 +651,7 @@ export const runAudioTranscriptionWalker = async (
     }
 
     // ── chatgpt / grok: batch multipart POST, forwarded verbatim ────────────
-    const startedAt = Date.now();
-    // Both verified subscription STT recipes ALWAYS sent an explicit
-    // `language: en` (docs/research/subscription-provider-capabilities-
-    // 2026-09-17.md: grok's "Working fields: file=input.wav, language=en,
-    // format=true"; chatgpt's "Working form fields: file: input.webm,
-    // language: en"). Grok's `/v1/stt` outright REJECTS a request missing it
-    // (400 `Field 'language' is required when 'format' is true`) — verified
-    // live. The OpenAI-compatible `/v1/audio/transcriptions` contract treats
-    // `language` as fully optional, so every caller that omits it (the common
-    // case) needs a server-side default here, never a bare pass-through of
-    // `undefined`, for either provider. An explicit caller-supplied language
-    // still wins.
-    const form =
-      hop.provider === "grok"
-        ? buildTranscriptionForm(
-            normalized.file,
-            format,
-            normalized.language ?? "en",
-            { format: "true" },
-          )
-        : buildTranscriptionForm(
-            normalized.file,
-            format,
-            normalized.language ?? "en",
-          );
-
-    const resp = await postUpstream(acquired.url, {
-      method: "POST",
-      headers: { ...acquired.headers, accept: "application/json" },
-      body: form,
-      signal: args.req.signal,
-    });
+    const { resp, startedAt } = dialed;
     const latencyMs = Date.now() - startedAt;
     if (resp === null) {
       reportResult("error", latencyMs);
@@ -960,30 +988,6 @@ export const runAudioSpeechWalker = async (
       }
       return stamp(lastError);
     }
-    const acquired = await acquireAudioUpstream(
-      "speech",
-      hop.provider,
-      args,
-      hop,
-    );
-    if (acquired === "retry") {
-      lastError = errorJson(
-        404,
-        `No speech credential available for ${hop.provider}`,
-      );
-      if (
-        !last &&
-        mediaHopAdvances({
-          dispatched: false,
-          errorCode: "missing_credential",
-        })
-      ) {
-        continue;
-      }
-      return stamp(lastError);
-    }
-    attempted.push(hop.modelId);
-    const startedAt = Date.now();
     const upstreamBody =
       hop.provider === "grok"
         ? JSON.stringify({
@@ -1003,16 +1007,56 @@ export const runAudioSpeechWalker = async (
             pronunciation_language: "en-US",
             speed: parsedBody.speed ?? 1,
           });
-    const resp = await postUpstream(acquired.url, {
-      method: "POST",
-      headers: {
-        ...acquired.headers,
-        "content-type": "application/json",
-        accept: "audio/mpeg, application/json",
+    // One dial per signed-in account: a 402/429/401/403 from one account
+    // moves on to the next (`serveAcrossAccounts`).
+    const dialed = await serveAcrossAccounts(
+      hop,
+      async (): Promise<TAccountAttempt<TAudioDial>> => {
+        const acquired = await acquireAudioUpstream(
+          "speech",
+          hop.provider,
+          args,
+          hop,
+        );
+        const startedAt = Date.now();
+        if (acquired === "retry") {
+          return {
+            result: { acquired, resp: null, startedAt },
+            failure: { kind: "no_credential" },
+          };
+        }
+        const resp = await postUpstream(acquired.url, {
+          method: "POST",
+          headers: {
+            ...acquired.headers,
+            "content-type": "application/json",
+            accept: "audio/mpeg, application/json",
+          },
+          body: upstreamBody,
+          signal: args.req.signal,
+        });
+        return mediaDialAttempt({ acquired, resp, startedAt });
       },
-      body: upstreamBody,
-      signal: args.req.signal,
-    });
+    );
+    const acquired = dialed.acquired;
+    if (acquired === "retry") {
+      lastError = errorJson(
+        404,
+        `No speech credential available for ${hop.provider}`,
+      );
+      if (
+        !last &&
+        mediaHopAdvances({
+          dispatched: false,
+          errorCode: "missing_credential",
+        })
+      ) {
+        continue;
+      }
+      return stamp(lastError);
+    }
+    attempted.push(hop.modelId);
+    const { resp, startedAt } = dialed;
     const latencyMs = Date.now() - startedAt;
     const reportResult = (status: "success" | "error"): void => {
       report(

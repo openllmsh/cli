@@ -48,7 +48,6 @@ import type {
   TErrorEnvelope,
   TModelCaps,
   TModelSettings,
-  TProviderUsageSnapshot,
   TRequestStatus,
   TServerSearchCall,
 } from "@openllmsh/sdk/protocol";
@@ -65,11 +64,6 @@ import {
   TUNNELED_REQUEST_VALUE,
 } from "@openllmsh/sdk/protocol";
 import { declaresAnthropicServerSearchTool } from "@openllmsh/sdk/wire/adapters/messages/request";
-import type { TRankableAccount } from "@openllmsh/sdk/wire/features/account-rank";
-import {
-  pickFinalFallback,
-  rankProviderAccounts,
-} from "@openllmsh/sdk/wire/features/account-rank";
 import type { TCompactionSurface } from "@openllmsh/sdk/wire/features/compaction/compact-request";
 import { compactRequestToFit } from "@openllmsh/sdk/wire/features/compaction/compact-request";
 import {
@@ -198,7 +192,6 @@ import {
   holdFieldsForRecord,
 } from "./access-hold-context";
 import { accountIndexes } from "./account-models";
-import { readRoster } from "./account-roster";
 import { AccountKeyedMap } from "./account-scope";
 import { requestStatusPush } from "./auth-events";
 import type { TCacheProbe } from "./cache-probe";
@@ -208,7 +201,6 @@ import {
   cacheProbePrefixHash,
   cacheProbeWrap,
 } from "./cache-probe";
-import type { TCliProvider } from "./cli-paths";
 import { DEFAULT_ACCOUNT_INDEX } from "./cli-paths";
 import {
   deliverChunkStream,
@@ -256,15 +248,18 @@ import { runWithAccount } from "./op-context";
 import { clearPlanCache } from "./plan-cache";
 import { recordAttempt } from "./record-attempt";
 import { isClaudeCodeOriginator, resolveHopExecution } from "./sub-method";
+import type { TLocalSubscriptionAuth } from "./subscription-accounts";
+import {
+  ensureLocalSubscription,
+  noteAccountFailure,
+  planSubscriptionAccounts,
+  usageForActiveAccount,
+} from "./subscription-accounts";
 import { observeTeamResponseStream } from "./team-leg-body";
 import { isTeamHop, tryDirectTeamLeg } from "./team-leg-client";
 import type { TTunnelToPeer } from "./tunnel-client";
 import { tunnelToPeer } from "./tunnel-client";
-import {
-  peekUsageForQuotaGate,
-  sampleUsageAfterRequest,
-  sampleUsageOnExhaustion,
-} from "./usage-cache";
+import { sampleUsageAfterRequest } from "./usage-cache";
 
 export const noteWalkerStreamTerminal = (opts: {
   readonly aborted: boolean;
@@ -2385,90 +2380,6 @@ const serveKimiBuiltinSearch = async (
  * not resolve a plan for → 400.
  */
 /**
- * Local subscription readiness for one provider — shared by the auth gate
- * and the quota-account lookup so a hop pays `status()` at most once.
- * `connected: false` means install-only / not signed in / status failed;
- * the walker must not spawn a bridge or attempt handrolled on that box.
- */
-export type TLocalSubscriptionAuth = {
-  readonly connected: boolean;
-  readonly detail: string | null;
-};
-
-export const ensureLocalSubscription = async (
-  provider: string,
-  connectedByProvider: Map<string, TLocalSubscriptionAuth>,
-  accountHashByProvider: Map<string, string | null>,
-): Promise<TLocalSubscriptionAuth> => {
-  const cached = connectedByProvider.get(provider);
-  if (cached !== undefined) return cached;
-
-  const { readProviderStatus } = await import("./status");
-  const { normalizeProviderConnection } = await import(
-    "@openllmsh/sdk/protocol"
-  );
-  // Always probe through `readProviderStatus` — a process-wide last-known
-  // connected row must not mask a later unknown/timeout (serviceable:false).
-  // Per-walk dedupe is `connectedByProvider` above; status owns its own
-  // in-flight coalescing so hops in one tick still share one CLI spawn.
-  const status = await readProviderStatus(provider);
-  if (status === null) {
-    const miss: TLocalSubscriptionAuth = {
-      connected: false,
-      detail: `${provider} is not a local subscription provider`,
-    };
-    connectedByProvider.set(provider, miss);
-    accountHashByProvider.set(provider, null);
-    return miss;
-  }
-  const normalized = normalizeProviderConnection(status);
-  const result: TLocalSubscriptionAuth = {
-    connected: normalized.serviceable,
-    detail: normalized.serviceable
-      ? null
-      : (status.detail ?? `${provider} not signed in on this device`),
-  };
-  connectedByProvider.set(provider, result);
-  accountHashByProvider.set(
-    provider,
-    normalized.serviceable ? (status.account_hash ?? null) : null,
-  );
-  return result;
-};
-
-export const usageForActiveAccount = async (
-  provider: string,
-  accountHashByProvider: Map<string, string | null>,
-  connectedByProvider: Map<string, TLocalSubscriptionAuth> = new Map(),
-): Promise<TProviderUsageSnapshot | null> => {
-  // Single resolution path:
-  //   1. If the auth cache already says not-connected → null (walker auth gate
-  //      already paid for status()).
-  //   2. If the account hash is not yet known → ensureLocalSubscription fills
-  //      both maps (same probe the hop auth gate uses).
-  //   3. Peek the usage cache for that account. A pre-seeded account hash
-  //      (unit tests) is honored without a live status() re-probe.
-  const known = connectedByProvider.get(provider);
-  if (known !== undefined && !known.connected) return null;
-
-  if (!accountHashByProvider.has(provider)) {
-    const auth = await ensureLocalSubscription(
-      provider,
-      connectedByProvider,
-      accountHashByProvider,
-    );
-    if (!auth.connected) return null;
-  }
-
-  const accountHash = accountHashByProvider.get(provider) ?? null;
-  if (accountHash === null) return null;
-  const delegate = getDelegate(provider);
-  if (delegate === null) return null;
-  // `usage()` is a stored-credential read — it must not native-refresh.
-  return peekUsageForQuotaGate(provider, accountHash, () => delegate.usage());
-};
-
-/**
  * The plan hop with the LARGEST known input window, and that window — the
  * last-resort compaction target. Unknown-limit hops are ignored (no window to
  * size a budget from). Returns `null` when no hop declares a limit.
@@ -2856,23 +2767,6 @@ const walkPlan = async (
       accountHash ?? undefined,
     );
   };
-  const sampleQuotaUsageImmediate = (
-    provider: string,
-    accountHash: string | null | undefined,
-  ): void => {
-    const delegate = getDelegate(provider);
-    if (delegate === null) return;
-    // The vendor just told us this account is exhausted. Sample NOW (no
-    // debounce / min-interval floor) so the quota gate has a rejected snapshot
-    // to route on — an exhausted account emits no successful request, so
-    // nothing else would re-sample it. Single-flight in `cachedUsage` collapses
-    // a concurrent herd to one vendor read.
-    sampleUsageOnExhaustion(
-      provider,
-      () => delegate.usage(),
-      accountHash ?? undefined,
-    );
-  };
   const reportHopFailure = (
     hop: THop,
     reason: string,
@@ -2929,13 +2823,13 @@ const walkPlan = async (
       cooldownReason !== undefined &&
       cooldownPolicyFor(cooldownReason).action === "cool_and_advance"
     ) {
-      const changed = markHopCooldown(
-        hop.provider,
-        hop.modelId,
-        cooldownReason,
-        walkSessionKey,
-        recoverAtMs,
-      );
+      // Marks the cooldown and, on `quota_exhausted`, samples the account's
+      // usage at once (shared with the media walkers).
+      const changed = noteAccountFailure(hop, cooldownReason, {
+        accountHash: accountHashByProvider.get(hop.provider),
+        sessionKey: walkSessionKey,
+        ...(recoverAtMs !== undefined ? { recoverAtMs } : {}),
+      });
       // A NEW/changed `auth` mark on a subscription hop: push status now so
       // the dashboard overlay does not wait for the 15s watcher. Repeated
       // identical marks (in-place retry) do not re-arm. Never refresh.
@@ -2944,16 +2838,6 @@ const walkPlan = async (
         args.onAuthCooldownStatusPush?.();
         requestStatusPush();
       }
-    }
-    // The vendor just TOLD us this account is out of quota. Sample its usage
-    // IMMEDIATELY (no debounce) so the quota gate gets a rejected snapshot to
-    // route on for the rest of the window — an exhausted account produces no
-    // successful request, so nothing else would ever re-sample it.
-    if (cooldownReason === "quota_exhausted") {
-      sampleQuotaUsageImmediate(
-        hop.provider,
-        accountHashByProvider.get(hop.provider),
-      );
     }
     reportHopFailure(hop, reason, status, cooldownReason);
   };
@@ -3029,50 +2913,18 @@ const walkPlan = async (
     finalHop: boolean,
     opts: { readonly forceContextAttempt: boolean },
   ): Promise<THopServed | THopContinue> => {
-    const roster = readRoster(hop.provider as TCliProvider);
-    if (roster.accounts.length <= 1) {
+    const plan = await planSubscriptionAccounts(hop, {
+      connectedByProvider,
+      accountHashByProvider,
+    });
+    if (plan === null) {
       return serveSubscriptionHop(hop, finalHop, { ...opts, retryAttempt: 0 });
     }
-    const now = Date.now();
-    const meter = lookupCatalogEntry(hop.modelId)?.subscription_meter;
-    const signedIn: TRankableAccount[] = [];
-    for (const { index } of roster.accounts) {
-      const rankable = await runWithAccount(index, async () => {
-        const auth = await ensureLocalSubscription(
-          hop.provider,
-          connectedByProvider,
-          accountHashByProvider,
-        );
-        if (!auth.connected) return null;
-        return {
-          index,
-          snapshot: await usageForActiveAccount(
-            hop.provider,
-            accountHashByProvider,
-            connectedByProvider,
-          ),
-          cooling: isHopCoolingDown(hop.provider, hop.modelId, now),
-        };
-      });
-      if (rankable !== null) signedIn.push(rankable);
-    }
-    let order = rankProviderAccounts({
-      accounts: signedIn,
-      meter,
-      pinnedIndex: roster.pinned_index,
-      staleCapMs: GATE_STALE_CAP_MS,
-      now,
-    }).map((a) => a.index);
+    const { signedIn, fallbackIndex } = plan;
+    let order: readonly number[] = plan.ranked;
     // Never-drop-all: on the FINAL hop, when every signed-in account is
     // cooled or exhausted, still dial the least-bad one for a real error
     // (pinned → most remaining trusted quota → lowest index).
-    const fallbackIndex = pickFinalFallback({
-      accounts: signedIn,
-      meter,
-      pinnedIndex: roster.pinned_index,
-      staleCapMs: GATE_STALE_CAP_MS,
-      now,
-    });
     if (order.length === 0 && signedIn.length > 0) {
       // Every local account is exhausted or cooling. Another device of this
       // user may hold a different account with quota — ask it before dialling
