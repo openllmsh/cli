@@ -354,7 +354,14 @@ Converted audio is capped at 25 MiB too, and overflow is an error, not truncatio
 The adapter uploads the bytes as multipart (`uploadTranscription` in
 `@openllmsh/sdk/mcp`, never a base64 data URL, which is a third larger), waits
 up to `TRANSCRIPTION_TIMEOUT_MS` (300 s, the gateway's `maxDuration`) rather
-than the generic 120 s tool ceiling, and redacts echoed audio. The daemon gives
+than the generic 120 s tool ceiling, and redacts echoed audio. It opts in to
+**keepalive** (`x-openllm-keepalive: 1`, `@openllmsh/sdk/protocol`
+`keepalive.ts`): an answer ready within 60 s comes back unchanged with its real
+status, while a slower one gets `200` at once, a space every 20 s, then an
+envelope carrying the real status, `x-openllm-*` headers and body, which
+`unwrapKeepaliveResponse` turns back into that response. Without it, the edge
+proxy (Cloudflare, ~100 s of silence on our plan) turned a long transcription
+into a 524. The daemon gives
 whole-body audio endpoints the same 300 s header budget
 (`originHeaderTimeoutFor`). An absent model
 stays absent so the gateway can apply the catalog media default chain
