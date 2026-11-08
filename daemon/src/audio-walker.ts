@@ -55,6 +55,7 @@ import { forwardMediaHopToCloud } from "./media-cloud-forward";
 import { mediaHopAdvances, mediaHttpErrorCode } from "./media-retry";
 import type { TParsedMultipart, TParsedMultipartFile } from "./multipart";
 import { multipartFile } from "./multipart";
+import { currentAccountIndex, runWithAccount } from "./op-context";
 import type { TAccountAttempt } from "./subscription-accounts";
 import { mediaDialAttempt, serveAcrossAccounts } from "./subscription-accounts";
 import type { TWalkArgs } from "./walker";
@@ -572,7 +573,11 @@ export const runAudioTranscriptionWalker = async (
         finalHop: last,
         signal: args.req.signal,
         // Every account cooling/exhausted: advance like a missing credential.
-        exhausted: () => ({ acquired: "retry" as const, resp: null, startedAt: 0 }),
+        exhausted: () => ({
+          acquired: "retry" as const,
+          resp: null,
+          startedAt: 0,
+        }),
       },
     );
     const acquired = dialed.acquired;
@@ -1016,9 +1021,11 @@ export const runAudioSpeechWalker = async (
           });
     // One dial per signed-in account: a 402/429/401/403 from one account
     // moves on to the next (`serveAcrossAccounts`).
+    let servingAccount = currentAccountIndex();
     const dialed = await serveAcrossAccounts(
       hop,
       async (): Promise<TAccountAttempt<TAudioDial>> => {
+        servingAccount = currentAccountIndex();
         const acquired = await acquireAudioUpstream(
           "speech",
           hop.provider,
@@ -1048,7 +1055,11 @@ export const runAudioSpeechWalker = async (
         finalHop: last,
         signal: args.req.signal,
         // Every account cooling/exhausted: advance like a missing credential.
-        exhausted: () => ({ acquired: "retry" as const, resp: null, startedAt: 0 }),
+        exhausted: () => ({
+          acquired: "retry" as const,
+          resp: null,
+          startedAt: 0,
+        }),
       },
     );
     const acquired = dialed.acquired;
@@ -1072,22 +1083,26 @@ export const runAudioSpeechWalker = async (
     const { resp, startedAt } = dialed;
     const latencyMs = Date.now() - startedAt;
     const reportResult = (status: "success" | "error"): void => {
-      report(
-        {
-          model: hop.modelId,
-          provider: hop.provider,
-          status,
-          tokens_in: chars,
-          tokens_out: 0,
-          latency_ms: latencyMs,
-          endpoint: args.endpoint,
-          ...(acquired.accountHash !== null
-            ? { account_hash: acquired.accountHash }
-            : {}),
-        },
-        args.originParam,
-        undefined,
-        { sent: true, usage: null, definiteProviderError: false },
+      // A success with tokens samples usage through the delegate, which reads
+      // the ambient account: run it as the account that served.
+      runWithAccount(servingAccount, () =>
+        report(
+          {
+            model: hop.modelId,
+            provider: hop.provider,
+            status,
+            tokens_in: chars,
+            tokens_out: 0,
+            latency_ms: latencyMs,
+            endpoint: args.endpoint,
+            ...(acquired.accountHash !== null
+              ? { account_hash: acquired.accountHash }
+              : {}),
+          },
+          args.originParam,
+          undefined,
+          { sent: true, usage: null, definiteProviderError: false },
+        ),
       );
     };
     if (resp === null) {
