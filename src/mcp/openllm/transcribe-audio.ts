@@ -482,7 +482,10 @@ const refusedBeforeAcceptance = (text: string): boolean => {
   const match = /^HTTP (\d{3}): ([\s\S]*)$/.exec(text);
   if (match === null) return false;
   const status = Number(match[1]);
-  if ([401, 404, 415, 429].includes(status)) return true;
+  // 413: the platform refused the body before the function ran (Vercel caps
+  // request bodies at 4.5 MB, so a long 16 kHz WAV for one hop never lands
+  // while the same audio as WebM/Opus for the next hop does).
+  if ([401, 404, 413, 415, 429].includes(status)) return true;
   if (status !== 400 && status !== 403) return false;
   // The body may be followed by a " Served by …" attribution sentence.
   const body = match[2] ?? "";
