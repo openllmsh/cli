@@ -989,16 +989,18 @@ const dialImageEditHop = async (
     return localMediaUnsupportedMiss(ctx, "image edit");
   }
   if (!isOAuthSlug(hop.provider)) {
-    attempted.push(hop.modelId);
+    // P4a: skipped, not attempted — stay out of x-openllm-chain / resolved.
+    // Always advance so a lone BYOK plan falls through to the 404 below
+    // without attributing the hop; the code names why.
     return {
       kind: "miss",
       error: errorJson(
-        400,
+        404,
         `API-key provider "${hop.provider}" cannot serve image edits on this device yet`,
         "invalid_request_error",
         "image_edit_api_key_unsupported",
       ),
-      advances: !finalHop,
+      advances: true,
     };
   }
   attempted.push(hop.modelId);
