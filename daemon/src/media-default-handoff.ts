@@ -9,18 +9,19 @@
 import type {
   TMediaDefaultRequest,
   TMediaDefaultSurface,
+  TMediaModelField,
 } from "@openllmsh/sdk/protocol";
 import {
+  CHAT_ALIAS_ON_MEDIA_SURFACE_CODE,
+  DEFAULT_TIER_ALIASES,
+  decideMediaModelField,
   decodeMediaModelSelection,
   mediaDefaultRequestFromBody,
 } from "@openllmsh/sdk/protocol";
 import type { TParsedMultipart } from "./multipart";
 import { serializeMultipartWithFields } from "./multipart";
 
-export type TModelField =
-  | { readonly kind: "absent" }
-  | { readonly kind: "invalid" }
-  | { readonly kind: "explicit"; readonly value: string };
+export type TModelField = TMediaModelField;
 
 export const classifyModelField = (value: unknown): TModelField => {
   try {
@@ -31,6 +32,24 @@ export const classifyModelField = (value: unknown): TModelField => {
   } catch {
     return { kind: "invalid" };
   }
+};
+
+/**
+ * Local refuse for built-in chat tier aliases on a media surface. Custom
+ * chat-only groups need the cloud's catalog view; the plan endpoint refuses
+ * those. Tiers are refused here so a round trip is not required.
+ */
+export const localChatAliasMediaRefusal = (
+  surface: TMediaDefaultSurface,
+  field: TModelField,
+): { readonly message: string; readonly code: string } | null => {
+  const decision = decideMediaModelField({
+    surface,
+    field,
+    chatOnlyAliasNames: DEFAULT_TIER_ALIASES,
+  });
+  if (decision.kind !== "refuse_chat_alias") return null;
+  return { message: decision.message, code: CHAT_ALIAS_ON_MEDIA_SURFACE_CODE };
 };
 
 export const modelFieldFromRequest = (
@@ -57,12 +76,14 @@ export const mediaDefaultSurfaceFor = (args: {
   readonly isTranscriptions: boolean;
   readonly isSpeech: boolean;
   readonly isVideoCreate: boolean;
+  readonly isEmbeddings?: boolean;
 }): TMediaDefaultSurface | null => {
   if (args.isImages) return "image";
   if (args.isImageEdits) return "image_edit";
   if (args.isTranscriptions) return "transcription";
   if (args.isSpeech) return "speech";
   if (args.isVideoCreate) return "video";
+  if (args.isEmbeddings === true) return "embeddings";
   return null;
 };
 

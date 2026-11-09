@@ -131,7 +131,10 @@ export const runEmbeddings = async (args: TWalkArgs): Promise<Response> => {
 
   const bodyModel = modelIdFromBody(args.rawBody);
   if (bodyModel === null) {
-    return errorJson(400, "model is required");
+    // Omitted model is planned via media_default (listener) so a signed plan
+    // normally walks above. Without a plan, forward to origin — the cloud
+    // walks the default embeddings chain for an omitted model.
+    return passthroughToOrigin(args.req, args.rawBytes);
   }
   const parts = splitProviderModel(bodyModel);
   if (parts !== null && isLocalServerSlug(parts.provider)) {

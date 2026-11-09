@@ -71,6 +71,7 @@ import { isLocalServerSlug } from "./local-servers";
 import { logWarn, safeDiagnosticMessage } from "./logger";
 import {
   buildMediaDefaultRequest,
+  localChatAliasMediaRefusal,
   materializeSelectedModel,
   mediaDefaultSurfaceFor,
   modelFieldFromRequest,
@@ -331,6 +332,7 @@ const handleInferenceIn = async (
     isTranscriptions,
     isSpeech,
     isVideoCreate: videoOperation === "create",
+    isEmbeddings,
   });
   const modelField = modelFieldFromRequest(rawBody, multipart);
   // Invalid `model` types are only a media-default concern. Compact and
@@ -338,6 +340,17 @@ const handleInferenceIn = async (
   // verbatim vendor passthrough).
   if (mediaSurface !== null && modelField.kind === "invalid") {
     return withCors(req, errorJson(400, "Invalid request body"));
+  }
+  // Built-in chat tier aliases on a media surface are refused locally —
+  // same code the plan endpoint returns — so a round trip is not required.
+  if (mediaSurface !== null) {
+    const refusal = localChatAliasMediaRefusal(mediaSurface, modelField);
+    if (refusal !== null) {
+      return withCors(
+        req,
+        errorJson(400, refusal.message, refusal.code, refusal.code),
+      );
+    }
   }
 
   // Inline image edits: explicit model normalizes immediately. Model-less
