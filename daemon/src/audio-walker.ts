@@ -451,7 +451,9 @@ const dialAudioTranscriptionHop = async (
       ? extractClaudeDictationPcm(normalized.file.bytes, format)
       : null;
   if (pcmValidation !== null && isPcmParseFailure(pcmValidation)) {
-    // M8 deferred: keep invalid PCM advance as missing_credential for now.
+    // Provider-format PCM shape is wrong for this hop; a later hop (or BYOK
+    // forward) may still accept the bytes. Walk as adapter_input_rejected
+    // — not missing_credential (M8).
     const error = errorJson(
       415,
       `Invalid ${format} audio: ${pcmValidation.error}`,
@@ -461,7 +463,9 @@ const dialAudioTranscriptionHop = async (
       error,
       advances:
         !finalHop &&
-        mediaHopAdvancesForReason("missing_credential", { dispatched: false }),
+        mediaHopAdvancesForReason("adapter_input_rejected", {
+          dispatched: false,
+        }),
     };
   }
 
