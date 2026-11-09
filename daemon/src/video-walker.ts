@@ -42,7 +42,10 @@ import {
   MediaInputError,
   MediaProviderUnavailableError,
 } from "./media-input-error";
-import { mediaHopAdvances, mediaHttpErrorCode } from "./media-retry";
+import {
+  mediaHopAdvancesForHttp,
+  mediaHopAdvancesForReason,
+} from "./media-retry";
 import { currentAccountIndex, runWithAccount } from "./op-context";
 import type { TAccountAttempt } from "./subscription-accounts";
 import { mediaDialAttempt, serveAcrossAccounts } from "./subscription-accounts";
@@ -494,14 +497,18 @@ export const runVideoCreate = async (args: TWalkArgs): Promise<Response> => {
       const forwarded = await forwardMediaHopToCloud(args, hop.modelId);
       if (forwarded.ok) return stamp(forwarded, hop.modelId);
       lastError = forwarded;
+      const forwardRaw = await forwarded
+        .clone()
+        .text()
+        .catch(() => "");
       if (
         !last &&
-        mediaHopAdvances({
-          dispatched: true,
-          httpStatus: forwarded.status,
-          errorCode: mediaHttpErrorCode(forwarded.status),
-          accepted: false,
-        })
+        mediaHopAdvancesForHttp(
+          forwarded.status,
+          forwardRaw,
+          { dispatched: true, accepted: false },
+          hop.provider,
+        )
       ) {
         continue;
       }
@@ -541,10 +548,7 @@ export const runVideoCreate = async (args: TWalkArgs): Promise<Response> => {
       lastError = errorJson(400, failure.message, errorCode);
       if (
         !last &&
-        mediaHopAdvances({
-          dispatched: false,
-          errorCode: "model_unavailable",
-        })
+        mediaHopAdvancesForReason("model_unavailable", { dispatched: false })
       ) {
         continue;
       }
@@ -574,7 +578,10 @@ export const runVideoCreate = async (args: TWalkArgs): Promise<Response> => {
           body: JSON.stringify(body),
           signal: args.req.signal,
         });
-        return mediaDialAttempt({ acquired, resp, accountIndex });
+        return await mediaDialAttempt(
+          { acquired, resp, accountIndex },
+          hop.provider,
+        );
       },
       {
         finalHop: last,
@@ -595,10 +602,7 @@ export const runVideoCreate = async (args: TWalkArgs): Promise<Response> => {
       );
       if (
         !last &&
-        mediaHopAdvances({
-          dispatched: false,
-          errorCode: "missing_credential",
-        })
+        mediaHopAdvancesForReason("missing_credential", { dispatched: false })
       ) {
         continue;
       }
@@ -620,7 +624,11 @@ export const runVideoCreate = async (args: TWalkArgs): Promise<Response> => {
         upstream.accountHash,
       );
       const rawError = await upstreamError(resp);
-      const errorText = redactVideoErrorText(await rawError.text(), [
+      const rawBody = await rawError
+        .clone()
+        .text()
+        .catch(() => "");
+      const errorText = redactVideoErrorText(rawBody, [
         request.input_image ?? "",
         ...(request.reference_images ?? []),
         ...(request.reference_voices ?? []),
@@ -636,12 +644,12 @@ export const runVideoCreate = async (args: TWalkArgs): Promise<Response> => {
       });
       if (
         !last &&
-        mediaHopAdvances({
-          dispatched: true,
-          httpStatus: resp.status,
-          errorCode: mediaHttpErrorCode(resp.status),
-          accepted: false,
-        })
+        mediaHopAdvancesForHttp(
+          resp.status,
+          rawBody,
+          { dispatched: true, accepted: false },
+          hop.provider,
+        )
       ) {
         continue;
       }

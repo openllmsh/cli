@@ -52,7 +52,10 @@ import type { TImageCredential } from "./delegation/types";
 import { logWarn, safeDiagnosticMessage } from "./logger";
 import { withMediaAttribution } from "./media-attribution";
 import { forwardMediaHopToCloud } from "./media-cloud-forward";
-import { mediaHopAdvances, mediaHttpErrorCode } from "./media-retry";
+import {
+  mediaHopAdvancesForHttp,
+  mediaHopAdvancesForReason,
+} from "./media-retry";
 import type { TParsedMultipart, TParsedMultipartFile } from "./multipart";
 import { multipartFile } from "./multipart";
 import { currentAccountIndex, runWithAccount } from "./op-context";
@@ -427,10 +430,7 @@ export const runAudioTranscriptionWalker = async (
       );
       if (
         !last &&
-        mediaHopAdvances({
-          dispatched: false,
-          errorCode: "missing_credential",
-        })
+        mediaHopAdvancesForReason("missing_credential", { dispatched: false })
       ) {
         continue;
       }
@@ -452,14 +452,18 @@ export const runAudioTranscriptionWalker = async (
       const forwarded = await forwardMediaHopToCloud(args, hop.modelId);
       if (forwarded.ok) return stamp(forwarded, hop.modelId);
       lastError = forwarded;
+      const forwardRaw = await forwarded
+        .clone()
+        .text()
+        .catch(() => "");
       if (
         !last &&
-        mediaHopAdvances({
-          dispatched: true,
-          httpStatus: forwarded.status,
-          errorCode: mediaHttpErrorCode(forwarded.status),
-          accepted: false,
-        })
+        mediaHopAdvancesForHttp(
+          forwarded.status,
+          forwardRaw,
+          { dispatched: true, accepted: false },
+          hop.provider,
+        )
       ) {
         continue;
       }
@@ -476,10 +480,7 @@ export const runAudioTranscriptionWalker = async (
       );
       if (
         !last &&
-        mediaHopAdvances({
-          dispatched: false,
-          errorCode: "model_unavailable",
-        })
+        mediaHopAdvancesForReason("model_unavailable", { dispatched: false })
       ) {
         continue;
       }
@@ -504,10 +505,7 @@ export const runAudioTranscriptionWalker = async (
       );
       if (
         !last &&
-        mediaHopAdvances({
-          dispatched: false,
-          errorCode: "missing_credential",
-        })
+        mediaHopAdvancesForReason("missing_credential", { dispatched: false })
       )
         continue;
       return stamp(lastError);
@@ -567,7 +565,10 @@ export const runAudioTranscriptionWalker = async (
           body: form,
           signal: args.req.signal,
         });
-        return mediaDialAttempt({ acquired, resp, startedAt });
+        return await mediaDialAttempt(
+          { acquired, resp, startedAt },
+          hop.provider,
+        );
       },
       {
         finalHop: last,
@@ -588,10 +589,7 @@ export const runAudioTranscriptionWalker = async (
       );
       if (
         !last &&
-        mediaHopAdvances({
-          dispatched: false,
-          errorCode: "missing_credential",
-        })
+        mediaHopAdvancesForReason("missing_credential", { dispatched: false })
       )
         continue;
       return stamp(lastError);
@@ -680,12 +678,12 @@ export const runAudioTranscriptionWalker = async (
       });
       if (
         !last &&
-        mediaHopAdvances({
-          dispatched: true,
-          httpStatus: resp.status,
-          errorCode: mediaHttpErrorCode(resp.status),
-          accepted: false,
-        })
+        mediaHopAdvancesForHttp(
+          resp.status,
+          body,
+          { dispatched: true, accepted: false },
+          hop.provider,
+        )
       ) {
         continue;
       }
@@ -955,14 +953,18 @@ export const runAudioSpeechWalker = async (
       const forwarded = await forwardMediaHopToCloud(args, hop.modelId);
       if (forwarded.ok) return stamp(forwarded, hop.modelId);
       lastError = forwarded;
+      const forwardRaw = await forwarded
+        .clone()
+        .text()
+        .catch(() => "");
       if (
         !last &&
-        mediaHopAdvances({
-          dispatched: true,
-          httpStatus: forwarded.status,
-          errorCode: mediaHttpErrorCode(forwarded.status),
-          accepted: false,
-        })
+        mediaHopAdvancesForHttp(
+          forwarded.status,
+          forwardRaw,
+          { dispatched: true, accepted: false },
+          hop.provider,
+        )
       ) {
         continue;
       }
@@ -976,10 +978,7 @@ export const runAudioSpeechWalker = async (
       );
       if (
         !last &&
-        mediaHopAdvances({
-          dispatched: false,
-          errorCode: "missing_credential",
-        })
+        mediaHopAdvancesForReason("missing_credential", { dispatched: false })
       ) {
         continue;
       }
@@ -991,10 +990,7 @@ export const runAudioSpeechWalker = async (
       lastError = errorJson(400, formatError ?? voiceError ?? "invalid speech");
       if (
         !last &&
-        mediaHopAdvances({
-          dispatched: false,
-          errorCode: "model_unavailable",
-        })
+        mediaHopAdvancesForReason("model_unavailable", { dispatched: false })
       ) {
         continue;
       }
@@ -1049,7 +1045,10 @@ export const runAudioSpeechWalker = async (
           body: upstreamBody,
           signal: args.req.signal,
         });
-        return mediaDialAttempt({ acquired, resp, startedAt });
+        return await mediaDialAttempt(
+          { acquired, resp, startedAt },
+          hop.provider,
+        );
       },
       {
         finalHop: last,
@@ -1070,10 +1069,7 @@ export const runAudioSpeechWalker = async (
       );
       if (
         !last &&
-        mediaHopAdvances({
-          dispatched: false,
-          errorCode: "missing_credential",
-        })
+        mediaHopAdvancesForReason("missing_credential", { dispatched: false })
       ) {
         continue;
       }
@@ -1122,12 +1118,12 @@ export const runAudioSpeechWalker = async (
       });
       if (
         !last &&
-        mediaHopAdvances({
-          dispatched: true,
-          httpStatus: resp.status,
-          errorCode: mediaHttpErrorCode(resp.status),
-          accepted: false,
-        })
+        mediaHopAdvancesForHttp(
+          resp.status,
+          body,
+          { dispatched: true, accepted: false },
+          hop.provider,
+        )
       ) {
         continue;
       }

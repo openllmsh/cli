@@ -11,10 +11,11 @@
  * {@link planSubscriptionAccounts}; the media walkers (audio, image, video)
  * use {@link serveAcrossAccounts} directly.
  *
- * Only an ACCOUNT-level failure (402 quota, 429 rate limit, 401/403 auth, or
- * no credential for that account) moves on to the next account. Anything
- * else — an input the model rejects, a 5xx — is the hop's answer and stays
- * with the plan walk.
+ * Only an ACCOUNT-level failure (cool-and-advance reasons from the shared
+ * classifier — quota/auth/rate/payment, including credits wording on any
+ * 4xx — or no credential for that account) moves on to the next account.
+ * Anything else — an input the model rejects, a 5xx — is the hop's answer
+ * and stays with the plan walk.
  */
 
 import type {
@@ -34,7 +35,7 @@ import type { TCliProvider } from "./cli-paths";
 import { lookupCatalogEntry } from "./config";
 import { getDelegate, isOAuthSlug } from "./delegation";
 import { isHopCoolingDown, markHopCooldown } from "./hop-cooldown";
-import { mediaHttpErrorCode } from "./media-retry";
+import { accountCoolReasonForHttp } from "./media-retry";
 import { runWithAccount } from "./op-context";
 import { peekUsageForQuotaGate, sampleUsageOnExhaustion } from "./usage-cache";
 
@@ -187,26 +188,18 @@ export const planSubscriptionAccounts = async (
 };
 
 /**
- * The cooldown an upstream HTTP status puts on the ACCOUNT that answered it,
- * or `undefined` when the status is not about the account (input rejected,
- * model missing, server error) and another account would answer the same.
+ * The cooldown an upstream HTTP status (+ body) puts on the ACCOUNT that
+ * answered it, or `undefined` when the status is not about the account
+ * (input rejected, model missing, server error) and another account would
+ * answer the same. Uses the shared hop classifier so credits wording on any
+ * 4xx cools like chat.
  */
 export const accountCooldownReasonFor = (
   status: number,
-): TCooldownReason | undefined => {
-  // One classifier for media statuses (`mediaHttpErrorCode`); only its
-  // account-level codes map to a cooldown.
-  switch (mediaHttpErrorCode(status)) {
-    case "quota_exhausted":
-      return "quota_exhausted";
-    case "rate_limited":
-      return "rate_limit";
-    case "auth_error":
-      return "auth";
-    default:
-      return undefined;
-  }
-};
+  raw = "",
+  provider?: string,
+): TCooldownReason | undefined =>
+  accountCoolReasonForHttp(status, raw, provider);
 
 /**
  * Cool the ambient account for this hop and, on `quota_exhausted`, sample its
@@ -255,31 +248,42 @@ export const noteAccountFailure = (
  * The account-level failure of one media dial, or `undefined` when the
  * response is the hop's own answer (success, or a failure another account
  * would repeat). `null` is a transport failure — never account-level.
+ * Clones the body so the walker's later `resp.text()` still works.
  */
-const mediaAccountFailureOf = (
+const mediaAccountFailureOf = async (
   resp: Response | null,
   accountHash: string | null,
-): TAccountFailure | undefined =>
-  resp !== null &&
-  !resp.ok &&
-  accountCooldownReasonFor(resp.status) !== undefined
-    ? { kind: "upstream", status: resp.status, accountHash }
-    : undefined;
+  provider?: string,
+): Promise<TAccountFailure | undefined> => {
+  if (resp === null || resp.ok) return undefined;
+  const raw = await resp
+    .clone()
+    .text()
+    .catch(() => "");
+  const reason = accountCooldownReasonFor(resp.status, raw, provider);
+  if (reason === undefined) return undefined;
+  return { kind: "upstream", status: resp.status, accountHash, reason };
+};
 
 /**
  * The attempt for one media dial (credential + upstream response): an
  * account-level failure lets the next account try, and the skipped
  * response's body is drained.
  */
-export const mediaDialAttempt = <
+export const mediaDialAttempt = async <
   TDial extends {
     readonly acquired: { readonly accountHash: string | null };
     readonly resp: Response | null;
   },
 >(
   dial: TDial,
-): TAccountAttempt<TDial> => {
-  const failure = mediaAccountFailureOf(dial.resp, dial.acquired.accountHash);
+  provider?: string,
+): Promise<TAccountAttempt<TDial>> => {
+  const failure = await mediaAccountFailureOf(
+    dial.resp,
+    dial.acquired.accountHash,
+    provider,
+  );
   return {
     result: dial,
     ...(failure !== undefined ? { failure } : {}),
@@ -295,6 +299,7 @@ export type TAccountFailure =
       readonly kind: "upstream";
       readonly status: number;
       readonly accountHash: string | null;
+      readonly reason: TCooldownReason;
       readonly recoverAtMs?: number;
     }
   | { readonly kind: "no_credential" };
@@ -387,9 +392,7 @@ const coolOnFailure = (
   failure: TAccountFailure | undefined,
 ): void => {
   if (failure?.kind !== "upstream") return;
-  const reason = accountCooldownReasonFor(failure.status);
-  if (reason === undefined) return;
-  noteAccountFailure(hop, reason, {
+  noteAccountFailure(hop, failure.reason, {
     accountHash: failure.accountHash,
     ...(failure.recoverAtMs !== undefined
       ? { recoverAtMs: failure.recoverAtMs }

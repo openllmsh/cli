@@ -45,7 +45,10 @@ import {
   MEDIA_BUILD_FAILURE_MESSAGE,
   MediaInputError,
 } from "./media-input-error";
-import { mediaHopAdvances, mediaHttpErrorCode } from "./media-retry";
+import {
+  mediaHopAdvancesForHttp,
+  mediaHopAdvancesForReason,
+} from "./media-retry";
 import type { TAccountAttempt } from "./subscription-accounts";
 import { mediaDialAttempt, serveAcrossAccounts } from "./subscription-accounts";
 import type { TWalkArgs } from "./walker";
@@ -622,7 +625,7 @@ export const runImageWalker = async (args: TWalkArgs): Promise<Response> => {
       // rejected field hoping a different model was at fault. The cloud
       // lane (`runMediaApiChain`) pushes before attempting for exactly
       // this reason; this is not a claim that anything was submitted —
-      // the dispatch facts handed to `mediaHopAdvances` are untouched.
+      // the dispatch facts handed to `mediaHopAdvancesForReason` are untouched.
       attempted.push(hop.modelId);
       // Validate before credential fallback can advance to an unchecked transport.
       let upstreamBody: Record<string, unknown>;
@@ -658,6 +661,9 @@ export const runImageWalker = async (args: TWalkArgs): Promise<Response> => {
             hop.modelId,
           );
         }
+        const advanceReason = unavailable
+          ? ("model_unavailable" as const)
+          : ("adapter_input_rejected" as const);
         const errorCode = unavailable ? "model_unavailable" : "caller_error";
         lastError = errorJson(
           400,
@@ -666,7 +672,10 @@ export const runImageWalker = async (args: TWalkArgs): Promise<Response> => {
             : (failure as { readonly message: string }).message,
           errorCode,
         );
-        if (!last && mediaHopAdvances({ dispatched: false, errorCode }))
+        if (
+          !last &&
+          mediaHopAdvancesForReason(advanceReason, { dispatched: false })
+        )
           continue;
         return stamp(lastError, hop.modelId);
       }
@@ -674,10 +683,7 @@ export const runImageWalker = async (args: TWalkArgs): Promise<Response> => {
       if (delegate?.credentialForImage === undefined) {
         if (
           !last &&
-          mediaHopAdvances({
-            dispatched: false,
-            errorCode: "missing_credential",
-          })
+          mediaHopAdvancesForReason("missing_credential", { dispatched: false })
         ) {
           continue;
         }
@@ -708,7 +714,7 @@ export const runImageWalker = async (args: TWalkArgs): Promise<Response> => {
             body: JSON.stringify(upstreamBody),
             signal: args.req.signal,
           });
-          return mediaDialAttempt({ acquired, resp });
+          return await mediaDialAttempt({ acquired, resp }, hop.provider);
         },
         {
           finalHop: last,
@@ -720,10 +726,7 @@ export const runImageWalker = async (args: TWalkArgs): Promise<Response> => {
       if (acquired === "retry") {
         if (
           !last &&
-          mediaHopAdvances({
-            dispatched: false,
-            errorCode: "missing_credential",
-          })
+          mediaHopAdvancesForReason("missing_credential", { dispatched: false })
         )
           continue;
         return stamp(
@@ -762,12 +765,12 @@ export const runImageWalker = async (args: TWalkArgs): Promise<Response> => {
         });
         if (
           !last &&
-          mediaHopAdvances({
-            dispatched: true,
-            httpStatus: resp.status,
-            errorCode: mediaHttpErrorCode(resp.status),
-            accepted: false,
-          })
+          mediaHopAdvancesForHttp(
+            resp.status,
+            body,
+            { dispatched: true, accepted: false },
+            hop.provider,
+          )
         ) {
           continue;
         }
@@ -855,14 +858,18 @@ export const runImageWalker = async (args: TWalkArgs): Promise<Response> => {
       return stamp(forwarded, hop.modelId);
     }
     lastError = forwarded;
+    const forwardRaw = await forwarded
+      .clone()
+      .text()
+      .catch(() => "");
     if (
       !last &&
-      mediaHopAdvances({
-        dispatched: true,
-        httpStatus: forwarded.status,
-        errorCode: mediaHttpErrorCode(forwarded.status),
-        accepted: false,
-      })
+      mediaHopAdvancesForHttp(
+        forwarded.status,
+        forwardRaw,
+        { dispatched: true, accepted: false },
+        hop.provider,
+      )
     ) {
       continue;
     }
@@ -1100,16 +1107,21 @@ export const runImageEditWalker = async (
         hop.providerModelId,
       );
     } catch (err) {
-      const errorCode =
-        err instanceof ImageProviderUnavailableError
-          ? "model_unavailable"
-          : "caller_error";
+      const unavailable = err instanceof ImageProviderUnavailableError;
+      const advanceReason = unavailable
+        ? ("model_unavailable" as const)
+        : ("adapter_input_rejected" as const);
+      const errorCode = unavailable ? "model_unavailable" : "caller_error";
       lastError = errorJson(
         400,
         err instanceof Error ? err.message : "Invalid image-edit request",
         errorCode,
       );
-      if (!last && mediaHopAdvances({ dispatched: false, errorCode })) continue;
+      if (
+        !last &&
+        mediaHopAdvancesForReason(advanceReason, { dispatched: false })
+      )
+        continue;
       return stamp(lastError, hop.modelId);
     }
     // One dial per signed-in account: a 402/429/401/403 from one account
@@ -1138,7 +1150,7 @@ export const runImageEditWalker = async (
           body: JSON.stringify(upstreamBody),
           signal: args.req.signal,
         });
-        return mediaDialAttempt({ acquired, resp });
+        return await mediaDialAttempt({ acquired, resp }, hop.provider);
       },
       {
         finalHop: last,
@@ -1150,10 +1162,7 @@ export const runImageEditWalker = async (
     if (acquired === "retry") {
       if (
         !last &&
-        mediaHopAdvances({
-          dispatched: false,
-          errorCode: "missing_credential",
-        })
+        mediaHopAdvancesForReason("missing_credential", { dispatched: false })
       )
         continue;
       return stamp(
@@ -1197,12 +1206,12 @@ export const runImageEditWalker = async (
       });
       if (
         !last &&
-        mediaHopAdvances({
-          dispatched: true,
-          httpStatus: resp.status,
-          errorCode: mediaHttpErrorCode(resp.status),
-          accepted: false,
-        })
+        mediaHopAdvancesForHttp(
+          resp.status,
+          body,
+          { dispatched: true, accepted: false },
+          hop.provider,
+        )
       ) {
         continue;
       }
