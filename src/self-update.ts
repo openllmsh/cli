@@ -17,6 +17,7 @@ import { dirname, join } from "node:path";
 import { gunzipSync } from "node:zlib";
 import { CLI_RELEASE } from "../manifest";
 import { CLI_TARGETS } from "../release-types";
+import { downloadWithStallTimeout } from "./binary-download";
 import { CLI_VERSION, cliConfig } from "./env";
 import type { TUpdateLeaseHandle } from "./update-lease";
 import { describeUpdateLease, tryAcquireUpdateLease } from "./update-lease";
@@ -91,25 +92,6 @@ export type TSelfUpdateResult =
   | "failed";
 
 /** Read a download body, reporting bytes as they arrive. */
-const readWithProgress = async (
-  res: Response,
-  onProgress: (received: number, total: number | null) => void,
-): Promise<Buffer> => {
-  if (res.body === null) return Buffer.from(await res.arrayBuffer());
-  const length = Number(res.headers.get("content-length"));
-  const total = Number.isFinite(length) && length > 0 ? length : null;
-  const chunks: Uint8Array[] = [];
-  let received = 0;
-  const reader = res.body.getReader();
-  for (;;) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    chunks.push(value);
-    received += value.byteLength;
-    onProgress(received, total);
-  }
-  return Buffer.concat(chunks);
-};
 
 /**
  * Converge the running binary to the gateway's pinned release. `quiet` (the
@@ -198,16 +180,12 @@ export const convergeSelf = async (
     }
     const expected = (await shaRes.text()).trim().split(/\s+/)[0];
 
-    const binRes = await fetch(`${gatewayUrl}/api/cli/binary/${target}`, {
-      signal: AbortSignal.timeout(120_000),
-    });
-    if (!binRes.ok) {
-      say(`[self-update] download failed: ${binRes.status}`);
-      return "failed";
-    }
+    // A stall timeout, not a fixed deadline: a slow but moving download of
+    // the ~120 MB binary must finish (a 120 s cap failed below ~1 MB/s).
     const held = lease;
-    let bytes = await readWithProgress(binRes, (received, total) =>
-      held.progress("download", { received, total }),
+    let bytes = await downloadWithStallTimeout(
+      `${gatewayUrl}/api/cli/binary/${target}`,
+      (received, total) => held.progress("download", { received, total }),
     );
     held.progress("verify");
     if (bytes.subarray(0, 2).equals(GZIP_MAGIC)) bytes = gunzipSync(bytes);

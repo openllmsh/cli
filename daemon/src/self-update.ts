@@ -8,6 +8,10 @@
 import { gunzipSync } from "node:zlib";
 import type { TCliTarget } from "../../release-types";
 import { CLI_TARGETS } from "../../release-types";
+import { downloadWithStallTimeout } from "../../src/binary-download";
+
+export { BINARY_STALL_TIMEOUT_MS } from "../../src/binary-download";
+
 import { endDaemonApply, tryBeginDaemonApply } from "./delegation/login-flow";
 
 // Cap on how long we hold the restart waiting for `/v1` requests to drain.
@@ -17,11 +21,6 @@ const DRAIN_POLL_MS = 250;
 // would leave `updating = true` for the rest of the process lifetime, blocking
 // every later update attempt.
 const DOWNLOAD_TIMEOUT_MS = 60_000;
-/**
- * The binary is ~120 MB: a total deadline cut off every connection slower
- * than ~2 MB/s, forever. Give up only when bytes stop arriving.
- */
-export const BINARY_STALL_TIMEOUT_MS = 30_000;
 
 export type TDrainTiming = {
   readonly maxMs: number;
@@ -156,36 +155,7 @@ export const fetchBinary = async (
   url: string,
   onProgress?: (received: number, total: number | null) => void,
 ): Promise<Buffer> => {
-  const abort = new AbortController();
-  let stall = setTimeout(() => abort.abort(), BINARY_STALL_TIMEOUT_MS);
-  const bump = (): void => {
-    clearTimeout(stall);
-    stall = setTimeout(() => abort.abort(), BINARY_STALL_TIMEOUT_MS);
-  };
-  const chunks: Uint8Array[] = [];
-  try {
-    const res = await fetch(url, { redirect: "follow", signal: abort.signal });
-    if (!res.ok) throw new Error(`binary download failed: ${res.status}`);
-    if (res.body === null) throw new Error("binary download had no body");
-    const length = Number(res.headers.get("content-length"));
-    const total = Number.isFinite(length) && length > 0 ? length : null;
-    let received = 0;
-    const reader = res.body.getReader();
-    for (;;) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      chunks.push(value);
-      received += value.byteLength;
-      onProgress?.(received, total);
-      bump();
-    }
-  } catch (err) {
-    if (abort.signal.aborted) throw new Error("binary download stalled");
-    throw err;
-  } finally {
-    clearTimeout(stall);
-  }
-  const buf = Buffer.concat(chunks);
+  const buf = await downloadWithStallTimeout(url, onProgress);
   // The published asset is gzipped (`openllm-<target>.gz`); decompress when the
   // gzip magic bytes (0x1f 0x8b) are present, tolerating a raw binary too. The
   // sha256 is checked against the DECOMPRESSED bytes (what runs), so the gate is
