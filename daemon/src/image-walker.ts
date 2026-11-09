@@ -36,7 +36,6 @@ import {
   ImageProviderUnavailableError,
   isSupportedImageEditReference,
 } from "./image-edit-wire";
-import { isLocalServerSlug } from "./local-servers";
 import { logWarn, safeDiagnosticMessage } from "./logger";
 import {
   classifyMediaBuildFailure,
@@ -51,6 +50,7 @@ import {
   forwardMediaApiKeyHop,
   isImageEditDialableHop,
   isStandardMediaDialableHop,
+  isUnsupportedDeviceMediaProvider,
   localMediaUnsupportedMiss,
   walkMediaPlan,
 } from "./media-plan-walk";
@@ -593,7 +593,7 @@ const dialImageGenHop = async (
   imageRequest: TImageGenerationRequest,
 ): Promise<TMediaHopDialResult> => {
   const { args, hop, finalHop, attempted } = ctx;
-  if (isLocalServerSlug(hop.provider)) {
+  if (isUnsupportedDeviceMediaProvider(hop.provider)) {
     return localMediaUnsupportedMiss(ctx, "image generation");
   }
   if (isOAuthSlug(hop.provider)) {
@@ -985,7 +985,7 @@ const dialImageEditHop = async (
   editRequest: TImageEditRequest,
 ): Promise<TMediaHopDialResult> => {
   const { args, hop, finalHop, attempted } = ctx;
-  if (isLocalServerSlug(hop.provider)) {
+  if (isUnsupportedDeviceMediaProvider(hop.provider)) {
     return localMediaUnsupportedMiss(ctx, "image edit");
   }
   if (!isOAuthSlug(hop.provider)) {

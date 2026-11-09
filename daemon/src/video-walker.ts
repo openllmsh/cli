@@ -12,7 +12,6 @@ import {
   decodeVideoId,
   describeAllowed,
   isAllowedMediaOption,
-  isLocalServerSlug,
   isOAuthProviderSlug,
   MEDIA_ERROR_RESPONSE_HEADER,
   MEDIA_URL_RESPONSE_HEADER,
@@ -47,6 +46,7 @@ import type {
 import {
   forwardMediaApiKeyHop,
   isStandardMediaDialableHop,
+  isUnsupportedDeviceMediaProvider,
   localMediaUnsupportedMiss,
   walkMediaPlan,
 } from "./media-plan-walk";
@@ -486,7 +486,7 @@ const dialVideoCreateHop = async (
   request: TVideoGenerationRequest,
 ): Promise<TMediaHopDialResult> => {
   const { args, hop, finalHop, attempted } = ctx;
-  if (isLocalServerSlug(hop.provider)) {
+  if (isUnsupportedDeviceMediaProvider(hop.provider)) {
     return localMediaUnsupportedMiss(ctx, "video");
   }
   if (!isOAuthProviderSlug(hop.provider)) {

@@ -8,7 +8,10 @@
  * single-shot path, and so this module can stay `@openllm/core`-free.
  */
 
-import { LOCAL_REQUIRES_DAEMON_ERROR_CODE } from "@openllmsh/sdk/protocol";
+import {
+  isLocalKeyProviderSlug,
+  LOCAL_REQUIRES_DAEMON_ERROR_CODE,
+} from "@openllmsh/sdk/protocol";
 import { errorJson } from "./cors";
 import { isOAuthSlug } from "./delegation";
 import { passthroughToOrigin } from "./forward";
@@ -20,6 +23,7 @@ import type {
 } from "./media-plan-walk";
 import {
   forwardMediaApiKeyHop,
+  localMediaUnsupportedMiss,
   mediaPlanSignatureError,
   walkMediaPlan,
 } from "./media-plan-walk";
@@ -48,9 +52,13 @@ const splitProviderModel = (
   };
 };
 
-/** Embeddings dialable hops: local servers and API-key/custom (not oauth). */
+/**
+ * Embeddings dialable hops: local servers and cloud API-key/custom.
+ * `local_key` is device-held chat-only — never dialable, never forwarded.
+ */
 export const isEmbeddingsDialableHop = (hop: TMediaPlanHop): boolean =>
-  isLocalServerSlug(hop.provider) || !isOAuthSlug(hop.provider);
+  isLocalServerSlug(hop.provider) ||
+  (!isOAuthSlug(hop.provider) && !isLocalKeyProviderSlug(hop.provider));
 
 const dialEmbeddingsHop = async (
   ctx: TMediaHopDialContext,
@@ -93,6 +101,9 @@ const dialEmbeddingsHop = async (
       ),
       advances: !finalHop,
     };
+  }
+  if (isLocalKeyProviderSlug(hop.provider)) {
+    return localMediaUnsupportedMiss(ctx, "embeddings");
   }
   // API-key / custom: forward pinned to this hop; classify + fallthrough.
   return forwardMediaApiKeyHop(ctx);

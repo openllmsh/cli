@@ -9,6 +9,7 @@
  * media overlays stop/continue via `mediaActionFor` (call sites in dials).
  */
 
+import { isLocalKeyProviderSlug } from "@openllmsh/sdk/protocol";
 import { errorJson } from "./cors";
 import { isOAuthSlug } from "./delegation";
 import { isLocalServerSlug } from "./local-servers";
@@ -103,9 +104,17 @@ export const hasDialableMediaSuccessor = (
   return false;
 };
 
-/** Default dialable set for STT/TTS/image gen/video create: anything but local. */
+/**
+ * Device-only providers with no media surface on this daemon: loopback local
+ * servers, and `local_key` coding plans (chat-only; keys never leave the
+ * device, so forwarding them to origin cannot serve media).
+ */
+export const isUnsupportedDeviceMediaProvider = (provider: string): boolean =>
+  isLocalServerSlug(provider) || isLocalKeyProviderSlug(provider);
+
+/** Default dialable set for STT/TTS/image gen/video create: cloud BYOK + oauth. */
 export const isStandardMediaDialableHop = (hop: TMediaPlanHop): boolean =>
-  !isLocalServerSlug(hop.provider);
+  !isUnsupportedDeviceMediaProvider(hop.provider);
 
 /** Image-edit (P4a): subscription only until P4b adds API-key adapters. */
 export const isImageEditDialableHop = (hop: TMediaPlanHop): boolean =>
@@ -145,15 +154,16 @@ export const localMediaUnsupportedMiss = (
 ): TMediaHopDialResult => {
   const { hop, finalHop, attempted } = ctx;
   attempted.push(hop.modelId);
+  const localKey = isLocalKeyProviderSlug(hop.provider);
   return {
     kind: "miss",
     error: errorJson(
       400,
-      `local provider "${hop.provider}" does not support ${surfaceLabel}`,
+      `${localKey ? "local_key" : "local"} provider "${hop.provider}" does not support ${surfaceLabel}`,
       "invalid_request_error",
-      "local_surface_unsupported",
+      localKey ? "local_key_surface_unsupported" : "local_surface_unsupported",
     ),
-    // Local unsupported always walks when a dialable successor remains (M9).
+    // Device-only unsupported always walks when a dialable successor remains (M9).
     advances: !finalHop,
   };
 };

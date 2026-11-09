@@ -47,7 +47,6 @@ import { lookupCatalogEntry } from "./config";
 import { errorJson } from "./cors";
 import { getDelegate, isOAuthSlug } from "./delegation";
 import type { TImageCredential } from "./delegation/types";
-import { isLocalServerSlug } from "./local-servers";
 import { logWarn, safeDiagnosticMessage } from "./logger";
 import type {
   TMediaHopDialContext,
@@ -56,6 +55,7 @@ import type {
 import {
   forwardMediaApiKeyHop,
   isStandardMediaDialableHop,
+  isUnsupportedDeviceMediaProvider,
   localMediaUnsupportedMiss,
   walkMediaPlan,
 } from "./media-plan-walk";
@@ -400,7 +400,7 @@ const dialAudioTranscriptionHop = async (
   options: TAudioTranscriptionWalkerOptions | undefined,
 ): Promise<TMediaHopDialResult> => {
   const { args, hop, finalHop, attempted } = ctx;
-  if (isLocalServerSlug(hop.provider)) {
+  if (isUnsupportedDeviceMediaProvider(hop.provider)) {
     return localMediaUnsupportedMiss(ctx, "transcription");
   }
   if (!isOAuthSlug(hop.provider)) {
@@ -898,7 +898,7 @@ const dialAudioSpeechHop = async (
   parsedBody: TSpeechRequestBody,
 ): Promise<TMediaHopDialResult> => {
   const { args, hop, finalHop, attempted } = ctx;
-  if (isLocalServerSlug(hop.provider)) {
+  if (isUnsupportedDeviceMediaProvider(hop.provider)) {
     return localMediaUnsupportedMiss(ctx, "speech");
   }
   if (!isOAuthSlug(hop.provider)) {
