@@ -38,13 +38,22 @@ import {
 } from "./image-edit-wire";
 import { isLocalServerSlug } from "./local-servers";
 import { logWarn, safeDiagnosticMessage } from "./logger";
-import { withMediaAttribution } from "./media-attribution";
-import { forwardMediaHopToCloud } from "./media-cloud-forward";
 import {
   classifyMediaBuildFailure,
   MEDIA_BUILD_FAILURE_MESSAGE,
   MediaInputError,
 } from "./media-input-error";
+import type {
+  TMediaHopDialContext,
+  TMediaHopDialResult,
+} from "./media-plan-walk";
+import {
+  forwardMediaApiKeyHop,
+  isImageEditDialableHop,
+  isStandardMediaDialableHop,
+  localMediaUnsupportedMiss,
+  walkMediaPlan,
+} from "./media-plan-walk";
 import {
   mediaHopAdvancesForHttp,
   mediaHopAdvancesForReason,
@@ -54,12 +63,9 @@ import { mediaDialAttempt, serveAcrossAccounts } from "./subscription-accounts";
 import type { TWalkArgs } from "./walker";
 import {
   coolHopAfterStaleRefresh,
-  parsePlan,
   passthroughHeaders,
-  planSignatureOk,
   postUpstream,
   report,
-  resolveHop,
   statusFor,
 } from "./walker";
 
@@ -562,21 +568,6 @@ export const imageStreamResponse = (
 };
 
 export const runImageWalker = async (args: TWalkArgs): Promise<Response> => {
-  if (
-    !planSignatureOk(
-      args.planParam,
-      args.pmidsParam,
-      args.originParam,
-      args.contextOverflowStrategy ?? null,
-      args.sigParam,
-    )
-  ) {
-    return errorJson(403, "invalid or missing plan signature");
-  }
-  if (args.planParam === null) {
-    return errorJson(400, "images require a daemon plan");
-  }
-
   let imageRequest: TImageGenerationRequest;
   try {
     imageRequest = parseImageRequest(args.rawBody);
@@ -587,238 +578,142 @@ export const runImageWalker = async (args: TWalkArgs): Promise<Response> => {
     );
   }
 
-  const pmids = args.pmidsParam === null ? [] : args.pmidsParam.split(",");
-  const hops = parsePlan(args.planParam).map((modelId, index) =>
-    resolveHop(modelId, pmids[index]),
-  );
-  const attempted: string[] = [];
-  const stamp = (resp: Response, resolved?: string): Response =>
-    withMediaAttribution(resp, {
-      attempted,
-      ...(resolved !== undefined ? { resolvedModel: resolved } : {}),
-    });
+  return walkMediaPlan({
+    args,
+    missingPlanMessage: "images require a daemon plan",
+    exhaustedMessage:
+      "No image provider in the daemon plan can serve this request",
+    isDialableHop: isStandardMediaDialableHop,
+    dial: async (ctx) => dialImageGenHop(ctx, imageRequest),
+  });
+};
 
-  let lastError: Response | null = null;
-  for (let i = 0; i < hops.length; i++) {
-    const hop = hops[i];
-    if (hop === undefined) continue;
-    const last = i === hops.length - 1;
-    if (isLocalServerSlug(hop.provider)) {
-      // Local model servers are chat/embeddings only in v1 — refuse cleanly.
-      attempted.push(hop.modelId);
-      lastError = errorJson(
-        400,
-        `local provider "${hop.provider}" does not support image generation`,
-        "invalid_request_error",
-        "local_surface_unsupported",
+const dialImageGenHop = async (
+  ctx: TMediaHopDialContext,
+  imageRequest: TImageGenerationRequest,
+): Promise<TMediaHopDialResult> => {
+  const { args, hop, finalHop, attempted } = ctx;
+  if (isLocalServerSlug(hop.provider)) {
+    return localMediaUnsupportedMiss(ctx, "image generation");
+  }
+  if (isOAuthSlug(hop.provider)) {
+    attempted.push(hop.modelId);
+    let upstreamBody: Record<string, unknown>;
+    try {
+      upstreamBody = buildImageUpstreamBody(
+        hop.provider,
+        imageRequest,
+        hop.providerModelId,
+        hop.caps,
       );
-      if (!last) continue;
-      return stamp(lastError, hop.modelId);
-    }
-    if (isOAuthSlug(hop.provider)) {
-      // Recorded the moment this hop is UNDERTAKEN, not once it has been
-      // dispatched. Everything below can refuse before a byte leaves the
-      // box — an option this wire cannot map, a provider with no local
-      // credential — and a refusal that names nobody is the one thing a
-      // caller cannot act on: the MCP tool renders "Served by <model>"
-      // from these headers, so without them an agent re-sends the same
-      // rejected field hoping a different model was at fault. The cloud
-      // lane (`runMediaApiChain`) pushes before attempting for exactly
-      // this reason; this is not a claim that anything was submitted —
-      // the dispatch facts handed to `mediaHopAdvancesForReason` are untouched.
-      attempted.push(hop.modelId);
-      // Validate before credential fallback can advance to an unchecked transport.
-      let upstreamBody: Record<string, unknown>;
-      try {
-        upstreamBody = buildImageUpstreamBody(
-          hop.provider,
-          imageRequest,
-          hop.providerModelId,
-          // Catalog-resolved, model-specific facts for THIS hop; the
-          // provider branch is only the family default beneath them.
-          hop.caps,
-        );
-      } catch (err) {
-        const failure = classifyMediaBuildFailure(err);
-        // `ImageProviderUnavailableError` predates the shared brands and
-        // is still thrown by the image-edit wire, so it keeps its own
-        // check rather than being reclassified as a gateway fault.
-        const unavailable =
-          failure.kind === "provider_unavailable" ||
-          err instanceof ImageProviderUnavailableError;
-        if (failure.kind === "unexpected" && !unavailable) {
-          logWarn(
-            "image-walker",
-            safeDiagnosticMessage`Failed to build image request`,
-            {
-              provider: hop.provider,
-              model: hop.providerModelId,
-              error: err instanceof Error ? err.message : String(err),
-            },
-          );
-          return stamp(
-            errorJson(500, MEDIA_BUILD_FAILURE_MESSAGE),
-            hop.modelId,
-          );
-        }
-        const advanceReason = unavailable
-          ? ("model_unavailable" as const)
-          : ("adapter_input_rejected" as const);
-        const errorCode = unavailable ? "model_unavailable" : "caller_error";
-        lastError = errorJson(
-          400,
-          unavailable && err instanceof Error
-            ? err.message
-            : (failure as { readonly message: string }).message,
-          errorCode,
-        );
-        if (
-          !last &&
-          mediaHopAdvancesForReason(advanceReason, { dispatched: false })
-        )
-          continue;
-        return stamp(lastError, hop.modelId);
-      }
-      const delegate = getDelegate(hop.provider);
-      if (delegate?.credentialForImage === undefined) {
-        if (
-          !last &&
-          mediaHopAdvancesForReason("missing_credential", { dispatched: false })
-        ) {
-          continue;
-        }
-        return stamp(
-          errorJson(404, `No image credential available for ${hop.provider}`),
-          hop.modelId,
-        );
-      }
-      // One dial per signed-in account: a 402/429/401/403 from one account
-      // moves on to the next (`serveAcrossAccounts`).
-      const { acquired, resp } = await serveAcrossAccounts(
-        hop,
-        async (): Promise<TAccountAttempt<TImageDial>> => {
-          const acquired = await acquireImageUpstream(hop.provider, args, hop);
-          if (acquired === "retry") {
-            return {
-              result: { acquired, resp: null },
-              failure: { kind: "no_credential" },
-            };
-          }
-          const resp = await postUpstream(acquired.url, {
-            method: "POST",
-            headers: {
-              ...acquired.headers,
-              "content-type": "application/json",
-              accept: "application/json",
-            },
-            body: JSON.stringify(upstreamBody),
-            signal: args.req.signal,
-          });
-          return await mediaDialAttempt({ acquired, resp }, hop.provider);
-        },
-        {
-          finalHop: last,
-          signal: args.req.signal,
-          // Every account cooling/exhausted: advance like a missing credential.
-          exhausted: () => ({ acquired: "retry" as const, resp: null }),
-        },
-      );
-      if (acquired === "retry") {
-        if (
-          !last &&
-          mediaHopAdvancesForReason("missing_credential", { dispatched: false })
-        )
-          continue;
-        return stamp(
-          errorJson(404, `No image credential available for ${hop.provider}`),
-          hop.modelId,
-        );
-      }
-      if (resp === null) {
-        const terminal = args.req.signal.aborted
-          ? errorJson(499, "client aborted request")
-          : errorJson(502, "upstream image provider is unreachable");
-        return stamp(terminal, hop.modelId);
-      }
-      if (!resp.ok) {
-        const body = await resp.text().catch(() => "");
-        report(
+    } catch (err) {
+      const failure = classifyMediaBuildFailure(err);
+      const unavailable =
+        failure.kind === "provider_unavailable" ||
+        err instanceof ImageProviderUnavailableError;
+      if (failure.kind === "unexpected" && !unavailable) {
+        logWarn(
+          "image-walker",
+          safeDiagnosticMessage`Failed to build image request`,
           {
-            model: hop.modelId,
             provider: hop.provider,
-            status: statusFor(resp.status),
-            tokens_in: 0,
-            tokens_out: 0,
-            latency_ms: Date.now() - args.startedAt,
-            endpoint: args.endpoint,
-            ...(acquired.accountHash !== null
-              ? { account_hash: acquired.accountHash }
-              : {}),
+            model: hop.providerModelId,
+            error: err instanceof Error ? err.message : String(err),
           },
-          args.originParam,
-          undefined,
-          { sent: true, usage: null, definiteProviderError: false },
         );
-        lastError = new Response(body.length > 0 ? body : null, {
-          status: resp.status,
-          headers: passthroughHeaders(resp),
-        });
-        if (
-          !last &&
-          mediaHopAdvancesForHttp(
-            resp.status,
-            body,
-            { dispatched: true, accepted: false },
-            hop.provider,
-          )
-        ) {
-          continue;
+        return {
+          kind: "return",
+          response: errorJson(500, MEDIA_BUILD_FAILURE_MESSAGE),
+        };
+      }
+      const advanceReason = unavailable
+        ? ("model_unavailable" as const)
+        : ("adapter_input_rejected" as const);
+      const errorCode = unavailable ? "model_unavailable" : "caller_error";
+      const error = errorJson(
+        400,
+        unavailable && err instanceof Error
+          ? err.message
+          : (failure as { readonly message: string }).message,
+        errorCode,
+      );
+      return {
+        kind: "miss",
+        error,
+        advances:
+          !finalHop &&
+          mediaHopAdvancesForReason(advanceReason, { dispatched: false }),
+      };
+    }
+    const delegate = getDelegate(hop.provider);
+    if (delegate?.credentialForImage === undefined) {
+      const error = errorJson(
+        404,
+        `No image credential available for ${hop.provider}`,
+      );
+      return {
+        kind: "miss",
+        error,
+        advances:
+          !finalHop &&
+          mediaHopAdvancesForReason("missing_credential", {
+            dispatched: false,
+          }),
+      };
+    }
+    const { acquired, resp } = await serveAcrossAccounts(
+      hop,
+      async (): Promise<TAccountAttempt<TImageDial>> => {
+        const acquired = await acquireImageUpstream(hop.provider, args, hop);
+        if (acquired === "retry") {
+          return {
+            result: { acquired, resp: null },
+            failure: { kind: "no_credential" },
+          };
         }
-        return stamp(lastError, hop.modelId);
-      }
-      let upstream: unknown;
-      try {
-        upstream = await resp.json();
-      } catch {
-        return stamp(
-          errorJson(502, "upstream image provider returned invalid JSON"),
-          hop.modelId,
-        );
-      }
-      let normalized: TImageGenerationResponse;
-      try {
-        normalized = normalizeImageResponse(upstream);
-      } catch (err) {
-        return stamp(
-          errorJson(
-            502,
-            err instanceof Error
-              ? `upstream image provider returned invalid data: ${err.message}`
-              : "upstream image provider returned invalid data",
-          ),
-          hop.modelId,
-        );
-      }
-      // The SSE lane's `completed` event REQUIRES `b64_json`, so a streaming
-      // request needs the bytes retained whatever `response_format` says —
-      // otherwise a URL-returning vendor yields zero frames and the walker
-      // reports 502 for a generation that actually succeeded and persisted.
-      const includeBase64 =
-        imageRequest.response_format === "b64_json" ||
-        imageRequest.stream === true;
-      let persistedItems: ReadonlyArray<TImageDataItem>;
-      try {
-        persistedItems = await Promise.all(
-          normalized.data.map((item) =>
-            persistImageDataItem(item, includeBase64, args),
-          ),
-        );
-      } catch {
-        return stamp(
-          errorJson(502, "Failed to persist generated image"),
-          hop.modelId,
-        );
-      }
+        const resp = await postUpstream(acquired.url, {
+          method: "POST",
+          headers: {
+            ...acquired.headers,
+            "content-type": "application/json",
+            accept: "application/json",
+          },
+          body: JSON.stringify(upstreamBody),
+          signal: args.req.signal,
+        });
+        return await mediaDialAttempt({ acquired, resp }, hop.provider);
+      },
+      {
+        finalHop,
+        signal: args.req.signal,
+        exhausted: () => ({ acquired: "retry" as const, resp: null }),
+      },
+    );
+    if (acquired === "retry") {
+      const error = errorJson(
+        404,
+        `No image credential available for ${hop.provider}`,
+      );
+      return {
+        kind: "miss",
+        error,
+        advances:
+          !finalHop &&
+          mediaHopAdvancesForReason("missing_credential", {
+            dispatched: false,
+          }),
+      };
+    }
+    if (resp === null) {
+      return {
+        kind: "return",
+        response: args.req.signal.aborted
+          ? errorJson(499, "client aborted request")
+          : errorJson(502, "upstream image provider is unreachable"),
+      };
+    }
+    if (!resp.ok) {
+      const body = await resp.text().catch(() => "");
       report(
         {
           model: hop.modelId,
@@ -836,10 +731,84 @@ export const runImageWalker = async (args: TWalkArgs): Promise<Response> => {
         undefined,
         { sent: true, usage: null, definiteProviderError: false },
       );
-      // `stream: true` changes the TRANSPORT, not the result: the same
-      // persisted bytes either ride one real completion event or the
-      // JSON body. `false`/absent keeps the JSON path byte-for-byte.
-      return stamp(
+      return {
+        kind: "miss",
+        error: new Response(body.length > 0 ? body : null, {
+          status: resp.status,
+          headers: passthroughHeaders(resp),
+        }),
+        advances:
+          !finalHop &&
+          mediaHopAdvancesForHttp(
+            resp.status,
+            body,
+            { dispatched: true, accepted: false },
+            hop.provider,
+          ),
+      };
+    }
+    let upstream: unknown;
+    try {
+      upstream = await resp.json();
+    } catch {
+      return {
+        kind: "return",
+        response: errorJson(
+          502,
+          "upstream image provider returned invalid JSON",
+        ),
+      };
+    }
+    let normalized: TImageGenerationResponse;
+    try {
+      normalized = normalizeImageResponse(upstream);
+    } catch (err) {
+      return {
+        kind: "return",
+        response: errorJson(
+          502,
+          err instanceof Error
+            ? `upstream image provider returned invalid data: ${err.message}`
+            : "upstream image provider returned invalid data",
+        ),
+      };
+    }
+    const includeBase64 =
+      imageRequest.response_format === "b64_json" ||
+      imageRequest.stream === true;
+    let persistedItems: ReadonlyArray<TImageDataItem>;
+    try {
+      persistedItems = await Promise.all(
+        normalized.data.map((item) =>
+          persistImageDataItem(item, includeBase64, args),
+        ),
+      );
+    } catch {
+      return {
+        kind: "return",
+        response: errorJson(502, "Failed to persist generated image"),
+      };
+    }
+    report(
+      {
+        model: hop.modelId,
+        provider: hop.provider,
+        status: statusFor(resp.status),
+        tokens_in: 0,
+        tokens_out: 0,
+        latency_ms: Date.now() - args.startedAt,
+        endpoint: args.endpoint,
+        ...(acquired.accountHash !== null
+          ? { account_hash: acquired.accountHash }
+          : {}),
+      },
+      args.originParam,
+      undefined,
+      { sent: true, usage: null, definiteProviderError: false },
+    );
+    return {
+      kind: "return",
+      response:
         imageRequest.stream === true
           ? imageStreamResponse(normalized, persistedItems, imageRequest)
           : new Response(
@@ -849,42 +818,9 @@ export const runImageWalker = async (args: TWalkArgs): Promise<Response> => {
                 headers: { "content-type": "application/json" },
               },
             ),
-        hop.modelId,
-      );
-    }
-    attempted.push(hop.modelId);
-    const forwarded = await forwardMediaHopToCloud(args, hop.modelId);
-    if (forwarded.ok) {
-      return stamp(forwarded, hop.modelId);
-    }
-    lastError = forwarded;
-    const forwardRaw = await forwarded
-      .clone()
-      .text()
-      .catch(() => "");
-    if (
-      !last &&
-      mediaHopAdvancesForHttp(
-        forwarded.status,
-        forwardRaw,
-        { dispatched: true, accepted: false },
-        hop.provider,
-      )
-    ) {
-      continue;
-    }
-    // Only names the hop when the cloud's own answer carried no attribution
-    // of its own (`withMediaAttribution` never overwrites a set header), so a
-    // forwarded refusal keeps whatever the cloud lane resolved.
-    return stamp(forwarded, hop.modelId);
+    };
   }
-  return stamp(
-    lastError ??
-      errorJson(
-        404,
-        "No image provider in the daemon plan can serve this request",
-      ),
-  );
+  return forwardMediaApiKeyHop(ctx);
 };
 
 // ─── Image EDITS ───────────────────────────────────────────────────────────
@@ -1012,23 +948,7 @@ export const persistImageEditResultItem = async (
 };
 
 /**
- * Image-edit dialable hops are subscription (oauth) only until P4b adds
- * API-key edit adapters. A trailing BYOK card must not keep `finalHop`
- * false for an earlier oauth hop (never-drop-all).
- */
-const hasDialableImageEditSuccessor = (
-  hops: ReadonlyArray<{ readonly provider: string }>,
-  fromIndex: number,
-): boolean => {
-  for (let j = fromIndex + 1; j < hops.length; j += 1) {
-    const hop = hops[j];
-    if (hop !== undefined && isOAuthSlug(hop.provider)) return true;
-  }
-  return false;
-};
-
-/**
- * Walk one image-EDIT request. Same 403/400 plan gate as {@link runImageWalker}.
+ * Walk one image-EDIT request via {@link walkMediaPlan}.
  * Falls back across subscription hops/accounts. API-key hops are skipped with
  * a clear reason (P4a) — BYOK edit adapters land in P4b. `finalHop` is
  * "no later dialable oauth hop", not the raw plan index.
@@ -1036,32 +956,6 @@ const hasDialableImageEditSuccessor = (
 export const runImageEditWalker = async (
   args: TWalkArgs,
 ): Promise<Response> => {
-  if (
-    !planSignatureOk(
-      args.planParam,
-      args.pmidsParam,
-      args.originParam,
-      args.contextOverflowStrategy ?? null,
-      args.sigParam,
-    )
-  ) {
-    return errorJson(403, "invalid or missing plan signature");
-  }
-  if (args.planParam === null) {
-    return errorJson(400, "image edits require a daemon plan");
-  }
-
-  // The listener (`listener.ts`) already normalized this request once: a
-  // JSON body goes straight through `parseImageEditInput`, and a multipart
-  // upload is flattened by `parseImageEditMultipart` into the same shape
-  // first — either way, `args.rawBody` here is that already-decoded
-  // `TImageEditRequest`, not the original wire body. This is therefore a
-  // SECOND, safe pass over the listener's own output: re-running the same
-  // pure parser on its already-canonical shape is idempotent (no
-  // `mask`/`style`/`background` survive the first pass, and `image` is
-  // already `{ url }`), so it can't reject a request the listener accepted.
-  // It exists so this walker never trusts an upstream cast without
-  // re-validating against the one parser that owns the contract.
   const parsed = parseImageEditInput(args.rawBody);
   if (!parsed.ok) {
     return errorJson(400, parsed.error.message, parsed.error.code);
@@ -1076,208 +970,115 @@ export const runImageEditWalker = async (
     );
   }
 
-  const pmids = args.pmidsParam === null ? [] : args.pmidsParam.split(",");
-  const hops = parsePlan(args.planParam).map((modelId, index) =>
-    resolveHop(modelId, pmids[index]),
-  );
-  const attempted: string[] = [];
-  const stamp = (resp: Response, resolved?: string): Response =>
-    withMediaAttribution(resp, {
-      attempted,
-      ...(resolved !== undefined ? { resolvedModel: resolved } : {}),
-    });
+  return walkMediaPlan({
+    args,
+    missingPlanMessage: "image edits require a daemon plan",
+    exhaustedMessage:
+      "No subscription image-edit provider in the daemon plan can serve this request",
+    isDialableHop: isImageEditDialableHop,
+    dial: async (ctx) => dialImageEditHop(ctx, editRequest),
+  });
+};
 
-  let lastError: Response | null = null;
-  for (let i = 0; i < hops.length; i++) {
-    const hop = hops[i];
-    if (hop === undefined) continue;
-    // Dialable = oauth only (P4a). Trailing API-key cards do not keep this
-    // false for an earlier subscription hop.
-    const finalHop = !hasDialableImageEditSuccessor(hops, i);
-    if (isLocalServerSlug(hop.provider)) {
-      attempted.push(hop.modelId);
-      lastError = errorJson(
-        400,
-        `local provider "${hop.provider}" does not support image edit`,
-        "invalid_request_error",
-        "local_surface_unsupported",
-      );
-      if (!finalHop) continue;
-      return stamp(lastError, hop.modelId);
-    }
-    if (!isOAuthSlug(hop.provider)) {
-      // P4a: skip API-key hops with a clear reason (P4b adds adapters).
-      attempted.push(hop.modelId);
-      lastError = errorJson(
+const dialImageEditHop = async (
+  ctx: TMediaHopDialContext,
+  editRequest: TImageEditRequest,
+): Promise<TMediaHopDialResult> => {
+  const { args, hop, finalHop, attempted } = ctx;
+  if (isLocalServerSlug(hop.provider)) {
+    return localMediaUnsupportedMiss(ctx, "image edit");
+  }
+  if (!isOAuthSlug(hop.provider)) {
+    attempted.push(hop.modelId);
+    return {
+      kind: "miss",
+      error: errorJson(
         400,
         `API-key provider "${hop.provider}" cannot serve image edits on this device yet`,
         "invalid_request_error",
         "image_edit_api_key_unsupported",
-      );
-      if (!finalHop) continue;
-      return stamp(lastError, hop.modelId);
-    }
-    // Recorded before the body is built, for the same reason as the
-    // generation walker above: an edit refused on this wire (a size this
-    // transport has no mapping for) or for want of a local credential still
-    // names the hop that refused it.
-    attempted.push(hop.modelId);
-    // Invalid caller options are terminal, even when this hop lacks credentials.
-    let upstreamBody: Record<string, unknown>;
-    try {
-      upstreamBody = buildImageEditUpstreamBody(
-        hop.provider,
-        editRequest,
-        hop.providerModelId,
-      );
-    } catch (err) {
-      const unavailable = err instanceof ImageProviderUnavailableError;
-      const advanceReason = unavailable
-        ? ("model_unavailable" as const)
-        : ("adapter_input_rejected" as const);
-      const errorCode = unavailable ? "model_unavailable" : "caller_error";
-      lastError = errorJson(
-        400,
-        err instanceof Error ? err.message : "Invalid image-edit request",
-        errorCode,
-      );
-      if (
-        !finalHop &&
-        mediaHopAdvancesForReason(advanceReason, { dispatched: false })
-      )
-        continue;
-      return stamp(lastError, hop.modelId);
-    }
-    // One dial per signed-in account: a 402/429/401/403 from one account
-    // moves on to the next (`serveAcrossAccounts`).
-    const { acquired, resp } = await serveAcrossAccounts(
-      hop,
-      async (): Promise<TAccountAttempt<TImageDial>> => {
-        const acquired = await acquireImageEditUpstream(
-          hop.provider,
-          args,
-          hop,
-        );
-        if (acquired === "retry") {
-          return {
-            result: { acquired, resp: null },
-            failure: { kind: "no_credential" },
-          };
-        }
-        const resp = await postUpstream(acquired.url, {
-          method: "POST",
-          headers: {
-            ...acquired.headers,
-            "content-type": "application/json",
-            accept: "application/json",
-          },
-          body: JSON.stringify(upstreamBody),
-          signal: args.req.signal,
-        });
-        return await mediaDialAttempt({ acquired, resp }, hop.provider);
-      },
-      {
-        finalHop,
-        signal: args.req.signal,
-        // Every account cooling/exhausted: advance like a missing credential.
-        exhausted: () => ({ acquired: "retry" as const, resp: null }),
-      },
+      ),
+      advances: !finalHop,
+    };
+  }
+  attempted.push(hop.modelId);
+  let upstreamBody: Record<string, unknown>;
+  try {
+    upstreamBody = buildImageEditUpstreamBody(
+      hop.provider,
+      editRequest,
+      hop.providerModelId,
     );
-    if (acquired === "retry") {
-      if (
+  } catch (err) {
+    const unavailable = err instanceof ImageProviderUnavailableError;
+    const advanceReason = unavailable
+      ? ("model_unavailable" as const)
+      : ("adapter_input_rejected" as const);
+    const errorCode = unavailable ? "model_unavailable" : "caller_error";
+    const error = errorJson(
+      400,
+      err instanceof Error ? err.message : "Invalid image-edit request",
+      errorCode,
+    );
+    return {
+      kind: "miss",
+      error,
+      advances:
         !finalHop &&
-        mediaHopAdvancesForReason("missing_credential", { dispatched: false })
-      )
-        continue;
-      return stamp(
-        errorJson(
-          404,
-          `No image-edit credential available for ${hop.provider}`,
-        ),
-        hop.modelId,
-      );
-    }
-    if (resp === null) {
-      return stamp(
-        args.req.signal.aborted
-          ? errorJson(499, "client aborted request")
-          : errorJson(502, "upstream image-edit provider is unreachable"),
-        hop.modelId,
-      );
-    }
-    if (!resp.ok) {
-      const body = await resp.text().catch(() => "");
-      report(
-        {
-          model: hop.modelId,
-          provider: hop.provider,
-          status: statusFor(resp.status),
-          tokens_in: 0,
-          tokens_out: 0,
-          latency_ms: Date.now() - args.startedAt,
-          endpoint: args.endpoint,
-          ...(acquired.accountHash !== null
-            ? { account_hash: acquired.accountHash }
-            : {}),
-        },
-        args.originParam,
-        undefined,
-        { sent: true, usage: null, definiteProviderError: false },
-      );
-      lastError = new Response(body.length > 0 ? body : null, {
-        status: resp.status,
-        headers: passthroughHeaders(resp),
-      });
-      if (
-        !finalHop &&
-        mediaHopAdvancesForHttp(
-          resp.status,
-          body,
-          { dispatched: true, accepted: false },
-          hop.provider,
-        )
-      ) {
-        continue;
+        mediaHopAdvancesForReason(advanceReason, { dispatched: false }),
+    };
+  }
+  const { acquired, resp } = await serveAcrossAccounts(
+    hop,
+    async (): Promise<TAccountAttempt<TImageDial>> => {
+      const acquired = await acquireImageEditUpstream(hop.provider, args, hop);
+      if (acquired === "retry") {
+        return {
+          result: { acquired, resp: null },
+          failure: { kind: "no_credential" },
+        };
       }
-      return stamp(lastError, hop.modelId);
-    }
-    let upstream: unknown;
-    try {
-      upstream = await resp.json();
-    } catch {
-      return stamp(
-        errorJson(502, "upstream image-edit provider returned invalid JSON"),
-        hop.modelId,
-      );
-    }
-    let normalized: TImageGenerationResponse;
-    try {
-      normalized = normalizeImageResponse(upstream);
-    } catch (err) {
-      return stamp(
-        errorJson(
-          502,
-          err instanceof Error
-            ? `upstream image-edit provider returned invalid data: ${err.message}`
-            : "upstream image-edit provider returned invalid data",
-        ),
-        hop.modelId,
-      );
-    }
-    const includeBase64 = editRequest.response_format === "b64_json";
-    let persistedItems: ReadonlyArray<TImageEditDataItem>;
-    try {
-      persistedItems = await Promise.all(
-        normalized.data.map((item) =>
-          persistImageEditResultItem(item, includeBase64, args),
-        ),
-      );
-    } catch {
-      return stamp(
-        errorJson(502, "Failed to persist edited image"),
-        hop.modelId,
-      );
-    }
+      const resp = await postUpstream(acquired.url, {
+        method: "POST",
+        headers: {
+          ...acquired.headers,
+          "content-type": "application/json",
+          accept: "application/json",
+        },
+        body: JSON.stringify(upstreamBody),
+        signal: args.req.signal,
+      });
+      return await mediaDialAttempt({ acquired, resp }, hop.provider);
+    },
+    {
+      finalHop,
+      signal: args.req.signal,
+      exhausted: () => ({ acquired: "retry" as const, resp: null }),
+    },
+  );
+  if (acquired === "retry") {
+    const error = errorJson(
+      404,
+      `No image-edit credential available for ${hop.provider}`,
+    );
+    return {
+      kind: "miss",
+      error,
+      advances:
+        !finalHop &&
+        mediaHopAdvancesForReason("missing_credential", { dispatched: false }),
+    };
+  }
+  if (resp === null) {
+    return {
+      kind: "return",
+      response: args.req.signal.aborted
+        ? errorJson(499, "client aborted request")
+        : errorJson(502, "upstream image-edit provider is unreachable"),
+    };
+  }
+  if (!resp.ok) {
+    const body = await resp.text().catch(() => "");
     report(
       {
         model: hop.modelId,
@@ -1295,19 +1096,87 @@ export const runImageEditWalker = async (
       undefined,
       { sent: true, usage: null, definiteProviderError: false },
     );
-    return stamp(
-      new Response(JSON.stringify({ ...normalized, data: persistedItems }), {
+    return {
+      kind: "miss",
+      error: new Response(body.length > 0 ? body : null, {
+        status: resp.status,
+        headers: passthroughHeaders(resp),
+      }),
+      advances:
+        !finalHop &&
+        mediaHopAdvancesForHttp(
+          resp.status,
+          body,
+          { dispatched: true, accepted: false },
+          hop.provider,
+        ),
+    };
+  }
+  let upstream: unknown;
+  try {
+    upstream = await resp.json();
+  } catch {
+    return {
+      kind: "return",
+      response: errorJson(
+        502,
+        "upstream image-edit provider returned invalid JSON",
+      ),
+    };
+  }
+  let normalized: TImageGenerationResponse;
+  try {
+    normalized = normalizeImageResponse(upstream);
+  } catch (err) {
+    return {
+      kind: "return",
+      response: errorJson(
+        502,
+        err instanceof Error
+          ? `upstream image-edit provider returned invalid data: ${err.message}`
+          : "upstream image-edit provider returned invalid data",
+      ),
+    };
+  }
+  const includeBase64 = editRequest.response_format === "b64_json";
+  let persistedItems: ReadonlyArray<TImageEditDataItem>;
+  try {
+    persistedItems = await Promise.all(
+      normalized.data.map((item) =>
+        persistImageEditResultItem(item, includeBase64, args),
+      ),
+    );
+  } catch {
+    return {
+      kind: "return",
+      response: errorJson(502, "Failed to persist edited image"),
+    };
+  }
+  report(
+    {
+      model: hop.modelId,
+      provider: hop.provider,
+      status: statusFor(resp.status),
+      tokens_in: 0,
+      tokens_out: 0,
+      latency_ms: Date.now() - args.startedAt,
+      endpoint: args.endpoint,
+      ...(acquired.accountHash !== null
+        ? { account_hash: acquired.accountHash }
+        : {}),
+    },
+    args.originParam,
+    undefined,
+    { sent: true, usage: null, definiteProviderError: false },
+  );
+  return {
+    kind: "return",
+    response: new Response(
+      JSON.stringify({ ...normalized, data: persistedItems }),
+      {
         status: 200,
         headers: { "content-type": "application/json" },
-      }),
-      hop.modelId,
-    );
-  }
-  return stamp(
-    lastError ??
-      errorJson(
-        404,
-        "No subscription image-edit provider in the daemon plan can serve this request",
-      ),
-  );
+      },
+    ),
+  };
 };

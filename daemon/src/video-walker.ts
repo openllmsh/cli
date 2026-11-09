@@ -34,14 +34,22 @@ import { errorJson } from "./cors";
 import { getDelegate } from "./delegation";
 import { passthroughToOrigin } from "./forward";
 import { logWarn, safeDiagnosticMessage } from "./logger";
-import { withMediaAttribution } from "./media-attribution";
-import { forwardMediaHopToCloud } from "./media-cloud-forward";
 import {
   classifyMediaBuildFailure,
   MEDIA_BUILD_FAILURE_MESSAGE,
   MediaInputError,
   MediaProviderUnavailableError,
 } from "./media-input-error";
+import type {
+  TMediaHopDialContext,
+  TMediaHopDialResult,
+} from "./media-plan-walk";
+import {
+  forwardMediaApiKeyHop,
+  isStandardMediaDialableHop,
+  localMediaUnsupportedMiss,
+  walkMediaPlan,
+} from "./media-plan-walk";
 import {
   mediaHopAdvancesForHttp,
   mediaHopAdvancesForReason,
@@ -456,218 +464,132 @@ const getStatus = async (
 };
 
 export const runVideoCreate = async (args: TWalkArgs): Promise<Response> => {
-  const signatureError = signedPlanError(args);
-  if (signatureError !== null) return signatureError;
-
   let request: TVideoGenerationRequest;
   try {
     request = parseVideoRequest(parseVideoGenerationInput(args.rawBody));
   } catch {
     return errorJson(400, VIDEO_INPUT_ERROR);
   }
-  const pmids = args.pmidsParam === null ? [] : args.pmidsParam.split(",");
-  const hops = parsePlan(args.planParam).map((modelId, index) =>
-    resolveHop(modelId, pmids[index]),
-  );
-  const attempted: string[] = [];
-  const stamp = (resp: Response, resolved?: string): Response =>
-    withMediaAttribution(resp, {
-      attempted,
-      ...(resolved !== undefined ? { resolvedModel: resolved } : {}),
-    });
-  let lastError: Response | null = null;
 
-  for (let i = 0; i < hops.length; i++) {
-    const hop = hops[i];
-    if (hop === undefined) continue;
-    const last = i === hops.length - 1;
-    if (isLocalServerSlug(hop.provider)) {
-      attempted.push(hop.modelId);
-      lastError = errorJson(
-        400,
-        `local provider "${hop.provider}" does not support video`,
-        "invalid_request_error",
-        "local_surface_unsupported",
-      );
-      if (!last) continue;
-      return stamp(lastError, hop.modelId);
-    }
-    if (!isOAuthProviderSlug(hop.provider)) {
-      attempted.push(hop.modelId);
-      const forwarded = await forwardMediaHopToCloud(args, hop.modelId);
-      if (forwarded.ok) return stamp(forwarded, hop.modelId);
-      lastError = forwarded;
-      const forwardRaw = await forwarded
-        .clone()
-        .text()
-        .catch(() => "");
-      if (
-        !last &&
-        mediaHopAdvancesForHttp(
-          forwarded.status,
-          forwardRaw,
-          { dispatched: true, accepted: false },
-          hop.provider,
-        )
-      ) {
-        continue;
-      }
-      return stamp(forwarded);
-    }
-    attempted.push(hop.modelId);
-    let body: Record<string, unknown>;
-    try {
-      body = buildVideoUpstreamBody(
-        hop.provider,
-        request,
-        hop.providerModelId,
-        // Catalog-resolved facts for THIS hop.
-        hop.caps,
-      );
-    } catch (err) {
-      const failure = classifyMediaBuildFailure(err);
-      if (failure.kind === "unexpected") {
-        // Our bug, not the caller's: log the detail, return one
-        // sanitized sentence, and do NOT advance — another hop would
-        // hit the same code path.
-        logWarn(
-          "video-walker",
-          safeDiagnosticMessage`Failed to build video request`,
-          {
-            provider: hop.provider,
-            model: hop.providerModelId,
-            error: err instanceof Error ? err.message : String(err),
-          },
-        );
-        return stamp(errorJson(500, MEDIA_BUILD_FAILURE_MESSAGE));
-      }
-      // Both remaining kinds are known BEFORE dispatch, so their own
-      // text is safe to return with the field that caused it.
-      const errorCode =
-        failure.kind === "input" ? "video_input_invalid" : "model_unavailable";
-      lastError = errorJson(400, failure.message, errorCode);
-      if (
-        !last &&
-        mediaHopAdvancesForReason("model_unavailable", { dispatched: false })
-      ) {
-        continue;
-      }
-      return stamp(lastError);
-    }
-    // One dial per signed-in account: a 402/429/401/403 from one account
-    // moves on to the next (`serveAcrossAccounts`). The account that
-    // accepted the job is remembered so its poll/content/cancel use it too.
-    const dialed = await serveAcrossAccounts(
-      hop,
-      async (): Promise<TAccountAttempt<TVideoDial>> => {
-        const acquired = await acquireVideoUpstream(hop.provider, args, hop);
-        const accountIndex = currentAccountIndex();
-        if (acquired === "retry") {
-          return {
-            result: { acquired, resp: null, accountIndex },
-            failure: { kind: "no_credential" },
-          };
-        }
-        const resp = await postUpstream(`${acquired.url}/videos/generations`, {
-          method: "POST",
-          headers: {
-            ...acquired.headers,
-            "content-type": "application/json",
-            accept: "application/json",
-          },
-          body: JSON.stringify(body),
-          signal: args.req.signal,
-        });
-        return await mediaDialAttempt(
-          { acquired, resp, accountIndex },
-          hop.provider,
-        );
-      },
-      {
-        finalHop: last,
-        signal: args.req.signal,
-        // Every account cooling/exhausted: advance like a missing credential.
-        exhausted: () => ({
-          acquired: "retry" as const,
-          resp: null,
-          accountIndex: currentAccountIndex(),
-        }),
-      },
+  return walkMediaPlan({
+    args,
+    missingPlanMessage: "videos require a daemon plan",
+    exhaustedMessage:
+      "No video provider in the daemon plan can serve this request",
+    isDialableHop: isStandardMediaDialableHop,
+    dial: async (ctx) => dialVideoCreateHop(ctx, request),
+  });
+};
+
+const dialVideoCreateHop = async (
+  ctx: TMediaHopDialContext,
+  request: TVideoGenerationRequest,
+): Promise<TMediaHopDialResult> => {
+  const { args, hop, finalHop, attempted } = ctx;
+  if (isLocalServerSlug(hop.provider)) {
+    return localMediaUnsupportedMiss(ctx, "video");
+  }
+  if (!isOAuthProviderSlug(hop.provider)) {
+    return forwardMediaApiKeyHop(ctx);
+  }
+  attempted.push(hop.modelId);
+  let body: Record<string, unknown>;
+  try {
+    body = buildVideoUpstreamBody(
+      hop.provider,
+      request,
+      hop.providerModelId,
+      hop.caps,
     );
-    const { acquired: upstream, resp } = dialed;
-    if (upstream === "retry") {
-      lastError = errorJson(
+  } catch (err) {
+    const failure = classifyMediaBuildFailure(err);
+    if (failure.kind === "unexpected") {
+      logWarn(
+        "video-walker",
+        safeDiagnosticMessage`Failed to build video request`,
+        {
+          provider: hop.provider,
+          model: hop.providerModelId,
+          error: err instanceof Error ? err.message : String(err),
+        },
+      );
+      return {
+        kind: "return",
+        response: errorJson(500, MEDIA_BUILD_FAILURE_MESSAGE),
+      };
+    }
+    const advanceReason =
+      failure.kind === "input"
+        ? ("adapter_input_rejected" as const)
+        : ("model_unavailable" as const);
+    const errorCode =
+      failure.kind === "input" ? "video_input_invalid" : "model_unavailable";
+    return {
+      kind: "miss",
+      error: errorJson(400, failure.message, errorCode),
+      advances:
+        !finalHop &&
+        mediaHopAdvancesForReason(advanceReason, { dispatched: false }),
+    };
+  }
+  const dialed = await serveAcrossAccounts(
+    hop,
+    async (): Promise<TAccountAttempt<TVideoDial>> => {
+      const acquired = await acquireVideoUpstream(hop.provider, args, hop);
+      const accountIndex = currentAccountIndex();
+      if (acquired === "retry") {
+        return {
+          result: { acquired, resp: null, accountIndex },
+          failure: { kind: "no_credential" },
+        };
+      }
+      const resp = await postUpstream(`${acquired.url}/videos/generations`, {
+        method: "POST",
+        headers: {
+          ...acquired.headers,
+          "content-type": "application/json",
+          accept: "application/json",
+        },
+        body: JSON.stringify(body),
+        signal: args.req.signal,
+      });
+      return await mediaDialAttempt(
+        { acquired, resp, accountIndex },
+        hop.provider,
+      );
+    },
+    {
+      finalHop,
+      signal: args.req.signal,
+      exhausted: () => ({
+        acquired: "retry" as const,
+        resp: null,
+        accountIndex: currentAccountIndex(),
+      }),
+    },
+  );
+  const { acquired: upstream, resp } = dialed;
+  if (upstream === "retry") {
+    return {
+      kind: "miss",
+      error: errorJson(
         404,
         `No video credential available for ${hop.provider}`,
-      );
-      if (
-        !last &&
-        mediaHopAdvancesForReason("missing_credential", { dispatched: false })
-      ) {
-        continue;
-      }
-      return stamp(lastError);
-    }
-    if (resp === null) {
-      return stamp(
-        args.req.signal.aborted
-          ? errorJson(499, "client aborted request")
-          : errorJson(502, "upstream video provider is unreachable"),
-      );
-    }
-    if (!resp.ok) {
-      reportVideo(
-        args,
-        hop.provider,
-        hop.modelId,
-        resp.status,
-        upstream.accountHash,
-      );
-      const rawError = await upstreamError(resp);
-      const rawBody = await rawError
-        .clone()
-        .text()
-        .catch(() => "");
-      const errorText = redactVideoErrorText(rawBody, [
-        request.input_image ?? "",
-        ...(request.reference_images ?? []),
-        ...(request.reference_voices ?? []),
-        ...Object.entries(upstream.headers).flatMap(([key, value]) =>
-          /authorization|cookie|token|key/i.test(key)
-            ? [value, value.replace(/^(?:Bearer|Basic)\s+/i, "")]
-            : [],
-        ),
-      ]);
-      lastError = new Response(errorText, {
-        status: rawError.status,
-        headers: rawError.headers,
-      });
-      if (
-        !last &&
-        mediaHopAdvancesForHttp(
-          resp.status,
-          rawBody,
-          { dispatched: true, accepted: false },
-          hop.provider,
-        )
-      ) {
-        continue;
-      }
-      return stamp(lastError);
-    }
-    let requestId: string | null;
-    try {
-      requestId = videoRequestIdFrom(await resp.json());
-    } catch {
-      requestId = null;
-    }
-    if (requestId === null) {
-      return stamp(
-        errorJson(502, "upstream video provider returned no request_id"),
-      );
-    }
-    rememberVideoJobAccount(hop.provider, requestId, dialed.accountIndex);
-    const createdAt = Math.floor(Date.now() / 1000);
+      ),
+      advances:
+        !finalHop &&
+        mediaHopAdvancesForReason("missing_credential", { dispatched: false }),
+    };
+  }
+  if (resp === null) {
+    return {
+      kind: "return",
+      response: args.req.signal.aborted
+        ? errorJson(499, "client aborted request")
+        : errorJson(502, "upstream video provider is unreachable"),
+    };
+  }
+  if (!resp.ok) {
     reportVideo(
       args,
       hop.provider,
@@ -675,55 +597,100 @@ export const runVideoCreate = async (args: TWalkArgs): Promise<Response> => {
       resp.status,
       upstream.accountHash,
     );
-    // Job ids are signed by the cloud (the daemon holds no video-id key), so
-    // a poll can't re-point this upstream job at another model.
-    const fields = {
-      p: hop.provider,
-      u: requestId,
-      m: hop.modelId,
-      c: createdAt,
-    };
-    const signedId =
-      (await signVideoJobId(fields, args.originParam).catch(() => null)) ??
-      (await signVideoJobId(fields, args.originParam).catch(() => null));
-    if (signedId === null) {
-      return stamp(
-        errorJson(
-          502,
-          "The video job was created but could not be registered; it cannot be polled",
-          "plan_error",
-        ),
-      );
-    }
-    const job: TVideoJob = {
-      id: signedId,
-      object: "video",
-      created_at: createdAt,
-      status: "queued",
-      model: hop.modelId,
-      progress: 0,
-      // Read forwarding evidence from the accepted outbound body, not user intent.
-      input_receipt: videoInputReceiptFromCounts({
-        starting_images: body.image === undefined ? 0 : 1,
-        subject_images: Array.isArray(body.reference_images)
-          ? body.reference_images.length
-          : 0,
-        voices: Array.isArray(body.reference_audios)
-          ? body.reference_audios.length
-          : 0,
-      }),
-      ...(request.seconds !== undefined ? { seconds: request.seconds } : {}),
-      ...(request.size !== undefined ? { size: request.size } : {}),
-    };
-    return stamp(responseJson(job), hop.modelId);
-  }
-  return stamp(
-    lastError ??
-      errorJson(
-        404,
-        "No video provider in the daemon plan can serve this request",
+    const rawError = await upstreamError(resp);
+    const rawBody = await rawError
+      .clone()
+      .text()
+      .catch(() => "");
+    const errorText = redactVideoErrorText(rawBody, [
+      request.input_image ?? "",
+      ...(request.reference_images ?? []),
+      ...(request.reference_voices ?? []),
+      ...Object.entries(upstream.headers).flatMap(([key, value]) =>
+        /authorization|cookie|token|key/i.test(key)
+          ? [value, value.replace(/^(?:Bearer|Basic)\s+/i, "")]
+          : [],
       ),
+    ]);
+    return {
+      kind: "miss",
+      error: new Response(errorText, {
+        status: rawError.status,
+        headers: rawError.headers,
+      }),
+      advances:
+        !finalHop &&
+        mediaHopAdvancesForHttp(
+          resp.status,
+          rawBody,
+          { dispatched: true, accepted: false },
+          hop.provider,
+        ),
+    };
+  }
+  let requestId: string | null;
+  try {
+    requestId = videoRequestIdFrom(await resp.json());
+  } catch {
+    requestId = null;
+  }
+  if (requestId === null) {
+    return {
+      kind: "return",
+      response: errorJson(
+        502,
+        "upstream video provider returned no request_id",
+      ),
+    };
+  }
+  rememberVideoJobAccount(hop.provider, requestId, dialed.accountIndex);
+  const createdAt = Math.floor(Date.now() / 1000);
+  reportVideo(
+    args,
+    hop.provider,
+    hop.modelId,
+    resp.status,
+    upstream.accountHash,
   );
+  const fields = {
+    p: hop.provider,
+    u: requestId,
+    m: hop.modelId,
+    c: createdAt,
+  };
+  const signedId =
+    (await signVideoJobId(fields, args.originParam).catch(() => null)) ??
+    (await signVideoJobId(fields, args.originParam).catch(() => null));
+  if (signedId === null) {
+    return {
+      kind: "return",
+      response: errorJson(
+        502,
+        "The video job was created but could not be registered; it cannot be polled",
+        "plan_error",
+      ),
+    };
+  }
+  const job: TVideoJob = {
+    id: signedId,
+    object: "video",
+    created_at: createdAt,
+    status: "queued",
+    model: hop.modelId,
+    progress: 0,
+    input_receipt: videoInputReceiptFromCounts({
+      starting_images: body.image === undefined ? 0 : 1,
+      subject_images: Array.isArray(body.reference_images)
+        ? body.reference_images.length
+        : 0,
+      voices: Array.isArray(body.reference_audios)
+        ? body.reference_audios.length
+        : 0,
+    }),
+    ...(request.seconds !== undefined ? { seconds: request.seconds } : {}),
+    ...(request.size !== undefined ? { size: request.size } : {}),
+  };
+  return { kind: "return", response: responseJson(job) };
 };
 
 export const runVideoPoll = async (

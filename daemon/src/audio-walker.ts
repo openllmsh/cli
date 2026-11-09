@@ -30,8 +30,6 @@ import {
   GROK_STT_INPUT_FORMATS,
   GROK_TTS_OUTPUT_FORMATS,
   GROK_TTS_VOICES,
-  isLocalServerSlug,
-  isOAuthProviderSlug,
   MEDIA_PERSISTENCE_BROWSER,
   MEDIA_PERSISTENCE_REQUEST_HEADER,
   MEDIA_PERSISTENCE_RESPONSE_HEADER,
@@ -47,11 +45,20 @@ import {
 import { uploadMedia } from "./cloud-client";
 import { lookupCatalogEntry } from "./config";
 import { errorJson } from "./cors";
-import { getDelegate } from "./delegation";
+import { getDelegate, isOAuthSlug } from "./delegation";
 import type { TImageCredential } from "./delegation/types";
+import { isLocalServerSlug } from "./local-servers";
 import { logWarn, safeDiagnosticMessage } from "./logger";
-import { withMediaAttribution } from "./media-attribution";
-import { forwardMediaHopToCloud } from "./media-cloud-forward";
+import type {
+  TMediaHopDialContext,
+  TMediaHopDialResult,
+} from "./media-plan-walk";
+import {
+  forwardMediaApiKeyHop,
+  isStandardMediaDialableHop,
+  localMediaUnsupportedMiss,
+  walkMediaPlan,
+} from "./media-plan-walk";
 import {
   mediaHopAdvancesForHttp,
   mediaHopAdvancesForReason,
@@ -64,12 +71,9 @@ import { mediaDialAttempt, serveAcrossAccounts } from "./subscription-accounts";
 import type { TWalkArgs } from "./walker";
 import {
   coolHopAfterStaleRefresh,
-  parsePlan,
   passthroughHeaders,
-  planSignatureOk,
   postUpstream,
   report,
-  resolveHop,
 } from "./walker";
 
 // ─── Credential acquisition (mirrors `acquireImageUpstream`) ───────────────
@@ -121,32 +125,6 @@ const acquireAudioUpstream = async (
   } catch {
     return "retry";
   }
-};
-
-/** Ordered plan hops. Subscription audio hooks and API-key tails both appear. */
-const listAudioHops = (args: TWalkArgs) => {
-  const pmids = args.pmidsParam === null ? [] : args.pmidsParam.split(",");
-  return parsePlan(args.planParam).map((modelId, index) =>
-    resolveHop(modelId, pmids[index]),
-  );
-};
-
-const requirePlanned = (args: TWalkArgs): Response | null => {
-  if (
-    !planSignatureOk(
-      args.planParam,
-      args.pmidsParam,
-      args.originParam,
-      args.contextOverflowStrategy ?? null,
-      args.sigParam,
-    )
-  ) {
-    return errorJson(403, "invalid or missing plan signature");
-  }
-  if (args.planParam === null) {
-    return errorJson(400, "audio requires a daemon plan");
-  }
-  return null;
 };
 
 // ─── Transcription ──────────────────────────────────────────────────────
@@ -394,9 +372,6 @@ export const runAudioTranscriptionWalker = async (
   multipart: TParsedMultipart | null,
   options?: TAudioTranscriptionWalkerOptions,
 ): Promise<Response> => {
-  const planErr = requirePlanned(args);
-  if (planErr !== null) return planErr;
-
   const input: TAudioTranscriptionInput =
     multipart !== null
       ? { kind: "multipart", multipart }
@@ -406,330 +381,314 @@ export const runAudioTranscriptionWalker = async (
     return errorJson(normalized.status, normalized.message);
   }
 
-  const hops = listAudioHops(args);
-  const attempted: string[] = [];
-  const stamp = (resp: Response, resolved?: string): Response =>
-    withMediaAttribution(resp, {
-      attempted,
-      ...(resolved !== undefined ? { resolvedModel: resolved } : {}),
-    });
-  let lastError: Response | null = null;
   const format = detectAudioFormat(normalized.file);
+  return walkMediaPlan({
+    args,
+    missingPlanMessage: "audio requires a daemon plan",
+    exhaustedMessage:
+      "No transcription provider in the daemon plan can serve this request",
+    isDialableHop: isStandardMediaDialableHop,
+    dial: async (ctx) =>
+      dialAudioTranscriptionHop(ctx, normalized, format, options),
+  });
+};
 
-  for (let i = 0; i < hops.length; i++) {
-    const hop = hops[i];
-    if (hop === undefined) continue;
-    const last = i === hops.length - 1;
-    const transcribeHook = getDelegate(
-      hop.provider,
-    )?.credentialForTranscription;
-    if (isOAuthProviderSlug(hop.provider) && transcribeHook === undefined) {
-      lastError = errorJson(
-        404,
-        `No transcription credential available for ${hop.provider}`,
-      );
-      if (
-        !last &&
-        mediaHopAdvancesForReason("missing_credential", { dispatched: false })
-      ) {
-        continue;
-      }
-      return stamp(lastError);
-    }
-    if (isLocalServerSlug(hop.provider)) {
-      attempted.push(hop.modelId);
-      lastError = errorJson(
-        400,
-        `local provider "${hop.provider}" does not support transcription`,
-        "invalid_request_error",
-        "local_surface_unsupported",
-      );
-      if (!last) continue;
-      return stamp(lastError, hop.modelId);
-    }
-    if (!isOAuthProviderSlug(hop.provider)) {
-      attempted.push(hop.modelId);
-      const forwarded = await forwardMediaHopToCloud(args, hop.modelId);
-      if (forwarded.ok) return stamp(forwarded, hop.modelId);
-      lastError = forwarded;
-      const forwardRaw = await forwarded
-        .clone()
-        .text()
-        .catch(() => "");
-      if (
-        !last &&
-        mediaHopAdvancesForHttp(
-          forwarded.status,
-          forwardRaw,
-          { dispatched: true, accepted: false },
-          hop.provider,
-        )
-      ) {
-        continue;
-      }
-      return stamp(forwarded);
-    }
+const dialAudioTranscriptionHop = async (
+  ctx: TMediaHopDialContext,
+  normalized: TNormalizedTranscriptionRequest,
+  format: TDetectedAudioFormat | null,
+  options: TAudioTranscriptionWalkerOptions | undefined,
+): Promise<TMediaHopDialResult> => {
+  const { args, hop, finalHop, attempted } = ctx;
+  if (isLocalServerSlug(hop.provider)) {
+    return localMediaUnsupportedMiss(ctx, "transcription");
+  }
+  if (!isOAuthSlug(hop.provider)) {
+    return forwardMediaApiKeyHop(ctx);
+  }
 
-    const allowed = inputFormatsFor(hop);
-    if (format === null || !allowed.includes(format)) {
-      lastError = errorJson(
-        415,
-        `Unsupported audio input for ${hop.provider}. Accepted: ${
-          allowed.length > 0 ? allowed.join(", ") : "none"
-        }.`,
-      );
-      if (
-        !last &&
-        mediaHopAdvancesForReason("model_unavailable", { dispatched: false })
-      ) {
-        continue;
-      }
-      return stamp(lastError);
-    }
-    // A claimed `wav_pcm16_16khz_mono` (grok's ONLY accepted format, and one
-    // of claude_code's two) is verified by actually parsing the container —
-    // a WAV with the wrong sample rate/channel count/bit depth is rejected
-    // explicitly (415) rather than forwarded and left to the vendor's own
-    // (opaque) validation. `pcm_s16le_16khz_mono` (claude_code-only, no
-    // header) is validated for shape (even byte count, non-empty) the same
-    // way. Grok still gets the ORIGINAL file bytes forwarded untouched below
-    // — this is a validation pass, not a transcode.
-    const pcmValidation =
-      format === "wav_pcm16_16khz_mono" || format === "pcm_s16le_16khz_mono"
-        ? extractClaudeDictationPcm(normalized.file.bytes, format)
-        : null;
-    if (pcmValidation !== null && isPcmParseFailure(pcmValidation)) {
-      lastError = errorJson(
-        415,
-        `Invalid ${format} audio: ${pcmValidation.error}`,
-      );
-      if (
-        !last &&
-        mediaHopAdvancesForReason("missing_credential", { dispatched: false })
-      )
-        continue;
-      return stamp(lastError);
-    }
-
-    attempted.push(hop.modelId);
-    // Both verified subscription STT recipes ALWAYS sent an explicit
-    // `language: en` (docs/research/subscription-provider-capabilities-
-    // 2026-09-17.md: grok's "Working fields: file=input.wav, language=en,
-    // format=true"; chatgpt's "Working form fields: file: input.webm,
-    // language: en"). Grok's `/v1/stt` outright REJECTS a request missing it
-    // (400 `Field 'language' is required when 'format' is true`) — verified
-    // live. The OpenAI-compatible `/v1/audio/transcriptions` contract treats
-    // `language` as fully optional, so every caller that omits it (the common
-    // case) needs a server-side default here, never a bare pass-through of
-    // `undefined`, for either provider. An explicit caller-supplied language
-    // still wins.
-    const form =
-      hop.provider === "grok"
-        ? buildTranscriptionForm(
-            normalized.file,
-            format,
-            normalized.language ?? "en",
-            { format: "true" },
-          )
-        : buildTranscriptionForm(
-            normalized.file,
-            format,
-            normalized.language ?? "en",
-          );
-    // One dial per signed-in account: a 402/429/401/403 from one account
-    // moves on to the next (`serveAcrossAccounts`). claude_code streams over
-    // a WebSocket below, so only its credential is acquired per account: a
-    // dictation session failure carries no HTTP status to classify.
-    const dialed = await serveAcrossAccounts(
-      hop,
-      async (): Promise<TAccountAttempt<TAudioDial>> => {
-        const acquired = await acquireAudioUpstream(
-          "transcription",
-          hop.provider,
-          args,
-          hop,
-        );
-        const startedAt = Date.now();
-        if (acquired === "retry") {
-          return {
-            result: { acquired, resp: null, startedAt },
-            failure: { kind: "no_credential" },
-          };
-        }
-        if (hop.provider === "claude_code") {
-          return { result: { acquired, resp: null, startedAt } };
-        }
-        const resp = await postUpstream(acquired.url, {
-          method: "POST",
-          headers: { ...acquired.headers, accept: "application/json" },
-          body: form,
-          signal: args.req.signal,
-        });
-        return await mediaDialAttempt(
-          { acquired, resp, startedAt },
-          hop.provider,
-        );
-      },
-      {
-        finalHop: last,
-        signal: args.req.signal,
-        // Every account cooling/exhausted: advance like a missing credential.
-        exhausted: () => ({
-          acquired: "retry" as const,
-          resp: null,
-          startedAt: 0,
-        }),
-      },
+  const transcribeHook = getDelegate(hop.provider)?.credentialForTranscription;
+  if (transcribeHook === undefined) {
+    const error = errorJson(
+      404,
+      `No transcription credential available for ${hop.provider}`,
     );
-    const acquired = dialed.acquired;
-    if (acquired === "retry") {
-      lastError = errorJson(
-        404,
-        `No transcription credential available for ${hop.provider}`,
-      );
-      if (
-        !last &&
-        mediaHopAdvancesForReason("missing_credential", { dispatched: false })
-      )
-        continue;
-      return stamp(lastError);
-    }
-
-    const reportResult = (
-      status: "success" | "error",
-      latencyMs: number,
-    ): void => {
-      report(
-        {
-          model: hop.modelId,
-          provider: hop.provider,
-          status,
-          tokens_in: 0,
-          tokens_out: 0,
-          latency_ms: latencyMs,
-          endpoint: args.endpoint,
-          ...(acquired.accountHash !== null
-            ? { account_hash: acquired.accountHash }
-            : {}),
-        },
-        args.originParam,
-        undefined,
-        { sent: true, usage: null, definiteProviderError: false },
-      );
+    return {
+      kind: "miss",
+      error,
+      advances:
+        !finalHop &&
+        mediaHopAdvancesForReason("missing_credential", { dispatched: false }),
     };
+  }
 
-    // ── claude_code: decode + stream over the dictation WebSocket ──────────
-    if (hop.provider === "claude_code") {
-      // Already validated above (`pcmValidation`) — `format` being accepted
-      // for claude_code guarantees it was one of the two PCM shapes, so this
-      // is always the success variant here.
-      if (pcmValidation === null || isPcmParseFailure(pcmValidation)) {
-        return errorJson(415, "Invalid dictation audio");
-      }
-      const pcmResult = pcmValidation;
+  const allowed = inputFormatsFor(hop);
+  if (format === null || !allowed.includes(format)) {
+    const error = errorJson(
+      415,
+      `Unsupported audio input for ${hop.provider}. Accepted: ${
+        allowed.length > 0 ? allowed.join(", ") : "none"
+      }.`,
+    );
+    return {
+      kind: "miss",
+      error,
+      advances:
+        !finalHop &&
+        mediaHopAdvancesForReason("model_unavailable", { dispatched: false }),
+    };
+  }
+  // A claimed `wav_pcm16_16khz_mono` (grok's ONLY accepted format, and one
+  // of claude_code's two) is verified by actually parsing the container —
+  // a WAV with the wrong sample rate/channel count/bit depth is rejected
+  // explicitly (415) rather than forwarded and left to the vendor's own
+  // (opaque) validation. `pcm_s16le_16khz_mono` (claude_code-only, no
+  // header) is validated for shape (even byte count, non-empty) the same
+  // way. Grok still gets the ORIGINAL file bytes forwarded untouched below
+  // — this is a validation pass, not a transcode.
+  const pcmValidation =
+    format === "wav_pcm16_16khz_mono" || format === "pcm_s16le_16khz_mono"
+      ? extractClaudeDictationPcm(normalized.file.bytes, format)
+      : null;
+  if (pcmValidation !== null && isPcmParseFailure(pcmValidation)) {
+    // M8 deferred: keep invalid PCM advance as missing_credential for now.
+    const error = errorJson(
+      415,
+      `Invalid ${format} audio: ${pcmValidation.error}`,
+    );
+    return {
+      kind: "miss",
+      error,
+      advances:
+        !finalHop &&
+        mediaHopAdvancesForReason("missing_credential", { dispatched: false }),
+    };
+  }
+
+  attempted.push(hop.modelId);
+  // Both verified subscription STT recipes ALWAYS sent an explicit
+  // `language: en` (docs/research/subscription-provider-capabilities-
+  // 2026-09-17.md: grok's "Working fields: file=input.wav, language=en,
+  // format=true"; chatgpt's "Working form fields: file: input.webm,
+  // language: en"). Grok's `/v1/stt` outright REJECTS a request missing it
+  // (400 `Field 'language' is required when 'format' is true`) — verified
+  // live. The OpenAI-compatible `/v1/audio/transcriptions` contract treats
+  // `language` as fully optional, so every caller that omits it (the common
+  // case) needs a server-side default here, never a bare pass-through of
+  // `undefined`, for either provider. An explicit caller-supplied language
+  // still wins.
+  const form =
+    hop.provider === "grok"
+      ? buildTranscriptionForm(
+          normalized.file,
+          format,
+          normalized.language ?? "en",
+          { format: "true" },
+        )
+      : buildTranscriptionForm(
+          normalized.file,
+          format,
+          normalized.language ?? "en",
+        );
+  // One dial per signed-in account: a 402/429/401/403 from one account
+  // moves on to the next (`serveAcrossAccounts`). claude_code streams over
+  // a WebSocket below, so only its credential is acquired per account: a
+  // dictation session failure carries no HTTP status to classify.
+  const dialed = await serveAcrossAccounts(
+    hop,
+    async (): Promise<TAccountAttempt<TAudioDial>> => {
+      const acquired = await acquireAudioUpstream(
+        "transcription",
+        hop.provider,
+        args,
+        hop,
+      );
       const startedAt = Date.now();
-      const session = await runClaudeDictationSession({
-        url: acquired.url,
-        headers: acquired.headers,
-        pcm: pcmResult.pcm,
-        frames: framePcm(pcmResult.pcm),
-        // Verified research recipe: "Send silence at the tail, then
-        // CloseStream" — the connection's own `utterance_end_ms=1000` needs a
-        // quiet tail to finalize the last utterance; bursting straight into
-        // CloseStream starves it and a short clip comes back with an EMPTY
-        // transcript despite a 200 (live-verified on this branch).
-        trailingSilenceMs: 1_200,
-        ...(options?.wsFactory !== undefined
-          ? { wsFactory: options.wsFactory }
-          : {}),
-        ...(options?.pace !== undefined ? { pace: options.pace } : {}),
+      if (acquired === "retry") {
+        return {
+          result: { acquired, resp: null, startedAt },
+          failure: { kind: "no_credential" },
+        };
+      }
+      if (hop.provider === "claude_code") {
+        return { result: { acquired, resp: null, startedAt } };
+      }
+      const resp = await postUpstream(acquired.url, {
+        method: "POST",
+        headers: { ...acquired.headers, accept: "application/json" },
+        body: form,
         signal: args.req.signal,
       });
-      const latencyMs = Date.now() - startedAt;
-      if (session.kind === "error") {
-        reportResult("error", latencyMs);
-        return errorJson(502, session.message);
-      }
-      reportResult("success", latencyMs);
-      return stamp(
-        new Response(JSON.stringify({ text: session.text }), {
-          status: 200,
-          headers: { "content-type": "application/json" },
-        }),
-        hop.modelId,
+      return await mediaDialAttempt(
+        { acquired, resp, startedAt },
+        hop.provider,
       );
-    }
+    },
+    {
+      finalHop,
+      signal: args.req.signal,
+      // Every account cooling/exhausted: advance like a missing credential.
+      exhausted: () => ({
+        acquired: "retry" as const,
+        resp: null,
+        startedAt: 0,
+      }),
+    },
+  );
+  const acquired = dialed.acquired;
+  if (acquired === "retry") {
+    const error = errorJson(
+      404,
+      `No transcription credential available for ${hop.provider}`,
+    );
+    return {
+      kind: "miss",
+      error,
+      advances:
+        !finalHop &&
+        mediaHopAdvancesForReason("missing_credential", { dispatched: false }),
+    };
+  }
 
-    // ── chatgpt / grok: batch multipart POST, forwarded verbatim ────────────
-    const { resp, startedAt } = dialed;
-    const latencyMs = Date.now() - startedAt;
-    if (resp === null) {
-      reportResult("error", latencyMs);
-      return args.req.signal.aborted
-        ? errorJson(499, "client aborted request")
-        : errorJson(502, "upstream transcription provider is unreachable");
+  const reportResult = (
+    status: "success" | "error",
+    latencyMs: number,
+  ): void => {
+    report(
+      {
+        model: hop.modelId,
+        provider: hop.provider,
+        status,
+        tokens_in: 0,
+        tokens_out: 0,
+        latency_ms: latencyMs,
+        endpoint: args.endpoint,
+        ...(acquired.accountHash !== null
+          ? { account_hash: acquired.accountHash }
+          : {}),
+      },
+      args.originParam,
+      undefined,
+      { sent: true, usage: null, definiteProviderError: false },
+    );
+  };
+
+  // ── claude_code: decode + stream over the dictation WebSocket ──────────
+  if (hop.provider === "claude_code") {
+    // Already validated above (`pcmValidation`) — `format` being accepted
+    // for claude_code guarantees it was one of the two PCM shapes, so this
+    // is always the success variant here.
+    if (pcmValidation === null || isPcmParseFailure(pcmValidation)) {
+      return {
+        kind: "return",
+        response: errorJson(415, "Invalid dictation audio"),
+      };
     }
-    if (!resp.ok) {
-      const body = await resp.text().catch(() => "");
+    const pcmResult = pcmValidation;
+    const startedAt = Date.now();
+    const session = await runClaudeDictationSession({
+      url: acquired.url,
+      headers: acquired.headers,
+      pcm: pcmResult.pcm,
+      frames: framePcm(pcmResult.pcm),
+      // Verified research recipe: "Send silence at the tail, then
+      // CloseStream" — the connection's own `utterance_end_ms=1000` needs a
+      // quiet tail to finalize the last utterance; bursting straight into
+      // CloseStream starves it and a short clip comes back with an EMPTY
+      // transcript despite a 200 (live-verified on this branch).
+      trailingSilenceMs: 1_200,
+      ...(options?.wsFactory !== undefined
+        ? { wsFactory: options.wsFactory }
+        : {}),
+      ...(options?.pace !== undefined ? { pace: options.pace } : {}),
+      signal: args.req.signal,
+    });
+    const latencyMs = Date.now() - startedAt;
+    if (session.kind === "error") {
       reportResult("error", latencyMs);
-      lastError = new Response(body.length > 0 ? body : null, {
+      // M7: Claude dictation 502 stops the walk — no advance.
+      return { kind: "return", response: errorJson(502, session.message) };
+    }
+    reportResult("success", latencyMs);
+    return {
+      kind: "return",
+      response: new Response(JSON.stringify({ text: session.text }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    };
+  }
+
+  // ── chatgpt / grok: batch multipart POST, forwarded verbatim ────────────
+  const { resp, startedAt } = dialed;
+  const latencyMs = Date.now() - startedAt;
+  if (resp === null) {
+    reportResult("error", latencyMs);
+    return {
+      kind: "return",
+      response: args.req.signal.aborted
+        ? errorJson(499, "client aborted request")
+        : errorJson(502, "upstream transcription provider is unreachable"),
+    };
+  }
+  if (!resp.ok) {
+    const body = await resp.text().catch(() => "");
+    reportResult("error", latencyMs);
+    return {
+      kind: "miss",
+      error: new Response(body.length > 0 ? body : null, {
         status: resp.status,
         headers: passthroughHeaders(resp),
-      });
-      if (
-        !last &&
+      }),
+      advances:
+        !finalHop &&
         mediaHopAdvancesForHttp(
           resp.status,
           body,
           { dispatched: true, accepted: false },
           hop.provider,
-        )
-      ) {
-        continue;
-      }
-      return stamp(lastError);
-    }
-    let upstream: unknown;
-    try {
-      upstream = await resp.json();
-    } catch {
-      reportResult("error", latencyMs);
-      return errorJson(
+        ),
+    };
+  }
+  let upstream: unknown;
+  try {
+    upstream = await resp.json();
+  } catch {
+    reportResult("error", latencyMs);
+    return {
+      kind: "return",
+      response: errorJson(
         502,
         "upstream transcription provider returned invalid JSON",
-      );
-    }
-    let normalizedResponse: { readonly text: string };
-    try {
-      // Never leak Codex's internal asset pointers (`asset_pointer` /
-      // `asset_ttl` / `asset_format`) — the OpenAI-compatible contract is
-      // `{text}` (plus optional verbose fields we don't populate here).
-      normalizedResponse = stripCodexAssetPointers(upstream);
-    } catch (err) {
-      reportResult("error", latencyMs);
-      return errorJson(
+      ),
+    };
+  }
+  let normalizedResponse: { readonly text: string };
+  try {
+    // Never leak Codex's internal asset pointers (`asset_pointer` /
+    // `asset_ttl` / `asset_format`) — the OpenAI-compatible contract is
+    // `{text}` (plus optional verbose fields we don't populate here).
+    normalizedResponse = stripCodexAssetPointers(upstream);
+  } catch (err) {
+    reportResult("error", latencyMs);
+    return {
+      kind: "return",
+      response: errorJson(
         502,
         err instanceof Error
           ? `upstream transcription provider returned invalid data: ${err.message}`
           : "upstream transcription provider returned invalid data",
-      );
-    }
-    reportResult("success", latencyMs);
-    return stamp(
-      new Response(JSON.stringify(normalizedResponse), {
-        status: 200,
-        headers: { "content-type": "application/json" },
-      }),
-      hop.modelId,
-    );
-  }
-  return stamp(
-    lastError ??
-      errorJson(
-        404,
-        "No transcription provider in the daemon plan can serve this request",
       ),
-  );
+    };
+  }
+  reportResult("success", latencyMs);
+  return {
+    kind: "return",
+    response: new Response(JSON.stringify(normalizedResponse), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    }),
+  };
 };
 
 // ─── Speech (TTS) ───────────────────────────────────────────────────────
@@ -915,262 +874,227 @@ const persistSpeechInBackground = (
 export const runAudioSpeechWalker = async (
   args: TWalkArgs,
 ): Promise<Response> => {
-  const planErr = requirePlanned(args);
-  if (planErr !== null) return planErr;
-
   const parsedBody = parseSpeechRequestBody(args.rawBody);
   if ("status" in parsedBody) {
     return errorJson(parsedBody.status, parsedBody.message);
   }
 
-  const hops = listAudioHops(args);
-  const attempted: string[] = [];
-  const stamp = (resp: Response, resolved?: string): Response =>
-    withMediaAttribution(resp, {
-      attempted,
-      ...(resolved !== undefined ? { resolvedModel: resolved } : {}),
-    });
-  let lastError: Response | null = null;
-  const chars = parsedBody.input.length;
+  return walkMediaPlan({
+    args,
+    missingPlanMessage: "audio requires a daemon plan",
+    exhaustedMessage:
+      "No speech provider in the daemon plan can serve this request",
+    isDialableHop: isStandardMediaDialableHop,
+    dial: async (ctx) => dialAudioSpeechHop(ctx, parsedBody),
+  });
+};
 
-  for (let i = 0; i < hops.length; i++) {
-    const hop = hops[i];
-    if (hop === undefined) continue;
-    const last = i === hops.length - 1;
-    if (isLocalServerSlug(hop.provider)) {
-      attempted.push(hop.modelId);
-      lastError = errorJson(
-        400,
-        `local provider "${hop.provider}" does not support speech`,
-        "invalid_request_error",
-        "local_surface_unsupported",
-      );
-      if (!last) continue;
-      return stamp(lastError, hop.modelId);
-    }
-    if (!isOAuthProviderSlug(hop.provider)) {
-      attempted.push(hop.modelId);
-      const forwarded = await forwardMediaHopToCloud(args, hop.modelId);
-      if (forwarded.ok) return stamp(forwarded, hop.modelId);
-      lastError = forwarded;
-      const forwardRaw = await forwarded
-        .clone()
-        .text()
-        .catch(() => "");
-      if (
-        !last &&
-        mediaHopAdvancesForHttp(
-          forwarded.status,
-          forwardRaw,
-          { dispatched: true, accepted: false },
-          hop.provider,
-        )
-      ) {
-        continue;
-      }
-      return stamp(forwarded);
-    }
-    const speechHook = getDelegate(hop.provider)?.credentialForSpeech;
-    if (speechHook === undefined) {
-      lastError = errorJson(
-        404,
-        `No speech credential available for ${hop.provider}`,
-      );
-      if (
-        !last &&
-        mediaHopAdvancesForReason("missing_credential", { dispatched: false })
-      ) {
-        continue;
-      }
-      return stamp(lastError);
-    }
-    const formatError = validateOutputFormat(hop, parsedBody.responseFormat);
-    const voiceError = validateVoice(hop, parsedBody.voice);
-    if (formatError !== null || voiceError !== null) {
-      lastError = errorJson(400, formatError ?? voiceError ?? "invalid speech");
-      if (
-        !last &&
-        mediaHopAdvancesForReason("model_unavailable", { dispatched: false })
-      ) {
-        continue;
-      }
-      return stamp(lastError);
-    }
-    const upstreamBody =
-      hop.provider === "grok"
-        ? JSON.stringify({
-            text: parsedBody.input,
-            // The caller's voice, once `validateVoice` has accepted it
-            // against the model's declared menu — forwarding a DIFFERENT
-            // voice than the one accepted would be the silent
-            // substitution the validation exists to prevent. With no
-            // voice sent, grok's single verified voice is used, which is
-            // the byte-identical previous behaviour for today's card
-            // (`grok/tts` declares exactly `eve`).
-            voice_id: parsedBody.voice ?? GROK_TTS_VOICES[0],
-            language: "en",
-          })
-        : JSON.stringify({
-            text: parsedBody.input,
-            pronunciation_language: "en-US",
-            speed: parsedBody.speed ?? 1,
-          });
-    // One dial per signed-in account: a 402/429/401/403 from one account
-    // moves on to the next (`serveAcrossAccounts`).
-    let servingAccount = currentAccountIndex();
-    const dialed = await serveAcrossAccounts(
-      hop,
-      async (): Promise<TAccountAttempt<TAudioDial>> => {
-        servingAccount = currentAccountIndex();
-        const acquired = await acquireAudioUpstream(
-          "speech",
-          hop.provider,
-          args,
-          hop,
-        );
-        const startedAt = Date.now();
-        if (acquired === "retry") {
-          return {
-            result: { acquired, resp: null, startedAt },
-            failure: { kind: "no_credential" },
-          };
-        }
-        const resp = await postUpstream(acquired.url, {
-          method: "POST",
-          headers: {
-            ...acquired.headers,
-            "content-type": "application/json",
-            accept: "audio/mpeg, application/json",
-          },
-          body: upstreamBody,
-          signal: args.req.signal,
-        });
-        return await mediaDialAttempt(
-          { acquired, resp, startedAt },
-          hop.provider,
-        );
-      },
-      {
-        finalHop: last,
-        signal: args.req.signal,
-        // Every account cooling/exhausted: advance like a missing credential.
-        exhausted: () => ({
-          acquired: "retry" as const,
-          resp: null,
-          startedAt: 0,
-        }),
-      },
+const dialAudioSpeechHop = async (
+  ctx: TMediaHopDialContext,
+  parsedBody: TSpeechRequestBody,
+): Promise<TMediaHopDialResult> => {
+  const { args, hop, finalHop, attempted } = ctx;
+  if (isLocalServerSlug(hop.provider)) {
+    return localMediaUnsupportedMiss(ctx, "speech");
+  }
+  if (!isOAuthSlug(hop.provider)) {
+    return forwardMediaApiKeyHop(ctx);
+  }
+
+  const speechHook = getDelegate(hop.provider)?.credentialForSpeech;
+  if (speechHook === undefined) {
+    const error = errorJson(
+      404,
+      `No speech credential available for ${hop.provider}`,
     );
-    const acquired = dialed.acquired;
-    if (acquired === "retry") {
-      lastError = errorJson(
-        404,
-        `No speech credential available for ${hop.provider}`,
-      );
-      if (
-        !last &&
-        mediaHopAdvancesForReason("missing_credential", { dispatched: false })
-      ) {
-        continue;
-      }
-      return stamp(lastError);
-    }
-    attempted.push(hop.modelId);
-    const { resp, startedAt } = dialed;
-    const latencyMs = Date.now() - startedAt;
-    const reportResult = (status: "success" | "error"): void => {
-      // A success with tokens samples usage through the delegate, which reads
-      // the ambient account: run it as the account that served.
-      runWithAccount(servingAccount, () =>
-        report(
-          {
-            model: hop.modelId,
-            provider: hop.provider,
-            status,
-            tokens_in: chars,
-            tokens_out: 0,
-            latency_ms: latencyMs,
-            endpoint: args.endpoint,
-            ...(acquired.accountHash !== null
-              ? { account_hash: acquired.accountHash }
-              : {}),
-          },
-          args.originParam,
-          undefined,
-          { sent: true, usage: null, definiteProviderError: false },
-        ),
-      );
+    return {
+      kind: "miss",
+      error,
+      advances:
+        !finalHop &&
+        mediaHopAdvancesForReason("missing_credential", { dispatched: false }),
     };
-    if (resp === null) {
-      reportResult("error");
-      return stamp(
-        args.req.signal.aborted
-          ? errorJson(499, "client aborted request")
-          : errorJson(502, "upstream speech provider is unreachable"),
+  }
+  const formatError = validateOutputFormat(hop, parsedBody.responseFormat);
+  const voiceError = validateVoice(hop, parsedBody.voice);
+  if (formatError !== null || voiceError !== null) {
+    const error = errorJson(400, formatError ?? voiceError ?? "invalid speech");
+    return {
+      kind: "miss",
+      error,
+      advances:
+        !finalHop &&
+        mediaHopAdvancesForReason("model_unavailable", { dispatched: false }),
+    };
+  }
+  const upstreamBody =
+    hop.provider === "grok"
+      ? JSON.stringify({
+          text: parsedBody.input,
+          // The caller's voice, once `validateVoice` has accepted it
+          // against the model's declared menu — forwarding a DIFFERENT
+          // voice than the one accepted would be the silent
+          // substitution the validation exists to prevent. With no
+          // voice sent, grok's single verified voice is used, which is
+          // the byte-identical previous behaviour for today's card
+          // (`grok/tts` declares exactly `eve`).
+          voice_id: parsedBody.voice ?? GROK_TTS_VOICES[0],
+          language: "en",
+        })
+      : JSON.stringify({
+          text: parsedBody.input,
+          pronunciation_language: "en-US",
+          speed: parsedBody.speed ?? 1,
+        });
+  // One dial per signed-in account: a 402/429/401/403 from one account
+  // moves on to the next (`serveAcrossAccounts`).
+  let servingAccount = currentAccountIndex();
+  const dialed = await serveAcrossAccounts(
+    hop,
+    async (): Promise<TAccountAttempt<TAudioDial>> => {
+      servingAccount = currentAccountIndex();
+      const acquired = await acquireAudioUpstream(
+        "speech",
+        hop.provider,
+        args,
+        hop,
       );
-    }
-    if (!resp.ok) {
-      const body = await resp.text().catch(() => "");
-      reportResult("error");
-      lastError = new Response(body.length > 0 ? body : null, {
+      const startedAt = Date.now();
+      if (acquired === "retry") {
+        return {
+          result: { acquired, resp: null, startedAt },
+          failure: { kind: "no_credential" },
+        };
+      }
+      const resp = await postUpstream(acquired.url, {
+        method: "POST",
+        headers: {
+          ...acquired.headers,
+          "content-type": "application/json",
+          accept: "audio/mpeg, application/json",
+        },
+        body: upstreamBody,
+        signal: args.req.signal,
+      });
+      return await mediaDialAttempt(
+        { acquired, resp, startedAt },
+        hop.provider,
+      );
+    },
+    {
+      finalHop,
+      signal: args.req.signal,
+      // Every account cooling/exhausted: advance like a missing credential.
+      exhausted: () => ({
+        acquired: "retry" as const,
+        resp: null,
+        startedAt: 0,
+      }),
+    },
+  );
+  const acquired = dialed.acquired;
+  if (acquired === "retry") {
+    const error = errorJson(
+      404,
+      `No speech credential available for ${hop.provider}`,
+    );
+    return {
+      kind: "miss",
+      error,
+      advances:
+        !finalHop &&
+        mediaHopAdvancesForReason("missing_credential", { dispatched: false }),
+    };
+  }
+  attempted.push(hop.modelId);
+  const { resp, startedAt } = dialed;
+  const latencyMs = Date.now() - startedAt;
+  const chars = parsedBody.input.length;
+  const reportResult = (status: "success" | "error"): void => {
+    // A success with tokens samples usage through the delegate, which reads
+    // the ambient account: run it as the account that served.
+    runWithAccount(servingAccount, () =>
+      report(
+        {
+          model: hop.modelId,
+          provider: hop.provider,
+          status,
+          tokens_in: chars,
+          tokens_out: 0,
+          latency_ms: latencyMs,
+          endpoint: args.endpoint,
+          ...(acquired.accountHash !== null
+            ? { account_hash: acquired.accountHash }
+            : {}),
+        },
+        args.originParam,
+        undefined,
+        { sent: true, usage: null, definiteProviderError: false },
+      ),
+    );
+  };
+  if (resp === null) {
+    reportResult("error");
+    return {
+      kind: "return",
+      response: args.req.signal.aborted
+        ? errorJson(499, "client aborted request")
+        : errorJson(502, "upstream speech provider is unreachable"),
+    };
+  }
+  if (!resp.ok) {
+    const body = await resp.text().catch(() => "");
+    reportResult("error");
+    return {
+      kind: "miss",
+      error: new Response(body.length > 0 ? body : null, {
         status: resp.status,
         headers: passthroughHeaders(resp),
-      });
-      if (
-        !last &&
+      }),
+      advances:
+        !finalHop &&
         mediaHopAdvancesForHttp(
           resp.status,
           body,
           { dispatched: true, accepted: false },
           hop.provider,
-        )
-      ) {
-        continue;
-      }
-      return stamp(lastError);
-    }
-    reportResult("success");
-    const contentType = resp.headers.get("content-type") ?? "audio/mpeg";
-    const body = resp.body;
-    if (body === null) {
-      return stamp(
-        new Response(null, {
-          status: 200,
-          headers: { "content-type": contentType },
-        }),
-        hop.modelId,
-      );
-    }
-    if (
-      args.req.headers.get(MEDIA_PERSISTENCE_REQUEST_HEADER) ===
-      MEDIA_PERSISTENCE_BROWSER
-    ) {
-      return stamp(
-        new Response(body, {
-          status: 200,
-          headers: {
-            "content-type": contentType,
-            [MEDIA_PERSISTENCE_RESPONSE_HEADER]: MEDIA_PERSISTENCE_BROWSER,
-          },
-        }),
-        hop.modelId,
-      );
-    }
-    const [clientBranch, persistBranch] = body.tee();
-    persistSpeechInBackground(persistBranch, contentType, args.originParam);
-    return stamp(
-      new Response(clientBranch, {
+        ),
+    };
+  }
+  reportResult("success");
+  const contentType = resp.headers.get("content-type") ?? "audio/mpeg";
+  const body = resp.body;
+  if (body === null) {
+    return {
+      kind: "return",
+      response: new Response(null, {
         status: 200,
         headers: { "content-type": contentType },
       }),
-      hop.modelId,
-    );
+    };
   }
-  return stamp(
-    lastError ??
-      errorJson(
-        404,
-        "No speech provider in the daemon plan can serve this request",
-      ),
-  );
+  if (
+    args.req.headers.get(MEDIA_PERSISTENCE_REQUEST_HEADER) ===
+    MEDIA_PERSISTENCE_BROWSER
+  ) {
+    return {
+      kind: "return",
+      response: new Response(body, {
+        status: 200,
+        headers: {
+          "content-type": contentType,
+          [MEDIA_PERSISTENCE_RESPONSE_HEADER]: MEDIA_PERSISTENCE_BROWSER,
+        },
+      }),
+    };
+  }
+  const [clientBranch, persistBranch] = body.tee();
+  persistSpeechInBackground(persistBranch, contentType, args.originParam);
+  return {
+    kind: "return",
+    response: new Response(clientBranch, {
+      status: 200,
+      headers: { "content-type": contentType },
+    }),
+  };
 };
