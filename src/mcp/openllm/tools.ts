@@ -5,6 +5,7 @@ export {
   isMcpListedTool,
   isMediaOptionalModelTool,
   isOpenllmTool,
+  LOCAL_TRANSCRIPTION_TIMEOUT_MS,
   MAX_TRANSCRIPTION_BYTES,
   openllmToolDefs,
   openllmToolDefsAll,

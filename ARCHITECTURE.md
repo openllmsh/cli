@@ -324,20 +324,29 @@ routes this one name, inside its group/listed-tool guard, to
 `src/mcp/openllm/transcribe-audio.ts`. That module alone imports filesystem and
 subprocess APIs; never import it from the browser-shared `tools.ts`.
 Relative paths resolve from the MCP server working directory. Regular-file
-checks and bounded reads enforce a 25 MiB input ceiling. Input is recognised
-by signature: WAV, MP3, WebM, M4A/MP4, Ogg/Opus and FLAC; other formats must be
-converted first. **The audio format never reorders the chain.** With `model`
+checks and bounded reads enforce a 25 MiB input ceiling. **No file is refused
+for its format.** The container is recognised by its magic bytes (WAV, RF64,
+Wave64, MP3, WebM/Matroska, MP4/M4A/3GP/QuickTime, raw AAC, CAF, AIFF/AIFC,
+Ogg, FLAC, AMR, WMA/ASF) and its ffmpeg demuxer forced; anything else is
+probed by ffmpeg, but only among an allow-list of audio file containers
+(`PROBE_FORMATS`: never a playlist, concat list, image sequence or network
+demuxer, and never mov, which is recognised and opened with data references
+off). A WAV whose header sizes don't add up is re-encoded instead of refused.
+A file with no decodable audio fails with that reason. Uploads go to this
+machine's daemon when it answers (`resolveGateway`), so subscription hops serve
+locally, past the cloud's 4.5 MB request-body cap; the catalog is still read
+from the cloud. **The audio format never reorders the chain.** With `model`
 omitted the tool reads `/v1/models`, ranks the transcription cards the way the
 gateway's media default does (`default_tiers` `media`, host-included first, then
 `tier_rank`), and walks them in order, sending each hop an explicit `model`.
 For a hop declaring `audio_support.input_formats` it passes the bytes through
 when they already match, and otherwise converts them with **system ffmpeg on
 PATH** to mono 16 kHz PCM16 WAV or WebM/Opus. A hop without declared formats
-(API-key) gets WAV/MP3/WebM as-is, and Ogg/FLAC/MP4 as WebM/Opus (compact:
+(API-key) gets WAV/MP3/WebM up to 4 MB as-is, and everything else as WebM/Opus (compact:
 16 kHz WAV is ~10 MB per 5 minutes, which outran the edge proxy's ~100 s
 response limit). One conversion
 is reused by every hop that wants it. A failed conversion moves on to the next
-model, and so does a hop refused before acceptance (401/404/415/429, or a
+model, and so does a hop refused before acceptance (401/404/413/415/429, or a
 400/403 whose gateway `error.type` is pre-dispatch, e.g.
 `subscription_requires_daemon`). Any other failure (5xx, transport error,
 timeout, other 4xx) ends the walk, so audio a provider may have accepted is

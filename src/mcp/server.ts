@@ -20,7 +20,7 @@ import {
   OPENLLM_MEMORY_BUILTIN_ID,
 } from "@openllmsh/sdk/mcp";
 import type { TGateway } from "../clients/gateway";
-import { fetchTier } from "../clients/gateway";
+import { fetchTier, resolveGateway } from "../clients/gateway";
 import type { TMarketplaceLaunch as TCliMarketplaceLaunch } from "../clients/marketplace";
 import type { TMcpGroup } from "../commands";
 import { mcpGroupsForTier } from "../commands";
@@ -89,7 +89,13 @@ export const createCliMcpServer = ({
     config,
     upstreams,
     includeFreeTierOnlyTools: tier === "free",
-    transcribe: (args, cfg) => transcribeAudio(args, cfg),
+    // Upload to this machine's daemon when it answers: subscription hops
+    // (Grok, Claude Dictation) then serve locally, past Vercel's 4.5 MB body
+    // cap on 16 kHz WAV, and the daemon forwards API-key hops to the cloud.
+    transcribe: (args, cfg) =>
+      transcribeAudio(args, cfg, {
+        uploadBase: async () => (await resolveGateway()).base,
+      }),
   });
   if (groups.includes("openllm")) registerLocalAuthTools(server);
   return server;

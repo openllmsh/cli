@@ -9,19 +9,90 @@ import {
   MediaAudioInputFormat,
 } from "@openllmsh/sdk/protocol";
 import type { TToolResult } from "../types";
-import { MAX_TRANSCRIPTION_BYTES, uploadTranscription } from "./tools";
+import {
+  LOCAL_TRANSCRIPTION_TIMEOUT_MS,
+  MAX_TRANSCRIPTION_BYTES,
+  TRANSCRIPTION_TIMEOUT_MS,
+  uploadTranscription,
+} from "./tools";
 
 const CONVERSION_TIMEOUT_MS = 30_000;
 const MAX_STDERR_BYTES = 8192;
 
-/** ffmpeg demuxers the MCP will open, always forced — never auto-probed. */
-type TDemuxer = "wav" | "ogg" | "flac" | "mp3" | "matroska" | "mov";
+/** ffmpeg demuxers the MCP forces once the container is recognised by its
+ *  magic bytes. `probe` is the fallback for everything else: ffmpeg picks the
+ *  demuxer itself, but only from {@link PROBE_FORMATS}. */
+type TDemuxer =
+  | "wav"
+  | "w64"
+  | "ogg"
+  | "flac"
+  | "mp3"
+  | "matroska"
+  | "mov"
+  | "aiff"
+  | "caf"
+  | "aac"
+  | "amr"
+  | "asf"
+  | "probe";
 type TAudioFormat = {
   mime: string;
   demuxer: TDemuxer;
-  /** Set when an API-key upload must be re-encoded (Ogg/FLAC/MP4 → WebM/Opus). */
-  convert?: "ogg" | "flac" | "mov";
+  /** The bytes can't be uploaded as they are: every hop gets a conversion
+   *  (WebM/Opus for API-key hops, the declared format for the others). */
+  convert?: true;
 };
+
+/** What an unrecognised file may be probed as: audio (and audio-carrying
+ *  video) FILE containers only. Never a playlist, concat list, image
+ *  sequence or network demuxer (no hls, concat, image2, dash, sdp, tee,
+ *  ffmetadata), and never mov — a QuickTime file is recognised by its boxes
+ *  and opened with data references pinned off instead. */
+const PROBE_FORMATS = [
+  "wav",
+  "w64",
+  "ogg",
+  "flac",
+  "mp3",
+  "matroska",
+  "webm",
+  "aiff",
+  "iff",
+  "caf",
+  "aac",
+  "loas",
+  "amr",
+  "amrnb",
+  "amrwb",
+  "asf",
+  "xwma",
+  "avi",
+  "flv",
+  "nut",
+  "mpeg",
+  "mpegts",
+  "au",
+  "voc",
+  "sox",
+  "wv",
+  "ape",
+  "tta",
+  "mpc",
+  "mpc8",
+  "dsf",
+  "ac3",
+  "eac3",
+  "dts",
+  "truehd",
+  "mlp",
+].join(",");
+
+const converted = (demuxer: TDemuxer): TAudioFormat => ({
+  mime: "audio/wav",
+  demuxer,
+  convert: true,
+});
 /** What a hop can be sent: a 16 kHz mono PCM16 WAV or a WebM/Opus stream. */
 type TConversionTarget = "wav16k" | "webm_opus";
 type TMediaAudioInputFormat = (typeof MediaAudioInputFormat.literals)[number];
@@ -49,9 +120,14 @@ export type TAudioConversionOptions = {
 export const readBoundedAudio = async (
   path: string,
   maxBytes = MAX_TRANSCRIPTION_BYTES,
+  /** Injection is for tests of a file changing under the read. */
+  openFile: typeof open = open,
 ): Promise<Buffer> => {
   // O_NONBLOCK prevents FIFO opens from hanging before fstat can reject them.
-  const handle = await open(path, constants.O_RDONLY | constants.O_NONBLOCK);
+  const handle = await openFile(
+    path,
+    constants.O_RDONLY | constants.O_NONBLOCK,
+  );
   try {
     const info = await handle.stat();
     if (!info.isFile())
@@ -83,56 +159,90 @@ export const readBoundedAudio = async (
   }
 };
 
-const formatOf = (bytes: Buffer): TAudioFormat => {
-  const starts = (value: string): boolean =>
-    bytes.subarray(0, value.length).toString("ascii") === value;
+/** A RIFF/WAVE whose chunk sizes all fit and that carries `fmt ` + `data`:
+ *  safe to upload unchanged. Also the check on our own converted output. */
+const isWellFormedWav = (bytes: Buffer): boolean => {
   if (
-    bytes.length >= 44 &&
-    starts("RIFF") &&
-    bytes.toString("ascii", 8, 12) === "WAVE"
-  ) {
-    // Reject truncated or fabricated RIFF containers before any upstream call.
-    if (bytes.readUInt32LE(4) + 8 > bytes.length)
-      throw new Error("WAV audio is truncated.");
-    let fmt = false;
-    let data = false;
-    for (let offset = 12; offset + 8 <= bytes.length; ) {
-      const size = bytes.readUInt32LE(offset + 4);
-      const end = offset + 8 + size;
-      if (end > bytes.length) throw new Error("WAV audio is truncated.");
-      const chunk = bytes.toString("ascii", offset, offset + 4);
-      if (chunk === "fmt " && size >= 16) fmt = true;
-      if (chunk === "data" && size > 0) data = true;
-      offset = end + (size % 2);
-    }
-    if (fmt && data) return { mime: "audio/wav", demuxer: "wav" };
+    bytes.length < 44 ||
+    bytes.toString("ascii", 0, 4) !== "RIFF" ||
+    bytes.toString("ascii", 8, 12) !== "WAVE" ||
+    bytes.readUInt32LE(4) + 8 > bytes.length
+  )
+    return false;
+  let fmt = false;
+  let data = false;
+  for (let offset = 12; offset + 8 <= bytes.length; ) {
+    const size = bytes.readUInt32LE(offset + 4);
+    const end = offset + 8 + size;
+    if (end > bytes.length) return false;
+    const chunk = bytes.toString("ascii", offset, offset + 4);
+    if (chunk === "fmt " && size >= 16) fmt = true;
+    if (chunk === "data" && size > 0) data = true;
+    offset = end + (size % 2);
   }
-  if (bytes.length > 27 && starts("OggS"))
-    return { mime: "audio/wav", demuxer: "ogg", convert: "ogg" };
-  if (bytes.length > 42 && starts("fLaC"))
-    return { mime: "audio/wav", demuxer: "flac", convert: "flac" };
-  // MP4/M4A (Voice Memos, many recorders): `ftyp` box at offset 4.
-  if (bytes.length > 12 && bytes.toString("ascii", 4, 8) === "ftyp")
-    return { mime: "audio/wav", demuxer: "mov", convert: "mov" };
+  return fmt && data;
+};
+
+/** QuickTime top-level boxes a `.mov` may open with instead of `ftyp`. */
+const QUICKTIME_BOXES = new Set([
+  "moov",
+  "mdat",
+  "wide",
+  "free",
+  "skip",
+  "pnot",
+]);
+const ASF_GUID = Buffer.from("3026b2758e66cf11a6d900aa0062ce6c", "hex");
+const W64_RIFF_GUID = Buffer.from("726966662e91cf11a5d628db04c10000", "hex");
+
+/**
+ * How to read these bytes. Never throws: a container recognised by its magic
+ * bytes gets its demuxer forced; anything else is handed to ffmpeg to probe
+ * among {@link PROBE_FORMATS}. Only WAV, MP3 and WebM that are already well
+ * formed are uploaded unchanged.
+ */
+export const formatOf = (bytes: Buffer): TAudioFormat => {
+  const ascii = (from: number, to: number): string =>
+    bytes.toString("ascii", from, Math.min(to, bytes.length));
+  // RIFF/WAVE with sizes that don't add up (a recorder that never finalised
+  // its header, a streamed capture): ffmpeg reads it; re-encode it.
+  if (ascii(0, 4) === "RIFF" && ascii(8, 12) === "WAVE")
+    return isWellFormedWav(bytes)
+      ? { mime: "audio/wav", demuxer: "wav" }
+      : converted("wav");
+  if (ascii(0, 4) === "RF64" && ascii(8, 12) === "WAVE")
+    return converted("wav");
+  if (bytes.subarray(0, 16).equals(W64_RIFF_GUID)) return converted("w64");
+  if (ascii(0, 4) === "OggS") return converted("ogg");
+  if (ascii(0, 4) === "fLaC") return converted("flac");
+  // MP4/M4A/3GP (Voice Memos, most phones): `ftyp` box at offset 4;
+  // QuickTime may open with another top-level box.
+  if (ascii(4, 8) === "ftyp" || QUICKTIME_BOXES.has(ascii(4, 8)))
+    return converted("mov");
+  if (ascii(0, 4) === "FORM" && ["AIFF", "AIFC"].includes(ascii(8, 12)))
+    return converted("aiff");
+  if (ascii(0, 4) === "caff") return converted("caf");
+  if (ascii(0, 5) === "#!AMR") return converted("amr");
+  if (bytes.subarray(0, 16).equals(ASF_GUID)) return converted("asf");
+  if (bytes.length >= 4 && bytes.readUInt32BE(0) === 0x1a45dfa3)
+    return bytes.subarray(0, 4096).includes(Buffer.from("webm"))
+      ? { mime: "audio/webm", demuxer: "matroska" }
+      : converted("matroska");
+  // Raw AAC (ADTS): 12-bit sync, layer 00. Checked before MP3, whose sync
+  // word it shares the first byte of.
+  if (bytes[0] === 0xff && ((bytes[1] ?? 0) & 0xf6) === 0xf0)
+    return converted("aac");
   if (
-    bytes.length > 10 &&
-    (starts("ID3") || (bytes[0] === 0xff && ((bytes[1] ?? 0) & 0xe6) === 0xe2))
+    ascii(0, 3) === "ID3" ||
+    (bytes[0] === 0xff && ((bytes[1] ?? 0) & 0xe6) === 0xe2)
   )
     return { mime: "audio/mpeg", demuxer: "mp3" };
-  if (
-    bytes.length > 16 &&
-    bytes.readUInt32BE(0) === 0x1a45dfa3 &&
-    bytes.subarray(0, 4096).includes(Buffer.from("webm"))
-  )
-    return { mime: "audio/webm", demuxer: "matroska" };
-  throw new Error(
-    "Unrecognized or malformed audio. Use WAV, MP3, WebM, M4A/MP4, Ogg/Opus or FLAC; convert other formats to WAV first.",
-  );
+  return converted("probe");
 };
 
 export const convertAudioToWav = (
   input: Buffer,
-  format: "ogg" | "flac" | "mov",
+  format: TDemuxer,
   options: TAudioConversionOptions = {},
 ): Promise<Buffer> => convertAudio(input, format, "wav16k", options);
 
@@ -147,7 +257,10 @@ const MUXER: Record<TConversionTarget, string> = {
 
 const ffmpegExecutable = (options: TAudioConversionOptions): string => {
   const executable =
-    options.ffmpegPath === undefined ? Bun.which("ffmpeg") : options.ffmpegPath;
+    options.ffmpegPath === undefined
+      ? // Read PATH now: Bun.which alone keeps the PATH the process started with.
+        Bun.which("ffmpeg", { PATH: process.env.PATH ?? "" })
+      : options.ffmpegPath;
   if (!executable)
     throw new Error(
       "Converting this audio for the selected model requires ffmpeg. Install ffmpeg and ensure it is on PATH, then retry.",
@@ -176,19 +289,20 @@ const withPrivateInput = async <T>(
   }
 };
 
-/** Forced demuxer + file-only protocol: no playlist, network or concat
- *  indirection. `file` would let a container reference OTHER local files;
- *  of the forced demuxers only mov can (data references), so they are
- *  pinned off, and ffmpeg runs in the private dir so nothing resolves
- *  relative to the caller's cwd. */
+/** File-only protocol and a forced (or whitelisted) demuxer: no playlist,
+ *  network or concat indirection. `file` would let a container reference
+ *  OTHER local files; of the demuxers allowed only mov can (data
+ *  references), so they are pinned off, and ffmpeg runs in the private dir
+ *  so nothing resolves relative to the caller's cwd. */
 const inputArgs = (demuxer: TDemuxer, inputPath: string): string[] => [
   "-hide_banner",
   "-nostdin",
   "-protocol_whitelist",
   "file",
   ...(demuxer === "mov" ? ["-enable_drefs", "0"] : []),
-  "-f",
-  demuxer,
+  ...(demuxer === "probe"
+    ? ["-format_whitelist", PROBE_FORMATS]
+    : ["-f", demuxer]),
   "-i",
   inputPath,
 ];
@@ -239,9 +353,17 @@ const runFfmpeg = (
 /** A conversion failure is its own error, never the format error: the file
  *  was recognised, ffmpeg just couldn't decode it. */
 const CONVERSION_FAILED =
-  "Audio conversion failed: ffmpeg couldn't decode this audio (the file may be damaged, or its codec missing from this ffmpeg build).";
+  "Audio conversion failed: ffmpeg found no decodable audio in this file (it may not contain audio, may be damaged, or may use a codec this ffmpeg build lacks).";
 
 /** This ffmpeg build lacks the encoder for `target` (e.g. no libopus). */
+/** ffmpeg couldn't decode the input: a property of the file, so no other
+ *  model or target format will do better. */
+class UndecodableAudioError extends Error {
+  constructor() {
+    super(CONVERSION_FAILED);
+  }
+}
+
 class MissingEncoderError extends Error {
   constructor(target: TConversionTarget) {
     super(
@@ -267,8 +389,7 @@ const encodeArgs = (target: TConversionTarget): string[] => [
 
 const checkConverted = (bytes: Buffer, target: TConversionTarget): void => {
   if (target === "wav16k") {
-    const outputFormat = formatOf(bytes);
-    if (outputFormat.mime !== "audio/wav" || outputFormat.convert !== undefined)
+    if (!isWellFormedWav(bytes))
       throw new Error("Audio conversion did not produce valid WAV audio.");
   } else if (inputFormatOf(bytes, "audio/webm") !== "webm_opus") {
     throw new Error("Audio conversion did not produce valid WebM/Opus audio.");
@@ -309,7 +430,7 @@ export const convertAudio = async (
     if (run.code !== 0)
       throw /Encoder not found|Unknown encoder/.test(run.stderr)
         ? new MissingEncoderError(target)
-        : new Error(CONVERSION_FAILED);
+        : new UndecodableAudioError();
     const bytes = await readBoundedAudio(output, maxBytes);
     checkConverted(bytes, target);
     return bytes;
@@ -365,13 +486,20 @@ const rankTranscriptionCards = (
           (b.tier_rank ?? Number.MAX_SAFE_INTEGER),
     );
 
-/** API-key hops take almost anything; only Ogg/FLAC/MP4 are re-encoded,
- *  and to WebM/Opus rather than WAV: 5 minutes of 16 kHz WAV is ~10 MB,
- *  which on a slow uplink plus the provider's longer work on PCM ran past
- *  the edge proxy's ~100 s response limit, while the same audio as
- *  WebM/Opus is ~1.2 MB. */
+/** Largest upload sent unchanged to a hop that declares no formats. The
+ *  cloud gateway runs on Vercel, which refuses request bodies over 4.5 MB
+ *  (413) before the function starts. */
+export const MAX_DIRECT_UPLOAD_BYTES = 4 * 1024 * 1024;
+
+/** API-key hops take WAV, MP3 and WebM as they are; everything else, and
+ *  anything over {@link MAX_DIRECT_UPLOAD_BYTES}, is re-encoded, to
+ *  WebM/Opus rather than WAV: 5 minutes of 16 kHz WAV is ~10 MB, the same
+ *  audio as WebM/Opus ~1.2 MB. */
 const legacyUpload = async (source: TSource): Promise<TUpload> => {
-  if (source.format.convert === undefined)
+  if (
+    source.format.convert === undefined &&
+    source.bytes.length <= MAX_DIRECT_UPLOAD_BYTES
+  )
     return { mime: source.format.mime, bytes: source.bytes };
   try {
     return {
@@ -507,10 +635,16 @@ const EXTENSION_OF: Record<string, string> = {
   "audio/webm": "webm",
 };
 
+/** Where one upload goes; `local` when that is this machine's daemon,
+ *  which has no function time limit. */
+type TUploadConfig = Parameters<typeof uploadTranscription>[1] & {
+  readonly local?: boolean;
+};
+
 const sendTranscription = async (
   upload: TUpload,
   fields: { readonly model?: string; readonly language?: string },
-  config: Parameters<typeof uploadTranscription>[1],
+  config: TUploadConfig,
 ): Promise<TToolResult> => {
   const form = new FormData();
   form.set(
@@ -520,28 +654,42 @@ const sendTranscription = async (
   );
   if (fields.model !== undefined) form.set("model", fields.model);
   if (fields.language !== undefined) form.set("language", fields.language);
-  const result = await uploadTranscription(form, config);
-  // Some upstream validation errors echo a data URL. Never send audio back
-  // into the model's context (the multipart upload itself carries none).
-  return {
-    ...result,
-    content: result.content.map((content) =>
-      content.type === "text"
-        ? {
-            ...content,
-            text: content.text.replace(
-              /data:[^\s;,]+;base64,[A-Za-z0-9+/=]+/g,
-              "[audio omitted]",
-            ),
-          }
-        : content,
+  return redactAudio(
+    await uploadTranscription(
+      form,
+      config,
+      config.local ? LOCAL_TRANSCRIPTION_TIMEOUT_MS : TRANSCRIPTION_TIMEOUT_MS,
     ),
-  };
+  );
+};
+
+/** Some upstream validation errors echo a data URL. Never send audio back
+ *  into the model's context (the multipart upload itself carries none). */
+export const redactAudio = (result: TToolResult): TToolResult => ({
+  ...result,
+  content: result.content.map((content) =>
+    content.type === "text"
+      ? {
+          ...content,
+          text: content.text.replace(
+            /data:[^\s;,]+;base64,[A-Za-z0-9+/=]+/g,
+            "[audio omitted]",
+          ),
+        }
+      : content,
+  ),
+});
+
+export type TTranscribeOptions = {
+  /** Where the audio is uploaded (the local daemon when it answers); the
+   *  catalog is always read from `config.baseUrl`. Defaults to it. */
+  readonly uploadBase?: () => Promise<string>;
 };
 
 export const transcribeAudio = async (
   args: Record<string, unknown>,
   config: Parameters<typeof uploadTranscription>[1],
+  options: TTranscribeOptions = {},
 ): Promise<TToolResult> => {
   try {
     if (
@@ -578,6 +726,12 @@ export const transcribeAudio = async (
       typeof args.language === "string" ? { language: args.language } : {};
     const model = typeof args.model === "string" ? args.model : undefined;
     const cards = await transcriptionCards(config);
+    const uploadBase = await options.uploadBase?.().catch(() => undefined);
+    const uploadConfig: TUploadConfig = {
+      ...config,
+      baseUrl: uploadBase ?? config.baseUrl,
+      local: uploadBase !== undefined && uploadBase !== config.baseUrl,
+    };
     // No catalog (older gateway, network blip): let the gateway pick, the
     // historical behaviour.
     // An empty ranked chain (no media-default cards) does the same.
@@ -588,7 +742,7 @@ export const transcribeAudio = async (
       return await sendTranscription(
         await legacyUpload(source),
         { ...(model === undefined ? {} : { model }), ...language },
-        config,
+        uploadConfig,
       );
     const chain: ReadonlyArray<TTranscriptionCard | { readonly id: string }> =
       model !== undefined
@@ -612,6 +766,8 @@ export const transcribeAudio = async (
       try {
         upload = await pending;
       } catch (error) {
+        // The file itself can't be decoded: say so once, not per model.
+        if (error instanceof UndecodableAudioError) throw error;
         failures.push(
           `${card.id}: ${error instanceof Error && !("code" in error) ? error.message : "audio conversion failed"}`,
         );
@@ -620,17 +776,15 @@ export const transcribeAudio = async (
       last = await sendTranscription(
         upload,
         { model: card.id, ...language },
-        config,
+        uploadConfig,
       );
       if (last.isError !== true) return last;
       failures.push(`${card.id}: ${resultText(last)}`);
       // Never resend audio a model may have accepted: that bills twice.
       if (!refusedBeforeAcceptance(resultText(last))) return last;
     }
-    if (failures.length === 0)
-      throw new Error(
-        "No transcription model is available. Connect a subscription STT provider or configure an API-key transcription provider.",
-      );
+    // The chain is never empty here (an empty ranked chain took the legacy
+    // path above), so there is always at least one failure to report.
     if (failures.length === 1 && last !== null) return last;
     return {
       content: [
