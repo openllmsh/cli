@@ -1,7 +1,8 @@
 /**
  * Daemon `POST /v1/embeddings` path. Local `local_*` / `local_port_*` hops
- * are served on-device via {@link serveLocalEmbeddings}; everything else
- * passes through to origin (cloud registry / BYOK).
+ * are served on-device via {@link serveLocalEmbeddings}; API-key / custom hops
+ * forward to origin with fallthrough (P6); oauth has no embeddings surface and
+ * is skipped without poisoning dialable `finalHop`.
  *
  * Kept out of `walker.ts` so the chat walker stays free of the embeddings
  * single-shot path, and so this module can stay `@openllm/core`-free.
@@ -12,12 +13,17 @@ import { errorJson } from "./cors";
 import { isOAuthSlug } from "./delegation";
 import { passthroughToOrigin } from "./forward";
 import { isLocalServerSlug, serveLocalEmbeddings } from "./local-servers";
+import type {
+  TMediaHopDialContext,
+  TMediaHopDialResult,
+  TMediaPlanHop,
+} from "./media-plan-walk";
 import {
-  parsePlan,
-  planSignatureOk,
-  resolveHop,
-  type TWalkArgs,
-} from "./walker";
+  forwardMediaApiKeyHop,
+  mediaPlanSignatureError,
+  walkMediaPlan,
+} from "./media-plan-walk";
+import type { TWalkArgs } from "./walker";
 
 const modelIdFromBody = (rawBody: unknown): string | null => {
   if (
@@ -42,78 +48,74 @@ const splitProviderModel = (
   };
 };
 
-const serveLocalOrNull = async (
-  provider: string,
-  providerModelId: string,
-  args: TWalkArgs,
-  finalHop: boolean,
-): Promise<Response | null> =>
-  serveLocalEmbeddings({
-    provider,
-    providerModelId,
-    body: args.rawBody,
-    signal: args.req.signal,
-    finalHop,
-  });
+/** Embeddings dialable hops: local servers and API-key/custom (not oauth). */
+export const isEmbeddingsDialableHop = (hop: TMediaPlanHop): boolean =>
+  isLocalServerSlug(hop.provider) || !isOAuthSlug(hop.provider);
 
-/** True when a later plan hop could still dial (local or API-key). */
-const hasDialableSuccessor = (
-  hops: ReadonlyArray<string>,
-  pmids: ReadonlyArray<string>,
-  fromIndex: number,
-): boolean => {
-  for (let j = fromIndex + 1; j < hops.length; j += 1) {
-    const modelId = hops[j];
-    if (modelId === undefined) continue;
-    const hop = resolveHop(modelId, pmids[j]);
-    if (isLocalServerSlug(hop.provider)) return true;
-    // OAuth has no embeddings surface — skip. Anything else is API-key /
-    // origin-passthrough and counts as dialable.
-    if (!isOAuthSlug(hop.provider)) return true;
+const dialEmbeddingsHop = async (
+  ctx: TMediaHopDialContext,
+): Promise<TMediaHopDialResult> => {
+  const { args, hop, finalHop, attempted } = ctx;
+  if (isLocalServerSlug(hop.provider)) {
+    attempted.push(hop.modelId);
+    const local = await serveLocalEmbeddings({
+      provider: hop.provider,
+      providerModelId: hop.providerModelId,
+      body: args.rawBody,
+      signal: args.req.signal,
+      finalHop,
+    });
+    if (local !== null) {
+      return { kind: "return", response: local };
+    }
+    // Local miss — walk to a later dialable hop when one exists.
+    return {
+      kind: "miss",
+      error: errorJson(
+        503,
+        `Local embedding model "${hop.modelId}" is unavailable on this device`,
+        "server_error",
+        LOCAL_REQUIRES_DAEMON_ERROR_CODE,
+      ),
+      advances: !finalHop,
+    };
   }
-  return false;
+  if (isOAuthSlug(hop.provider)) {
+    // No embeddings surface — skip without counting as dialable (finalHop
+    // already ignores oauth via isEmbeddingsDialableHop).
+    return {
+      kind: "miss",
+      error: errorJson(
+        400,
+        `subscription provider "${hop.provider}" does not support embeddings`,
+        "invalid_request_error",
+        "subscription_surface_unsupported",
+      ),
+      advances: !finalHop,
+    };
+  }
+  // API-key / custom: forward pinned to this hop; classify + fallthrough.
+  return forwardMediaApiKeyHop(ctx);
 };
 
 /**
- * Walk a signed plan (when present) for a local embeddings hop; otherwise
- * honour an explicit `local_*` model id on the body. Non-local requests
+ * Walk a signed plan (when present) for embeddings; otherwise honour an
+ * explicit `local_*` model id on the body. Non-local body-only requests
  * forward to origin unchanged.
  */
 export const runEmbeddings = async (args: TWalkArgs): Promise<Response> => {
-  const planTrusted = planSignatureOk(
-    args.planParam,
-    args.pmidsParam,
-    args.originParam,
-    args.contextOverflowStrategy ?? null,
-    args.sigParam,
-  );
-
-  if (planTrusted) {
-    const hops = parsePlan(args.planParam);
-    const pmids =
-      args.pmidsParam === null || args.pmidsParam.length === 0
-        ? []
-        : args.pmidsParam.split(",");
-    for (let i = 0; i < hops.length; i += 1) {
-      const modelId = hops[i];
-      if (modelId === undefined) continue;
-      const hop = resolveHop(modelId, pmids[i]);
-      if (isLocalServerSlug(hop.provider)) {
-        const finalHop = !hasDialableSuccessor(hops, pmids, i);
-        const local = await serveLocalOrNull(
-          hop.provider,
-          hop.providerModelId,
-          args,
-          finalHop,
-        );
-        if (local !== null) return local;
-        continue;
-      }
-      // OAuth subscription hops have no embeddings surface in v1.
-      if (isOAuthSlug(hop.provider)) continue;
-      // Remaining API-key hop: cloud owns credentials + registry.
-      return passthroughToOrigin(args.req, args.rawBytes);
-    }
+  const signatureError = mediaPlanSignatureError(args);
+  // An invalid signature still allows the body-only local / passthrough path
+  // below — only a trusted plan walks the ordered chain.
+  if (signatureError === null && args.planParam !== null) {
+    return walkMediaPlan({
+      args,
+      missingPlanMessage: "embeddings require a daemon plan",
+      exhaustedMessage:
+        "No embeddings provider in the daemon plan can serve this request",
+      isDialableHop: isEmbeddingsDialableHop,
+      dial: dialEmbeddingsHop,
+    });
   }
 
   const bodyModel = modelIdFromBody(args.rawBody);
@@ -122,13 +124,13 @@ export const runEmbeddings = async (args: TWalkArgs): Promise<Response> => {
   }
   const parts = splitProviderModel(bodyModel);
   if (parts !== null && isLocalServerSlug(parts.provider)) {
-    // Body-only path has nowhere to fall through — always final.
-    const local = await serveLocalOrNull(
-      parts.provider,
-      parts.providerModelId,
-      args,
-      true,
-    );
+    const local = await serveLocalEmbeddings({
+      provider: parts.provider,
+      providerModelId: parts.providerModelId,
+      body: args.rawBody,
+      signal: args.req.signal,
+      finalHop: true,
+    });
     if (local !== null) return local;
     return errorJson(
       503,
