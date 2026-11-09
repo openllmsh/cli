@@ -248,11 +248,16 @@ explicit caller model is never rewritten. Requests the daemon passes through or
 forwards to origin carry `x-openllm-tunneled`, so the origin never tunnels them
 back to a daemon. The listener validates the body and hands the signed
 plan to the walker. Media walkers (`image-walker`, `audio-walker`,
-`video-walker`) iterate the **full signed plan**. Advance uses protocol
-`decideMediaChainAdvance` (429/auth/quota/missing credential before accept,
-including API hops). Timeout, network, 5xx after submit, accepted 2xx,
-delivered output, and persist-after-success are terminal. Image edits never
-forward a paid generation hop. Successful responses set
+`video-walker`, `embeddings-walker`) share **`walkMediaPlan`**
+(`media-plan-walk.ts`): ordered walk of the **full signed plan**, dialable
+`finalHop`, local refuse, BYOK `forwardMediaApiKeyHop` + classify, oauth
+`serveAcrossAccounts`. Advance uses the shared hop classifier
+(`classifyHopError`) plus protocol `mediaActionFor` (credits/unknown 4xx
+cool or walk like chat; dispatched 5xx/timeout/network **surface** — no
+chat `retry_in_place`; accepted 2xx / persist-after-success never re-sent).
+Image edits fall back across subscription hops only; API-key edit hops are
+skipped with `image_edit_api_key_unsupported` until P4b. Embeddings walk
+local → API-key with fallthrough (oauth skipped). Successful responses set
 `x-openllm-resolved-model` / `x-openllm-chain` from protocol header constants.
 Bodyless video retrieve/content/cancel (mux GET) carry no model: the
 listener `decodeVideoId`s the opaque job and `GET /api/daemon/plan?video_job=`
