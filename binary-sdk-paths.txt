@@ -55,6 +55,7 @@ packages/sdk/protocol/media-bytes.ts
 packages/sdk/protocol/media-default.ts
 packages/sdk/protocol/media-dimensions.ts
 packages/sdk/protocol/media-input.ts
+packages/sdk/protocol/media-model.ts
 packages/sdk/protocol/media-option-issue.ts
 packages/sdk/protocol/media-types.ts
 packages/sdk/protocol/model-match.ts
