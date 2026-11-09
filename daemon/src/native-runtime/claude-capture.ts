@@ -35,10 +35,10 @@ import { existsSync } from "node:fs";
 import type {
   TChatCompletionChunk,
   TChatCompletionRequest,
-  TErrorEnvelope,
 } from "@openllmsh/sdk/protocol";
 import type { TClassifierInput } from "@openllmsh/sdk/wire/lib/error-class";
 import { classifyHopError } from "@openllmsh/sdk/wire/lib/error-class";
+import { errorEnvelopeFrom } from "@openllmsh/sdk/wire/lib/error-envelope";
 import { isRefusalChunk } from "@openllmsh/sdk/wire/lib/refusal";
 import { isMeaningfulChunk } from "@openllmsh/sdk/wire/lib/streaming/peek";
 import { decodeAnthropicEventStream } from "@openllmsh/sdk/wire/providers/anthropic/streaming";
@@ -371,57 +371,6 @@ const MAX_CAPTURED_ERROR_BODY_BYTES = 32 * 1024;
 const MAX_ERROR_DETAIL_CHARS = 200;
 
 /**
- * Best-effort structured envelope from a bounded error body — mirrors the
- * shared daemon parse (`walker.ts`'s `errorEnvelopeFrom`) closely enough for
- * {@link classifyHopError}, without importing `walker.ts` (would cycle back
- * into native-runtime). Validates `message`/`type`/`code` as strings with a
- * fallback rather than casting `unknown` to `TErrorEnvelope["error"]` — an
- * object-shaped but malformed field (e.g. `message: 123` or `message: {}`)
- * must not reach {@link classifyHopError} untyped and must not throw here.
- */
-const errorEnvelopeFromBoundedBody = (
-  raw: string,
-): TErrorEnvelope | undefined => {
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(raw);
-  } catch {
-    return raw.length > 0
-      ? {
-          error: {
-            message: raw.slice(0, MAX_ERROR_DETAIL_CHARS),
-            type: "upstream_error",
-          },
-        }
-      : undefined;
-  }
-  if (typeof parsed !== "object" || parsed === null) return undefined;
-  const errorField = (parsed as Record<string, unknown>).error;
-  if (typeof errorField === "string") {
-    return {
-      error: {
-        message: errorField.slice(0, MAX_ERROR_DETAIL_CHARS),
-        type: "upstream_error",
-      },
-    };
-  }
-  if (typeof errorField !== "object" || errorField === null) {
-    return undefined;
-  }
-  const e = errorField as Record<string, unknown>;
-  return {
-    error: {
-      message:
-        typeof e.message === "string"
-          ? e.message.slice(0, MAX_ERROR_DETAIL_CHARS)
-          : "upstream error (unparseable message)",
-      type: typeof e.type === "string" ? e.type : "upstream_error",
-      ...(typeof e.code === "string" ? { code: e.code } : {}),
-    },
-  };
-};
-
-/**
  * Read at most {@link MAX_CAPTURED_ERROR_BODY_BYTES} of a non-2xx captured
  * response body, bounded by BOTH byte count and time. A vendor 4xx/5xx body
  * is always small JSON; a stalled/slow-drip body must not hang capture
@@ -512,12 +461,13 @@ export const declinedForNonOkCapturedResponse = async (
   } = { provider: "claude", providerFormat: "anthropic" },
 ): Promise<Extract<TNativeRunResult, { readonly kind: "declined" }>> => {
   const raw = await readBoundedErrorBody(response, signal);
-  const envelope = errorEnvelopeFromBoundedBody(raw);
+  const envelope = errorEnvelopeFrom(raw);
   const classified = classifyHopError({
     status: response.status,
     envelope,
     providerFormat: options.providerFormat,
     aborted: false,
+    provider: options.provider,
   });
   const retryAfter = response.headers.get("retry-after");
   const detail =

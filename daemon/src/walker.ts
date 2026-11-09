@@ -45,7 +45,6 @@ import type {
   TChatCompletionResponse,
   TCooldownReason,
   TDaemonRecordRequest,
-  TErrorEnvelope,
   TModelCaps,
   TModelSettings,
   TRequestStatus,
@@ -127,6 +126,7 @@ import {
   CONTEXT_OVERFLOW_BODY,
   classifyHopError,
 } from "@openllmsh/sdk/wire/lib/error-class";
+import { errorEnvelopeFrom } from "@openllmsh/sdk/wire/lib/error-envelope";
 import { originatorHeadersFrom } from "@openllmsh/sdk/wire/lib/forwarded-headers";
 import {
   isCanonicalRefusal,
@@ -751,32 +751,6 @@ export const postWithReplayStripRetry = async (
 const hopFormat = (wire: TUpstreamWire): "openai" | "anthropic" =>
   wire === "anthropic" ? "anthropic" : "openai";
 
-/** Best-effort error-envelope extraction for reason tagging. Parsing is never
- * a routing gate: an unknown provider body still represents an uncommitted
- * candidate failure and therefore walks.
- *
- * A STRING-valued `error` is lifted into the canonical envelope: xAI's CLI
- * proxy answers an exhausted balance with `{"error":"Grok Build usage balance
- * exhausted"}`, and dropping that prose left the classifier with an empty
- * message — tagging the hop `payment` (60s) instead of `quota_exhausted`, so
- * the dead account was re-dialled all session. */
-const errorEnvelopeFrom = (raw: string): TErrorEnvelope | undefined => {
-  try {
-    const json = JSON.parse(raw) as { error?: unknown };
-    if (typeof json.error === "string") {
-      return { error: { message: json.error, type: "upstream_error" } };
-    }
-    return json.error !== null && typeof json.error === "object"
-      ? { error: json.error as TErrorEnvelope["error"] }
-      : undefined;
-  } catch {
-    const message = hopBodySnippet(raw);
-    return message.length > 0
-      ? { error: { message, type: "upstream_error" } }
-      : undefined;
-  }
-};
-
 /** Classify a raw upstream error response: best-effort envelope parse, then
  *  the shared cloud/daemon policy. The single call point for every
  *  daemon-served hop — subscription (wire-derived format) and cloud-forward
@@ -786,12 +760,14 @@ const classifyRawResponse = (
   raw: string,
   providerFormat: "openai" | "anthropic",
   aborted: boolean,
+  provider?: string,
 ): ReturnType<typeof classifyHopError> =>
   classifyHopError({
     status,
     envelope: errorEnvelopeFrom(raw),
     providerFormat,
     aborted,
+    provider,
   });
 
 /** Shared pre-commit candidate decision used for every daemon-served hop. */
@@ -800,8 +776,9 @@ export const classifyPrecommitResponse = (
   raw: string,
   wire: TUpstreamWire,
   aborted: boolean,
+  provider?: string,
 ): ReturnType<typeof classifyHopError> =>
-  classifyRawResponse(status, raw, hopFormat(wire), aborted);
+  classifyRawResponse(status, raw, hopFormat(wire), aborted, provider);
 
 export const statusFor = (httpStatus: number): TRequestStatus =>
   httpStatus < 400
@@ -1627,6 +1604,7 @@ export const serveSubscription = async (
       raw,
       wire,
       args.req.signal.aborted,
+      hop.provider,
     );
     if (cls.kind === "transient" && !args.req.signal.aborted) {
       // Capture the vendor's Retry-After as an ABSOLUTE recover floor (the
@@ -1786,6 +1764,7 @@ export const serveSubscription = async (
       detail,
       hopFormat(wire),
       args.req.signal.aborted,
+      hop.provider,
     );
     const upstreamResponse = errorJson(
       502,
@@ -2213,6 +2192,7 @@ const serveKimiBuiltinSearch = async (
         raw,
         wire,
         args.req.signal.aborted,
+        hop.provider,
       );
       if (round === 0 && cls.kind === "transient") {
         // Round 0 has consumed nothing yet, so hand the decision to the
@@ -3200,6 +3180,7 @@ const walkPlan = async (
             raw,
             "openai",
             args.req.signal.aborted,
+            hop.provider,
           );
           if (cls.kind === "transient" && cls.reason === "context_overflow") {
             if (!shouldDemoteOnContextOverflow(contextOverflowStrategy)) {
@@ -3493,7 +3474,13 @@ const walkPlan = async (
         .clone()
         .text()
         .catch(() => "");
-      const cls = classifyRawResponse(response.status, raw, "openai", false);
+      const cls = classifyRawResponse(
+        response.status,
+        raw,
+        "openai",
+        false,
+        hop.provider,
+      );
       if (cls.kind === "abort") return response;
       const action = cooldownPolicyFor(cls.reason).action;
       const shouldRetryInPlace =
@@ -3748,6 +3735,7 @@ const walkPlan = async (
         raw,
         "openai",
         args.req.signal.aborted,
+        hop.provider,
       );
       if (
         cls.kind === "transient" &&

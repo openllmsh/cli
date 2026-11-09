@@ -161,7 +161,9 @@ packages/sdk/wire/lib/canonical/message.ts
 packages/sdk/wire/lib/canonical/token-estimate.ts
 packages/sdk/wire/lib/encrypted-content.ts
 packages/sdk/wire/lib/error-class.ts
+packages/sdk/wire/lib/error-envelope.ts
 packages/sdk/wire/lib/forwarded-headers.ts
+packages/sdk/wire/lib/provider-error-rules.ts
 packages/sdk/wire/lib/refusal.ts
 packages/sdk/wire/lib/responses-apply-patch.ts
 packages/sdk/wire/lib/responses-namespace.ts

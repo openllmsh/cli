@@ -9,7 +9,6 @@
 import type {
   TChatCompletionChunk,
   TChatCompletionResponse,
-  TErrorEnvelope,
   TModelCaps,
   TModelSettings,
 } from "@openllmsh/sdk/protocol";
@@ -28,6 +27,7 @@ import {
   isReadableProviderBody,
 } from "@openllmsh/sdk/wire/lib/attempt-outcome";
 import { classifyHopError } from "@openllmsh/sdk/wire/lib/error-class";
+import { errorEnvelopeFrom } from "@openllmsh/sdk/wire/lib/error-envelope";
 import { decodeProviderEventStream } from "@openllmsh/sdk/wire/lib/streaming/provider-decode";
 import { createUsageObserver } from "@openllmsh/sdk/wire/lib/usage-observer";
 import {
@@ -88,24 +88,6 @@ export type TLocalServeArgs = {
 const authHeadersFor = (port: number): Record<string, string> => {
   const key = localKeyForPort(port);
   return key !== null ? { Authorization: `Bearer ${key}` } : {};
-};
-
-/** Best-effort OpenAI/Anthropic error envelope parse for hop classification. */
-export const errorEnvelopeFrom = (raw: string): TErrorEnvelope | undefined => {
-  try {
-    const json = JSON.parse(raw) as { error?: unknown };
-    if (typeof json.error === "string") {
-      return { error: { message: json.error, type: "upstream_error" } };
-    }
-    return json.error !== null && typeof json.error === "object"
-      ? { error: json.error as TErrorEnvelope["error"] }
-      : undefined;
-  } catch {
-    const message = raw.trim().slice(0, 500);
-    return message.length > 0
-      ? { error: { message, type: "upstream_error" } }
-      : undefined;
-  }
 };
 
 /**
@@ -369,6 +351,7 @@ export const serveLocalHop = async (
       envelope: errorEnvelopeFrom(raw),
       providerFormat: "openai",
       aborted: args.req.signal.aborted,
+      provider: hop.provider,
     });
     const usage = localErrorUsage(raw, resp.status);
     const usageComplete = usage.complete;
@@ -563,6 +546,7 @@ export const serveLocalEmbeddings = async (args: {
       envelope: errorEnvelopeFrom(raw),
       providerFormat: "openai",
       aborted: args.signal.aborted,
+      provider: args.provider,
     });
     if (cls.kind === "abort") {
       return errorJson(499, "client aborted request");

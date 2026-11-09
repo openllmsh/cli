@@ -19,6 +19,7 @@ import {
 } from "@openllmsh/sdk/protocol";
 import type { TAttemptOutcome } from "@openllmsh/sdk/wire/lib/attempt-outcome";
 import { classifyHopError } from "@openllmsh/sdk/wire/lib/error-class";
+import { errorEnvelopeFrom } from "@openllmsh/sdk/wire/lib/error-envelope";
 import { scrubSecretText } from "@openllmsh/sdk/wire/lib/secret-scrub";
 import { createUsageObserver } from "@openllmsh/sdk/wire/lib/usage-observer";
 import {
@@ -33,7 +34,6 @@ import type { TLocalServeArgs, TLocalServeHop } from "../local-servers/serve";
 import {
   decodeOpenaiJson,
   decodeOpenaiStream,
-  errorEnvelopeFrom,
   localErrorResponse,
   localErrorUsage,
   postLocal,
@@ -196,6 +196,7 @@ export const serveLocalKeyHop = async (
         envelope: errorEnvelopeFrom(raw),
         providerFormat: "openai",
         aborted: args.req.signal.aborted,
+        provider: hop.provider,
       });
       const usage = localErrorUsage(raw, resp.status);
       const usageComplete = usage.complete;

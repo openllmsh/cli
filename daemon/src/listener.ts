@@ -1220,6 +1220,7 @@ const handleInferenceIn = async (
       raw,
       "openai",
       req.signal.aborted,
+      planParam?.split("/")[0],
     );
     if (
       cls.kind === "abort" ||
