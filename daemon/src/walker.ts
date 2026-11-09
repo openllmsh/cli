@@ -126,7 +126,10 @@ import {
   CONTEXT_OVERFLOW_BODY,
   classifyHopError,
 } from "@openllmsh/sdk/wire/lib/error-class";
-import { errorEnvelopeFrom } from "@openllmsh/sdk/wire/lib/error-envelope";
+import {
+  bodySnippet,
+  errorEnvelopeFrom,
+} from "@openllmsh/sdk/wire/lib/error-envelope";
 import { originatorHeadersFrom } from "@openllmsh/sdk/wire/lib/forwarded-headers";
 import {
   isCanonicalRefusal,
@@ -1380,12 +1383,9 @@ export const isHopRetry = (v: THopServeOutcome): v is THopRetry =>
   "kind" in v &&
   (v as { kind: unknown }).kind === "retry";
 
-/** Short single-line snippet from upstream body for trail/UI (max chars). */
-export const hopBodySnippet = (raw: string, max = 200): string => {
-  const line = raw.replace(/\s+/g, " ").trim();
-  if (line.length === 0) return "";
-  return line.length > max ? `${line.slice(0, max)}…` : line;
-};
+/** Short single-line snippet from upstream body for trail/UI (max chars).
+ *  Re-export of the shared sdk/wire helper so call sites stay stable. */
+export const hopBodySnippet = bodySnippet;
 
 export const formatHopFailuresHeader = (
   trail: ReadonlyArray<THopTrailEntry>,
@@ -2020,6 +2020,12 @@ export const serveSubscription = async (
   // success row is exactly the undebuggable shape this file is trying to
   // eliminate. So the row keeps its honest status and carries a note saying
   // why the counts are zero, rather than silently looking like a free request.
+  //
+  // Unlike the cloud runner (which classifies an undecodable 2xx as
+  // `accepted_unreadable` and surfaces), the daemon never re-enters
+  // classifyHopError on a 2xx here — it forwards and stops. That is safe: the
+  // provider already accepted (and may have billed) the request, so the next
+  // hop is never dialed.
   const recordUnmetered = (reason: string): void =>
     report(
       {

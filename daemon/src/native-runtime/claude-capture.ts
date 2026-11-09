@@ -461,7 +461,20 @@ export const declinedForNonOkCapturedResponse = async (
   } = { provider: "claude", providerFormat: "anthropic" },
 ): Promise<Extract<TNativeRunResult, { readonly kind: "declined" }>> => {
   const raw = await readBoundedErrorBody(response, signal);
-  const envelope = errorEnvelopeFrom(raw);
+  const parsed = errorEnvelopeFrom(raw);
+  // Cap the classifier/detail message at MAX_ERROR_DETAIL_CHARS. The shared
+  // envelope parser keeps a longer classify snippet for quota matching
+  // elsewhere; capture declines must not leak an oversized vendor string into
+  // `reason` (hostile bodies can put a huge `message` inside valid JSON).
+  const envelope =
+    parsed === undefined
+      ? undefined
+      : {
+          error: {
+            ...parsed.error,
+            message: parsed.error.message.slice(0, MAX_ERROR_DETAIL_CHARS),
+          },
+        };
   const classified = classifyHopError({
     status: response.status,
     envelope,
