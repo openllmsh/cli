@@ -1012,11 +1012,26 @@ export const persistImageEditResultItem = async (
 };
 
 /**
+ * Image-edit dialable hops are subscription (oauth) only until P4b adds
+ * API-key edit adapters. A trailing BYOK card must not keep `finalHop`
+ * false for an earlier oauth hop (never-drop-all).
+ */
+const hasDialableImageEditSuccessor = (
+  hops: ReadonlyArray<{ readonly provider: string }>,
+  fromIndex: number,
+): boolean => {
+  for (let j = fromIndex + 1; j < hops.length; j += 1) {
+    const hop = hops[j];
+    if (hop !== undefined && isOAuthSlug(hop.provider)) return true;
+  }
+  return false;
+};
+
+/**
  * Walk one image-EDIT request. Same 403/400 plan gate as {@link runImageWalker}.
- * The plan candidate must be a subscription provider whose delegate exposes
- * `credentialForImageEdit` — an API-key (BYOK) hop is never considered here;
- * the cloud handler is responsible for refusing BYOK explicitly rather than
- * ever routing one to this walker.
+ * Falls back across subscription hops/accounts. API-key hops are skipped with
+ * a clear reason (P4a) — BYOK edit adapters land in P4b. `finalHop` is
+ * "no later dialable oauth hop", not the raw plan index.
  */
 export const runImageEditWalker = async (
   args: TWalkArgs,
@@ -1076,7 +1091,9 @@ export const runImageEditWalker = async (
   for (let i = 0; i < hops.length; i++) {
     const hop = hops[i];
     if (hop === undefined) continue;
-    const last = i === hops.length - 1;
+    // Dialable = oauth only (P4a). Trailing API-key cards do not keep this
+    // false for an earlier subscription hop.
+    const finalHop = !hasDialableImageEditSuccessor(hops, i);
     if (isLocalServerSlug(hop.provider)) {
       attempted.push(hop.modelId);
       lastError = errorJson(
@@ -1085,13 +1102,20 @@ export const runImageEditWalker = async (
         "invalid_request_error",
         "local_surface_unsupported",
       );
-      if (!last) continue;
+      if (!finalHop) continue;
       return stamp(lastError, hop.modelId);
     }
     if (!isOAuthSlug(hop.provider)) {
-      // A BYOK hop is the cloud's to serve; this walker never attempts one,
-      // so it must not appear in the chain it reports.
-      continue;
+      // P4a: skip API-key hops with a clear reason (P4b adds adapters).
+      attempted.push(hop.modelId);
+      lastError = errorJson(
+        400,
+        `API-key provider "${hop.provider}" cannot serve image edits on this device yet`,
+        "invalid_request_error",
+        "image_edit_api_key_unsupported",
+      );
+      if (!finalHop) continue;
+      return stamp(lastError, hop.modelId);
     }
     // Recorded before the body is built, for the same reason as the
     // generation walker above: an edit refused on this wire (a size this
@@ -1118,7 +1142,7 @@ export const runImageEditWalker = async (
         errorCode,
       );
       if (
-        !last &&
+        !finalHop &&
         mediaHopAdvancesForReason(advanceReason, { dispatched: false })
       )
         continue;
@@ -1153,7 +1177,7 @@ export const runImageEditWalker = async (
         return await mediaDialAttempt({ acquired, resp }, hop.provider);
       },
       {
-        finalHop: last,
+        finalHop,
         signal: args.req.signal,
         // Every account cooling/exhausted: advance like a missing credential.
         exhausted: () => ({ acquired: "retry" as const, resp: null }),
@@ -1161,7 +1185,7 @@ export const runImageEditWalker = async (
     );
     if (acquired === "retry") {
       if (
-        !last &&
+        !finalHop &&
         mediaHopAdvancesForReason("missing_credential", { dispatched: false })
       )
         continue;
@@ -1205,7 +1229,7 @@ export const runImageEditWalker = async (
         headers: passthroughHeaders(resp),
       });
       if (
-        !last &&
+        !finalHop &&
         mediaHopAdvancesForHttp(
           resp.status,
           body,
