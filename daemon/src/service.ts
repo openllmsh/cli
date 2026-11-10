@@ -947,14 +947,11 @@ export const serviceUninstall = (): TServiceUninstallResult => {
   // Keep the record of a daemon that survived the stop, so it can still be
   // found and stopped; a stale pidfile is cleared by readLiveDetachedDaemon.
   const survivor = readLiveDetachedDaemon();
-  const journalSurvivor =
-    survivor === null ? holdJournalSurvivorPid() : null;
+  const journalSurvivor = survivor === null ? holdJournalSurvivorPid() : null;
   const survivorPid = survivor?.pid ?? journalSurvivor;
   if (survivorPid !== null) {
     const who =
-      survivorPid > 0
-        ? `pid ${String(survivorPid)}`
-        : "holding the state dir";
+      survivorPid > 0 ? `pid ${String(survivorPid)}` : "holding the state dir";
     process.stderr.write(
       `[openllm] detached daemon ${who} is still running; stop it and re-run uninstall\n`,
     );
@@ -969,9 +966,7 @@ export const serviceUninstall = (): TServiceUninstallResult => {
     tryRun("systemctl", ["--user", "daemon-reload"]);
   }
   const stoppedDetachedPid =
-    detachedBefore !== null && survivorPid === null
-      ? detachedBefore.pid
-      : null;
+    detachedBefore !== null && survivorPid === null ? detachedBefore.pid : null;
   return {
     removedPath: existed ? path : null,
     survivorPid,

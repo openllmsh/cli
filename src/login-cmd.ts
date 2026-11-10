@@ -59,10 +59,7 @@ import {
 } from "./cli-auth-login";
 import { daemonPort, daemonReachable } from "./clients/gateway";
 import { CLIENT_IDS, CLIENTS } from "./clients/registry";
-import {
-  daemonInvocation,
-  runManagedDaemonCommand,
-} from "./daemon-delegation";
+import { daemonInvocation, runManagedDaemonCommand } from "./daemon-delegation";
 import {
   ACCOUNT_EMAIL_ENV,
   apiKeyEnvVars,

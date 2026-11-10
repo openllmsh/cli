@@ -34,6 +34,7 @@ import {
   resumedIdOf,
   skipPermissionsRemembered,
 } from "../agent/skip-permissions-pref";
+import { sleepSyncMs } from "../child-supervisor/posix";
 import { stateDir } from "../env";
 import type {
   TActivityProbe,
@@ -48,7 +49,6 @@ import {
   RESUME_ID_PATTERN,
   setSessionLifecycleHooks,
 } from "../session-core";
-import { sleepSyncMs } from "../child-supervisor/posix";
 import { readSessionHostProcessStartTime } from "../session-host-stop";
 
 const SESSION_DIR_MODE = 0o700;
