@@ -55,6 +55,13 @@ export type TProvisionMissingVendorClisDeps = {
   readonly antigravityEnv?: string | undefined;
   /** Override marker existence for the present-check (tests). */
   readonly antigravityMarkerPresent?: boolean;
+  /**
+   * Launch the curl|bash pipe in a detached session and return immediately
+   * (like interactive `install.sh`). Used by `openllm login --start` so the
+   * desktop's 60s CLI kill never races the ~210s vendor wait after the daemon
+   * is already serving.
+   */
+  readonly detach?: boolean;
 };
 
 /**
@@ -223,9 +230,51 @@ export const provisionMissingVendorClis = async (
   }
 
   const url = `${gatewayUrl}/install`;
-  process.stderr.write(`[start] provisioning missing vendor CLIs via ${url}\n`);
-
   const spawn: TVendorProvisionSpawn = deps?.spawn ?? Bun.spawn.bind(Bun);
+  const vendorEnv: NodeJS.ProcessEnv = {
+    ...process.env,
+    OPENLLM_CLOUD_ORIGIN: gatewayUrl,
+    OPENLLM_INSTALL_MODE: "vendors",
+    OPENLLM_INTERACTIVE: "0",
+    OPENLLM_START_DAEMON: "0",
+    OPENLLM_VENDOR_WAIT_SECS: VENDOR_WAIT_SECS,
+  };
+
+  // Detached: one session that outlives `openllm login` (desktop kills login
+  // after 60s). Interactive install.sh does the same — vendors never block
+  // "daemon is serving".
+  if (deps?.detach === true) {
+    process.stderr.write(
+      `[start] provisioning missing vendor CLIs in the background via ${url}\n`,
+    );
+    try {
+      const child = spawn(
+        [
+          "bash",
+          "-c",
+          `curl -fsSL --connect-timeout ${CURL_CONNECT_TIMEOUT_SECS} --max-time ${CURL_MAX_TIME_SECS} "$1" | bash -s -- --no-start --no-shell-setup`,
+          "openllm-vendor-provision",
+          url,
+        ],
+        {
+          stdin: "ignore",
+          stdout: "ignore",
+          stderr: "ignore",
+          env: vendorEnv,
+          detached: true,
+        },
+      );
+      child.unref();
+      return 0;
+    } catch {
+      process.stderr.write(
+        `[start] vendor provisioning failed to start — daemon already running\n`,
+      );
+      return 1;
+    }
+  }
+
+  process.stderr.write(`[start] provisioning missing vendor CLIs via ${url}\n`);
 
   let curl: ReturnType<typeof Bun.spawn>;
   try {
@@ -259,14 +308,7 @@ export const provisionMissingVendorClis = async (
       stdin: curl.stdout,
       stdout: "inherit",
       stderr: "inherit",
-      env: {
-        ...process.env,
-        OPENLLM_CLOUD_ORIGIN: gatewayUrl,
-        OPENLLM_INSTALL_MODE: "vendors",
-        OPENLLM_INTERACTIVE: "0",
-        OPENLLM_START_DAEMON: "0",
-        OPENLLM_VENDOR_WAIT_SECS: VENDOR_WAIT_SECS,
-      },
+      env: vendorEnv,
     });
   } catch {
     try {

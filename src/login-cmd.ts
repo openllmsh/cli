@@ -185,9 +185,10 @@ export type TLoginIo = {
   /** False only when the server refuses the saved key (it no longer works). */
   readonly checkSavedKey?: (origin: string, key: string) => Promise<boolean>;
   /**
-   * After a successful Full start/restart, provision missing vendor CLIs
-   * (same as `openllm start`). Injectable for tests; defaults to
-   * `provisionMissingVendorClis`. Return code is best-effort / non-fatal.
+   * After a successful Full start/restart, kick off missing-vendor CLI
+   * provisioning without blocking return (desktop Connect kills login after
+   * 60s; vendor wait can run ~210s). Injectable for tests; defaults to
+   * detached `provisionMissingVendorClis`. Best-effort / non-fatal.
    */
   readonly provisionVendors?: () => Promise<number>;
   /** Injectable process signal bus for OAuth Ctrl-C (tests). */
@@ -693,25 +694,33 @@ export const runLogin = async (
     if (parsed.json) io.writeStdout(loginJson("start_failed"));
     return LOGIN_DAEMON_START_FAILED_EXIT;
   }
-  // Same as `openllm start`: after a successful Full start/restart, provision
-  // missing vendor CLIs best-effort so `login --start` (Minimal→Full upgrade,
-  // desktop re-pair) does not leave claude/codex/… missing until another start.
+  // After a successful Full start/restart, kick off vendor provisioning but
+  // do NOT await it. Desktop Connect / re-pair runs `login --start` under a
+  // 60s kill (`packages/native/.../daemon.rs` CLI_TIMEOUT); the vendor pipe
+  // can wait ~210s. The daemon is already serving — return now, and let
+  // vendors install in the background (interactive install.sh does the same).
+  // Terminal `openllm start` still awaits so the user sees vendor results.
   if (command !== null && !isMinimalSetupMode()) {
-    try {
-      const provision =
-        io.provisionVendors ??
-        (await import("./vendor-provision")).provisionMissingVendorClis;
-      const provisionCode = await provision();
-      if (provisionCode !== 0) {
+    const provision =
+      io.provisionVendors ??
+      ((): Promise<number> =>
+        import("./vendor-provision").then((mod) =>
+          mod.provisionMissingVendorClis({ detach: true }),
+        ));
+    void Promise.resolve()
+      .then(() => provision())
+      .then((provisionCode) => {
+        if (provisionCode !== 0) {
+          io.terminal.write(
+            `[openllm] Vendor CLI provisioning reported exit ${String(provisionCode)}; the daemon is running.\n`,
+          );
+        }
+      })
+      .catch((error: unknown) => {
         io.terminal.write(
-          `[openllm] Vendor CLI provisioning reported exit ${String(provisionCode)}; the daemon is running.\n`,
+          `[openllm] Vendor CLI provisioning failed: ${error instanceof Error ? error.message : String(error)}; the daemon is running.\n`,
         );
-      }
-    } catch (error) {
-      io.terminal.write(
-        `[openllm] Vendor CLI provisioning failed: ${error instanceof Error ? error.message : String(error)}; the daemon is running.\n`,
-      );
-    }
+      });
   }
   const daemon: TLoginDaemonOutcome =
     command === "restart"
