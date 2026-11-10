@@ -65,7 +65,6 @@ import {
   openSync,
   readFileSync,
   renameSync,
-  rmSync,
   unlinkSync,
   writeFileSync,
 } from "node:fs";
@@ -206,6 +205,19 @@ export const stateDir = (home?: string): string => {
       );
 };
 
+/**
+ * Current daemon log basenames under the state dir. Doctor and the daemon
+ * share these so a rename cannot leave one surface looking at a stale name.
+ * Both structured names are listed so doctor can surface whichever mode wrote
+ * them; `logFilePath` still picks one by `isDevMode()`.
+ */
+export const DAEMON_LOG_BASENAMES: readonly string[] = [
+  "openllm.log",
+  "openllm.dev.log",
+  "openllm.out.log",
+  "openllm.err.log",
+];
+
 /** The structured log file, isolated from the installed daemon in dev mode. */
 export const logFilePath = (): string =>
   join(stateDir(), isDevMode() ? "openllm.dev.log" : "openllm.log");
@@ -217,28 +229,6 @@ export const daemonStdoutLogFilePath = (): string =>
 /** Native stderr capture written by the installed launchd/systemd service. */
 export const daemonStderrLogFilePath = (): string =>
   join(stateDir(), "openllm.err.log");
-
-/**
- * Legacy (pre-rename) log filenames under the state dir. Removed on daemon
- * start — no compat readers (no-legacy-wire-compat).
- */
-export const LEGACY_DAEMON_LOG_FILES: readonly string[] = [
-  "openllmd.log",
-  "openllmd.dev.log",
-  "openllmd.out.log",
-  "openllmd.err.log",
-];
-
-/** Best-effort delete of legacy `openllmd.*` log files after the rename. */
-export const removeLegacyDaemonLogFiles = (): void => {
-  for (const name of LEGACY_DAEMON_LOG_FILES) {
-    try {
-      rmSync(join(stateDir(), name), { force: true });
-    } catch {
-      // ignore — best-effort cleanup
-    }
-  }
-};
 
 /**
  * An explicit daemon env-file override is valid only when it is an absolute,

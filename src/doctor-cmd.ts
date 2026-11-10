@@ -24,6 +24,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { DAEMON_LOG_BASENAMES } from "../daemon/src/env";
 import {
   CHATGPT_LAUNCHER_BUNDLE_ID,
   chatgptLauncherPath,
@@ -145,12 +146,8 @@ const legacyBackups = (): readonly string[] => {
 /** A transitional/legacy binary name that should no longer be primary. */
 const legacyBinary = (): string => join(openllmDir(), "bin", "openllmc");
 
-const daemonLogPaths = (): readonly string[] => [
-  join(openllmDir(), "openllm.log"),
-  join(openllmDir(), "openllm.dev.log"),
-  join(openllmDir(), "openllm.out.log"),
-  join(openllmDir(), "openllm.err.log"),
-];
+const daemonLogPaths = (): readonly string[] =>
+  DAEMON_LOG_BASENAMES.map((name) => join(openllmDir(), name));
 
 const DAEMON_STATUS_TIMEOUT_MS = 1_500;
 const DAEMON_STATUS_COMMAND_TIMEOUT_MS = 2_000;

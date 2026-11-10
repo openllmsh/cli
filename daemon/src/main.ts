@@ -77,7 +77,6 @@ import {
   deviceId,
   hasApiKey,
   isDevMode,
-  removeLegacyDaemonLogFiles,
   stateDir,
 } from "./env";
 import { buildHealth } from "./health";
@@ -169,9 +168,6 @@ export const main = async (): Promise<void> => {
     );
     process.exit(1);
   }
-
-  // Drop pre-rename `openllmd.*` log files — status now advertises `openllm.*`.
-  removeLegacyDaemonLogFiles();
 
   // Converge a pre-merge two-binary install (real `openllmd` file, units that
   // exec bare `openllmd`) onto the single `openllm daemon` binary.
