@@ -178,11 +178,14 @@ export const runAuthCli = async (args: readonly string[]): Promise<number> => {
     const result = await callLocalAuth(request);
     output(result.body);
     return result.ok ? 0 : 1;
-  } catch {
+  } catch (err) {
+    const detail =
+      err instanceof Error && err.message.trim() !== ""
+        ? err.message.trim()
+        : "See openllm auth --help.";
     output({
       error: "invalid_auth_arguments",
-      message:
-        "See openllm auth --help. submit-code requires --flow-id and a single code on stdin; never put login codes in arguments.",
+      message: detail,
     });
     return 2;
   }

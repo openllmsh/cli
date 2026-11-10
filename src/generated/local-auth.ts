@@ -151,8 +151,8 @@ export const AUTH_LABEL_MAX_LENGTH = 64;
 
 /** Strict on every surface; provider existence is checked against live daemon delegates. */
 export const parseLocalAuthRequest = (input: unknown): TLocalAuthRequest => {
-  const invalid = (): never => {
-    throw new Error("Invalid local auth request");
+  const invalid = (message = "Invalid local auth request"): never => {
+    throw new Error(message);
   };
   if (input === null || typeof input !== "object" || Array.isArray(input))
     return invalid();
@@ -160,36 +160,36 @@ export const parseLocalAuthRequest = (input: unknown): TLocalAuthRequest => {
   const descriptor = AUTH_COMMANDS.find(
     (item) => item.name === record.operation,
   );
-  if (descriptor === undefined) return invalid();
+  if (descriptor === undefined) return invalid(`Unknown auth operation`);
   const allowed = [
     "operation",
     ...(descriptor.provider !== "none" ? ["provider"] : []),
     ...descriptor.fields,
   ];
   if (Object.keys(record).some((key) => !allowed.includes(key)))
-    return invalid();
+    return invalid(`Unsupported field for ${descriptor.name}`);
   if (descriptor.provider === "required" && record.provider === undefined)
-    return invalid();
+    return invalid(`${descriptor.name} requires a provider`);
   if (
     record.provider !== undefined &&
     (typeof record.provider !== "string" ||
       !/^[a-z][a-z0-9_]{0,63}$/.test(record.provider))
   )
-    return invalid();
+    return invalid("Invalid provider");
   if (
     record.method !== undefined &&
     record.method !== "browser" &&
     record.method !== "device"
   )
-    return invalid();
+    return invalid("--method must be browser or device");
   if (
     record.flow_id !== undefined &&
     (typeof record.flow_id !== "string" ||
       !/^[a-zA-Z0-9_-]{1,128}$/.test(record.flow_id))
   )
-    return invalid();
+    return invalid("Invalid --flow-id");
   if (record.flow_id !== undefined && record.provider === undefined)
-    return invalid();
+    return invalid("--flow-id requires a provider");
   if (
     record.account !== undefined &&
     (typeof record.account !== "number" ||
@@ -197,14 +197,14 @@ export const parseLocalAuthRequest = (input: unknown): TLocalAuthRequest => {
       record.account < 0 ||
       record.account > AUTH_ACCOUNT_MAX)
   )
-    return invalid();
+    return invalid(`Invalid --account (0–${AUTH_ACCOUNT_MAX})`);
   if (
     descriptor.name === "remove-account" &&
     (typeof record.account !== "number" || record.account < 1)
   )
-    return invalid();
+    return invalid("remove-account requires --account ≥ 1");
   if (descriptor.name === "pin-account" && record.account === undefined)
-    return invalid();
+    return invalid("pin-account requires --account");
   if (
     record.label !== undefined &&
     (typeof record.label !== "string" ||
@@ -215,12 +215,12 @@ export const parseLocalAuthRequest = (input: unknown): TLocalAuthRequest => {
           character.charCodeAt(0) < 32 || character.charCodeAt(0) === 127,
       ))
   )
-    return invalid();
+    return invalid("Invalid --label");
   if (
     record.since !== undefined &&
     (typeof record.since !== "string" || !/^[a-f0-9]{1,64}$/.test(record.since))
   )
-    return invalid();
+    return invalid("--since must be a hex revision");
   if (
     record.wait_ms !== undefined &&
     (typeof record.wait_ms !== "number" ||
@@ -228,7 +228,9 @@ export const parseLocalAuthRequest = (input: unknown): TLocalAuthRequest => {
       record.wait_ms < 0 ||
       record.wait_ms > AUTH_WAIT_MAX_MS)
   )
-    return invalid();
+    return invalid(
+      `--wait-ms must be an integer from 0 to ${AUTH_WAIT_MAX_MS}`,
+    );
   if (descriptor.name === "submit-code") {
     if (
       record.flow_id === undefined ||
@@ -240,7 +242,9 @@ export const parseLocalAuthRequest = (input: unknown): TLocalAuthRequest => {
           character.charCodeAt(0) <= 32 || character.charCodeAt(0) === 127,
       )
     )
-      return invalid();
+      return invalid(
+        "submit-code requires --flow-id and a single code on stdin; never put login codes in arguments",
+      );
   }
   return record as TLocalAuthRequest;
 };
