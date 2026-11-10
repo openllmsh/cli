@@ -69,8 +69,11 @@ export const readSessionChildStopTarget = (
 
 /**
  * True while the recorded session child (process-group leader) is still alive
- * under the stored start-time identity, or while its process group still has
- * members after the leader exited.
+ * under the stored start-time identity, or while a verified child's process
+ * group still has members after the leader exited. An unverified record
+ * (no start time) only counts a live leader — a dead leader's leftover or
+ * recycled process group must not block uninstall, because it can never be
+ * signalled safely either.
  */
 export const sessionChildGroupAlive = (
   child: TSessionChildStopTarget,
@@ -82,9 +85,11 @@ export const sessionChildGroupAlive = (
       if (live !== null) return live === child.childProcessStartTime;
       // Leader disappeared mid-check — fall through to the group probe.
     } else {
+      // Unverified: report the live leader; never claim its group is ours.
       return true;
     }
   }
+  if (child.childProcessStartTime === undefined) return false;
   return processGroupExists(child.childPid);
 };
 

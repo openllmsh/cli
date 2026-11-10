@@ -95,6 +95,13 @@ export const daemonVersion = async (): Promise<string | null> => {
  * (not just `GET /status`), and `auth` drives native CLI login / keychain
  * flows that live in the daemon module graph. Prefer spawn for correctness.
  */
+/** Optional stdio override for {@link runManagedDaemonCommand} (login --json). */
+export type TManagedDaemonStdio = {
+  readonly stdin?: "inherit" | "ignore" | number | Uint8Array;
+  readonly stdout?: "inherit" | "ignore" | number;
+  readonly stderr?: "inherit" | "ignore" | number;
+};
+
 export const runManagedDaemonCommand = async (
   command:
     | TDaemonLifecycleCommand
@@ -104,6 +111,7 @@ export const runManagedDaemonCommand = async (
     | "auth",
   args: readonly string[] = [],
   extraEnv: Readonly<Record<string, string>> = {},
+  stdio: TManagedDaemonStdio = {},
 ): Promise<number> => {
   let proc: ReturnType<typeof Bun.spawn> | undefined;
   const forward = (signal: NodeJS.Signals): void => {
@@ -121,9 +129,9 @@ export const runManagedDaemonCommand = async (
   process.on("SIGHUP", onSighup);
   try {
     proc = Bun.spawn([...daemonInvocation(), command, ...args], {
-      stdin: "inherit",
-      stdout: "inherit",
-      stderr: "inherit",
+      stdin: stdio.stdin ?? "inherit",
+      stdout: stdio.stdout ?? "inherit",
+      stderr: stdio.stderr ?? "inherit",
       env: { ...process.env, ...extraEnv },
     });
     return await proc.exited;

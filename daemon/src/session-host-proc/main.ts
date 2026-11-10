@@ -81,10 +81,11 @@ const processStartTimeForRetried = (
 };
 
 /**
- * Persistable detached-child identity for meta.json. Omits both fields when
- * start-time cannot be recorded — a pid-only record permanently blocks
- * uninstall (cannot signal safely, still listed as a survivor).
- * Exported for tests.
+ * Persistable detached-child identity for meta.json. Always keeps `childPid`
+ * when known so uninstall can report a possibly-alive child. Missing
+ * `childProcessStartTime` is the unverified marker: stop/uninstall may list
+ * a live leader as a survivor but must never signal it
+ * (`sessionChildGroupOwned` in session-host-stop). Exported for tests.
  */
 export const sessionChildMetaFields = (
   childPid: number | null,
@@ -95,7 +96,7 @@ export const sessionChildMetaFields = (
 } => {
   if (childPid === null) return {};
   const childProcessStartTime = readStart(childPid);
-  if (childProcessStartTime === null) return {};
+  if (childProcessStartTime === null) return { childPid };
   return { childPid, childProcessStartTime };
 };
 

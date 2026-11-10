@@ -286,40 +286,13 @@ const readConfigFile = (): string | null => {
 const runDaemon = async (
   command: "restart" | "start",
   quiet: boolean,
-): Promise<number> => {
-  if (!quiet) return runManagedDaemonCommand(command);
-  let proc: ReturnType<typeof Bun.spawn> | undefined;
-  const forward = (signal: NodeJS.Signals): void => {
-    try {
-      proc?.kill(signal);
-    } catch {
-      // already exited
-    }
-  };
-  const onSigint = (): void => forward("SIGINT");
-  const onSigterm = (): void => forward("SIGTERM");
-  const onSighup = (): void => forward("SIGHUP");
-  process.on("SIGINT", onSigint);
-  process.on("SIGTERM", onSigterm);
-  process.on("SIGHUP", onSighup);
-  try {
-    proc = Bun.spawn([...daemonInvocation(), command], {
-      stdin: "ignore",
-      stdout: 2,
-      stderr: "inherit",
-    });
-    return await proc.exited;
-  } catch (error) {
-    process.stderr.write(
-      `[openllm] could not run managed daemon: ${error instanceof Error ? error.message : String(error)}\n`,
-    );
-    return 1;
-  } finally {
-    process.off("SIGINT", onSigint);
-    process.off("SIGTERM", onSigterm);
-    process.off("SIGHUP", onSighup);
-  }
-};
+): Promise<number> =>
+  runManagedDaemonCommand(
+    command,
+    [],
+    {},
+    quiet ? { stdin: "ignore", stdout: 2, stderr: "inherit" } : {},
+  );
 
 /** The anchored key travels on stdin (never argv, which `ps` shows); the
  *  daemon's stdout (the bare key) is discarded. */

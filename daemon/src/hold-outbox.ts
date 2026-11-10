@@ -11,6 +11,7 @@ import {
 import { open, readFile, rename } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import type { TDaemonRecordRequest } from "@openllmsh/sdk/protocol";
+import { sleepSyncMs } from "./child-supervisor/posix";
 import { isDevMode, stateDir } from "./env";
 
 const RETRY_BASE_MS = 2_000;
@@ -72,8 +73,10 @@ type THoldJournalFlockLibrary = {
 
 /** LOCK_EX | LOCK_NB — same flags {@link acquireHoldJournalLock} uses. */
 const HOLD_JOURNAL_LOCK_EX_NB = 2 | 4;
-/** LOCK_EX — blocking exclusive, for short critical sections (detached start). */
-const HOLD_JOURNAL_LOCK_EX = 2;
+/** Default bound for {@link withExclusiveFlock} waiters (detached daemon start). */
+const EXCLUSIVE_FLOCK_WAIT_MS = 5_000;
+/** Poll interval while retrying a non-blocking exclusive flock. */
+const EXCLUSIVE_FLOCK_POLL_MS = 25;
 
 const openHoldJournalFlockLibrary = (
   libraryNames?: readonly string[],
@@ -127,26 +130,34 @@ export const holdJournalLockIsHeld = (
 
 /**
  * Run `fn` while holding an exclusive flock on `lockPath`. Serializes short
- * critical sections across processes (detached daemon start). When FFI locking
- * is unavailable, runs `fn` without a lock (same posture as the hold-journal
- * no-op fallback) rather than inventing a weaker file-create mutex.
+ * critical sections across processes (detached daemon start). Uses
+ * non-blocking `LOCK_EX|LOCK_NB` with retries until `waitMs`; timed-out
+ * waiters throw and never run `fn` unlocked. When FFI locking is unavailable,
+ * runs `fn` without a lock (same posture as the hold-journal no-op fallback)
+ * rather than inventing a weaker file-create mutex.
  */
 export const withExclusiveFlock = <T>(
   lockPath: string,
   fn: () => T,
   libraryNames?: readonly string[],
+  waitMs: number = EXCLUSIVE_FLOCK_WAIT_MS,
 ): T => {
   mkdirSync(dirname(lockPath), { recursive: true, mode: 0o700 });
   const library = openHoldJournalFlockLibrary(libraryNames);
   if (library === null) return fn();
   const fd = openSync(lockPath, "a+", 0o600);
+  const deadline = Date.now() + Math.max(0, waitMs);
   try {
-    if (library.symbols.flock(fd, HOLD_JOURNAL_LOCK_EX) !== 0) {
-      // Blocking LOCK_EX should not fail; fall through unlocked rather than hang
-      // the caller on an unexpected errno.
-      return fn();
+    for (;;) {
+      if (library.symbols.flock(fd, HOLD_JOURNAL_LOCK_EX_NB) === 0) {
+        return fn();
+      }
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) {
+        throw new Error(`timed out waiting for exclusive lock on ${lockPath}`);
+      }
+      sleepSyncMs(Math.min(EXCLUSIVE_FLOCK_POLL_MS, remaining));
     }
-    return fn();
   } finally {
     closeSync(fd);
     library.close();
