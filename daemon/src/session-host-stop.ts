@@ -305,6 +305,49 @@ const isDaemonCli = (value: unknown): value is TDaemonCli =>
   (DAEMON_CLIS as readonly string[]).includes(value);
 
 /**
+ * Count durable session hosts under `sessionsRoot` whose recorded pid is still
+ * alive. Used by uninstall to snapshot before stopping the daemon — host
+ * processes can exit with the daemon, which would otherwise make a later
+ * stop pass report "none running".
+ */
+export const countLiveSessionHostsIn = (sessionsRoot: string): number => {
+  let entries: string[];
+  try {
+    entries = readdirSync(sessionsRoot);
+  } catch {
+    return 0;
+  }
+  let live = 0;
+  for (const name of entries) {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(
+        readFileSync(join(sessionsRoot, name, "meta.json"), "utf8"),
+      );
+    } catch {
+      continue;
+    }
+    if (
+      typeof parsed !== "object" ||
+      parsed === null ||
+      Array.isArray(parsed)
+    ) {
+      continue;
+    }
+    const meta = parsed as Record<string, unknown>;
+    if (
+      typeof meta.pid !== "number" ||
+      !Number.isInteger(meta.pid) ||
+      meta.pid <= 0
+    ) {
+      continue;
+    }
+    if (processAlive(meta.pid)) live += 1;
+  }
+  return live;
+};
+
+/**
  * Scan `sessionsRoot` for recorded session children whose process group is
  * still alive. Used by uninstall so a detached child surviving its host
  * cannot be reported as a clean removal.

@@ -36,8 +36,10 @@ import { uninstallCompletion } from "./completion";
 import { readLiveDetachedDaemon } from "./detached-daemon";
 import { stateDir } from "./env";
 import { drainHoldOutbox, pendingHoldRecords } from "./hold-outbox";
+import type { TServiceUninstallResult } from "./service";
 import { serviceUninstall } from "./service";
 import {
+  countLiveSessionHostsIn,
   listSurvivingSessionChildrenIn,
   stopLiveSessionHostsIn,
 } from "./session-host-stop";
@@ -45,6 +47,41 @@ import {
 /** Write a line to uninstall stdout. */
 const out = (s: string): void => {
   process.stdout.write(s);
+};
+
+/**
+ * One-line summary of the service/daemon stop step. Exported for tests —
+ * "no registration found" only when nothing was registered AND no detached
+ * daemon was stopped.
+ */
+export const formatServiceUninstallLine = (
+  result: Pick<TServiceUninstallResult, "removedPath" | "stoppedDetachedPid">,
+): string => {
+  if (result.removedPath !== null) {
+    return `  ✓ stopped + unregistered the service (${result.removedPath})\n`;
+  }
+  if (result.stoppedDetachedPid !== null) {
+    return `  ✓ stopped the daemon (detached, pid ${String(result.stoppedDetachedPid)})\n`;
+  }
+  return "  ✓ service stopped (no registration found)\n";
+};
+
+/**
+ * One-line summary of session-host teardown. `liveBefore` is the count
+ * snapshotted before the daemon was stopped (hosts may exit with it);
+ * `stopped` is how many `stopLiveSessionHosts` itself signalled.
+ */
+export const formatSessionHostsUninstallLine = (
+  liveBefore: number,
+  stopped: number,
+): string => {
+  const ended = Math.max(liveBefore, stopped);
+  if (ended <= 0) return "  ✓ session hosts (none running)\n";
+  const noun = ended === 1 ? "host" : "hosts";
+  if (stopped > 0) {
+    return `  ✓ stopped ${String(ended)} session ${noun}\n`;
+  }
+  return `  ✓ ended ${String(ended)} session ${noun} (with the daemon)\n`;
 };
 
 /** The `openllmd` binary the installers drop under the state dir. */
@@ -242,21 +279,19 @@ export const runUninstall = async (args: readonly string[]): Promise<never> => {
 
   out("\nRemoving the OpenLLM daemon…\n");
 
+  // Snapshot live session hosts BEFORE stopping the daemon — durable hosts
+  // normally survive, but a process-group stop / prior CLI `--yes` pass can
+  // leave the post-stop scan empty while hosts did end for this uninstall.
+  const sessionsRoot = join(stateDir(), "sessions");
+  const liveHostsBefore = countLiveSessionHostsIn(sessionsRoot);
+
   // 1. Stop + unregister the service (kills self-restore + detached daemon).
   const removedService = serviceUninstall();
-  out(
-    removedService.removedPath !== null
-      ? `  ✓ stopped + unregistered the service (${removedService.removedPath})\n`
-      : "  ✓ service stopped (no registration found)\n",
-  );
+  out(formatServiceUninstallLine(removedService));
 
   // 1b. Stop durable session hosts before their registry directory is removed.
   const stoppedHosts = await stopLiveSessionHosts();
-  out(
-    stoppedHosts > 0
-      ? `  ✓ stopped ${stoppedHosts} session host${stoppedHosts === 1 ? "" : "s"}\n`
-      : "  ✓ session hosts (none running)\n",
-  );
+  out(formatSessionHostsUninstallLine(liveHostsBefore, stoppedHosts));
 
   // Never claim success / delete state while an OpenLLM process is still live.
   // Deleting daemon.pid while a detached daemon survives is what left bots with

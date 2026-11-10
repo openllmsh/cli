@@ -900,9 +900,18 @@ export type TServiceUninstallResult = {
   readonly removedPath: string | null;
   /** True when a detached daemon is still running after the stop attempt. */
   readonly survivorPid: number | null;
+  /**
+   * Detached daemon pid that was live before the stop and is gone after —
+   * so uninstall can say "stopped the daemon (detached, pid N)" instead of
+   * "no registration found" when there was never a launchd/systemd unit.
+   */
+  readonly stoppedDetachedPid: number | null;
 };
 
 export const serviceUninstall = (): TServiceUninstallResult => {
+  // Snapshot a live detached daemon before stop so uninstall messaging can
+  // distinguish "stopped a detached daemon" from "nothing was running".
+  const detachedBefore = readLiveDetachedDaemon();
   // 1. Stop + disable self-restore so nothing respawns while we tear down.
   if (isMac) stopMac();
   else stopLinux();
@@ -925,9 +934,12 @@ export const serviceUninstall = (): TServiceUninstallResult => {
   if (!isMac && existed) {
     tryRun("systemctl", ["--user", "daemon-reload"]);
   }
+  const stoppedDetachedPid =
+    detachedBefore !== null && survivor === null ? detachedBefore.pid : null;
   return {
     removedPath: existed ? path : null,
     survivorPid: survivor?.pid ?? null,
+    stoppedDetachedPid,
   };
 };
 
