@@ -28,6 +28,11 @@ export const authGeneration = (): number => generation;
 
 /** Something auth-relevant happened; waiters recompute. */
 export const notifyAuthChange = (): void => {
+  // Drop the cached snapshot first. A long-poll that samples generation after
+  // this notify (local-auth `baseline = authGeneration()` then `body(false)`)
+  // must not reuse a pre-event `latest` and sleep until wait_ms — see the
+  // baseline-vs-stale-latest gap in tests/daemon/local-auth-watch.test.ts.
+  latest = null;
   generation += 1;
   for (const wake of [...waiters]) wake("event");
 };
