@@ -90,11 +90,41 @@ const localFlowOf = (provider: string, id: string): TLocalFlow | null => {
   return flow;
 };
 
-/** Never echo vendor output, auth URLs, pasted codes, or another flow's id in command results. */
+const MESSAGE_MAX = 200;
+/**
+ * A failure's readable reason (the daemon's `error` / `detail` text), for
+ * people and agents alike. Scrubbed: gateway keys and links are replaced and
+ * it is capped, so no secret, auth URL or long vendor dump rides it.
+ */
+export const outcomeMessage = (result: unknown): string | undefined => {
+  if (result === null || typeof result !== "object") return undefined;
+  const record = result as Record<string, unknown>;
+  const raw =
+    typeof record.detail === "string" && record.detail.trim() !== ""
+      ? record.detail
+      : typeof record.error === "string"
+        ? record.error
+        : undefined;
+  if (raw === undefined) return undefined;
+  const scrubbed = raw
+    .replace(/sk-llm-[A-Za-z0-9._-]+/g, "[key]")
+    .replace(/\b[a-z][a-z0-9+.-]*:\/\/\S+/gi, "[link]")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (scrubbed === "") return undefined;
+  return scrubbed.length > MESSAGE_MAX
+    ? `${scrubbed.slice(0, MESSAGE_MAX - 1)}…`
+    : scrubbed;
+};
+
+/** Never echo raw vendor output, auth URLs, pasted codes, or another flow's id in command results. */
 const commandOutcome = (ack: TDaemonCommandAck): Record<string, unknown> => {
   const result = ack.result as Record<string, unknown> | undefined;
+  const message =
+    ack.status === "error" ? outcomeMessage(ack.result) : undefined;
   return {
     command_status: ack.status,
+    ...(message !== undefined ? { message } : {}),
     ...(ack.status === "error"
       ? {
           error:
@@ -134,6 +164,9 @@ const flowSnapshot = (
   const live = loginSlot(provider).flow()?.flowId === flow.id;
   return {
     flow_id: flow.token,
+    // The id this flow's auth events and status markers carry — public
+    // already, so the owner can match them to its own flow.
+    event_flow_id: flow.id,
     ...(flow.ack !== undefined
       ? commandOutcome(flow.ack)
       : { command_status: "running" }),
@@ -375,19 +408,29 @@ const handleParsed = async (
       }
       return reply(200, { ...result, revision });
     }
-    const candidate =
-      provider !== undefined ? localFlows.get(provider) : undefined;
     const owned =
       provider !== undefined && input.flow_id !== undefined
         ? localFlowOf(provider, input.flow_id)
-        : input.operation === "cancel" &&
-            provider !== undefined &&
-            candidate !== undefined &&
-            loginSlot(provider).flow()?.flowId === candidate.id
-          ? candidate
-          : null;
+        : null;
+    // Reading a prompt or submitting a code needs the private token. Cancel is
+    // only a stop, so any caller may stop the live sign-in: by its token, by
+    // the public id its status marker carries (a reloaded tab), or — with no
+    // id — whatever sign-in is live for this provider account.
+    const live =
+      provider !== undefined ? loginSlot(provider).flow()?.flowId : undefined;
+    const cancelTarget =
+      input.operation !== "cancel"
+        ? undefined
+        : owned !== null
+          ? owned.id
+          : input.flow_id === undefined || input.flow_id === live
+            ? live
+            : undefined;
+    if (input.operation === "cancel" && cancelTarget === undefined)
+      return reply(409, { error: "flow_not_owned_or_expired" });
     if (
-      (input.flow_id !== undefined || input.operation === "cancel") &&
+      input.operation !== "cancel" &&
+      input.flow_id !== undefined &&
       owned === null
     )
       return reply(409, { error: "flow_not_owned_or_expired" });
@@ -508,7 +551,7 @@ const handleParsed = async (
           payload: {
             slug: provider,
             ...accountField,
-            ...(owned !== null ? { flow_id: owned.id } : {}),
+            ...(cancelTarget !== undefined ? { flow_id: cancelTarget } : {}),
           },
         };
         break;
@@ -536,7 +579,7 @@ const handleParsed = async (
     }
     const ack = await execute(
       Schema.decodeUnknownSync(DaemonCommand)(raw),
-      owned?.id,
+      cancelTarget ?? owned?.id,
     );
     const accountResult = ack.result as Record<string, unknown> | undefined;
     return reply(ack.status === "error" ? 409 : 200, {
