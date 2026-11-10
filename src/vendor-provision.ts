@@ -8,9 +8,10 @@
  * install that already had a key without delaying the listen port.
  */
 
-import { accessSync, constants, statSync } from "node:fs";
+import { accessSync, constants, existsSync, statSync } from "node:fs";
 import { join } from "node:path";
-import { cliConfig, userHome } from "./env";
+import { ANTIGRAVITY_ENABLED_MARKER } from "../daemon/src/antigravity-feature";
+import { cliConfig, openllmDir, userHome } from "./env";
 import { awaitPipeCodes, bunSubprocessPeer } from "./process-pipe";
 import { isSecureOrigin } from "./self-update";
 
@@ -50,6 +51,10 @@ export type TProvisionMissingVendorClisDeps = {
   readonly home?: string;
   /** Override PATH lookup (tests). */
   readonly which?: (command: string) => string | null;
+  /** Override `OPENLLM_ANTIGRAVITY` for the present-check (tests). */
+  readonly antigravityEnv?: string | undefined;
+  /** Override marker existence for the present-check (tests). */
+  readonly antigravityMarkerPresent?: boolean;
 };
 
 /**
@@ -60,14 +65,37 @@ type TVendorPlatformDeps = {
   readonly which: (command: string) => string | null;
   readonly platform: NodeJS.Platform;
   readonly arch: string;
+  /** Home used to locate `~/.openllm/antigravity-enabled` (tests override). */
+  readonly home: string;
+  /**
+   * Override `OPENLLM_ANTIGRAVITY` (tests). `undefined` reads `process.env`.
+   */
+  readonly antigravityEnv?: string | undefined;
+  /**
+   * Override marker-file existence (tests). `undefined` checks the real path
+   * under `home`.
+   */
+  readonly antigravityMarkerPresent?: boolean;
 };
 
 /**
- * Antigravity ships only for these platforms (install.sh
- * `antigravity_platform_key`), and the installer needs `unzip` to unpack it;
- * otherwise it reports `antigravity=skipped` and never installs it.
+ * True when the installer would actually call `provision_antigravity`.
+ * Mirrors `packages/cli/install.sh` `provision_clis` (kill switch + marker)
+ * and the inner skips in `provision_antigravity` (platform key + `unzip`).
+ * Default Full install leaves Antigravity OFF — do NOT count it as required
+ * unless the kill switch is on.
  */
 const antigravityInstallable = (deps: TVendorPlatformDeps): boolean => {
+  const env =
+    deps.antigravityEnv !== undefined
+      ? deps.antigravityEnv
+      : process.env.OPENLLM_ANTIGRAVITY;
+  if (env === "0") return false;
+  const markerPresent =
+    deps.antigravityMarkerPresent !== undefined
+      ? deps.antigravityMarkerPresent
+      : existsSync(join(openllmDirFor(deps.home), ANTIGRAVITY_ENABLED_MARKER));
+  if (env !== "1" && !markerPresent) return false;
   const supported =
     (deps.platform === "darwin" &&
       (deps.arch === "arm64" || deps.arch === "x64")) ||
@@ -75,6 +103,10 @@ const antigravityInstallable = (deps: TVendorPlatformDeps): boolean => {
       (deps.arch === "x64" || deps.arch === "arm64"));
   return supported && deps.which("unzip") !== null;
 };
+
+/** `~/.openllm` under an overridden home (tests) or the live openllm dir. */
+const openllmDirFor = (home: string): string =>
+  home === userHome() ? openllmDir() : join(home, ".openllm");
 
 export const PROVISIONED_VENDOR_CLIS: readonly {
   readonly command: string;
@@ -128,6 +160,8 @@ export const allProvisionedVendorClisPresent = (
     readonly which?: (command: string) => string | null;
     readonly platform?: NodeJS.Platform;
     readonly arch?: string;
+    readonly antigravityEnv?: string | undefined;
+    readonly antigravityMarkerPresent?: boolean;
   } = {},
 ): boolean => {
   const home = deps.home ?? userHome();
@@ -138,6 +172,9 @@ export const allProvisionedVendorClisPresent = (
     which,
     platform: deps.platform ?? process.platform,
     arch: deps.arch ?? process.arch,
+    home,
+    antigravityEnv: deps.antigravityEnv,
+    antigravityMarkerPresent: deps.antigravityMarkerPresent,
   };
   for (const vendor of PROVISIONED_VENDOR_CLIS) {
     if (vendor.installable !== undefined && !vendor.installable(platformDeps))
@@ -175,6 +212,8 @@ export const provisionMissingVendorClis = async (
     allProvisionedVendorClisPresent({
       home: deps?.home,
       which: deps?.which,
+      antigravityEnv: deps?.antigravityEnv,
+      antigravityMarkerPresent: deps?.antigravityMarkerPresent,
     })
   ) {
     process.stderr.write(
