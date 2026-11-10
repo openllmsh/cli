@@ -964,7 +964,7 @@ const logAuthCommandStage = (
  *
  *  Redacted before it hits the daemon log: `integrations.ts` returns the
  *  RAW `output` in the ack (it goes to the dashboard over the authed socket)
- *  and only redacts its own openllmd.err.log tail — so THIS log path must
+ *  and only redacts its own openllm.err.log tail — so THIS log path must
  *  scrub the API key itself, or a failing script that echoes its env would
  *  persist the key to disk here. */
 const ackErrorDetail = (result: unknown): string => {
@@ -1471,7 +1471,40 @@ const onMessage = (data: unknown): void => {
     return;
   }
   const r = decodeFrame(json);
-  if (Result.isSuccess(r)) onFrame(r.success);
+  if (Result.isSuccess(r)) {
+    onFrame(r.success);
+    return;
+  }
+  // Unknown/undecodable JSON: if it looks like a command with an id, ack an
+  // explicit outdated error so future kinds fail clearly instead of hanging
+  // the caller until their timeout (§6 — no silent drop).
+  if (
+    json !== null &&
+    typeof json === "object" &&
+    !Array.isArray(json) &&
+    (json as { type?: unknown }).type === "command"
+  ) {
+    const command = (json as { command?: unknown }).command;
+    if (
+      command !== null &&
+      typeof command === "object" &&
+      !Array.isArray(command) &&
+      typeof (command as { id?: unknown }).id === "string"
+    ) {
+      const id = (command as { id: string }).id;
+      send({
+        type: "ack",
+        ack: {
+          id,
+          status: "error",
+          result: {
+            error: "daemon_outdated",
+            message: "please update your daemon",
+          },
+        },
+      });
+    }
+  }
 };
 
 /** partysocket calls this before every (re)connect — fetch a fresh channel so

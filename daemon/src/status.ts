@@ -18,6 +18,7 @@ import type {
   TProviderUsageSnapshot,
 } from "@openllmsh/sdk/protocol";
 import {
+  AUTH_CONTROL_CAP,
   DEVICE_SESSIONS_CONTROL_CAP,
   LOCAL_KEY_PROVIDER_PRESETS,
   LOCAL_KEY_PROVIDERS_CONTROL_CAP,
@@ -940,6 +941,7 @@ const computeStatusFreshInner = async (
     control_caps: [
       "refresh_models_due",
       MULTI_ACCOUNT_CONTROL_CAP,
+      AUTH_CONTROL_CAP,
       DEVICE_SESSIONS_CONTROL_CAP,
       LOCAL_KEY_PROVIDERS_CONTROL_CAP,
       TEAM_KEY_CUSTODY_CONTROL_CAP,
