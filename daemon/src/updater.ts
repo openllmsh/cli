@@ -336,6 +336,12 @@ export type TConvergeDeps = {
    */
   readonly announcePlannedRestart?: () => void | Promise<void>;
   /**
+   * After a `"keep"` restart outcome: re-register the control channel and clear
+   * planned-restart state. Defaults to the live control-channel helper; tests
+   * stub it.
+   */
+  readonly recoverAfterAbortedRestart?: () => void | Promise<void>;
+  /**
    * Restart after a binary swap. Defaults to {@link restartForUpdate}:
    * macOS kickstarts launchd; a detached Linux daemon is respawned; a
    * systemd unit returns false so the caller exits and `RestartSec` relaunches.
@@ -353,6 +359,14 @@ export type TConvergeDeps = {
 const defaultAnnouncePlannedRestart = async (): Promise<void> => {
   const { announcePlannedRestart } = await import("./control-channel");
   announcePlannedRestart();
+};
+
+/** Reconnect after a planned restart whose replacement failed. */
+const defaultRecoverAfterAbortedRestart = async (): Promise<void> => {
+  const { recoverControlChannelAfterAbortedRestart } = await import(
+    "./control-channel"
+  );
+  recoverControlChannelAfterAbortedRestart();
 };
 
 /**
@@ -375,6 +389,7 @@ const defaultDeps = (): TConvergeDeps => ({
   fingerprint: DAEMON_FINGERPRINT,
   exit: () => process.exit(0),
   announcePlannedRestart: defaultAnnouncePlannedRestart,
+  recoverAfterAbortedRestart: defaultRecoverAfterAbortedRestart,
   kickstartSupervisedDaemon: defaultKickstartSupervisedDaemon,
 });
 
@@ -499,7 +514,15 @@ export const createBinaryUpdater = (): TBinaryUpdater => {
           )();
           // Detached replace can fail after killing only the replacement —
           // `"keep"` means stay alive rather than exit into zero daemons.
-          if (restartResult === "keep") return;
+          // The announce already unregistered this socket on the relay, so
+          // reconnect and clear planned-restart state before returning.
+          if (restartResult === "keep") {
+            await (
+              deps.recoverAfterAbortedRestart ??
+              defaultRecoverAfterAbortedRestart
+            )();
+            return;
+          }
           deps.exit();
         } catch (error) {
           // Kickstart import / launchd failure after announce: still exit so a

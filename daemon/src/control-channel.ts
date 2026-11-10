@@ -1859,6 +1859,20 @@ export const announcePlannedRestart = (
 /** True after {@link announcePlannedRestart} in this process. */
 export const isPlannedRestartAnnounced = (): boolean => plannedRestartAnnounced;
 
+/**
+ * Undo a planned-restart announcement when the replacement failed and this
+ * process must keep serving. Clears the flag so a later graceful stop still
+ * sends its offline beacon, and forces a control-channel reconnect so the
+ * relay re-registers this socket (announce marks the prior one departed).
+ */
+export const recoverControlChannelAfterAbortedRestart = (): void => {
+  plannedRestartAnnounced = false;
+  if (ws === null) return;
+  // partysocket: reconnect closes the departed socket and dials a fresh one;
+  // onopen sends hello and re-registers with the relay.
+  ws.reconnect();
+};
+
 /** Graceful-exit beacon: flip the key offline, then close. Best-effort.
  *  Also returns the module to a cold start so a later `startControlChannel`
  *  in the same process (suite re-entry, daemon restart) does not inherit
