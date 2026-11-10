@@ -35,8 +35,6 @@ export type TClaudeFirstRunSeed = {
   readonly cwd: string;
   /** Gateway / helper key — last 20 chars go into `customApiKeyResponses`. */
   readonly apiKey?: string;
-  /** When the launch passes `--dangerously-skip-permissions`. */
-  readonly skipPermissions?: boolean;
   /** Theme to record if onboarding was never completed. */
   readonly theme?: string;
 };
@@ -82,14 +80,13 @@ export const mergeClaudeFirstRun = (
     out.theme = seed.theme ?? CLAUDE_FIRST_RUN_THEME;
   }
 
-  if (seed.skipPermissions === true) {
-    if (!Object.hasOwn(out, "bypassPermissionsModeAccepted")) {
-      out.bypassPermissionsModeAccepted = true;
-    }
-    if (!Object.hasOwn(out, "skipDangerousModePermissionPrompt")) {
-      out.skipDangerousModePermissionPrompt = true;
-    }
-  }
+  // Bypass-permissions acceptance is NEVER written here. Seeding
+  // `bypassPermissionsModeAccepted` / `skipDangerousModePermissionPrompt` into
+  // the user's global `~/.claude.json` permanently silenced Claude's once-per-
+  // machine warning for every later `claude --dangerously-skip-permissions` on
+  // that Mac — including outside OpenLLM. Device sessions put
+  // `skipDangerousModePermissionPrompt` on the run-scoped `--settings` overlay
+  // instead (`planClaude`); the daemon also auto-answers the TTY dialog.
 
   if (seed.apiKey !== undefined && seed.apiKey.length > 0) {
     const suffix = claudeApiKeySuffix(seed.apiKey);

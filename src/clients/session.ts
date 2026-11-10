@@ -582,6 +582,7 @@ export const runSessionClient = async (
       catalog: catalog ?? undefined,
       tier,
       bare: flags.bare,
+      skipPermissions: flags.dangerous,
     });
     materialize(plan, runDir);
     const tuiDir =
@@ -596,15 +597,16 @@ export const runSessionClient = async (
         ? [client.dangerousFlag]
         : [];
 
-    // Claude's first-run dialogs live in `~/.claude.json`, outside the run-dir
-    // `--settings` overlay. In a device session (no terminal to answer them)
-    // seed only missing keys so it does not stall before SessionStart; an
-    // existing value is never overwritten.
+    // Claude's first-run dialogs (onboarding / folder trust / API-key approval)
+    // live in `~/.claude.json`, outside the run-dir `--settings` overlay. In a
+    // device session (no terminal to answer them) seed only those missing keys
+    // so it does not stall before SessionStart. Bypass-permissions acceptance
+    // is NOT seeded globally — `skipPermissions` rides the run-scoped settings
+    // overlay from `planClaude` instead.
     if (shouldSeedClaudeFirstRun(client.id, process.env)) {
       seedClaudeFirstRun(userHome(), process.env, {
         cwd: process.cwd(),
         apiKey: gateway.apiKey,
-        skipPermissions: flags.dangerous,
       });
     }
 

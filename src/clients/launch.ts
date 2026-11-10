@@ -90,6 +90,13 @@ export type TLaunchInputs = {
   readonly tier?: TTier;
   /** Opt-in sterile Claude launch: omit the OpenLLM MCP overlay. */
   readonly bare?: boolean;
+  /**
+   * Device-session / `-d` skip-permissions. When set, Claude's run-scoped
+   * `--settings` overlay carries `skipDangerousModePermissionPrompt` so the
+   * once-per-machine bypass warning is silenced for THIS launch only — never
+   * written into the user's global `~/.claude.json`.
+   */
+  readonly skipPermissions?: boolean;
 };
 
 export type TLaunchPlan = {
@@ -266,6 +273,13 @@ const planClaude = (inputs: TLaunchInputs): TLaunchPlan => {
           // wins", but we only ever set it in the run-local settings, so the
           // user's own connectors are untouched outside `openllm claude`.
           disableClaudeAiConnectors: true,
+          // Device-session `-d`: honour Claude's Settings key from the SDK
+          // (`skipDangerousModePermissionPrompt`) for THIS run only. Never seed
+          // the global `~/.claude.json` bypass flags — that permanently
+          // silenced the warning for every later Claude launch on the machine.
+          ...(inputs.skipPermissions === true
+            ? { skipDangerousModePermissionPrompt: true }
+            : {}),
         },
         null,
         2,
