@@ -16,25 +16,39 @@ export type TAuthWake = "event" | "status";
 
 const waiters = new Set<(reason: TAuthWake) => void>();
 let latest: TDaemonStatus | null = null;
+/** Bumps on every notify so a waiter can detect a lost wakeup between its
+ *  snapshot and registration (register-then-recheck). */
+let generation = 0;
 
 /** The most recent snapshot any producer computed (control tick, command, local call). */
 export const latestAuthStatus = (): TDaemonStatus | null => latest;
 
+/** Generation counter for lost-wakeup detection; record before a snapshot. */
+export const authGeneration = (): number => generation;
+
 /** Something auth-relevant happened; waiters recompute. */
 export const notifyAuthChange = (): void => {
+  generation += 1;
   for (const wake of [...waiters]) wake("event");
 };
 
 /** A fresh snapshot was computed; waiters read it as-is. */
 export const notifyAuthStatus = (status: TDaemonStatus): void => {
   latest = status;
+  generation += 1;
   for (const wake of [...waiters]) wake("status");
 };
 
-/** Resolve with the first wake reason, or `"timeout"` after `ms`. */
+/**
+ * Resolve with the first wake reason, or `"timeout"` after `ms`.
+ * Pass `sinceGeneration` from {@link authGeneration} taken before the caller's
+ * snapshot: if a notify landed in the gap, resolve `"event"` immediately
+ * instead of sitting until `ms`.
+ */
 export const waitForAuthChange = (
   ms: number,
   signal?: AbortSignal,
+  sinceGeneration?: number,
 ): Promise<TAuthWake | "timeout"> =>
   new Promise((resolve) => {
     let timer: ReturnType<typeof setTimeout> | undefined;
@@ -47,6 +61,12 @@ export const waitForAuthChange = (
     const onAbort = (): void => done("timeout");
     if (signal?.aborted === true) return resolve("timeout");
     waiters.add(done);
+    // Lost wakeup: a notify arrived between the caller's snapshot and this
+    // registration — wake now so they recheck instead of waiting out `ms`.
+    if (sinceGeneration !== undefined && generation !== sinceGeneration) {
+      done("event");
+      return;
+    }
     signal?.addEventListener("abort", onAbort);
     timer = setTimeout(() => done("timeout"), ms);
   });

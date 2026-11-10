@@ -26,6 +26,7 @@ import {
 } from "./agent/loopback";
 import { requestStatusPush } from "./auth-events";
 import {
+  authGeneration,
   authRevision,
   latestAuthStatus,
   waitForAuthChange,
@@ -130,8 +131,31 @@ export const outcomeMessage = (result: unknown): string | undefined => {
       : undefined;
   if (raw === undefined) return undefined;
   const scrubbed = raw
-    .replace(/sk-llm-[A-Za-z0-9._-]+/g, "[key]")
+    // Gateway / vendor API keys (sk-llm-…, sk-ant-…, sk-…).
+    .replace(/\bsk-(?:llm|ant)-[A-Za-z0-9._-]+/g, "[key]")
+    .replace(/\bsk-[A-Za-z0-9]{16,}/g, "[key]")
+    // Bearer tokens and JWT-shaped blobs.
+    .replace(/\bBearer\s+[A-Za-z0-9._~+/=-]+/gi, "Bearer [token]")
+    .replace(
+      /\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}/g,
+      "[token]",
+    )
+    // Long hex runs and base64-looking blobs (+/= or mixed case — not a
+    // repeated single letter that a truncated dump might leave).
+    .replace(/\b[A-Fa-f0-9]{32,}\b/g, "[hex]")
+    .replace(/\b[A-Za-z0-9+/]{40,}={0,2}\b/g, (match) =>
+      /[+/=]/.test(match) || (/[a-z]/.test(match) && /[A-Z]/.test(match))
+        ? "[blob]"
+        : match,
+    )
+    // Device/user codes like ABCD-EFGH (vendor device-login prompts).
+    .replace(/\b[A-Z0-9]{4,8}-[A-Z0-9]{4,8}\b/g, "[code]")
+    // URLs with or without a scheme (hosts with a path or query).
     .replace(/\b[a-z][a-z0-9+.-]*:\/\/\S+/gi, "[link]")
+    .replace(
+      /\b(?:www\.)?[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+(?:\/\S*|\?\S+)/g,
+      "[link]",
+    )
     .replace(/\s+/g, " ")
     .trim();
   if (scrubbed === "") return undefined;
@@ -443,11 +467,18 @@ const handleParsed = async (
       let result = await body(true);
       let revision = authRevision(result);
       // Long-poll: hold until the snapshot differs from the caller's revision.
+      // Each iteration samples generation, rechecks the snapshot, THEN waits —
+      // so a notify during compute or the gap wakes us (lost-wakeup) without
+      // treating our own computeStatus notify as a false wake.
       if (input.since !== undefined && input.wait_ms !== undefined) {
         while (revision === input.since) {
           const left = deadline - Date.now();
           if (left <= 0) break;
-          const wake = await waitForAuthChange(left, signal);
+          const baseline = authGeneration();
+          result = await body(false);
+          revision = authRevision(result);
+          if (revision !== input.since) break;
+          const wake = await waitForAuthChange(left, signal, baseline);
           if (wake === "timeout") break;
           result = await body(wake === "event");
           revision = authRevision(result);
