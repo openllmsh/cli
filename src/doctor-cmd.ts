@@ -146,10 +146,10 @@ const legacyBackups = (): readonly string[] => {
 const legacyBinary = (): string => join(openllmDir(), "bin", "openllmc");
 
 const daemonLogPaths = (): readonly string[] => [
-  join(openllmDir(), "openllmd.log"),
-  join(openllmDir(), "openllmd.dev.log"),
-  join(openllmDir(), "openllmd.out.log"),
-  join(openllmDir(), "openllmd.err.log"),
+  join(openllmDir(), "openllm.log"),
+  join(openllmDir(), "openllm.dev.log"),
+  join(openllmDir(), "openllm.out.log"),
+  join(openllmDir(), "openllm.err.log"),
 ];
 
 const DAEMON_STATUS_TIMEOUT_MS = 1_500;

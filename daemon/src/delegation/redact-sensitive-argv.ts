@@ -1,7 +1,7 @@
 /** Secret-bearing option VALUES (`-p`/`-w`/`-k`) redacted for logs.
  *  `-w` carries the OAuth credential payload (`add-generic-password`),
  *  `-p` a keychain password, `-k` the partition-list unlock password —
- *  none may reach `openllmd.err.log`. Unsupported long options are left
+ *  none may reach `openllm.err.log`. Unsupported long options are left
  *  as-is: neither `runCapture` nor `security` callers pass them. */
 export const redactSensitiveArgv = (argv: ReadonlyArray<string>): string[] =>
   argv.map((arg, i) =>

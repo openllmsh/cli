@@ -107,7 +107,7 @@ export const spawnCwd = (
  * failure mode behind "the flow doesn't trigger, no errors". The OS sandbox
  * SIGKILLs/SIGABRTs a child that hits a denied operation, and a plain exit-code
  * check misses it. Logging the command + signal at ERROR level puts the actual
- * culprit in `openllmd.err.log` instead of letting it vanish. Returns whether a
+ * culprit in `openllm.err.log` instead of letting it vanish. Returns whether a
  * kill was detected (so callers can treat it as a definite failure). No-op for
  * a clean exit.
  */

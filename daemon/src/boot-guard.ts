@@ -7,7 +7,7 @@
  * launchd `KeepAlive`). A persistent boot failure — port permanently in use, a
  * corrupt binary, a config the daemon rejects at startup — therefore respawns
  * forever: each boot re-runs the sandbox/FFI setup and writes log lines, so the
- * loop floods `openllmd.log` and pegs the CPU with nothing to show for it.
+ * loop floods `openllm.log` and pegs the CPU with nothing to show for it.
  *
  * `guardCrashLoop()` records each boot's timestamp in `state.json` and, if
  * too many boots land inside a short window, declares a crash loop: it disables

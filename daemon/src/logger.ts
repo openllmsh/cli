@@ -2,13 +2,13 @@
  * Daemon logs. ONE structured destination, plus native-only stream capture —
  * no duplication between files:
  *
- *   1. `~/.openllm/openllmd.log` — the SINGLE structured log: one timestamped
+ *   1. `~/.openllm/openllm.log` — the SINGLE structured log: one timestamped
  *      JSON line per event, rotated past a size cap. The canonical
  *      `tail -f` / `openllmd logs` target. Find faults by grepping
  *      `"level":"error"` (or `"warn"`); every scope is tagged. Which levels
  *      land here is gated by `OPENLLM_LOG_LEVEL` (default `info` — so `debug`
  *      is OFF unless explicitly enabled); see {@link thresholdRank}.
- *   2. `openllmd.out.log` / `openllmd.err.log` — the OS supervisor's capture of
+ *   2. `openllm.out.log` / `openllm.err.log` — the OS supervisor's capture of
  *      the daemon's raw stdout / stderr (launchd `StandardOut/ErrorPath`,
  *      systemd `append:` — see `service.ts`). These are reserved for NATIVE
  *      output the app logger CAN'T produce (Bun panics, uncaught exceptions,
@@ -23,7 +23,7 @@
  * The daemon is headless and the control loop deliberately BACKS OFF on errors
  * instead of crashing — so a relay 404, a sealed-open miss, an unreachable
  * cloud, or a SANDBOX-KILLED child used to vanish with no trace. These helpers
- * make every fault land in `openllmd.log` at `error` level with enough context
+ * make every fault land in `openllm.log` at `error` level with enough context
  * to diagnose it.
  *
  * Best-effort + self-contained: never throws (a logging failure must not take
@@ -238,12 +238,12 @@ const write = (
   // else is queued so it never blocks the event loop.
   const wroteCombinedLog = appendCombined(line, level === "error");
   try {
-    // App structured logs go ONLY to the combined `openllmd.log` (the
+    // App structured logs go ONLY to the combined `openllm.log` (the
     // appendFileSync above). They are deliberately NOT echoed to stdout/stderr:
-    // the supervisor-captured `openllmd.out.log` (← stdout) / `openllmd.err.log`
+    // the supervisor-captured `openllm.out.log` (← stdout) / `openllm.err.log`
     // (← stderr) are reserved for NATIVE output the app logger can't produce
     // (Bun panics, uncaught crashes, OOM) — so those files never DUPLICATE the
-    // combined log. Find app errors by grepping `openllmd.log` for
+    // combined log. Find app errors by grepping `openllm.log` for
     // `"level":"error"` (or `openllmd logs`); `err.log` is crash forensics.
     //
     // The ONE exception: the boot readiness line, emitted as a single PLAIN

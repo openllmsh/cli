@@ -293,7 +293,7 @@ export const createUsageCache = (deps: TUsageCacheDeps = {}): TUsageCache => {
     }
   };
 
-  // The cache FILE is dev-namespaced, exactly like `openllmd.dev.log` — a
+  // The cache FILE is dev-namespaced, exactly like `openllm.dev.log` — a
   // source-run dev daemon shares the state dir (`~/.openllm`) with the installed
   // prod daemon most developers also run, and an undifferentiated
   // `usage-cache.json` would let the two fight over one file: prod (an older

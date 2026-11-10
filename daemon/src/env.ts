@@ -47,7 +47,7 @@
  * - `OPENLLM_SESSION_IDLE_TIMEOUT_MIN` — detached PTY idle-reap window in
  *                            minutes (default `60`; `0` disables). Read by
  *                            `session-host.ts` from this same env file.
- * - `OPENLLM_LOG_LEVEL`   — most-verbose level written to `openllmd.log`
+ * - `OPENLLM_LOG_LEVEL`   — most-verbose level written to `openllm.log`
  *                            (`error` | `warn` | `info` | `debug`, default
  *                            `info` — so `debug` is OFF unless set). Read by
  *                            `logger.ts` from this same env file.
@@ -65,6 +65,7 @@ import {
   openSync,
   readFileSync,
   renameSync,
+  rmSync,
   unlinkSync,
   writeFileSync,
 } from "node:fs";
@@ -207,15 +208,37 @@ export const stateDir = (home?: string): string => {
 
 /** The structured log file, isolated from the installed daemon in dev mode. */
 export const logFilePath = (): string =>
-  join(stateDir(), isDevMode() ? "openllmd.dev.log" : "openllmd.log");
+  join(stateDir(), isDevMode() ? "openllm.dev.log" : "openllm.log");
 
 /** Native stdout capture written by the installed launchd/systemd service. */
 export const daemonStdoutLogFilePath = (): string =>
-  join(stateDir(), "openllmd.out.log");
+  join(stateDir(), "openllm.out.log");
 
 /** Native stderr capture written by the installed launchd/systemd service. */
 export const daemonStderrLogFilePath = (): string =>
-  join(stateDir(), "openllmd.err.log");
+  join(stateDir(), "openllm.err.log");
+
+/**
+ * Legacy (pre-rename) log filenames under the state dir. Removed on daemon
+ * start — no compat readers (no-legacy-wire-compat).
+ */
+export const LEGACY_DAEMON_LOG_FILES: readonly string[] = [
+  "openllmd.log",
+  "openllmd.dev.log",
+  "openllmd.out.log",
+  "openllmd.err.log",
+];
+
+/** Best-effort delete of legacy `openllmd.*` log files after the rename. */
+export const removeLegacyDaemonLogFiles = (): void => {
+  for (const name of LEGACY_DAEMON_LOG_FILES) {
+    try {
+      rmSync(join(stateDir(), name), { force: true });
+    } catch {
+      // ignore — best-effort cleanup
+    }
+  }
+};
 
 /**
  * An explicit daemon env-file override is valid only when it is an absolute,
