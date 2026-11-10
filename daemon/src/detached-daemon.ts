@@ -66,17 +66,20 @@ export const detachedProcStartTime = (pid: number): string | null => {
 };
 
 /**
- * Detached-daemon process identity for NEW records. On Linux prefers
- * `/proc/<pid>/stat` field 22 (`proc:<ticks>`) — boot-relative, stable across
- * wall-clock steps (VM suspend/resume). Falls back to `ps -o lstart=` (macOS,
- * or Linux when `/proc` is unreadable). Session-host identity keeps using
- * {@link processStartTime}.
+ * Detached-daemon process identity for NEW records.
+ *
+ * On Linux this is ONLY `/proc/<pid>/stat` field 22 (`proc:<ticks>`) —
+ * boot-relative and stable across wall-clock steps (VM suspend/resume). It
+ * never falls back to `ps -o lstart=` for a new write: a transient `/proc`
+ * miss must be retried (see {@link startDetachedDaemon}), not recorded as a
+ * wall-clock string that later mismatches after a clock step. Callers that
+ * still see `null` after retries treat a dead pid as a start failure.
+ *
+ * On macOS (no `/proc`) this uses `ps -o lstart=`. Session-host identity keeps
+ * using {@link processStartTime} on every platform.
  */
 export const detachedProcessStartTime = (pid: number): string | null => {
-  if (process.platform === "linux") {
-    const fromProc = detachedProcStartTime(pid);
-    if (fromProc !== null) return fromProc;
-  }
+  if (process.platform === "linux") return detachedProcStartTime(pid);
   return processStartTime(pid);
 };
 
@@ -165,6 +168,8 @@ export const clearDetachedPidfile = (): void => {
 
 /** Retries for a transient `ps` / `/proc` start-time miss. */
 const START_TIME_RETRY_ATTEMPTS = 5;
+/** Extra budget for the post-spawn write — `/proc` can lag briefly after fork. */
+const START_TIME_WRITE_RETRY_ATTEMPTS = 10;
 const START_TIME_RETRY_MS = 20;
 
 /**
@@ -585,16 +590,21 @@ export const startDetachedDaemon = (
   const readStart = opts.readStartTime ?? detachedProcessStartTime;
   // A freshly spawned pid should be readable immediately; retry briefly for a
   // slow process table rather than recording an unsafe pid-only identity.
-  let startTime: string | null = null;
-  for (let i = 0; i < 10; i++) {
-    startTime = readStart(proc.pid);
-    if (startTime !== null) break;
-    sleepSyncMs(20);
-  }
+  // On Linux `detachedProcessStartTime` returns only `proc:` (or null) — never
+  // a wall-clock lstart — so these retries are what close a transient `/proc`
+  // miss instead of poisoning the pidfile with `ps lstart`.
+  const startTime = readStartTimeRetried(
+    proc.pid,
+    readStart,
+    START_TIME_WRITE_RETRY_ATTEMPTS,
+  );
   if (startTime === null) {
+    const stillAlive = processAlive(proc.pid);
     terminateOwnedPidSync(proc.pid, () => processAlive(proc.pid), 500, 500);
     throw new Error(
-      `failed to record start time for detached daemon (pid ${proc.pid})`,
+      stillAlive
+        ? `failed to record start time for detached daemon (pid ${proc.pid}; process still alive)`
+        : `failed to record start time for detached daemon (pid ${proc.pid}; process already exited)`,
     );
   }
   const record: TDetachedDaemonRecord = {
