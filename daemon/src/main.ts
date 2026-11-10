@@ -344,7 +344,11 @@ export const main = async (): Promise<void> => {
   const noteBootstrapOutcome = (): void => {
     const state = getCloudState();
     if (state === "ok") bootstrapBackoff.noteSuccess();
-    else if (state !== "no_key") bootstrapBackoff.noteFailure();
+    // `no_key` waits for a local write; `connecting` is pre-first-attempt —
+    // neither is an unhealthy streak.
+    else if (state !== "no_key" && state !== "connecting") {
+      bootstrapBackoff.noteFailure();
+    }
   };
   const scheduleBootstrap = (): void => {
     const delay = bootstrapBackoff.nextDelayMs(getCloudState());

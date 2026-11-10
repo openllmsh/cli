@@ -16,8 +16,9 @@ export type TBootstrapBackoffDeps = {
   /** Healthy refresh interval. */
   readonly healthyTtlMs: number;
   /**
-   * Fast poll while waiting for a local key write (`cloud_state === "no_key"`).
-   * Distinct from unhealthy backoff so onboarding stays snappy.
+   * Fast poll while waiting for a local key write (`cloud_state === "no_key"`)
+   * or the first bootstrap attempt (`connecting`). Distinct from unhealthy
+   * backoff so onboarding / boot stays snappy.
    */
   readonly noKeyMs: number;
   readonly random?: () => number;
@@ -33,6 +34,7 @@ export const bootstrapBackoffConfig: Omit<TBootstrapBackoffDeps, "random"> = {
 export type TCloudStateForBackoff =
   | "ok"
   | "no_key"
+  | "connecting"
   | "unreachable"
   | "invalid_key"
   | string;
@@ -46,7 +48,7 @@ export type TBootstrapBackoff = {
   readonly streak: () => number;
   /**
    * Delay before the next bootstrap attempt for `cloudState`.
-   * Jittered for unhealthy states; fixed for `ok` / `no_key`.
+   * Jittered for unhealthy states; fixed for `ok` / `no_key` / `connecting`.
    */
   readonly nextDelayMs: (cloudState: TCloudStateForBackoff) => number;
 };
@@ -67,7 +69,9 @@ export const createBootstrapBackoff = (
     streak: () => streak,
     nextDelayMs: (cloudState) => {
       if (cloudState === "ok") return deps.healthyTtlMs;
-      if (cloudState === "no_key") return deps.noKeyMs;
+      if (cloudState === "no_key" || cloudState === "connecting") {
+        return deps.noKeyMs;
+      }
       // Callers increment streak via noteFailure before asking for the delay.
       // streak 0 (defensive) and streak 1 both land near baseMs.
       const shift = Math.max(streak - 1, 0);

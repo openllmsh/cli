@@ -35,7 +35,7 @@ import {
   invalidateDeviceAccessPin,
   setDeviceAccessPubkey,
 } from "./device-access-verify";
-import { daemonApiKeyId } from "./env";
+import { daemonApiKeyId, hasApiKey } from "./env";
 import { loadIdentityKey } from "./keypair";
 import { withoutCommandReplayContext } from "./op-context";
 import { clearPlanCache, observePolicyRevision } from "./plan-cache";
@@ -54,14 +54,27 @@ const EMPTY = EMPTY_DAEMON_BOOTSTRAP;
 /**
  * Outcome of the last bootstrap attempt — surfaced on `GET /status` so
  * the dashboard knows whether to show the API-key picker (`no_key` /
- * `invalid_key`), a retry hint (`unreachable`), or the provider cards
- * (`ok`).
+ * `invalid_key`), a retry hint (`unreachable`), a still-booting hint
+ * (`connecting`), or the provider cards (`ok`).
  */
-export type TCloudState = "ok" | "no_key" | "invalid_key" | "unreachable";
+export type TCloudState =
+  | "ok"
+  | "no_key"
+  | "invalid_key"
+  | "unreachable"
+  | "connecting";
+
+/**
+ * Initial `/status` cloud state before the first bootstrap attempt finishes.
+ * A configured key must not read as `no_key` while the listener is already up
+ * and bootstrap is still in flight (`openllm status` right after `start`).
+ */
+export const initialCloudState = (keyConfigured: boolean): TCloudState =>
+  keyConfigured ? "connecting" : "no_key";
 
 let snapshot: TDaemonBootstrap = EMPTY;
 let byModelId: Map<string, TDaemonCatalogEntry> = new Map();
-let cloudState: TCloudState = "no_key";
+let cloudState: TCloudState = initialCloudState(hasApiKey());
 let reportingPolicyRevision = 0;
 
 /** Started refresh revision, used to fence delayed diagnostics callbacks. */
