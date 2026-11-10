@@ -47,11 +47,29 @@ const withoutJournalLock = (): (() => void) => {
   return () => {};
 };
 
+/** Absolute path of the hold-journal flock file (pid written while held). */
+export const holdJournalLockPath = (): string => `${outboxPath()}.lock`;
+
+/**
+ * Pid recorded in the hold-journal lock file while another daemon holds it, or
+ * null when missing/unreadable. Does not check liveness — callers decide.
+ */
+export const readHoldJournalHolderPid = (): number | null => {
+  try {
+    const raw = readFileSync(holdJournalLockPath(), "utf8").trim();
+    if (!/^\d+$/.test(raw)) return null;
+    const pid = Number.parseInt(raw, 10);
+    return Number.isInteger(pid) && pid > 0 ? pid : null;
+  } catch {
+    return null;
+  }
+};
+
 /** The kernel releases this lock on process death; the file itself is never removed. */
 export const acquireHoldJournalLock = (
   libraryNames?: readonly string[],
 ): (() => void) => {
-  const path = `${outboxPath()}.lock`;
+  const path = holdJournalLockPath();
   mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
   const libraries =
     libraryNames ??
@@ -83,9 +101,20 @@ export const acquireHoldJournalLock = (
   if (library === null) return withoutJournalLock();
   const fd = openSync(path, "a+", 0o600);
   if (library.symbols.flock(fd, 2 | 4) !== 0) {
+    let holder = "";
+    try {
+      const raw = readFileSync(path, "utf8").trim();
+      if (/^\d+$/.test(raw)) holder = raw;
+    } catch {
+      /* lock body unreadable */
+    }
     closeSync(fd);
     library.close();
-    throw new Error("hold journal is owned by another daemon");
+    throw new Error(
+      holder.length > 0
+        ? `hold journal is owned by another daemon (pid ${holder})`
+        : "hold journal is owned by another daemon",
+    );
   }
   try {
     ftruncateSync(fd, 0);

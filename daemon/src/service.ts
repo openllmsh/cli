@@ -729,7 +729,14 @@ const startServiceAfterCredentialGate = (
     return true;
   }
   const detachedBefore = readLiveDetachedDaemon();
-  const mode = startLinux(binPath);
+  let mode: "systemd" | "detached";
+  try {
+    mode = startLinux(binPath);
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    process.stderr.write(`[openllm] ${detail}\n`);
+    return false;
+  }
   if (mode === "detached") {
     const live = readLiveDetachedDaemon();
     const pid = live?.pid;
@@ -783,7 +790,8 @@ export const serviceStop = (): boolean => {
   const survivor = readLiveDetachedDaemon();
   if (survivor !== null) {
     process.stderr.write(
-      `[openllm] detached daemon pid ${survivor.pid} is still running after stop\n`,
+      `[openllm] detached daemon pid ${survivor.pid} is still running after stop` +
+        ` — if stop refused to signal it, run: kill ${survivor.pid}\n`,
     );
     return false;
   }
