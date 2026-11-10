@@ -59,7 +59,10 @@ import {
 } from "./cli-auth-login";
 import { daemonPort, daemonReachable } from "./clients/gateway";
 import { CLIENT_IDS, CLIENTS } from "./clients/registry";
-import { daemonInvocation } from "./daemon-delegation";
+import {
+  daemonInvocation,
+  runManagedDaemonCommand,
+} from "./daemon-delegation";
 import {
   ACCOUNT_EMAIL_ENV,
   apiKeyEnvVars,
@@ -78,6 +81,7 @@ import {
 import type { TSetupMode } from "./setup-mode";
 import {
   exportedSetupMode,
+  isMinimalSetupMode,
   readSetupMode,
   SETUP_MODE_ENV,
   savedSetupMode,
@@ -183,6 +187,12 @@ export type TLoginIo = {
   readonly confirm?: (question: string) => Promise<boolean>;
   /** False only when the server refuses the saved key (it no longer works). */
   readonly checkSavedKey?: (origin: string, key: string) => Promise<boolean>;
+  /**
+   * After a successful Full start/restart, provision missing vendor CLIs
+   * (same as `openllm start`). Injectable for tests; defaults to
+   * `provisionMissingVendorClis`. Return code is best-effort / non-fatal.
+   */
+  readonly provisionVendors?: () => Promise<number>;
   /** Injectable process signal bus for OAuth Ctrl-C (tests). */
   readonly signalProcess?: TSignalProcess;
 };
@@ -262,26 +272,6 @@ const readPipedStdin = async (): Promise<string | null> => {
   }
 };
 
-/** Spawn the managed daemon with argv and return its exit code. */
-const runDaemonArgs = async (
-  args: readonly string[],
-  quiet: boolean,
-): Promise<number> => {
-  try {
-    const proc = Bun.spawn([...daemonInvocation(), ...args], {
-      stdin: "ignore",
-      stdout: quiet ? 2 : "inherit",
-      stderr: "inherit",
-    });
-    return await proc.exited;
-  } catch (error) {
-    process.stderr.write(
-      `[openllm] could not run managed daemon: ${error instanceof Error ? error.message : String(error)}\n`,
-    );
-    return 1;
-  }
-};
-
 /** The env file this login writes, or null when it doesn't exist yet. */
 const readConfigFile = (): string | null => {
   try {
@@ -291,11 +281,48 @@ const readConfigFile = (): string | null => {
   }
 };
 
-/** Run a managed-daemon subcommand and return its exit code. */
-const runDaemon = (
+/**
+ * Run a managed-daemon start/restart with the same SIGINT/SIGTERM/SIGHUP
+ * forwarding as `openllm start` (`runManagedDaemonCommand`). Quiet mode still
+ * folds stdout into stderr so `--json` callers keep a clean stdout channel.
+ */
+const runDaemon = async (
   command: "restart" | "start",
   quiet: boolean,
-): Promise<number> => runDaemonArgs([command], quiet);
+): Promise<number> => {
+  if (!quiet) return runManagedDaemonCommand(command);
+  let proc: ReturnType<typeof Bun.spawn> | undefined;
+  const forward = (signal: NodeJS.Signals): void => {
+    try {
+      proc?.kill(signal);
+    } catch {
+      // already exited
+    }
+  };
+  const onSigint = (): void => forward("SIGINT");
+  const onSigterm = (): void => forward("SIGTERM");
+  const onSighup = (): void => forward("SIGHUP");
+  process.on("SIGINT", onSigint);
+  process.on("SIGTERM", onSigterm);
+  process.on("SIGHUP", onSighup);
+  try {
+    proc = Bun.spawn([...daemonInvocation(), command], {
+      stdin: "ignore",
+      stdout: 2,
+      stderr: "inherit",
+    });
+    return await proc.exited;
+  } catch (error) {
+    process.stderr.write(
+      `[openllm] could not run managed daemon: ${error instanceof Error ? error.message : String(error)}\n`,
+    );
+    return 1;
+  } finally {
+    process.off("SIGINT", onSigint);
+    process.off("SIGTERM", onSigterm);
+    process.off("SIGHUP", onSighup);
+  }
+};
 
 /** The anchored key travels on stdin (never argv, which `ps` shows); the
  *  daemon's stdout (the bare key) is discarded. */
@@ -695,6 +722,26 @@ export const runLogin = async (
     );
     if (parsed.json) io.writeStdout(loginJson("start_failed"));
     return LOGIN_DAEMON_START_FAILED_EXIT;
+  }
+  // Same as `openllm start`: after a successful Full start/restart, provision
+  // missing vendor CLIs best-effort so `login --start` (Minimal→Full upgrade,
+  // desktop re-pair) does not leave claude/codex/… missing until another start.
+  if (command !== null && !isMinimalSetupMode()) {
+    try {
+      const provision =
+        io.provisionVendors ??
+        (await import("./vendor-provision")).provisionMissingVendorClis;
+      const provisionCode = await provision();
+      if (provisionCode !== 0) {
+        io.terminal.write(
+          `[openllm] Vendor CLI provisioning reported exit ${String(provisionCode)}; the daemon is running.\n`,
+        );
+      }
+    } catch (error) {
+      io.terminal.write(
+        `[openllm] Vendor CLI provisioning failed: ${error instanceof Error ? error.message : String(error)}; the daemon is running.\n`,
+      );
+    }
   }
   const daemon: TLoginDaemonOutcome =
     command === "restart"
