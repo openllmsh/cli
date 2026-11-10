@@ -89,8 +89,30 @@ export const sessionChildGroupAlive = (
 };
 
 /**
+ * True only when the recorded group is provably still ours, so it is safe to
+ * signal: a live leader must match the recorded start time, and a group whose
+ * leader has exited is ours because a pgid can't be reused while it has
+ * members. A record with no start time, or a live leader whose start time
+ * can't be read, is unverifiable — a recycled pid could be anyone's group.
+ */
+export const sessionChildGroupOwned = (
+  child: TSessionChildStopTarget,
+): boolean => {
+  if (!isSafePid(child.childPid)) return false;
+  if (child.childProcessStartTime === undefined) return false;
+  if (processAlive(child.childPid)) {
+    const live = readSessionHostProcessStartTime(child.childPid);
+    if (live !== null) return live === child.childProcessStartTime;
+    if (processAlive(child.childPid)) return false;
+  }
+  return processGroupExists(child.childPid);
+};
+
+/**
  * SIGTERM → grace → SIGKILL the detached session child's process group.
- * Returns true when the group is gone afterwards.
+ * Returns true when the group is gone afterwards. An alive group whose
+ * ownership can't be verified is never signalled and reports false, so the
+ * caller keeps it as a survivor instead of killing an unrelated group.
  */
 export const terminateSessionChildGroup = async (
   child: TSessionChildStopTarget,
@@ -98,7 +120,8 @@ export const terminateSessionChildGroup = async (
   finalReapMs?: number,
 ): Promise<boolean> => {
   if (!sessionChildGroupAlive(child)) return true;
-  const stillOwned = (): boolean => sessionChildGroupAlive(child);
+  if (!sessionChildGroupOwned(child)) return false;
+  const stillOwned = (): boolean => sessionChildGroupOwned(child);
   const outcome = await terminateProcessGroup(
     child.childPid,
     graceMs,
@@ -310,14 +333,26 @@ const isDaemonCli = (value: unknown): value is TDaemonCli =>
  * processes can exit with the daemon, which would otherwise make a later
  * stop pass report "none running".
  */
-export const countLiveSessionHostsIn = (sessionsRoot: string): number => {
+type TSessionMetaRecord = {
+  readonly name: string;
+  readonly meta: Record<string, unknown>;
+};
+
+/**
+ * Every `<sessionsRoot>/<name>/meta.json` that reads and parses to a JSON
+ * object. Missing roots, unreadable files, invalid JSON and non-object
+ * metadata are skipped.
+ */
+const readSessionMetaRecords = (
+  sessionsRoot: string,
+): readonly TSessionMetaRecord[] => {
   let entries: string[];
   try {
     entries = readdirSync(sessionsRoot);
   } catch {
-    return 0;
+    return [];
   }
-  let live = 0;
+  const records: TSessionMetaRecord[] = [];
   for (const name of entries) {
     let parsed: unknown;
     try {
@@ -327,14 +362,16 @@ export const countLiveSessionHostsIn = (sessionsRoot: string): number => {
     } catch {
       continue;
     }
-    if (
-      typeof parsed !== "object" ||
-      parsed === null ||
-      Array.isArray(parsed)
-    ) {
+    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed))
       continue;
-    }
-    const meta = parsed as Record<string, unknown>;
+    records.push({ name, meta: parsed as Record<string, unknown> });
+  }
+  return records;
+};
+
+export const countLiveSessionHostsIn = (sessionsRoot: string): number => {
+  let live = 0;
+  for (const { meta } of readSessionMetaRecords(sessionsRoot)) {
     if (
       typeof meta.pid !== "number" ||
       !Number.isInteger(meta.pid) ||
@@ -355,37 +392,10 @@ export const countLiveSessionHostsIn = (sessionsRoot: string): number => {
 export const listSurvivingSessionChildrenIn = (
   sessionsRoot: string,
 ): readonly TSessionChildStopTarget[] => {
-  let entries: string[];
-  try {
-    entries = readdirSync(sessionsRoot);
-  } catch {
-    return [];
-  }
   const survivors: TSessionChildStopTarget[] = [];
-  for (const name of entries) {
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(
-        readFileSync(join(sessionsRoot, name, "meta.json"), "utf8"),
-      );
-    } catch {
-      continue;
-    }
-    if (
-      typeof parsed !== "object" ||
-      parsed === null ||
-      Array.isArray(parsed)
-    ) {
-      continue;
-    }
-    const id =
-      typeof (parsed as { id?: unknown }).id === "string"
-        ? (parsed as { id: string }).id
-        : name;
-    const child = readSessionChildStopTarget(
-      id,
-      parsed as Record<string, unknown>,
-    );
+  for (const { name, meta } of readSessionMetaRecords(sessionsRoot)) {
+    const id = typeof meta.id === "string" ? meta.id : name;
+    const child = readSessionChildStopTarget(id, meta);
     if (child !== null && sessionChildGroupAlive(child)) survivors.push(child);
   }
   return survivors;
@@ -401,30 +411,8 @@ export const listSurvivingSessionChildrenIn = (
 export const stopLiveSessionHostsIn = async (
   sessionsRoot: string,
 ): Promise<number> => {
-  let entries: string[];
-  try {
-    entries = readdirSync(sessionsRoot);
-  } catch {
-    return 0;
-  }
   let stopped = 0;
-  for (const name of entries) {
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(
-        readFileSync(join(sessionsRoot, name, "meta.json"), "utf8"),
-      );
-    } catch {
-      continue;
-    }
-    if (
-      typeof parsed !== "object" ||
-      parsed === null ||
-      Array.isArray(parsed)
-    ) {
-      continue;
-    }
-    const meta = parsed as Record<string, unknown>;
+  for (const { name, meta } of readSessionMetaRecords(sessionsRoot)) {
     if (
       typeof meta.pid !== "number" ||
       !Number.isInteger(meta.pid) ||
