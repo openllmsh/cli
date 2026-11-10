@@ -140,14 +140,11 @@ export const outcomeMessage = (result: unknown): string | undefined => {
       /\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}/g,
       "[token]",
     )
-    // Long hex runs and base64-looking blobs (+/= or mixed case — not a
-    // repeated single letter that a truncated dump might leave).
+    // Long hex runs first so they keep the `[hex]` label, then any 40+
+    // alphanumeric (or base64 alphabet) run — including trailing `=` padding
+    // opaque vendor tokens often carry.
     .replace(/\b[A-Fa-f0-9]{32,}\b/g, "[hex]")
-    .replace(/\b[A-Za-z0-9+/]{40,}={0,2}\b/g, (match) =>
-      /[+/=]/.test(match) || (/[a-z]/.test(match) && /[A-Z]/.test(match))
-        ? "[blob]"
-        : match,
-    )
+    .replace(/\b[A-Za-z0-9+/]{40,}={0,3}/g, "[blob]")
     // Device/user codes like ABCD-EFGH (vendor device-login prompts).
     .replace(/\b[A-Z0-9]{4,8}-[A-Z0-9]{4,8}\b/g, "[code]")
     // URLs with or without a scheme (hosts with a path or query).
