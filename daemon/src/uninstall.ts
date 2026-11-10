@@ -33,6 +33,7 @@ import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { postRecord } from "./cloud-client";
 import { uninstallCompletion } from "./completion";
+import { readLiveDetachedDaemon } from "./detached-daemon";
 import { stateDir } from "./env";
 import { drainHoldOutbox, pendingHoldRecords } from "./hold-outbox";
 import { serviceUninstall } from "./service";
@@ -78,11 +79,17 @@ const DAEMON_STATE_ENTRIES: readonly string[] = [
   "sessions", // remote PTY + durable session-host state
   "debug", // debug artifacts
   "daemon.pid", // detached (no-systemd) daemon pidfile
+  "openllm.log",
+  "openllm.out.log",
+  "openllm.err.log",
+  "openllm.dev.log",
+  // Legacy names (pre-rename) — still delete on uninstall if present.
   "openllmd.log",
   "openllmd.out.log",
   "openllmd.err.log",
   "openllmd.dev.log",
   "openllmd.diagnostics.jsonl",
+  "openllm.diagnostics.jsonl",
 ];
 
 /**
@@ -235,8 +242,8 @@ export const runUninstall = async (args: readonly string[]): Promise<never> => {
   // 1. Stop + unregister the service (kills self-restore + detached daemon).
   const removedService = serviceUninstall();
   out(
-    removedService !== null
-      ? `  ✓ stopped + unregistered the service (${removedService})\n`
+    removedService.removedPath !== null
+      ? `  ✓ stopped + unregistered the service (${removedService.removedPath})\n`
       : "  ✓ service stopped (no registration found)\n",
   );
 
@@ -247,6 +254,25 @@ export const runUninstall = async (args: readonly string[]): Promise<never> => {
       ? `  ✓ stopped ${stoppedHosts} session host${stoppedHosts === 1 ? "" : "s"}\n`
       : "  ✓ session hosts (none running)\n",
   );
+
+  // Never claim success / delete state while an OpenLLM process is still live.
+  // Deleting daemon.pid while a detached daemon survives is what left bots with
+  // orphan processes after `openllm uninstall --yes --remove-logins`.
+  if (removedService.survivorPid !== null) {
+    out(
+      `\nUninstall stopped — detached daemon pid ${removedService.survivorPid} is still running.\n` +
+        "Stop it (or kill that process) and re-run uninstall.\n",
+    );
+    process.exit(1);
+  }
+  const leftover = readLiveDetachedDaemon();
+  if (leftover !== null) {
+    out(
+      `\nUninstall stopped — detached daemon pid ${leftover.pid} is still running.\n` +
+        "Stop it (or kill that process) and re-run uninstall.\n",
+    );
+    process.exit(1);
+  }
 
   // 2. Shell completion.
   const completion = uninstallCompletion();

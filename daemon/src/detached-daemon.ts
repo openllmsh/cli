@@ -90,8 +90,7 @@ export const detachedStartTimeReaderFor = (
     : processStartTime;
 
 /** Absolute path of the detached-daemon pidfile under the state dir. */
-export const detachedPidfilePath = (): string =>
-  join(stateDir(), "daemon.pid");
+export const detachedPidfilePath = (): string => join(stateDir(), "daemon.pid");
 
 /** Parse a pidfile body. Pure — exported for tests. */
 export const parseDetachedPidfile = (
@@ -99,7 +98,11 @@ export const parseDetachedPidfile = (
 ): TDetachedDaemonRecord | null => {
   try {
     const parsed: unknown = JSON.parse(raw);
-    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    if (
+      typeof parsed !== "object" ||
+      parsed === null ||
+      Array.isArray(parsed)
+    ) {
       return null;
     }
     const rec = parsed as Record<string, unknown>;
@@ -157,6 +160,70 @@ export const clearDetachedPidfile = (): void => {
   rmSync(detachedPidfilePath(), { force: true });
 };
 
+/** Retries for a transient `ps` / `/proc` start-time miss. */
+const START_TIME_RETRY_ATTEMPTS = 5;
+const START_TIME_RETRY_MS = 20;
+
+/**
+ * Read a process command line for ownership checks. Linux uses
+ * `/proc/<pid>/cmdline`; elsewhere `ps -o command=`. Null = unreadable.
+ * Exported for tests.
+ */
+export const readDetachedProcessCommandLine = (pid: number): string | null => {
+  if (!Number.isInteger(pid) || pid <= 0) return null;
+  if (process.platform === "linux") {
+    try {
+      return readFileSync(`/proc/${pid}/cmdline`, "utf8");
+    } catch {
+      return null;
+    }
+  }
+  try {
+    const out = execFileSync("ps", ["-o", "command=", "-p", String(pid)], {
+      encoding: "utf8",
+      timeout: 1_000,
+      stdio: ["ignore", "pipe", "ignore"],
+    });
+    const trimmed = out.trim();
+    return trimmed.length > 0 ? trimmed : null;
+  } catch {
+    return null;
+  }
+};
+
+/**
+ * True when a command line looks like our detached daemon (`openllm daemon` /
+ * `openllmd daemon`) or a durable `__session-host` child. Exported for tests.
+ */
+export const detachedCommandLineLooksOwned = (commandLine: string): boolean => {
+  // `/proc/.../cmdline` is NUL-separated; normalize without a control-char regex.
+  const normalized = commandLine.split("\0").join(" ");
+  if (/(?:^|[\s/])__session-host(?:\s|$)/.test(normalized)) return true;
+  return /(?:^|\/)(openllm|openllmd)(?:\.exe)?[\s]+daemon(?:\s|$)/i.test(
+    normalized,
+  );
+};
+
+/** True when the live pid's cmdline matches an OpenLLM daemon we own. */
+export const detachedProcessLooksOwned = (pid: number): boolean => {
+  const cmd = readDetachedProcessCommandLine(pid);
+  return cmd !== null && detachedCommandLineLooksOwned(cmd);
+};
+
+/** Read start-time with a short retry for transient process-table blips. */
+const readStartTimeRetried = (
+  pid: number,
+  reader: (pid: number) => string | null,
+  attempts: number = START_TIME_RETRY_ATTEMPTS,
+): string | null => {
+  for (let i = 0; i < attempts; i++) {
+    const live = reader(pid);
+    if (live !== null) return live;
+    if (i + 1 < attempts) sleepSyncMs(START_TIME_RETRY_MS);
+  }
+  return null;
+};
+
 /** True when the pidfile names a still-live process with matching start time. */
 export const detachedRecordAlive = (
   record: TDetachedDaemonRecord,
@@ -164,13 +231,16 @@ export const detachedRecordAlive = (
 ): boolean => {
   const reader =
     readStartTime ?? detachedStartTimeReaderFor(record.processStartTime);
-  const live = reader(record.pid);
-  return live !== null && live === record.processStartTime;
+  const live = readStartTimeRetried(record.pid, reader);
+  if (live !== null) return live === record.processStartTime;
+  // Start-time unreadable: only treat as owned when cmdline still matches.
+  return processAlive(record.pid) && detachedProcessLooksOwned(record.pid);
 };
 
 /**
  * Return the pidfile record only while it still names a live matching process;
- * clears stale pidfiles, but keeps the file on transient identity failures.
+ * clears stale pidfiles. A transient null start-time is retried, then confirmed
+ * via cmdline — never treated as live on pid liveness alone (PID reuse).
  */
 export const readLiveDetachedDaemon = (
   readStartTime?: (pid: number) => string | null,
@@ -179,15 +249,17 @@ export const readLiveDetachedDaemon = (
   if (record === null) return null;
   const reader =
     readStartTime ?? detachedStartTimeReaderFor(record.processStartTime);
-  const live = reader(record.pid);
+  const live = readStartTimeRetried(record.pid, reader);
   if (live === null) {
-    // Transient identity failure — do NOT clear the pidfile. Fall back to pid
-    // liveness so a brief process-table blip cannot orphan a running daemon.
     if (!processAlive(record.pid)) {
       clearDetachedPidfile();
       return null;
     }
-    return record;
+    // Unreadable start-time with a live pid: trust cmdline ownership, else
+    // clear a recycled-PID pidfile so start is not a no-op.
+    if (detachedProcessLooksOwned(record.pid)) return record;
+    clearDetachedPidfile();
+    return null;
   }
   // A matching start time can still be a zombie (exited, not reaped).
   if (live !== record.processStartTime || !processAlive(record.pid)) {
@@ -210,25 +282,32 @@ export const stopDetachedDaemon = (
   if (record === null) return null;
   const reader =
     readStartTime ?? detachedStartTimeReaderFor(record.processStartTime);
-  const live = reader(record.pid);
+  const live = readStartTimeRetried(record.pid, reader);
   if (live === null) {
-    // Cannot verify identity — never signal on pid liveness alone (PID reuse).
-    // Clear only when the pid is already gone; otherwise keep the pidfile.
     if (!processAlive(record.pid)) {
       clearDetachedPidfile();
       return null;
     }
-    process.stderr.write(
-      `[openllm] detached daemon pid ${record.pid}: cannot verify process identity; not signalling\n`,
+    // Identity via start-time failed — signal only when cmdline still looks
+    // like our daemon (avoids PID-reuse kills; unblocks uninstall/stop).
+    if (!detachedProcessLooksOwned(record.pid)) {
+      process.stderr.write(
+        `[openllm] detached daemon pid ${record.pid}: cannot verify process identity; clearing stale pidfile\n`,
+      );
+      clearDetachedPidfile();
+      return null;
+    }
+    terminateOwnedPidSync(
+      record.pid,
+      () => processAlive(record.pid) && detachedProcessLooksOwned(record.pid),
     );
-    return null;
-  }
-  if (live !== record.processStartTime) {
+  } else if (live !== record.processStartTime) {
     clearDetachedPidfile();
     return null;
+  } else {
+    const stillOwned = (): boolean => detachedRecordAlive(record, reader);
+    terminateOwnedPidSync(record.pid, stillOwned);
   }
-  const stillOwned = (): boolean => detachedRecordAlive(record, reader);
-  terminateOwnedPidSync(record.pid, stillOwned);
   // Final bounded wait so a just-SIGKILL'd pid is gone before callers spawn.
   const deadline = Date.now() + 2_000;
   while (Date.now() < deadline && processAlive(record.pid)) {
@@ -308,14 +387,15 @@ const SAVED_SERVICE_KEYS = ["OPENLLM_API_KEY"] as const;
 /** Env var naming the old daemon pid a detached replacement waits on. */
 export const DETACHED_HANDOFF_PID_ENV = "OPENLLM_DAEMON_HANDOFF_PID";
 
-/** Upper bound on the handoff wait — boot anyway after this. */
+/** Upper bound on the handoff wait — refuse to boot if the old pid survives. */
 export const DETACHED_HANDOFF_WAIT_MS = 30_000;
 
 /**
  * Called first thing on daemon boot. When this process is a detached
  * self-update replacement, wait (bounded) for the old daemon to exit so the
  * listen port is free. In-process (Atomics sleep) — no external `sleep`, no
- * shell. The env var is removed so children never inherit it.
+ * shell. The env var is removed so children never inherit it. Throws when the
+ * old pid is still alive after the bound — never proceed into a bind fight.
  */
 export const awaitDetachedHandoff = (
   alive: (pid: number) => boolean = processAlive,
@@ -327,7 +407,16 @@ export const awaitDetachedHandoff = (
   const pid = Number.parseInt(raw, 10);
   if (!Number.isInteger(pid) || pid <= 1 || pid === process.pid) return;
   const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline && alive(pid)) sleepSyncMs(100);
+  let stillAlive = alive(pid);
+  while (Date.now() < deadline && stillAlive) {
+    sleepSyncMs(100);
+    stillAlive = alive(pid);
+  }
+  if (stillAlive) {
+    throw new Error(
+      `detached handoff timed out: old daemon pid ${pid} is still running`,
+    );
+  }
 };
 
 /**
@@ -354,7 +443,10 @@ export const startDetachedDaemon = (
   const errFd = openSync(errPath, "a");
   const spawn =
     opts.spawn ??
-    ((argv, spawnOpts): { readonly pid: number; readonly unref: () => void } => {
+    ((
+      argv,
+      spawnOpts,
+    ): { readonly pid: number; readonly unref: () => void } => {
       const proc = Bun.spawn([...argv], spawnOpts);
       return { pid: proc.pid, unref: () => proc.unref() };
     });

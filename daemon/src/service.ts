@@ -254,7 +254,7 @@ const writeEnvFileIfNeeded = (): void => {
 /**
  * The daemon's service-captured log files — the stdout/stderr the OS
  * supervisor (launchd/systemd) redirects, distinct from the app's own
- * structured `openllmd.log`. Single source of truth, consumed by `renderPlist`,
+ * structured `openllm.log`. Single source of truth, consumed by `renderPlist`,
  * `renderUnit`, and `serviceStatus` so the capture policy is ONE value, not
  * per-renderer copies that drift (the bug: macOS captured an err.log, Linux
  * didn't).
@@ -286,7 +286,7 @@ const hasRelativeStateDirOverride = (): boolean => {
  * Service-log directives for the systemd unit. Always tags journald with a
  * greppable identity; ADDITIONALLY mirrors stdout/stderr to files — parity with
  * the macOS launch agent's `StandardOut/ErrorPath`, so Linux finally writes an
- * `openllmd.err.log` capturing crash/OOM/native output the app logger can't
+ * `openllm.err.log` capturing crash/OOM/native output the app logger can't
  * reach — when systemd supports `append:` (≥240) and the paths are absolute (an
  * `OPENLLM_DAEMON_STATE_DIR` override could be relative). Otherwise stays
  * journald-only — never `file:`, which truncates the log on every (re)start.
@@ -744,8 +744,7 @@ const startServiceAfterCredentialGate = (
           // do not claim the newly configured one.
           `openllm v${DAEMON_VERSION} already running detached${
             pid !== undefined ? ` (pid ${pid})` : ""
-          }.\n` +
-            "It is not supervised and will not restart at boot.\n"
+          }.\n` + "It is not supervised and will not restart at boot.\n"
         : `openllm v${DAEMON_VERSION} started detached (${pidNote}listening on ${listen}).\n` +
             "It is not supervised and will not restart at boot.\n",
     );
@@ -772,8 +771,11 @@ export const serviceStart = (): boolean => {
   return startServiceAfterCredentialGate(gate);
 };
 
-/** Stop the service and disable all self-restore. Idempotent. */
-export const serviceStop = (): void => {
+/**
+ * Stop the service and disable all self-restore. Idempotent.
+ * @returns false when a detached daemon survived the stop.
+ */
+export const serviceStop = (): boolean => {
   if (isMac) stopMac();
   else stopLinux();
   // Mac path has no detached fallback today, but clear a stale pidfile anyway.
@@ -783,9 +785,10 @@ export const serviceStop = (): void => {
     process.stderr.write(
       `[openllm] detached daemon pid ${survivor.pid} is still running after stop\n`,
     );
-    return;
+    return false;
   }
   process.stdout.write("openllm stopped; self-restore disabled.\n");
+  return true;
 };
 
 /**
@@ -803,7 +806,7 @@ export const serviceRestart = (): boolean => {
   // guard must also run before stop, otherwise a rejected dev restart could
   // disable a healthy production service.
   if (DAEMON_VERSION === "0.0.0-dev") rejectSourceServiceRegistration();
-  serviceStop();
+  if (!serviceStop()) return false;
   return startServiceAfterCredentialGate(gate);
 };
 
@@ -841,16 +844,35 @@ export const kickstartSupervisedDaemon = (
  * launchd; a detached Linux daemon is respawned in place; a systemd unit
  * returns false so the caller can exit and let `RestartSec` relaunch.
  */
+/**
+ * Outcome of {@link restartForUpdate}. `"keep"` means the replacement failed
+ * and the caller must NOT exit — otherwise boolean true/false both mean the
+ * caller should exit (kickstarted / respawned, or systemd RestartSec).
+ */
+export type TRestartForUpdateResult = boolean | "keep";
+
 export const restartForUpdate = (
   deps: TKickstartSupervisedDaemonDeps = {},
-): boolean => {
+): TRestartForUpdateResult => {
   if (isMac) return kickstartSupervisedDaemon(deps);
   const info = supervisorInfo();
+  const spawnReplacement = (): TRestartForUpdateResult => {
+    try {
+      startDetachedDaemon(serviceBinPath(), { replace: true });
+      return true;
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      process.stderr.write(
+        `[openllm] detached self-update spawn failed; keeping current daemon (${detail})\n`,
+      );
+      return "keep";
+    }
+  };
   if (info.kind === "detached" || readLiveDetachedDaemon() !== null) {
     // This process IS the live detached daemon (or its pidfile still points at
-    // one). Spawn the replacement first; the caller exits afterwards.
-    startDetachedDaemon(serviceBinPath(), { replace: true });
-    return true;
+    // one). Spawn the replacement first; the caller exits afterwards — unless
+    // the spawn fails, in which case we must keep this process.
+    return spawnReplacement();
   }
   // Pidfile missing (e.g. cleared by a transient `ps` failure before the
   // null-read fix) but this process is still the serving daemon on the
@@ -859,8 +881,7 @@ export const restartForUpdate = (
   // A unit file means systemd owns this install (e.g. the bus is briefly
   // unreachable): let `Restart=` relaunch it rather than racing a detached copy.
   if (info.kind === "none" && !existsSync(unitPath())) {
-    startDetachedDaemon(serviceBinPath(), { replace: true });
-    return true;
+    return spawnReplacement();
   }
   return false;
 };
@@ -874,7 +895,14 @@ export const restartForUpdate = (
  * no registration was present. Best-effort + idempotent. Used by
  * `openllmd uninstall`.
  */
-export const serviceUninstall = (): string | null => {
+export type TServiceUninstallResult = {
+  /** Registration path removed, or null when none was present. */
+  readonly removedPath: string | null;
+  /** True when a detached daemon is still running after the stop attempt. */
+  readonly survivorPid: number | null;
+};
+
+export const serviceUninstall = (): TServiceUninstallResult => {
   // 1. Stop + disable self-restore so nothing respawns while we tear down.
   if (isMac) stopMac();
   else stopLinux();
@@ -897,7 +925,10 @@ export const serviceUninstall = (): string | null => {
   if (!isMac && existed) {
     tryRun("systemctl", ["--user", "daemon-reload"]);
   }
-  return existed ? path : null;
+  return {
+    removedPath: existed ? path : null,
+    survivorPid: survivor?.pid ?? null,
+  };
 };
 
 export type TStatusFields = {

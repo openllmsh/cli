@@ -8,9 +8,11 @@
  * daemon's opaque `device_id` so the dashboard can tell which key's daemon is
  * on THIS host (`docs/proposals/this-machine-detection-audit.md`). Dashboard
  * control travels through the outbound relay WebSocket (`control-channel.ts`).
- * The CLI-only `/local/auth` and doctor routes instead require this boot's
- * owner-only capability and reject browser Origin; they do not share the
- * public inference/health CORS grant. See `local-auth.ts` and `local-http.ts`.
+ * The CLI-only `/local/auth` and doctor routes require this boot's owner-only
+ * capability (no Origin). The desktop app's webview may also call `/local/auth`
+ * with Origin when it holds the `local_agent_auth` capability — same admission
+ * as `/local/device-control`. They do not share the public inference/health
+ * CORS grant. See `local-auth.ts` and `local-http.ts`.
  *
  * It holds NO DEK and decrypts NO vault credential. The only secret it
  * carries is the user's `sk-llm-...` key, used to authenticate cloud
@@ -67,6 +69,7 @@ import { getCloudState, latestCliVersion, refreshBootstrap } from "./config";
 import { corsHeaders, isPreflight, preflightResponse } from "./cors";
 import { isSurvivableTransportError } from "./crash-policy";
 import { requireServiceApiKey } from "./credential-gate";
+import { awaitDetachedHandoff } from "./detached-daemon";
 import { getCliState, refreshCliState } from "./device-state";
 import {
   daemonEnv,
@@ -74,6 +77,7 @@ import {
   deviceId,
   hasApiKey,
   isDevMode,
+  removeLegacyDaemonLogFiles,
   stateDir,
 } from "./env";
 import { buildHealth } from "./health";
@@ -99,7 +103,6 @@ import {
 import { probeSandboxCapability } from "./sandbox/exec";
 import { recordSandboxState, sandboxState } from "./sandbox/landlock";
 import { beginRequest, endRequest, trackBodyDone } from "./self-update";
-import { awaitDetachedHandoff } from "./detached-daemon";
 import { migrateLegacyInstall } from "./service";
 import { reconcileSessionHostsAtBoot } from "./session-host";
 import { convergeBinary, currentUpdate } from "./updater";
@@ -156,8 +159,19 @@ export const main = async (): Promise<void> => {
   guardCrashLoop();
 
   // A detached self-update replacement waits for the old daemon to release
-  // the port before booting (no-op otherwise).
-  awaitDetachedHandoff();
+  // the port before booting (no-op otherwise). Refuse to bind if the old
+  // process is still alive after the handoff bound.
+  try {
+    awaitDetachedHandoff();
+  } catch (error) {
+    process.stderr.write(
+      `[openllm] ${error instanceof Error ? error.message : String(error)}\n`,
+    );
+    process.exit(1);
+  }
+
+  // Drop pre-rename `openllmd.*` log files — status now advertises `openllm.*`.
+  removeLegacyDaemonLogFiles();
 
   // Converge a pre-merge two-binary install (real `openllmd` file, units that
   // exec bare `openllmd`) onto the single `openllm daemon` binary.
@@ -208,7 +222,7 @@ export const main = async (): Promise<void> => {
 
   // Last-resort crash handling. The daemon is headless under launchd/systemd,
   // so an uncaught throw or rejected promise would otherwise die silently —
-  // log it to `~/.openllm/openllmd.log`, then EXIT non-zero. Registering a
+  // log it to `~/.openllm/openllm.log`, then EXIT non-zero. Registering a
   // handler does NOT stop the runtime from terminating, and continuing after a
   // fatal error leaves the process in an indeterminate state; exiting lets the
   // launch agent / systemd unit restart it clean. `logError` writes

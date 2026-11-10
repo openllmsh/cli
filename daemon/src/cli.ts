@@ -310,8 +310,7 @@ export const runCli = (args: readonly string[] = userArgs()): boolean => {
       process.exit(serviceStart() ? 0 : 1);
       break;
     case "stop":
-      serviceStop();
-      process.exit(0);
+      process.exit(serviceStop() ? 0 : 1);
       break;
     case "restart":
       process.exit(serviceRestart() ? 0 : 1);

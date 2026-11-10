@@ -339,9 +339,14 @@ export type TConvergeDeps = {
    * Restart after a binary swap. Defaults to {@link restartForUpdate}:
    * macOS kickstarts launchd; a detached Linux daemon is respawned; a
    * systemd unit returns false so the caller exits and `RestartSec` relaunches.
-   * Tests stub it. The legacy name is kept so existing test stubs still typecheck.
+   * Returning `"keep"` means the replacement failed and this process must stay
+   * up (never exit into zero daemons). Tests stub it. The legacy name is kept
+   * so existing test stubs still typecheck.
    */
-  readonly kickstartSupervisedDaemon?: () => boolean | Promise<boolean>;
+  readonly kickstartSupervisedDaemon?: () =>
+    | boolean
+    | "keep"
+    | Promise<boolean | "keep">;
 };
 
 /** Announce a planned restart on the control channel. */
@@ -354,7 +359,9 @@ const defaultAnnouncePlannedRestart = async (): Promise<void> => {
  * After a binary swap, restart via the service layer so detached daemons
  * respawn instead of being orphaned.
  */
-const defaultKickstartSupervisedDaemon = async (): Promise<boolean> => {
+const defaultKickstartSupervisedDaemon = async (): Promise<
+  boolean | "keep"
+> => {
   // Lazy: service.ts pulls credential-gate / install paths unused by most
   // converge ticks; only a real restart needs it. Uses restartForUpdate so a
   // detached (no-systemd) daemon is respawned after the swap, not orphaned.
@@ -487,11 +494,23 @@ export const createBinaryUpdater = (): TBinaryUpdater => {
         // until it went stale.
         held.release();
         try {
-          await (
+          const restartResult = await (
             deps.kickstartSupervisedDaemon ?? defaultKickstartSupervisedDaemon
           )();
-        } finally {
+          // Detached replace can fail after killing only the replacement —
+          // `"keep"` means stay alive rather than exit into zero daemons.
+          if (restartResult === "keep") return;
           deps.exit();
+        } catch (error) {
+          // Kickstart import / launchd failure after announce: still exit so a
+          // supervisor (KeepAlive / RestartSec) can relaunch. Detached spawn
+          // failures must return `"keep"` above instead of throwing.
+          logInfo(
+            "update",
+            `restart after swap failed (${error instanceof Error ? error.message : String(error)}); exiting for supervisor relaunch`,
+          );
+          deps.exit();
+          throw error;
         }
       });
     } finally {
