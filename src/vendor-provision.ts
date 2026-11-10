@@ -56,9 +56,31 @@ export type TProvisionMissingVendorClisDeps = {
  * Vendor CLIs the Full installer provisions — mirrors
  * `build_vendor_status_line` in `packages/cli/install.sh`.
  */
+type TVendorPlatformDeps = {
+  readonly which: (command: string) => string | null;
+  readonly platform: NodeJS.Platform;
+  readonly arch: string;
+};
+
+/**
+ * Antigravity ships only for these platforms (install.sh
+ * `antigravity_platform_key`), and the installer needs `unzip` to unpack it;
+ * otherwise it reports `antigravity=skipped` and never installs it.
+ */
+const antigravityInstallable = (deps: TVendorPlatformDeps): boolean => {
+  const supported =
+    (deps.platform === "darwin" &&
+      (deps.arch === "arm64" || deps.arch === "x64")) ||
+    (deps.platform === "linux" &&
+      (deps.arch === "x64" || deps.arch === "arm64"));
+  return supported && deps.which("unzip") !== null;
+};
+
 export const PROVISIONED_VENDOR_CLIS: readonly {
   readonly command: string;
   readonly dest: (home: string) => string;
+  /** False when the installer would skip it here, so it can't be missing. */
+  readonly installable?: (deps: TVendorPlatformDeps) => boolean;
 }[] = [
   {
     command: "claude",
@@ -95,6 +117,7 @@ export const PROVISIONED_VENDOR_CLIS: readonly {
         "current",
         "agy_acp_server.par",
       ),
+    installable: antigravityInstallable,
   },
 ];
 
@@ -103,13 +126,22 @@ export const allProvisionedVendorClisPresent = (
   deps: {
     readonly home?: string;
     readonly which?: (command: string) => string | null;
+    readonly platform?: NodeJS.Platform;
+    readonly arch?: string;
   } = {},
 ): boolean => {
   const home = deps.home ?? userHome();
   const which =
     deps.which ??
     ((command: string): string | null => Bun.which(command) ?? null);
+  const platformDeps: TVendorPlatformDeps = {
+    which,
+    platform: deps.platform ?? process.platform,
+    arch: deps.arch ?? process.arch,
+  };
   for (const vendor of PROVISIONED_VENDOR_CLIS) {
+    if (vendor.installable !== undefined && !vendor.installable(platformDeps))
+      continue;
     const onPath = which(vendor.command);
     if (onPath !== null && onPath.length > 0) continue;
     const dest = vendor.dest(home);
