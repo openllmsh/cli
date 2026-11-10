@@ -99,6 +99,7 @@ import {
 import { probeSandboxCapability } from "./sandbox/exec";
 import { recordSandboxState, sandboxState } from "./sandbox/landlock";
 import { beginRequest, endRequest, trackBodyDone } from "./self-update";
+import { awaitDetachedHandoff } from "./detached-daemon";
 import { migrateLegacyInstall } from "./service";
 import { reconcileSessionHostsAtBoot } from "./session-host";
 import { convergeBinary, currentUpdate } from "./updater";
@@ -116,16 +117,19 @@ const BOOT_AT = Date.now();
 /** Per-socket data of the two local WS surfaces (realtime + loopback agent). */
 type TLocalSocketData = TLocalRealtimeSocketData | TLocalAgentSocketData;
 
+/** Whether a control-channel peer is an agent socket. */
 const isAgentSocket = (
   socket: Bun.ServerWebSocket<TLocalSocketData>,
 ): socket is Bun.ServerWebSocket<TLocalAgentSocketData> =>
   "agentLoopback" in socket.data;
 
+/** Whether a control-channel peer is a realtime socket. */
 const isRealtimeSocket = (
   socket: Bun.ServerWebSocket<TLocalSocketData>,
 ): socket is Bun.ServerWebSocket<TLocalRealtimeSocketData> =>
   !("agentLoopback" in socket.data);
 
+/** Daemon process entry: bind local control, supervise children, serve tunnels. */
 export const main = async (): Promise<void> => {
   // `daemonPort()` loads the env file, so the kill-switch / opt-in vars are
   // resolved before the sandbox decision.
@@ -150,6 +154,10 @@ export const main = async (): Promise<void> => {
   // Runs before the sandbox so it can't be tripped by an FS-confinement bug,
   // and before the (costly) sandbox/FFI work it's meant to stop repeating.
   guardCrashLoop();
+
+  // A detached self-update replacement waits for the old daemon to release
+  // the port before booting (no-op otherwise).
+  awaitDetachedHandoff();
 
   // Converge a pre-merge two-binary install (real `openllmd` file, units that
   // exec bare `openllmd`) onto the single `openllm daemon` binary.

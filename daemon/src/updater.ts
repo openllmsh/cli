@@ -164,6 +164,7 @@ const PERMANENT_FS_CODES: ReadonlySet<string> = new Set([
   "EDQUOT",
 ]);
 
+/** Map an unknown error to a stable converge error code. */
 const errorCode = (err: unknown): string | null =>
   typeof err === "object" &&
   err !== null &&
@@ -335,25 +336,33 @@ export type TConvergeDeps = {
    */
   readonly announcePlannedRestart?: () => void | Promise<void>;
   /**
-   * macOS: `launchctl kickstart -k` so launchd relaunches without paying
-   * `ThrottleInterval`. Returns whether kickstart ran. Defaults to
-   * {@link kickstartSupervisedDaemon}; tests stub it. Linux no-ops → exit.
+   * Restart after a binary swap. Defaults to {@link restartForUpdate}:
+   * macOS kickstarts launchd; a detached Linux daemon is respawned; a
+   * systemd unit returns false so the caller exits and `RestartSec` relaunches.
+   * Tests stub it. The legacy name is kept so existing test stubs still typecheck.
    */
   readonly kickstartSupervisedDaemon?: () => boolean | Promise<boolean>;
 };
 
+/** Announce a planned restart on the control channel. */
 const defaultAnnouncePlannedRestart = async (): Promise<void> => {
   const { announcePlannedRestart } = await import("./control-channel");
   announcePlannedRestart();
 };
 
+/**
+ * After a binary swap, restart via the service layer so detached daemons
+ * respawn instead of being orphaned.
+ */
 const defaultKickstartSupervisedDaemon = async (): Promise<boolean> => {
   // Lazy: service.ts pulls credential-gate / install paths unused by most
-  // converge ticks; only a real restart needs it.
-  const { kickstartSupervisedDaemon } = await import("./service");
-  return kickstartSupervisedDaemon();
+  // converge ticks; only a real restart needs it. Uses restartForUpdate so a
+  // detached (no-systemd) daemon is respawned after the swap, not orphaned.
+  const { restartForUpdate } = await import("./service");
+  return restartForUpdate();
 };
 
+/** Default converge dependency bundle for production runs. */
 const defaultDeps = (): TConvergeDeps => ({
   version: DAEMON_VERSION,
   fingerprint: DAEMON_FINGERPRINT,
@@ -519,6 +528,7 @@ export const convergeBinary = (
   deps?: TConvergeDeps,
 ): Promise<void> => binaryUpdater.convergeBinary(latest, opts, deps);
 
+/** Watch the on-disk binary for swaps that should trigger converge. */
 export const watchBinary = (): void => {
   binaryUpdater.watchBinary();
 };

@@ -122,15 +122,23 @@ openllm daemon device disable).
   --no-restart         save the key only — never restart or start the daemon,
                        never change the setup mode
   --json               print {"saved":true,"daemon":"restarted"|"started"|
-                       "not_running"|"unchanged","setupMode":"full"|"minimal"}
-                       on stdout; everything else on stderr
+                       "not_running"|"unchanged"|"start_failed",
+                       "setupMode":"full"|"minimal"} on stdout; everything else
+                       on stderr. Exit 3 means the key was saved but starting
+                       (or restarting) the daemon failed — run \`openllm start\`
+                       or \`openllm restart\` (restart a running daemon so it
+                       reloads the saved key).
 `;
 
 export type TLoginDaemonOutcome =
   | "restarted"
   | "started"
   | "not_running"
-  | "unchanged";
+  | "unchanged"
+  | "start_failed";
+
+/** Key saved, but `openllm start`/`restart` after login failed. */
+export const LOGIN_DAEMON_START_FAILED_EXIT = 3;
 
 /** The `--json` line on stdout. `setupMode` is the mode in effect after login. */
 export type TLoginJson = {
@@ -201,6 +209,7 @@ export const loginNextStep = (style: TTermStyle = plainStyle): string => {
   return `  ${style.dim("Run any of these:")}\n${rows}`;
 };
 
+/** Ask a yes/no question on the TTY; false when not a TTY. */
 const confirmOnTty = async (question: string): Promise<boolean> => {
   process.stderr.write(question);
   const answer = await readTtyLine();
@@ -253,6 +262,7 @@ const readPipedStdin = async (): Promise<string | null> => {
   }
 };
 
+/** Spawn the managed daemon with argv and return its exit code. */
 const runDaemonArgs = async (
   args: readonly string[],
   quiet: boolean,
@@ -281,6 +291,7 @@ const readConfigFile = (): string | null => {
   }
 };
 
+/** Run a managed-daemon subcommand and return its exit code. */
 const runDaemon = (
   command: "restart" | "start",
   quiet: boolean,
@@ -343,6 +354,7 @@ const switchToFullForStart = (terminal: TCredentialGateTerminal): void => {
   }
 };
 
+/** Emit a machine-readable login outcome as JSON. */
 const loginJson = (daemon: TLoginDaemonOutcome): string =>
   `${JSON.stringify({ saved: true, daemon, setupMode: readSetupMode() } satisfies TLoginJson)}\n`;
 
@@ -358,6 +370,7 @@ type TLoginArgs = {
   readonly resume: string | null;
 };
 
+/** Parse `openllm login` flags into a typed options object. */
 const parseLoginArgs = (args: readonly string[]): TLoginArgs | null => {
   let key: string | null = null;
   let apiKeyEntry = false;
@@ -453,6 +466,7 @@ const confirmReplacingSavedKey = async (
   return confirm(`Already signed in${who}. Sign in again? [y/N] `);
 };
 
+/** Run the OpenLLM login flow; returns a process exit code. */
 export const runLogin = async (
   args: readonly string[],
   io: TLoginIo = defaultIo,
@@ -679,7 +693,8 @@ export const runLogin = async (
     io.terminal.write(
       `[openllm] The key is saved, but ${command === "restart" ? "restarting" : "starting"} the daemon failed. Run \`openllm ${command}\`.\n`,
     );
-    return 1;
+    if (parsed.json) io.writeStdout(loginJson("start_failed"));
+    return LOGIN_DAEMON_START_FAILED_EXIT;
   }
   const daemon: TLoginDaemonOutcome =
     command === "restart"

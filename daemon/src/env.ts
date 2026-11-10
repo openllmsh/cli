@@ -332,7 +332,7 @@ export const loadEnvFile = (): void => {
 
 /** Parse `KEY=value` lines (comments + blanks ignored) into a map. Shared by
  *  `loadEnvFile` and the dev-mode shared-file API-key fallback. */
-const parseEnvLines = (text: string): Map<string, string> => {
+export const parseEnvLines = (text: string): Map<string, string> => {
   const out = new Map<string, string>();
   for (const line of text.split("\n")) {
     const trimmed = line.trim();

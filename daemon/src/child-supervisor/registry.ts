@@ -30,10 +30,13 @@ export type TChildRegistryRecord = {
   readonly startedAtMs: number;
 };
 
+/** Directory that holds on-disk child-supervisor records. */
 const childrenDir = (): string => join(stateDir(), "children");
 
+/** Path of one child-supervisor record file. */
 const recordPath = (pid: number): string => join(childrenDir(), `${pid}.json`);
 
+/** Narrow an unknown value to a known supervised child kind. */
 const isKind = (value: unknown): value is TDisposableChildKind =>
   value === "probe" ||
   value === "vendor-capture" ||
@@ -41,6 +44,7 @@ const isKind = (value: unknown): value is TDisposableChildKind =>
   value === "login" ||
   value === "native-runtime";
 
+/** Narrow unknown JSON to a child-registry record before trusting its fields. */
 const isRecord = (value: unknown): value is TChildRegistryRecord => {
   if (typeof value !== "object" || value === null || Array.isArray(value))
     return false;
@@ -65,11 +69,13 @@ const isRecord = (value: unknown): value is TChildRegistryRecord => {
 };
 
 /**
- * `ps -o lstart=` follows LC_TIME and TZ. Installer writes and daemon reads
- * must share one pin or a live worker looks PID-reused. Keep sync + async
- * helpers on the same env.
+ * `ps -o lstart=` follows LC_TIME and TZ. Writers and readers must share one
+ * pin or a live worker looks PID-reused. Keep sync + async helpers on the same
+ * env. The pin covers child-supervisor and detached-daemon identity only;
+ * durable session hosts deliberately read unpinned `ps` so hosts written by
+ * earlier releases still match.
  */
-const processStartTimePsEnv = (): NodeJS.ProcessEnv => ({
+export const processStartTimePsEnv = (): NodeJS.ProcessEnv => ({
   ...process.env,
   LC_ALL: "C",
   TZ: "UTC",
@@ -116,6 +122,7 @@ export const defaultProcessStartTimeHelperSpawn: TProcessStartTimeHelperSpawn =
       detached: true,
     });
 
+/** Cancel a helper subprocess stdout stream so it can exit. */
 const closeHelperStdout = (proc: ReturnType<typeof Bun.spawn>): void => {
   const stdout = proc.stdout;
   if (stdout === undefined || typeof stdout === "number") return;
@@ -128,6 +135,7 @@ const closeHelperStdout = (proc: ReturnType<typeof Bun.spawn>): void => {
   }
 };
 
+/** SIGTERM a detached start-time helper and wait briefly for exit. */
 const reapStartTimeHelper = async (
   proc: ReturnType<typeof Bun.spawn>,
 ): Promise<void> => {
@@ -203,13 +211,17 @@ export const readProcessStartTime = async (
 // intentionally process-local rather than durable state.
 const daemonInstanceId = `${process.pid}:${processStartTime(process.pid) ?? String(Date.now())}`;
 
+/** Stable id for this daemon process instance. */
 export const currentDaemonInstanceId = (): string => daemonInstanceId;
 
+/** Stable id for this child-supervisor instance. */
 export const currentChildSupervisorInstanceId = (): string => daemonInstanceId;
 
+/** Digest of argv used to detect supervisor identity drift. */
 export const argvDigest = (argv: ReadonlyArray<string>): string =>
   createHash("sha256").update(JSON.stringify(argv)).digest("hex");
 
+/** Persist a supervised child record on disk. */
 export const addChildRegistryRecord = (record: TChildRegistryRecord): void => {
   const directory = childrenDir();
   const target = recordPath(record.pid);
@@ -232,6 +244,7 @@ export const addChildRegistryRecord = (record: TChildRegistryRecord): void => {
   }
 };
 
+/** Delete a supervised child record from disk. */
 export const removeChildRegistryRecord = (pid: number): void => {
   try {
     rmSync(recordPath(pid), { force: true });
@@ -240,6 +253,7 @@ export const removeChildRegistryRecord = (pid: number): void => {
   }
 };
 
+/** Load every supervised child record from disk. */
 export const listChildRegistryRecords = (): readonly TChildRegistryRecord[] => {
   let entries: string[];
   try {
@@ -267,6 +281,7 @@ export const listChildRegistryRecords = (): readonly TChildRegistryRecord[] => {
   return records;
 };
 
+/** Whether a live process still matches its registry record. */
 export const childProcessMatchesRecord = (
   record: TChildRegistryRecord,
 ): boolean => processStartTime(record.pid) === record.processStartTime;

@@ -10,6 +10,7 @@ import type { TDaemonCli } from "./clients/registry";
 import { resolveById } from "./clients/session-picker";
 import {
   discoverLiveSessionHosts,
+  killSessionHostViaCtl,
   sessionHostProcessAlive,
   withDeviceSessionTitles,
 } from "./session-host";
@@ -37,12 +38,15 @@ List, attach to, or kill live local durable sessions.
           controls on stdin (see packages/cli/src/clients/attach.ts).
 `;
 
+/** Truncate a display string to a maximum length with an ellipsis. */
 const truncate = (value: string, max: number): string =>
   value.length <= max ? value : `${value.slice(0, Math.max(0, max - 1))}…`;
 
+/** Shorten a session id for tabular display. */
 const truncateId = (value: string, max: number): string =>
   value.length <= max ? value : value.slice(0, max);
 
+/** Format a timestamp as a short relative age string. */
 const relativeAge = (updatedAtMs: number, nowMs: number): string => {
   const seconds = Math.max(0, Math.floor((nowMs - updatedAtMs) / 1_000));
   if (seconds < 60) return `${seconds}s ago`;
@@ -51,6 +55,7 @@ const relativeAge = (updatedAtMs: number, nowMs: number): string => {
   return `${Math.floor(seconds / 86_400)}d ago`;
 };
 
+/** Compact a cwd path for the sessions table. */
 const compactCwd = (cwd: string): string => {
   const home = process.env.HOME;
   return home !== undefined && cwd.startsWith(`${home}/`)
@@ -111,6 +116,7 @@ export const listSessionHosts = async (): Promise<
     }),
   );
 
+/** Resolve a session id argument or print an error. */
 const requireSession = (
   sessions: readonly TBrokerSessionRow[],
   id: string | undefined,
@@ -137,6 +143,7 @@ type TAttachOpts = {
   readonly rows: number;
 };
 
+/** Attach the current TTY to a live broker session host. */
 const attach = async (
   session: TBrokerSessionRow,
   opts: TAttachOpts,
@@ -178,6 +185,7 @@ const attach = async (
   return 1;
 };
 
+/** Parse attach flags (`--pipe`, `--cols`, `--rows`). */
 const parseAttachOpts = (args: readonly string[]): TAttachOpts | null => {
   let pipe = false;
   let cols = process.stdout.columns ?? 80;
@@ -206,9 +214,6 @@ const parseAttachOpts = (args: readonly string[]): TAttachOpts | null => {
   return { pipe, cols, rows };
 };
 
-const sleep = async (ms: number): Promise<void> =>
-  new Promise((resolve) => setTimeout(resolve, ms));
-
 /**
  * Stop the standalone host through its private control socket.
  *
@@ -227,130 +232,20 @@ export const killSessionHost = async (
   if (
     session.pid === undefined ||
     session.process_start_time === undefined ||
-    session.socket_path === undefined ||
-    !sessionHostProcessAlive({
-      pid: session.pid,
-      processStartTime: session.process_start_time,
-    })
+    session.socket_path === undefined
   ) {
     return false;
   }
-
-  const socketPath = session.socket_path;
-  const pid = session.pid;
-  const processStartTime = session.process_start_time;
-  const alive = (): boolean =>
-    sessionHostProcessAlive({ pid, processStartTime });
-
-  const killed = await new Promise<boolean>((resolve) => {
-    let settled = false;
-    const settle = (ok: boolean): void => {
-      if (settled) return;
-      settled = true;
-      resolve(ok);
-    };
-
-    let ws: WebSocket;
-    try {
-      ws = new WebSocket(
-        socketPath.startsWith("/") ? `ws+unix://${socketPath}` : socketPath,
-      );
-    } catch {
-      settle(false);
-      return;
-    }
-
-    const timer = setTimeout(() => {
-      try {
-        ws.close();
-      } catch {
-        /* ignore */
-      }
-      settle(!alive());
-    }, 2_000);
-
-    ws.binaryType = "arraybuffer";
-    ws.onopen = (): void => {
-      // Final identity check immediately before sending control — refuse if
-      // the process exited or the pid was recycled after discovery.
-      if (!alive()) {
-        clearTimeout(timer);
-        try {
-          ws.close();
-        } catch {
-          /* ignore */
-        }
-        settle(false);
-        return;
-      }
-      ws.send(
-        JSON.stringify({
-          t: "open",
-          open: {
-            session_id: session.id,
-            cli: session.cli,
-            cols: 80,
-            rows: 24,
-            mode: "attach",
-          },
-        }),
-      );
-    };
-    ws.onmessage = (event: MessageEvent): void => {
-      if (typeof event.data !== "string") return;
-      let parsed: unknown;
-      try {
-        parsed = JSON.parse(event.data);
-      } catch {
-        return;
-      }
-      if (
-        typeof parsed !== "object" ||
-        parsed === null ||
-        (parsed as { t?: unknown }).t !== "ctrl"
-      ) {
-        return;
-      }
-      const p = (parsed as { p?: { t?: unknown; ok?: unknown } }).p;
-      if (p?.t !== "open_ack") return;
-      if (p.ok !== true) {
-        clearTimeout(timer);
-        try {
-          ws.close();
-        } catch {
-          /* ignore */
-        }
-        settle(false);
-        return;
-      }
-      ws.send(JSON.stringify({ t: "ctrl", p: { t: "close", intent: "kill" } }));
-      try {
-        ws.close();
-      } catch {
-        /* ignore */
-      }
-    };
-    ws.onerror = (): void => {
-      clearTimeout(timer);
-      settle(false);
-    };
-    ws.onclose = (): void => {
-      clearTimeout(timer);
-      void (async () => {
-        for (let elapsed = 0; elapsed < 1_000; elapsed += 50) {
-          await sleep(50);
-          if (!alive()) {
-            settle(true);
-            return;
-          }
-        }
-        settle(false);
-      })();
-    };
+  return killSessionHostViaCtl({
+    id: session.id,
+    cli: session.cli,
+    pid: session.pid,
+    processStartTime: session.process_start_time,
+    socketPath: session.socket_path,
   });
-  return killed;
 };
 
+/** Kill a broker session host via its control socket. */
 const kill = async (session: TBrokerSessionRow): Promise<number> => {
   if (!(await killSessionHost(session))) {
     process.stderr.write(`[openllm] could not kill session ${session.id}\n`);

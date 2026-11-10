@@ -2,25 +2,31 @@
 # OpenLLM installer — installs the single `openllm` binary (the CLI, plus the
 # `ollm` alias, AND the local daemon as `openllm daemon`). Ordered setup:
 # binary → OpenLLM authentication (or reuse a usable credential) → full-mode
-# vendor CLI provisioning → daemon start. Minimal mode authenticates only.
-# On a controlling terminal a keyless install runs `openllm login` (OAuth by
-# default, or `--api-key` paste) and continues the same run after success.
-# Headless / non-interactive installs never hang: they accept an explicit key
-# or print `openllm login` and exit nonzero without provisioning vendors or
-# starting the daemon.
+# vendor CLI provisioning → optional daemon start. Minimal mode authenticates
+# only.
 #
-# Exit status: nonzero when a first install ends without a usable key, or when
-# the daemon fails to start / restart. Vendor CLIs never change it — pending
-# (another installer already has that provider in flight), failed or timed out
-# are reported with a warning naming ~/.openllm/cli-install.log and how to
-# retry, and the run still exits 0 once the daemon is up. Ctrl-C / TERM during
-# the vendor wait stops only the vendor installers this run started, says what
-# is already saved and exits nonzero.
+# Two auto-detected modes (override with --interactive / --non-interactive):
+#   Interactive (controlling tty): today's walkthrough; Full by default; starts
+#     the daemon when a key is available.
+#   Headless: Full with no prompts; does NOT start/register the daemon unless
+#     --start / OPENLLM_START_DAEMON=1; ends with a fixed parseable summary.
+# Key presence does not change the start decision. Updates restart a RUNNING
+# daemon and never start a stopped one.
 #
 #   curl -fsSL https://www.openllm.sh/install | bash
-#
-#   # with a key, so the daemon is paired immediately:
 #   curl -fsSL https://www.openllm.sh/install | OPENLLM_API_KEY=sk-llm-... bash
+#   curl -fsSL https://www.openllm.sh/install | bash -s -- --non-interactive
+#
+# Flags (fail on unknown/contradiction BEFORE installing anything):
+#   --help  --dry-run
+#   --interactive | --non-interactive | -y     OPENLLM_INTERACTIVE=1|0
+#   --full (default) | --minimal               OPENLLM_SETUP_MODE
+#     Full only: --start | --no-start          OPENLLM_START_DAEMON=1|0
+#                --vendors=a,b | --no-vendors  OPENLLM_ONLY_VENDOR_CLIS /
+#                                              OPENLLM_SKIP_VENDOR_CLIS
+#   --origin=  --port=  --no-shell-setup       OPENLLM_SKIP_SHELL_SETUP
+# Precedence: flag > env > ~/.openllm/.env > default. No --key flag (keys stay
+# OPENLLM_API_KEY only — argv shows up in ps / shell history).
 #
 # Env (all optional):
 #   OPENLLM_CLOUD_ORIGIN   gateway origin (env → existing ~/.openllm/.env →
@@ -35,61 +41,33 @@
 #                          Re-running install with a new anchor rotates it.
 #                          The anchor is the sessions opt-in — an anchored
 #                          device serves agent sessions by default.
-#   OPENLLM_DAEMON_PORT    local daemon port (default 8787). Unset / empty in
-#                          the process env AND absent from the env file → the
-#                          default, exactly like every other missing setting.
-#                          An explicit or already-persisted port is kept as-is
-#                          (never probed or reassigned).
-#   OPENLLM_SKIP_SHELL_SETUP     set to skip `openllm setup` + completion install
-#                                (PATH symlinks / shell rc / completion stay untouched)
-#   OPENLLM_SKIP_VENDOR_CLIS     set to skip vendor CLI provisioning (opt-out;
-#                                Full installs vendors by default, including
-#                                headless / curl|bash)
+#   OPENLLM_DAEMON_PORT    local daemon port (default 8787).
+#   OPENLLM_SKIP_SHELL_SETUP     skip `openllm setup` + completion install
+#   OPENLLM_SKIP_VENDOR_CLIS     skip vendor CLI provisioning
 #   OPENLLM_ONLY_VENDOR_CLIS     comma-separated subscription slugs to provision
-#                                (e.g. claude_code,chatgpt); unset = all vendors
-#   OPENLLM_SETUP_MODE           product setup mode: `full` or `minimal`.
-#                                Explicit value / `--minimal` bypasses the
-#                                interactive chooser. Full (the default)
-#                                authenticates, provisions missing vendor CLIs,
-#                                and starts the daemon when a key is available.
-#                                Minimal authenticates only — no vendor install
-#                                and no daemon start; later `openllm <client>`
-#                                launches stay cloud-directed. Persisted into
-#                                the env file so subsequent launches honor it.
-#                                Distinct from OPENLLM_INSTALL_MODE (install vs
-#                                update). On a fresh interactive install with
-#                                no saved mode, the installer asks Full vs
-#                                Minimal on the controlling tty (Enter → Full).
-#                                Headless / non-interactive installs (scripts,
-#                                CI, the desktop app; no controlling tty) never
-#                                hang and pick Full silently — including bare
-#                                `curl … | bash`. Anyone who wants Minimal in
-#                                automation sets OPENLLM_SETUP_MODE=minimal or
-#                                passes `--minimal`. An update, or a re-run that
-#                                already has OPENLLM_SETUP_MODE in the env file,
-#                                never prompts — the saved mode is preserved.
-#                                An update that replaced the binary restarts a
-#                                RUNNING daemon in either mode; Minimal never
-#                                starts a stopped one. A re-run that changed
-#                                neither the binary nor the env file leaves a
-#                                running daemon alone. EOF / cancel aborts
-#                                before any mode-dependent persistence or
-#                                vendor install.
-#   --minimal                    same as OPENLLM_SETUP_MODE=minimal (for
-#                                `curl …/install | bash -s -- --minimal`)
+#   OPENLLM_SETUP_MODE           `full` or `minimal` (see --full / --minimal)
+#   OPENLLM_INTERACTIVE          1|0 force interactive / headless
+#   OPENLLM_START_DAEMON         1|0 force daemon start / no-start (Full only)
+#   OPENLLM_VENDOR_WAIT_SECS     headless vendor wait ceiling (default 600)
+#   OPENLLM_INSTALL_MODE         install | update | vendors
+#                                `vendors` only provisions missing vendor CLIs
+#                                (used by `openllm start` in Full mode)
+#
+# Exit status: 0 when the install worked and next steps were printed (keyless
+# included). Nonzero only on a real failure, including an explicitly requested
+# start that failed. Vendor CLI failures are reported in the summary and do
+# not fail the run.
 #
 # This is the ONLY shell installer. In full mode it also provisions any missing
 # vendor subscription CLIs (claude / codex / kimi / grok / cursor-agent / muse)
-# via each vendor's official installer — skip if already present — in the
-# background, never awaited: the daemon starts as soon as the binary and env
-# are in place. Google Antigravity has no installer script, so the latest
-# official ACP agent release (resolved from the ACP registry) is downloaded
-# and unpacked under ~/.openllm/vendor/antigravity. It never edits a
-# third-party client config:
-# `openllm <client>` applies OpenLLM at run time instead. The only files it
-# writes outside ~/.openllm (besides what a vendor installer itself does) are
-# the PATH symlinks and the ONE marked block in your shell rc that
-# `openllm setup` / `openllm daemon completion` manage.
+# via each vendor's official installer — skip if already present. Google
+# Antigravity has no installer script, so the latest official ACP agent release
+# is downloaded under ~/.openllm/vendor/antigravity. It never edits a
+# third-party client config: `openllm <client>` applies OpenLLM at run time.
+# The only files it writes outside ~/.openllm (besides what a vendor installer
+# itself does) are the PATH symlinks and the ONE marked block in your shell rc
+# that `openllm setup` / `openllm daemon completion` manage.
+
 set -euo pipefail
 
 # ORIGIN is resolved in preflight (env → existing ~/.openllm/.env → default),
@@ -114,23 +92,213 @@ SETUP_MODE_EXPLICIT=0
 # daemon restart when nothing changed.
 INSTALLED_COMPONENTS=""
 
+# Flag / mode resolution state (parsed below; resolved after env-file helpers).
+FLAG_HELP=0
+FLAG_DRY_RUN=0
+FLAG_INTERACTIVE=""
+FLAG_SETUP_MODE=""
+FLAG_START=""
+FLAG_VENDORS_ONLY=""
+FLAG_NO_VENDORS=0
+FLAG_ORIGIN=""
+FLAG_PORT=""
+FLAG_NO_SHELL_SETUP=0
+WANT_START=0
+INTERACTIVE=0
+
 has_command() { command -v "$1" >/dev/null 2>&1; }
 
 die() { echo "Error: $*" >&2; exit 1; }
 
-# Accept `--minimal`; reject every other option so a mistyped flag never
-# silently no-ops. `curl … | bash -s -- --minimal` is the documented path.
+print_installer_help() {
+  cat <<'EOF'
+OpenLLM installer
+
+Usage:
+  curl -fsSL https://www.openllm.sh/install | bash
+  curl -fsSL https://www.openllm.sh/install | bash -s -- [options]
+
+Options:
+  --help                         Show this help and exit
+  --dry-run                      Print the resolved plan; install nothing
+  --interactive                  Force interactive mode (prompts + start)
+  --non-interactive, -y          Force headless mode (no prompts; no start)
+  --full                         Full setup (default)
+  --minimal                      Minimal setup (no vendors, no daemon start)
+  --start                        Start the daemon (Full only)
+  --no-start                     Do not start the daemon (Full only)
+  --vendors=a,b                  Only provision these vendor slugs
+                                 (claude_code,chatgpt,kimi_code,grok,
+                                  cursor,muse,antigravity)
+  --no-vendors                   Skip vendor CLI provisioning
+  --origin=URL                   Gateway origin (OPENLLM_CLOUD_ORIGIN)
+  --port=N                       Daemon port (OPENLLM_DAEMON_PORT)
+  --no-shell-setup               Skip PATH / shell rc / completion wiring
+
+Env aliases (flag > env > ~/.openllm/.env > default):
+  OPENLLM_INTERACTIVE=1|0
+  OPENLLM_SETUP_MODE=full|minimal
+  OPENLLM_START_DAEMON=1|0
+  OPENLLM_ONLY_VENDOR_CLIS / OPENLLM_SKIP_VENDOR_CLIS
+  OPENLLM_SKIP_SHELL_SETUP
+  OPENLLM_API_KEY                (no --key flag)
+  OPENLLM_VENDOR_WAIT_SECS       headless vendor wait (default 600)
+  OPENLLM_INSTALL_MODE=install|update|vendors
+EOF
+}
+
+# Slugs accepted by --vendors= / OPENLLM_ONLY_VENDOR_CLIS (provision_clis +
+# antigravity). Keep in sync with the --vendors help line above.
+INSTALLER_VENDOR_SLUGS="claude_code,chatgpt,kimi_code,grok,cursor,muse,antigravity"
+
+# Reject unknown --vendors= entries before any install side effect.
+validate_vendor_slugs() {
+  local raw="$1" slug rest
+  rest="$raw"
+  while [ -n "$rest" ]; do
+    case "$rest" in
+      *,*)
+        slug="${rest%%,*}"
+        rest="${rest#*,}"
+        ;;
+      *)
+        slug="$rest"
+        rest=""
+        ;;
+    esac
+    [ -n "$slug" ] || die "--vendors= entries must be non-empty (got: $raw)"
+    case ",${INSTALLER_VENDOR_SLUGS}," in
+      *",$slug,"*) ;;
+      *)
+        die "unknown --vendors= slug: $slug (expected one of: $INSTALLER_VENDOR_SLUGS)"
+        ;;
+    esac
+  done
+}
+
+# Parse argv first so unknown / contradictory flags fail before any install work.
 for arg in "$@"; do
   case "$arg" in
+    --help|-h)
+      FLAG_HELP=1
+      ;;
+    --dry-run)
+      FLAG_DRY_RUN=1
+      ;;
+    --interactive)
+      if [ "$FLAG_INTERACTIVE" = 0 ]; then
+        die "contradictory options: --interactive and --non-interactive"
+      fi
+      FLAG_INTERACTIVE=1
+      ;;
+    --non-interactive|-y)
+      if [ "$FLAG_INTERACTIVE" = 1 ]; then
+        die "contradictory options: --interactive and --non-interactive"
+      fi
+      FLAG_INTERACTIVE=0
+      ;;
+    --full)
+      if [ "$FLAG_SETUP_MODE" = minimal ]; then
+        die "contradictory options: --full and --minimal"
+      fi
+      FLAG_SETUP_MODE=full
+      ;;
     --minimal)
-      OPENLLM_SETUP_MODE=minimal
-      SETUP_MODE_EXPLICIT=1
+      if [ "$FLAG_SETUP_MODE" = full ]; then
+        die "contradictory options: --full and --minimal"
+      fi
+      FLAG_SETUP_MODE=minimal
+      ;;
+    --start)
+      if [ "$FLAG_START" = 0 ]; then
+        die "contradictory options: --start and --no-start"
+      fi
+      FLAG_START=1
+      ;;
+    --no-start)
+      if [ "$FLAG_START" = 1 ]; then
+        die "contradictory options: --start and --no-start"
+      fi
+      FLAG_START=0
+      ;;
+    --no-vendors)
+      if [ -n "$FLAG_VENDORS_ONLY" ]; then
+        die "contradictory options: --vendors and --no-vendors"
+      fi
+      FLAG_NO_VENDORS=1
+      ;;
+    --vendors=*)
+      if [ "$FLAG_NO_VENDORS" = 1 ]; then
+        die "contradictory options: --vendors and --no-vendors"
+      fi
+      FLAG_VENDORS_ONLY="${arg#--vendors=}"
+      [ -n "$FLAG_VENDORS_ONLY" ] || die "--vendors= requires a comma-separated list"
+      validate_vendor_slugs "$FLAG_VENDORS_ONLY"
+      ;;
+    --origin=*)
+      FLAG_ORIGIN="${arg#--origin=}"
+      [ -n "$FLAG_ORIGIN" ] || die "--origin= requires a URL"
+      ;;
+    --port=*)
+      FLAG_PORT="${arg#--port=}"
+      [ -n "$FLAG_PORT" ] || die "--port= requires a port number"
+      ;;
+    --no-shell-setup)
+      FLAG_NO_SHELL_SETUP=1
+      ;;
+    --key|--key=*|--api-key|--api-key=*)
+      die "no --key flag — set OPENLLM_API_KEY in the environment instead"
+      ;;
+    -*)
+      die "unknown installer option: $arg"
       ;;
     *)
       die "unknown installer option: $arg"
       ;;
   esac
 done
+
+if [ "$FLAG_HELP" = 1 ]; then
+  print_installer_help
+  exit 0
+fi
+
+# Apply flag overrides onto env vars immediately (flag > env).
+if [ -n "$FLAG_SETUP_MODE" ]; then
+  OPENLLM_SETUP_MODE="$FLAG_SETUP_MODE"
+  SETUP_MODE_EXPLICIT=1
+fi
+if [ "$FLAG_INTERACTIVE" = 1 ]; then
+  OPENLLM_INTERACTIVE=1
+elif [ "$FLAG_INTERACTIVE" = 0 ]; then
+  OPENLLM_INTERACTIVE=0
+fi
+if [ "$FLAG_START" = 1 ]; then
+  OPENLLM_START_DAEMON=1
+elif [ "$FLAG_START" = 0 ]; then
+  OPENLLM_START_DAEMON=0
+fi
+if [ "$FLAG_NO_VENDORS" = 1 ]; then
+  OPENLLM_SKIP_VENDOR_CLIS=1
+fi
+if [ -n "$FLAG_VENDORS_ONLY" ]; then
+  OPENLLM_ONLY_VENDOR_CLIS="$FLAG_VENDORS_ONLY"
+  unset OPENLLM_SKIP_VENDOR_CLIS 2>/dev/null || true
+fi
+# The env alias gets the same check as the flag: an unknown slug would
+# otherwise silently select no vendors.
+if [ -n "${OPENLLM_ONLY_VENDOR_CLIS:-}" ]; then
+  validate_vendor_slugs "$OPENLLM_ONLY_VENDOR_CLIS"
+fi
+if [ -n "$FLAG_ORIGIN" ]; then
+  OPENLLM_CLOUD_ORIGIN="$FLAG_ORIGIN"
+fi
+if [ -n "$FLAG_PORT" ]; then
+  OPENLLM_DAEMON_PORT="$FLAG_PORT"
+fi
+if [ "$FLAG_NO_SHELL_SETUP" = 1 ]; then
+  OPENLLM_SKIP_SHELL_SETUP=1
+fi
 
 # The terminal the human is on. A piped `curl … | bash` leaves the script's own
 # stdin as the download stream; answers must come from this path, never stdin.
@@ -495,27 +663,48 @@ if [ -z "$DAEMON_PORT" ]; then
   DAEMON_PORT="$DEFAULT_DAEMON_PORT"
 fi
 case "$INSTALL_MODE" in
-  install|update) ;;
-  *) die "OPENLLM_INSTALL_MODE must be 'install' or 'update'" ;;
+  install|update|vendors) ;;
+  *) die "OPENLLM_INSTALL_MODE must be 'install', 'update', or 'vendors'" ;;
 esac
-# Product setup mode. Explicit env / --minimal wins and never prompts. A saved
-# OPENLLM_SETUP_MODE in the env file is preserved on re-run / update (no prompt,
-# no unexpected reset). On a fresh install with no saved mode: interactive
-# terminals ask Full vs Minimal (Enter → Full) before any mode-dependent work;
-# headless never hangs and picks Full silently (including bare curl|bash — CI /
-# automation that wants Minimal must pass OPENLLM_SETUP_MODE=minimal or
-# --minimal). Update with no prior value leaves the mode unset so we do not
-# invent one.
+
+# Resolve interactive mode: flag/env > controlling tty.
+# Blank OPENLLM_INTERACTIVE is treated as unset (harness may clear it).
+resolve_interactive() {
+  local raw
+  if [ "$FLAG_INTERACTIVE" = 1 ] || [ "$FLAG_INTERACTIVE" = 0 ]; then
+    INTERACTIVE="$FLAG_INTERACTIVE"
+    return 0
+  fi
+  if [ "${OPENLLM_INTERACTIVE+set}" = set ]; then
+    raw="$(trim_whitespace "${OPENLLM_INTERACTIVE}")"
+    case "$raw" in
+      1|true|yes|YES|True) INTERACTIVE=1; return 0 ;;
+      0|false|no|NO|False) INTERACTIVE=0; return 0 ;;
+      "") ;;
+      *) die "OPENLLM_INTERACTIVE must be 1 or 0" ;;
+    esac
+  fi
+  if has_controlling_tty; then
+    INTERACTIVE=1
+  else
+    INTERACTIVE=0
+  fi
+}
+resolve_interactive
+
+# Product setup mode. Explicit env / --minimal|--full wins and never prompts. A
+# saved OPENLLM_SETUP_MODE in the env file is preserved on re-run / update.
+# Fresh install with no saved mode: interactive terminals ask Full vs Minimal;
+# headless never hangs and picks Full silently.
 # `${VAR+set}` (not `-n`) so an explicit empty / whitespace-only value is still
-# treated as supplied — otherwise it would fall into the update-no-prior "" case
-# and a fresh install would silently run full (vendors + daemon) with no chooser.
+# treated as supplied.
 if [ "${OPENLLM_SETUP_MODE+set}" = set ]; then
   SETUP_MODE_EXPLICIT=1
   SETUP_MODE="$(trim_whitespace "$OPENLLM_SETUP_MODE")"
 else
   SETUP_MODE="$(trim_whitespace "$(env_file_value OPENLLM_SETUP_MODE || true)")"
-  if [ -z "$SETUP_MODE" ] && [ "$INSTALL_MODE" != update ]; then
-    if has_controlling_tty; then
+  if [ -z "$SETUP_MODE" ] && [ "$INSTALL_MODE" != update ] && [ "$INSTALL_MODE" != vendors ]; then
+    if [ "$INTERACTIVE" = 1 ]; then
       if ! prompt_setup_mode; then
         die "setup cancelled — re-run and choose Full or Minimal (or pass --minimal / OPENLLM_SETUP_MODE=…)"
       fi
@@ -526,10 +715,12 @@ else
 fi
 case "$SETUP_MODE" in
   "" )
-    # Accept empty only for update with no saved mode. An explicit env / flag
-    # that trims to empty is an error — never invent full for that case.
     if [ "$SETUP_MODE_EXPLICIT" = 1 ]; then
       die "OPENLLM_SETUP_MODE must be 'full' or 'minimal'"
+    fi
+    # vendors mode with no saved setup defaults to full provisioning.
+    if [ "$INSTALL_MODE" = vendors ]; then
+      SETUP_MODE=full
     fi
     ;;
   full|minimal) ;;
@@ -537,8 +728,75 @@ case "$SETUP_MODE" in
 esac
 # Minimal install implies no vendor provisioning and no daemon start for this
 # run. An explicit OPENLLM_SKIP_VENDOR_CLIS remains honored for full installs.
+# Full-only sub-flags with Minimal fail here — before mkdir / download / env
+# writes — so a contradiction never leaves side effects behind.
 if [ "$SETUP_MODE" = minimal ]; then
+  if [ "$FLAG_START" = 1 ]; then
+    die "--start cannot be combined with --minimal (pass --full to override a saved Minimal setup)"
+  fi
+  if [ "$FLAG_START" = 0 ]; then
+    die "--no-start cannot be combined with --minimal (pass --full to override a saved Minimal setup)"
+  fi
+  if [ -n "$FLAG_VENDORS_ONLY" ]; then
+    die "--vendors cannot be combined with --minimal (pass --full to override a saved Minimal setup)"
+  fi
+  if [ "$FLAG_NO_VENDORS" = 1 ]; then
+    die "--no-vendors cannot be combined with --minimal (pass --full to override a saved Minimal setup)"
+  fi
   OPENLLM_SKIP_VENDOR_CLIS=1
+fi
+
+# Resolve whether this run should start the daemon (Full only).
+# Blank OPENLLM_START_DAEMON is treated as unset so tests can clear the harness
+# default and exercise the true interactive/headless default.
+resolve_want_start() {
+  local raw
+  WANT_START=0
+  if [ "$SETUP_MODE" = minimal ]; then
+    # Full-only sub-flags already rejected above. A bare OPENLLM_START_DAEMON
+    # from a caller/harness is ignored under Minimal.
+    WANT_START=0
+    return 0
+  fi
+  if [ "$FLAG_START" = 1 ]; then
+    WANT_START=1
+    return 0
+  fi
+  if [ "$FLAG_START" = 0 ]; then
+    WANT_START=0
+    return 0
+  fi
+  if [ "${OPENLLM_START_DAEMON+set}" = set ]; then
+    raw="$(trim_whitespace "${OPENLLM_START_DAEMON}")"
+    case "$raw" in
+      1|true|yes|YES|True) WANT_START=1; return 0 ;;
+      0|false|no|NO|False) WANT_START=0; return 0 ;;
+      "") ;;
+      *) die "OPENLLM_START_DAEMON must be 1 or 0" ;;
+    esac
+  fi
+  # Interactive Full starts; headless Full does not.
+  if [ "$INTERACTIVE" = 1 ]; then
+    WANT_START=1
+  else
+    WANT_START=0
+  fi
+}
+resolve_want_start
+
+if [ "$FLAG_DRY_RUN" = 1 ]; then
+  cat <<EOF
+OpenLLM install dry-run
+mode: $INSTALL_MODE
+setup: ${SETUP_MODE:-full}
+interactive: $INTERACTIVE
+start_daemon: $WANT_START
+origin: ${OPENLLM_CLOUD_ORIGIN:-"(env-file or https://www.openllm.sh)"}
+port: ${OPENLLM_DAEMON_PORT:-"(env-file or default)"}
+vendors: $([ -n "${OPENLLM_SKIP_VENDOR_CLIS:-}" ] && echo skipped || echo "${OPENLLM_ONLY_VENDOR_CLIS:-all}")
+shell_setup: $([ -n "${OPENLLM_SKIP_SHELL_SETUP:-}" ] && echo skipped || echo yes)
+EOF
+  exit 0
 fi
 case "$(uname -s)" in
   Darwin) OS="darwin" ;;
@@ -587,6 +845,22 @@ API_KEY=""
 mkdir -p "$BIN_DIR" "$(dirname "$ENV_FILE")"
 
 # --- the ONE install entry point ------------------------------------------
+# `vendors` mode only provisions missing vendor CLIs (used by `openllm start`).
+# It requires an already-installed binary and never downloads or starts anything.
+if [ "$INSTALL_MODE" = vendors ]; then
+  [ -x "$BIN_DIR/openllm" ] || die "OpenLLM is not installed yet — run the installer first"
+  CLI_VERSION="$("$BIN_DIR/openllm" --version 2>/dev/null | head -n 1 | tr -d '\r' || true)"
+  CLI_VERSION="${CLI_VERSION#openllm }"
+  CLI_VERSION="${CLI_VERSION#v}"
+  [ -n "$CLI_VERSION" ] || CLI_VERSION="unknown"
+  API_KEY="$(trim_whitespace "$(env_file_lookup OPENLLM_API_KEY || true)")"
+  if [ -n "$API_KEY" ] && is_usable_api_key "$API_KEY"; then
+    export OPENLLM_API_KEY="$API_KEY"
+  else
+    API_KEY=""
+  fi
+  ENV_DIGEST_BEFORE="$(sha256_of "$ENV_FILE" 2>/dev/null || true)"
+else
 # /api/install validates the committed daemon + CLI release pins in TypeScript
 # (allow-listed repo, well-formed digests, a published tag for this target) and
 # fails closed. Hitting it first means a mis-pinned or half-published release is
@@ -796,6 +1070,8 @@ install_component openllm api/cli/binary "$CLI_VERSION"
 # `openllmd`-named invocation to its daemon half.
 ln -sfn openllm "$BIN_DIR/openllmd"
 
+fi
+
 # --- the shared config file ------------------------------------------------
 # Re-read under the same exclusive `$ENV_FILE.lock` protocol as the daemon's
 # writeEnvFileVars. Never rebuild this file from a pre-download snapshot: a daemon
@@ -925,8 +1201,10 @@ write_env_file() {
 # restarted at the end only when what it runs on changed — the binary
 # (INSTALLED_COMPONENTS) or this file (key, origin, port, anchor from the
 # sign-in below or this rewrite).
+if [ "$INSTALL_MODE" != vendors ]; then
 ENV_DIGEST_BEFORE="$(sha256_of "$ENV_FILE" 2>/dev/null || true)"
 write_env_file
+fi
 
 # --- shell wiring ----------------------------------------------------------
 # Delegated to the binaries themselves so the installer and a human run the
@@ -936,7 +1214,7 @@ write_env_file
 # leaves the binary usable by absolute path.
 # First-install only: a manual update must not touch PATH symlinks, the shell
 # rc block, or completion — those are the user's environment, already wired.
-if [ "$INSTALL_MODE" != update ]; then
+if [ "$INSTALL_MODE" != update ] && [ "$INSTALL_MODE" != vendors ]; then
   # OPENLLM_SKIP_SHELL_SETUP — leave PATH symlinks, shell rc, and completion alone
   # (useful for CI / non-interactive hosts that already manage the environment).
   if [ -z "${OPENLLM_SKIP_SHELL_SETUP:-}" ]; then
@@ -978,10 +1256,11 @@ refresh_api_key_from_env() {
 
 AUTH_ATTEMPTED=0
 AUTH_FAILED=0
-if [ -z "$API_KEY" ] && [ "$INSTALL_MODE" != update ]; then
-  # Authenticate via `openllm login` when a controlling terminal is available.
-  # Never hang headlessly or disturb an existing daemon when no key is saved.
-  if has_controlling_tty && [ -x "$BIN_DIR/openllm" ]; then
+if [ -z "$API_KEY" ] && [ "$INSTALL_MODE" != update ] && [ "$INSTALL_MODE" != vendors ]; then
+  # Authenticate via `openllm login` only in interactive mode with a controlling
+  # tty. `--non-interactive` on a PTY must not hang on login — headless keyless
+  # prints `Next: openllm login --non-interactive` in the summary and exits 0.
+  if [ "$INTERACTIVE" = 1 ] && has_controlling_tty && [ -x "$BIN_DIR/openllm" ]; then
     AUTH_ATTEMPTED=1
     echo
     if "$BIN_DIR/openllm" login --no-restart < /dev/tty; then
@@ -1155,6 +1434,9 @@ vendor_cli_active_worker() {
 # reclaim takes an inner `reclaim/` mkdir sublock, re-validates owner+grace,
 # then `mv`s the whole dir. release must match token.
 VENDOR_CLI_LOCK_INIT_GRACE_SEC=45
+# Pid-less stage=installing JSON is a parent reservation before worker identity
+# is published. Headless wait honors it only within this mtime grace.
+VENDOR_CLI_PIDLESS_RESERVATION_GRACE_SEC=60
 
 vendor_cli_lock_dir() {
   printf '%s/%s.lock.d' "$(vendor_cli_state_dir)" "$1"
@@ -1838,6 +2120,9 @@ provision_antigravity() {
 # caller's summary names what failed, timed out, or is still being installed
 # by another installer.
 VENDOR_FAILED_NAMES=""
+# Slugs whose worker could not be launched (e.g. the initial state write
+# failed). The summary reports them as failed, never as skipped.
+VENDOR_LAUNCH_FAILED_SLUGS=""
 VENDOR_PENDING_NAMES=""
 VENDOR_REAPED_NAMES=""
 
@@ -1962,6 +2247,7 @@ provision_clis() {
       *)
         failed=1
         VENDOR_FAILED_NAMES="${VENDOR_FAILED_NAMES:+$VENDOR_FAILED_NAMES, }$name"
+        VENDOR_LAUNCH_FAILED_SLUGS="${VENDOR_LAUNCH_FAILED_SLUGS},$slug,"
         ;;
     esac
   done
@@ -1991,6 +2277,7 @@ provision_clis() {
       *)
         failed=1
         VENDOR_FAILED_NAMES="${VENDOR_FAILED_NAMES:+$VENDOR_FAILED_NAMES, }Google Antigravity"
+        VENDOR_LAUNCH_FAILED_SLUGS="${VENDOR_LAUNCH_FAILED_SLUGS},antigravity,"
         ;;
     esac
   fi
@@ -2011,18 +2298,18 @@ provision_clis() {
   [ "$pending" = 0 ] || return 3
   return 0
 }
-# Background vendor install: launch missing CLIs, then start the daemon without
-# waiting. Skipped on a manual update: rerunning every vendor's installer is a
-# first-install action the user didn't ask for. Also skipped without a usable
-# API key — authentication comes first. Full setup (the default, including
-# headless) provisions vendors; OPENLLM_SKIP_VENDOR_CLIS opts out. A provider
-# another installer already has in flight is left to it (pending). Launch
-# failures are a warning — none of these fail the run once the daemon is up.
+# Background vendor install. Skipped on a manual update. Full setup provisions
+# vendors even when keyless (unless OPENLLM_SKIP_VENDOR_CLIS / --no-vendors).
+# Headless waits for launched workers AFTER daemon start (OPENLLM_VENDOR_WAIT_SECS,
+# default 600) so the summary is accurate without delaying a requested start;
+# interactive leaves them in the background.
+# `OPENLLM_INSTALL_MODE=vendors` is the same provision path without download.
 VENDOR_PROVISIONED=0
 VENDOR_FAILED=0
 VENDOR_PENDING=0
 VENDOR_BACKGROUND=0
-if [ "$INSTALL_MODE" != update ] && [ "$SETUP_MODE" != minimal ] && [ -n "$API_KEY" ] && [ -z "${OPENLLM_SKIP_VENDOR_CLIS:-}" ]; then
+VENDOR_WAITED=0
+if { [ "$INSTALL_MODE" != update ]; } && [ "$SETUP_MODE" != minimal ] && [ -z "${OPENLLM_SKIP_VENDOR_CLIS:-}" ]; then
   VENDOR_PROVISIONED=1
   # `||` keeps a nonzero provision_clis status off the `set -e` path so we
   # still start the daemon and report launch-failure/pending distinctly.
@@ -2033,6 +2320,9 @@ if [ "$INSTALL_MODE" != update ] && [ "$SETUP_MODE" != minimal ] && [ -n "$API_K
     3) VENDOR_PENDING=1 ;;
     *) VENDOR_FAILED=1 ;;
   esac
+  # Vendor wait runs AFTER the daemon start block below when start is wanted
+  # (desktop headless sets OPENLLM_START_DAEMON=1). Waiting here would delay
+  # serving for up to OPENLLM_VENDOR_WAIT_SECS on a stuck vendor install.
 fi
 
 # Is a daemon answering on this install's port? `/status` is the daemon's
@@ -2054,221 +2344,276 @@ restart_for_new_binary() {
 }
 
 # --- start / reconcile the service (after auth; vendors may still be running) -
-# `openllm daemon start` owns service registration (launchd / systemd user unit,
-# restart-on-crash, boot start, linger). Full setup only starts once a usable
-# key exists. Minimal setup never STARTS a stopped daemon; an update that
-# replaced the binary does restart one that is already running (a daemon the
-# user started by hand would otherwise keep serving the old code). Vendor CLI
-# installs continue in the background and must not gate this step.
+# Start decision is WANT_START (interactive Full / --start), not key presence.
+# Updates restart a RUNNING daemon when the binary changed and never start a
+# stopped one. vendors mode never starts. Minimal never starts a stopped daemon.
 DAEMON_STARTED=0
 DAEMON_START_FAILED=0
+DAEMON_STATE="not started"
 case " $INSTALLED_COMPONENTS " in
   *" openllm "*) BINARY_CHANGED=1 ;;
   *) BINARY_CHANGED=0 ;;
 esac
-if [ "$SETUP_MODE" = minimal ]; then
-  if [ "$INSTALL_MODE" = update ]; then
-    if [ "$BINARY_CHANGED" = 1 ] && daemon_is_running; then
-      restart_for_new_binary
+if [ "$INSTALL_MODE" = vendors ]; then
+  # Never start/restart in vendors mode — only report the current probe.
+  if daemon_is_running; then
+    DAEMON_STATE="running"
+  else
+    DAEMON_STATE="not started"
+  fi
+elif [ "$INSTALL_MODE" = update ]; then
+  if [ "$BINARY_CHANGED" = 1 ] && daemon_is_running; then
+    restart_for_new_binary
+    if [ "$DAEMON_STARTED" = 1 ]; then
+      DAEMON_STATE="running"
     else
-      echo "OpenLLM updated (minimal setup; daemon left as-is)."
+      DAEMON_STATE="failed"
     fi
-  elif [ -n "$API_KEY" ]; then
+  else
+    if daemon_is_running; then
+      DAEMON_STATE="running"
+      echo "  daemon already current — no restart needed"
+    else
+      DAEMON_STATE="not started"
+      echo "OpenLLM updated (daemon left as-is)."
+    fi
+  fi
+elif [ "$SETUP_MODE" = minimal ]; then
+  # Minimal never starts a daemon, but one may already be running.
+  if daemon_is_running; then
+    DAEMON_STATE="running"
+    echo "Minimal setup — daemon left running as-is."
+  else
+    DAEMON_STATE="not started"
     echo "Minimal setup — daemon not started. Run \`openllm start\` later if you want this machine to serve."
   fi
-elif [ -n "$API_KEY" ]; then
-  if [ "$INSTALL_MODE" = update ]; then
-    if [ "$BINARY_CHANGED" = 1 ]; then
-      restart_for_new_binary
+elif [ "$WANT_START" = 1 ]; then
+  if [ -z "$API_KEY" ]; then
+    # Nothing to pair yet — print Next: login/start and exit 0. A later
+    # `openllm start` (or a re-run with a key) performs the real start.
+    if daemon_is_running; then
+      DAEMON_STATE="running"
     else
-      echo "  daemon already current — no restart needed"
+      DAEMON_STATE="not started"
     fi
   elif [ "$BINARY_CHANGED" = 0 ] \
     && [ -n "$ENV_DIGEST_BEFORE" ] \
     && [ "$ENV_DIGEST_BEFORE" = "$(sha256_of "$ENV_FILE" 2>/dev/null || true)" ] \
     && daemon_is_running; then
-    # Re-running the installer on a machine that is already set up: same
-    # binary, same config, daemon serving. `daemon start` would re-register
-    # and restart it for nothing.
     DAEMON_STARTED=1
+    DAEMON_STATE="running"
     echo "  daemon already running and current — no restart needed"
   else
     echo "Starting the daemon..."
     if "$BIN_DIR/openllm" daemon start; then
       DAEMON_STARTED=1
+      DAEMON_STATE="running"
     else
       DAEMON_START_FAILED=1
+      DAEMON_STATE="failed"
       echo "Warning: daemon start failed — run '$BIN_DIR/openllm daemon status' to diagnose" >&2
     fi
   fi
-elif [ "$INSTALL_MODE" = update ]; then
-  # Keyless update: converge binaries + config only. Never register/start an
-  # unpaired daemon, and never tear down an existing service — that is a
-  # first-install reconciliation, not an update action.
-  echo "OpenLLM updated (no API key configured; daemon left as-is)."
+else
+  # No start requested: report what is actually there, never start one.
+  if daemon_is_running; then
+    DAEMON_STATE="running"
+  else
+    DAEMON_STATE="not started"
+  fi
 fi
 
-# What happened to the vendor CLIs this run, after the daemon step (so the
-# warning can say whether the daemon is up). Never changes the exit status.
-print_vendor_summary() {
-  local log="$OPENLLM_DIR/cli-install.log" what=""
-  if [ "$VENDOR_FAILED" = 1 ]; then
-    what="failed to launch${VENDOR_FAILED_NAMES:+: $VENDOR_FAILED_NAMES}"
-    {
-      echo
-      if [ "$DAEMON_STARTED" = 1 ]; then
-        echo "Warning: some vendor CLIs did not install ($what). OpenLLM and the daemon are set up; only those CLIs are missing."
+# Headless (and vendors-only): wait for workers so the summary is accurate.
+# Runs AFTER daemon start when start was wanted, so a stuck vendor never delays
+# serving (desktop pairs with OPENLLM_START_DAEMON=1 under headless).
+if [ "$VENDOR_PROVISIONED" = 1 ] && { [ "$INTERACTIVE" = 0 ] || [ "$INSTALL_MODE" = vendors ]; }; then
+  wait_secs="$(trim_whitespace "${OPENLLM_VENDOR_WAIT_SECS:-600}")"
+  case "$wait_secs" in ''|*[!0-9]*) wait_secs=600 ;; esac
+  VENDOR_WAITED=1
+  deadline=$(( $(date +%s) + wait_secs ))
+  while [ "$(date +%s)" -lt "$deadline" ]; do
+    any=0
+    if [ -d "$OPENLLM_DIR/vendor-cli-install" ]; then
+      for f in "$OPENLLM_DIR/vendor-cli-install"/*.json; do
+        [ -f "$f" ] || continue
+        stage="$(vendor_cli_read_field "$f" stage || true)"
+        [ "$stage" = "installing" ] || continue
+        # Dead workers are not active. A pid-less record is a brief parent
+        # reservation (identity not published yet) — keep waiting while fresh,
+        # but ignore once stale so an abandoned pre-handoff file cannot block
+        # the wait forever.
+        pid="$(vendor_cli_read_num_field "$f" pid || true)"
+        if [ -n "$pid" ]; then
+          start="$(vendor_cli_read_field "$f" process_start || true)"
+          vendor_cli_pid_live "$pid" "$start" || continue
+        else
+          age="$(vendor_cli_path_mtime_age_sec "$f" || true)"
+          # Fail-closed age 0 (unreadable mtime) stays in grace.
+          [ -n "$age" ] && [ "$age" -lt "$VENDOR_CLI_PIDLESS_RESERVATION_GRACE_SEC" ] 2>/dev/null || continue
+        fi
+        any=1
+        break
+      done
+    fi
+    [ "$any" = 0 ] && break
+    sleep 1
+  done
+fi
+
+# vendors mode runs right after `openllm start`, so the daemon may still be
+# booting: re-probe after the wait, retrying briefly. Never starts anything.
+if [ "$INSTALL_MODE" = vendors ] && [ "$DAEMON_STATE" != "running" ]; then
+  probe_tries=0
+  while [ "$probe_tries" -lt 5 ]; do
+    if daemon_is_running; then
+      DAEMON_STATE="running"
+      break
+    fi
+    probe_tries=$((probe_tries + 1))
+    [ "$probe_tries" -lt 5 ] && sleep 1
+  done
+fi
+
+# Fixed, parseable install summary (agents and humans both read this).
+build_vendor_status_line() {
+  # display|PATH name|slug|dest launcher — dests match provision_clis.
+  local parts="" name bin slug dest stage reason path body
+  for entry in \
+    "claude|claude|claude_code|$HOME/.local/bin/claude" \
+    "codex|codex|chatgpt|$HOME/.local/bin/codex" \
+    "kimi|kimi|kimi_code|$HOME/.kimi-code/bin/kimi" \
+    "grok|grok|grok|$HOME/.grok/bin/grok" \
+    "cursor-agent|cursor-agent|cursor|$HOME/.local/bin/cursor-agent" \
+    "muse|muse|muse|$HOME/.local/bin/muse" \
+    "antigravity|agy_acp_server.par|antigravity|$HOME/.openllm/vendor/antigravity/current/agy_acp_server.par"
+  do
+    IFS='|' read -r name bin slug dest <<<"$entry"
+    if [ -n "${OPENLLM_SKIP_VENDOR_CLIS:-}" ] || [ "$SETUP_MODE" = minimal ] || [ "$INSTALL_MODE" = update ]; then
+      stage="skipped"
+      reason=""
+    elif [ "$VENDOR_PROVISIONED" != 1 ]; then
+      stage="skipped"
+      reason=""
+    # Prefer a live binary over a stale progress record (e.g. leftover
+    # stage=installing / failed after a successful vendor install).
+    elif has_command "$bin" || [ -x "$dest" ] || [ -x "$HOME/.local/bin/$bin" ]; then
+      stage="installed"
+      reason=""
+    elif case "$VENDOR_LAUNCH_FAILED_SLUGS" in *",$slug,"*) true ;; *) false ;; esac; then
+      stage="failed"
+      reason="launch_failed"
+    else
+      path="$OPENLLM_DIR/vendor-cli-install/${slug}.json"
+      if [ -f "$path" ]; then
+        body="$(cat "$path" 2>/dev/null || true)"
+        case "$body" in
+          *'"stage":"awaiting_detection"'*|*'"stage":"installed"'*|*'"stage": "awaiting_detection"'*|*'"stage": "installed"'*)
+            stage="installed" ; reason="" ;;
+          *'"stage":"installing"'*|*'"stage": "installing"'*)
+            stage="pending" ; reason="still installing" ;;
+          *'"stage":"failed"'*|*'"stage": "failed"'*)
+            stage="failed"
+            reason="$(printf '%s' "$body" | sed -n 's/.*"reason":"\([^"]*\)".*/\1/p' | head -n 1)"
+            [ -n "$reason" ] || reason="installer_failed"
+            ;;
+          *'"stage":"interrupted"'*|*'"stage": "interrupted"'*)
+            stage="failed" ; reason="interrupted" ;;
+          *)
+            stage="pending" ; reason="unknown" ;;
+        esac
+      elif [ -n "${OPENLLM_ONLY_VENDOR_CLIS:-}" ]; then
+        case ",${OPENLLM_ONLY_VENDOR_CLIS}," in
+          *",${slug},"*) stage="failed"; reason="not launched" ;;
+          *) stage="skipped"; reason="" ;;
+        esac
       else
-        echo "Warning: some vendor CLIs did not install ($what)."
+        stage="skipped"
+        reason=""
       fi
-      echo "  Details: $log"
-      echo "  To retry, $(vendor_cli_retry_hint)."
-      echo "  A missing client also offers to install just its CLI when you run it (e.g. openllm claude)."
-    } >&2
-  elif [ "$VENDOR_PENDING" = 1 ]; then
-    cat <<EOF
-Another installer is still installing: $VENDOR_PENDING_NAMES. It keeps going
-in the background (see $log); if a CLI is still missing afterwards, $(vendor_cli_retry_hint).
-EOF
-  elif [ "$VENDOR_BACKGROUND" = 1 ]; then
-    cat <<EOF
-Vendor CLIs are installing in the background (see $log).
-Open the dashboard's Providers tab to connect your vendor accounts once each CLI is ready.
-EOF
-  elif [ "$VENDOR_PROVISIONED" = 1 ]; then
-    cat <<EOF
-Vendor CLI provisioning finished (see $log).
-Open the dashboard's Providers tab to connect your vendor accounts.
-EOF
+    fi
+    if [ -n "$reason" ]; then
+      parts="${parts:+$parts }${name}=${stage}(${reason})"
+    else
+      parts="${parts:+$parts }${name}=${stage}"
+    fi
+  done
+  printf '%s' "$parts"
+}
+
+path_hint_line() {
+  # `openllm` is installed at $BIN_DIR (~/.openllm/bin); PATH symlinks into
+  # ~/.local/bin or /usr/local/bin are best-effort. Report "on PATH" only when
+  # `command -v openllm` resolves to this install (same inode), otherwise print
+  # the session export that matches `sessionPathExportLine` / llms.txt.
+  local resolved
+  resolved="$(command -v openllm 2>/dev/null || true)"
+  if [ -n "$resolved" ] && [ -e "$BIN_DIR/openllm" ] && [ "$resolved" -ef "$BIN_DIR/openllm" ]; then
+    printf 'path: on PATH\n'
   else
-    cat <<EOF
-Vendor CLIs were not provisioned this run (OPENLLM_SKIP_VENDOR_CLIS is set).
-Open the dashboard's Providers tab to connect each vendor.
-EOF
+    printf 'path: export PATH="$HOME/.openllm/bin:$PATH"\n'
   fi
 }
 
-print_auth_next_steps() {
-  cat <<EOF
-
-OpenLLM needs an API key before setup can finish.
-Sign in at $ORIGIN/sign-in.
-New users will receive a key during onboarding. Already have an account? Open Keys after signing in.
-EOF
-  if [ "$SETUP_MODE" != minimal ]; then
-    cat <<EOF
-Then run: openllm start
-  (signs this computer in through the browser, then starts the daemon;
-   add --api-key to paste a key instead)
-EOF
-  else
-    cat <<EOF
-Then run: openllm login
-EOF
+print_install_summary() {
+  local vendor_line
+  vendor_line="$(build_vendor_status_line)"
+  echo
+  echo "OpenLLM install summary"
+  echo "installed: openllm v${CLI_VERSION:-unknown} ($BIN_DIR/openllm)"
+  echo "vendors: ${vendor_line:-none}"
+  echo "daemon: $DAEMON_STATE"
+  path_hint_line
+  if [ "$INSTALL_MODE" = update ]; then
+    echo "Next: openllm status"
+  elif [ -z "$API_KEY" ]; then
+    echo "Next: openllm login --non-interactive"
+    if [ "$SETUP_MODE" != minimal ] && [ "$DAEMON_STATE" != "running" ]; then
+      echo "Next: openllm start"
+    fi
+  elif [ "$SETUP_MODE" != minimal ] && [ "$DAEMON_STATE" != "running" ]; then
+    echo "Next: openllm start"
   fi
 }
 
 if [ "$INSTALL_MODE" = update ]; then
-  # A manual update did no shell wiring or vendor provisioning — keep the closing
-  # note to what actually happened.
   cat <<EOF
 
 OpenLLM is up to date.
-
-  openllm status           daemon service + run state
-  openllm --help           everything else
 EOF
+  print_install_summary
+elif [ "$INSTALL_MODE" = vendors ]; then
+  print_install_summary
 elif [ "$SETUP_MODE" = minimal ]; then
   if [ -n "$API_KEY" ]; then
     cat <<EOF
 
 OpenLLM is installed (minimal setup).
-
-  Run any of these (through the cloud origin):
-    openllm claude         Claude Code
-    openllm codex          Codex
-    openllm grok           Grok Build
-    openllm hermes         Hermes
-    openllm opencode       OpenCode
-
-  ollm <client>            short alias for any of them
-  openllm start            optional — make this machine a local supplier
-  openllm --help           everything else
-
-Open a new shell (or source your rc) so \`openllm\` and \`ollm\` are on PATH.
-Minimal setup does not install vendor CLIs or start the daemon. A missing
-client will offer to install just that CLI when you run it.
 EOF
   else
-    if [ "$AUTH_ATTEMPTED" = 1 ] && [ "$AUTH_FAILED" = 1 ]; then
-      cat <<EOF
-
-No API key saved yet. Finish authentication any time with: openllm login
-(Sign in at $ORIGIN/sign-in to get a key.)
-EOF
-    else
-      print_auth_next_steps
-    fi
-  fi
-else
-  if [ -n "$API_KEY" ] && [ "$DAEMON_START_FAILED" = 0 ]; then
     cat <<EOF
 
-OpenLLM is installed.
-
-  Run any of these:
-    openllm claude         Claude Code
-    openllm codex          Codex
-    openllm grok           Grok Build
-    openllm hermes         Hermes
-    openllm opencode       OpenCode
-
-  ollm <client>            short alias for any of them
-  openllm status           daemon service + run state
-  openllm --help           everything else
-
-Open a new shell (or source your rc) so \`openllm\` and \`ollm\` are on PATH.
+OpenLLM binary installed (minimal setup). Sign in to finish.
 EOF
-    print_vendor_summary
-  elif [ -n "$API_KEY" ] && [ "$DAEMON_START_FAILED" = 1 ]; then
+  fi
+  print_install_summary
+else
+  if [ "$DAEMON_START_FAILED" = 1 ] && [ "$WANT_START" = 1 ]; then
     cat <<EOF
 
 OpenLLM is installed, but the daemon did not start.
-
-  openllm start            finish daemon setup
-  openllm daemon status    diagnose the failure
-  openllm --help           everything else
-
-Open a new shell (or source your rc) so \`openllm\` and \`ollm\` are on PATH.
 EOF
-    print_vendor_summary
   else
-    if [ "$AUTH_ATTEMPTED" = 1 ] && [ "$AUTH_FAILED" = 1 ]; then
-      cat <<EOF
+    cat <<EOF
 
-Authentication did not finish. The OpenLLM binary is installed; finish
-setup any time with: openllm start
-(it signs this computer in through the browser, then starts the daemon)
-(Sign in at $ORIGIN/sign-in if you still need an API key.)
+OpenLLM is installed.
 EOF
-    else
-      print_auth_next_steps
-    fi
   fi
+  print_install_summary
 fi
 
-# Incomplete first-install auth is a clear failure (nonzero). The binary and
-# config stay on disk for the recovery command printed above. A daemon that
-# failed to start (or restart) is nonzero too: this machine is not serving.
-# Vendor CLIs are NOT part of the exit status — skipped (unauthorized),
-# pending (another installer has them), failed or timed out, the install
-# itself is complete and the warning above says how to retry. The desktop app
-# maps any nonzero exit to `install_failed`, so a vendor hiccup must not undo
-# a pairing that worked. Updates keep exit zero when they only converge
-# binaries/config.
-if [ "$INSTALL_MODE" != update ] && [ -z "$API_KEY" ]; then
-  exit 1
-fi
+# Nonzero only on real failure. Keyless success with next steps prints exit 0.
+# A failed start (--start / interactive Full) or a failed update restart is
+# nonzero. Vendor failures are not.
 if [ "$DAEMON_START_FAILED" = 1 ]; then
   exit 1
 fi

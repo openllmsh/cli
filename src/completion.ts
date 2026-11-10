@@ -50,6 +50,7 @@ const commandArgLines = (): ReadonlyArray<
     return [command.name, [...extra, ...HELP_FLAGS]] as const;
   });
 
+/** Generate the bash completion script body. */
 const bashScript = (): string => {
   const top = TOP_LEVEL.join(" ");
   const verbCases = EXEC_GROUPS.map(
@@ -104,6 +105,7 @@ complete -F _openllm openllm ollm
  *  must degrade to a weird description, not a parse error in the user's rc. */
 const zq = (s: string): string => s.replace(/'/g, `'\\''`);
 
+/** Generate the zsh completion script body. */
 const zshScript = (): string => {
   // Descriptions are colon-free (commands.ts), so the `value:desc` specs parse.
   const specs = [
@@ -163,6 +165,7 @@ compdef _openllm openllm ollm
 `;
 };
 
+/** Generate the fish completion script body. */
 const fishScript = (): string => {
   const lines = COMMANDS.map(
     (c) =>
@@ -185,6 +188,7 @@ const fishScript = (): string => {
   return `# openllm fish completion\ncomplete -c openllm -f\n${lines.join("\n")}\ncomplete -c ollm --wraps openllm\n`;
 };
 
+/** Select the completion script body for a shell name. */
 export const completionScript = (shell: TCompletionShell): string => {
   switch (shell) {
     case "bash":
@@ -196,14 +200,22 @@ export const completionScript = (shell: TCompletionShell): string => {
   }
 };
 
+/** Whether a string is a supported interactive shell name. */
 const isShell = (v: string): v is TCompletionShell =>
   (COMPLETION_SHELLS as readonly string[]).includes(v);
 
 /** The marker every rc line we add carries, so removal is exact. */
 const RC_MARKER = "# openllm-completion";
 
+/** Default fish completions file path for the `openllm` command. */
 const fishCompletionPath = (): string =>
   join(userHome(), ".config", "fish", "completions", "openllm.fish");
+
+/** Path `installCompletion` writes for a known shell (rc line or fish file). */
+export const completionTargetPath = (shell: TCompletionShell): string =>
+  shell === "fish"
+    ? fishCompletionPath()
+    : join(userHome(), shell === "zsh" ? ".zshrc" : ".bashrc");
 
 /** The current login shell name from `$SHELL`, or null if not recognized. */
 const detectShell = (): TCompletionShell | null => {
@@ -263,23 +275,27 @@ const refreshRcLine = (file: string, line: string): void => {
  * (a read-only rc under the daemon sandbox, a missing $HOME, …) — the
  * callers already render null as a clean "couldn't install" message instead
  * of a raw stack trace.
+ *
+ * `shellOverride` lets callers that already resolved bash/zsh/fish (e.g.
+ * `runSetup`) pass it without mutating `$SHELL`; omit to keep `detectShell`.
  */
-export const installCompletion = (): string | null => {
-  const shell = detectShell();
+export const installCompletion = (
+  shellOverride?: TCompletionShell,
+): string | null => {
+  const shell = shellOverride ?? detectShell();
   if (shell === null) return null;
   try {
+    const target = completionTargetPath(shell);
     if (shell === "fish") {
-      const file = fishCompletionPath();
-      mkdirSync(dirname(file), { recursive: true });
-      writeFileSync(file, fishScript());
-      return file;
+      mkdirSync(dirname(target), { recursive: true });
+      writeFileSync(target, fishScript());
+      return target;
     }
-    const rc = join(userHome(), shell === "zsh" ? ".zshrc" : ".bashrc");
     refreshRcLine(
-      rc,
+      target,
       `command -v openllm >/dev/null && source <(openllm completion ${shell})  ${RC_MARKER}`,
     );
-    return rc;
+    return target;
   } catch {
     // fs failure (read-only rc / sandbox) — report as not-installed.
     return null;
@@ -314,6 +330,7 @@ export const removeCompletion = (): void => {
   }
 };
 
+/** Handle `openllm completion` and write the script. */
 export const runCompletionCommand = (args: readonly string[]): number => {
   const arg = args[0] ?? "";
   if (arg === "install") {

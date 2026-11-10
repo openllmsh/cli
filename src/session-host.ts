@@ -8,9 +8,23 @@ import {
   statSync,
 } from "node:fs";
 import { extname, isAbsolute, join } from "node:path";
+import { processAlive } from "../daemon/src/child-supervisor/posix";
+import {
+  readSessionHostProcessStartTime,
+  sessionHostProcessAlive,
+  stopSessionHost,
+} from "../daemon/src/session-host-stop";
+import type { TSessionHostStopTarget } from "../daemon/src/session-host-stop";
 import type { TDaemonCli } from "./clients/registry";
 import { DAEMON_CLIS } from "./clients/registry";
 import { daemonStateDir } from "./env";
+
+export {
+  killSessionHostViaCtl,
+  sessionHostProcessAlive,
+  stopSessionHost,
+} from "../daemon/src/session-host-stop";
+export type { TSessionHostStopTarget } from "../daemon/src/session-host-stop";
 
 export type TSessionHostMeta = {
   readonly id: string;
@@ -29,17 +43,22 @@ export type TLiveSessionHost = TSessionHostMeta & {
   readonly socketPath: string;
 };
 
+/** Root directory for durable session-host registries. */
 export const sessionHostsRoot = (): string =>
   join(daemonStateDir(), "sessions");
+/** Per-host directory under {@link sessionHostsRoot}. */
 export const sessionHostDir = (id: string): string =>
   join(sessionHostsRoot(), id);
+/** Path of a host's private control socket. */
 export const sessionHostSocketPath = (id: string): string =>
   join(sessionHostDir(id), "ctl.sock");
 
+/** Narrow unknown input to a known daemon-managed client id. */
 const isDaemonCli = (value: unknown): value is TDaemonCli =>
   typeof value === "string" &&
   (DAEMON_CLIS as readonly string[]).includes(value);
 
+/** Reject spawn args that are absolute-path / length / NUL unsafe. */
 const validSessionHostSpawnArgs = (args: {
   readonly cwd: string;
   readonly title: string;
@@ -84,42 +103,17 @@ export const isSessionHostMeta = (
   );
 };
 
-const processStartTime = (pid: number): string | null => {
-  try {
-    const output = Bun.spawnSync(["ps", "-o", "lstart=", "-p", String(pid)], {
-      stdout: "pipe",
-      stderr: "ignore",
-    });
-    if (output.exitCode !== 0) return null;
-    const value = new TextDecoder().decode(output.stdout).trim();
-    return value.length > 0 ? value : null;
-  } catch {
-    return null;
-  }
-};
+/**
+ * Unpinned `ps -o lstart=` identity — matches hosts written by prior releases.
+ * Child-supervisor keeps its own LC_ALL=C/TZ=UTC pin separately.
+ */
+const processStartTime = (pid: number): string | null =>
+  readSessionHostProcessStartTime(pid);
 
 /** PID liveness only — used for legacy meta that predates processStartTime. */
-const pidAlive = (pid: number): boolean => {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (error) {
-    return (
-      error !== null &&
-      typeof error === "object" &&
-      "code" in error &&
-      (error as { readonly code?: unknown }).code === "EPERM"
-    );
-  }
-};
+const pidAlive = (pid: number): boolean => processAlive(pid);
 
-export const sessionHostProcessAlive = (
-  meta: Pick<TSessionHostMeta, "pid" | "processStartTime">,
-): boolean => {
-  const startTime = processStartTime(meta.pid);
-  return startTime !== null && startTime === meta.processStartTime;
-};
-
+/** Read a process start-time token for session-host identity. */
 export const sessionHostProcessStartTime = (): string | null =>
   processStartTime(process.pid);
 
@@ -134,6 +128,7 @@ type TLegacySessionHostMeta = {
   readonly startedAtMs: number | null;
 };
 
+/** Read a legacy session-host metadata file when present. */
 const readLegacySessionHostMeta = (
   value: unknown,
 ): TLegacySessionHostMeta | null => {
@@ -186,6 +181,7 @@ const readSessionHostMeta = (
  */
 const HOST_STARTUP_GRACE_MS = 10_000;
 
+/** Age of a host directory from mtime, or infinity when unreadable. */
 const directoryAgeMs = (directory: string): number => {
   try {
     return Date.now() - statSync(directory).mtimeMs;
@@ -194,6 +190,7 @@ const directoryAgeMs = (directory: string): number => {
   }
 };
 
+/** Best-effort recursive delete of a stale host directory. */
 const reapDirectory = (directory: string): void => {
   try {
     rmSync(directory, { recursive: true, force: true });
@@ -226,7 +223,23 @@ export const withDeviceSessionTitles = async (
   }
 };
 
-export const discoverLiveSessionHosts = (): readonly TLiveSessionHost[] => {
+export type TDiscoverLiveSessionHostsOpts = {
+  /**
+   * When false, leave stale / incomplete directories untouched. Used by
+   * uninstall to capture stop targets before confirmation without side
+   * effects. Default true.
+   */
+  readonly reapStale?: boolean;
+};
+
+/**
+ * Scan session-host directories for live hosts; optionally reap stale/incomplete
+ * dirs so status and uninstall see only real targets.
+ */
+export const discoverLiveSessionHosts = (
+  opts: TDiscoverLiveSessionHostsOpts = {},
+): readonly TLiveSessionHost[] => {
+  const reapStale = opts.reapStale !== false;
   let entries: string[];
   try {
     entries = readdirSync(sessionHostsRoot());
@@ -243,7 +256,7 @@ export const discoverLiveSessionHosts = (): readonly TLiveSessionHost[] => {
     // alone until the grace period expires so a concurrent scan cannot delete
     // a host that is still starting.
     if (record === null) {
-      if (directoryAgeMs(directory) > HOST_STARTUP_GRACE_MS) {
+      if (reapStale && directoryAgeMs(directory) > HOST_STARTUP_GRACE_MS) {
         reapDirectory(directory);
       }
       continue;
@@ -253,7 +266,10 @@ export const discoverLiveSessionHosts = (): readonly TLiveSessionHost[] => {
       // Non-attachable: keep while the recorded pid is alive, reap once gone.
       // processStartTime is required for attach/kill identity, so legacy stays
       // out of the live list even though the host process may still be running.
-      if (record.meta.id !== name || !pidAlive(record.meta.pid)) {
+      if (
+        reapStale &&
+        (record.meta.id !== name || !pidAlive(record.meta.pid))
+      ) {
         reapDirectory(directory);
       }
       continue;
@@ -261,7 +277,7 @@ export const discoverLiveSessionHosts = (): readonly TLiveSessionHost[] => {
 
     const meta = record.meta;
     if (meta.id !== name) {
-      if (directoryAgeMs(directory) > HOST_STARTUP_GRACE_MS) {
+      if (reapStale && directoryAgeMs(directory) > HOST_STARTUP_GRACE_MS) {
         reapDirectory(directory);
       }
       continue;
@@ -269,12 +285,15 @@ export const discoverLiveSessionHosts = (): readonly TLiveSessionHost[] => {
 
     // A dead (or recycled) pid is unambiguously stale regardless of age.
     if (!sessionHostProcessAlive(meta)) {
-      reapDirectory(directory);
+      if (reapStale) reapDirectory(directory);
       continue;
     }
 
     if (!existsSync(socketPath)) {
-      if (Date.now() - meta.startedAtMs > HOST_STARTUP_GRACE_MS) {
+      if (
+        reapStale &&
+        Date.now() - meta.startedAtMs > HOST_STARTUP_GRACE_MS
+      ) {
         reapDirectory(directory);
       }
       continue;
@@ -284,6 +303,21 @@ export const discoverLiveSessionHosts = (): readonly TLiveSessionHost[] => {
   }
   return sessions.sort((a, b) => b.startedAtMs - a.startedAtMs);
 };
+
+/** Stop each captured host. Returns how many were signalled. */
+export const stopSessionHosts = async (
+  hosts: readonly TSessionHostStopTarget[],
+): Promise<number> => {
+  let stopped = 0;
+  for (const host of hosts) {
+    if (await stopSessionHost(host)) stopped += 1;
+  }
+  return stopped;
+};
+
+/** Stop every discoverable live session host. Returns how many were signalled. */
+export const stopAllLiveSessionHosts = async (): Promise<number> =>
+  stopSessionHosts(discoverLiveSessionHosts({ reapStale: false }));
 
 /** Wait briefly for the detached host to publish its authenticated control socket. */
 export const waitForSessionHostSocket = async (
@@ -299,6 +333,7 @@ export const waitForSessionHostSocket = async (
   return existsSync(socketPath) ? socketPath : null;
 };
 
+/** Build `__session-host` argv, or null when spawn args fail validation. */
 export const sessionHostSpawnArgv = (args: {
   readonly id: string;
   readonly cli: TDaemonCli;

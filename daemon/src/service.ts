@@ -40,6 +40,13 @@ import { setAutoUpdate } from "./auto-update-pref";
 import type { TCredentialGateResult } from "./credential-gate";
 import { hasCredentialProof, requireServiceApiKey } from "./credential-gate";
 import {
+  formatDetachedSupervisor,
+  readLiveDetachedDaemon,
+  startDetachedDaemon,
+  stopDetachedDaemon,
+  systemdUserBusAvailable,
+} from "./detached-daemon";
+import {
   daemonEnv,
   daemonStderrLogFilePath,
   daemonStdoutLogFilePath,
@@ -54,12 +61,37 @@ import { hardenMacBinary } from "./harden-binary";
 import type { TDaemonHealth } from "./health";
 import { DAEMON_VERSION } from "./version";
 
+/** How the daemon is being kept alive — reported by `status`. */
+export type TSupervisorKind = "launchd" | "systemd" | "detached" | "none";
+
+/**
+ * Human `supervisor:` line for status. Pure — exported for tests.
+ * Launchd/systemd keep their detailed render as a suffix (`kind · detail`)
+ * so crash-loop info stays visible; detached names its pid.
+ */
+export const formatSupervisorKind = (
+  kind: TSupervisorKind,
+  pid: number | null,
+  detail?: string,
+): string => {
+  if (kind === "detached") {
+    return pid !== null ? formatDetachedSupervisor(pid) : "detached";
+  }
+  if (detail !== undefined && detail.length > 0) {
+    return `${kind} · ${detail}`;
+  }
+  return kind;
+};
+
 const LABEL = "sh.openllm.daemon";
 const isMac = process.platform === "darwin";
 
+/** launchd plist path for the user daemon service. */
 const plistPath = (): string =>
   join(homedir(), "Library", "LaunchAgents", `${LABEL}.plist`);
+/** systemd user unit directory for the daemon service. */
 const unitDir = (): string => join(homedir(), ".config", "systemd", "user");
+/** systemd user unit file path for the daemon service. */
 const unitPath = (): string => join(unitDir(), "openllmd.service");
 
 /** The installer-owned single binary — both CLI and daemon (`openllm daemon`). */
@@ -151,8 +183,11 @@ export const migrateLegacyInstall = (
   }
 };
 
+/** Current numeric user id as a string. */
 const uid = (): number => (process.getuid ? process.getuid() : 0);
+/** macOS launchctl GUI domain for this user. */
 const guiDomain = (): string => `gui/${uid()}`;
+/** macOS launchctl GUI target for this user. */
 const guiTarget = (): string => `${guiDomain()}/${LABEL}`;
 
 /** Run a command, swallowing failure; returns whether it exited 0. */
@@ -285,6 +320,7 @@ export const renderUnitLogging = (systemdMajorVersion: number): string => {
 export const plistUsesLaunchdProcessGroupCleanup = (plist: string): boolean =>
   !/<key>AbandonProcessGroup<\/key>\s*<true\s*\/>/.test(plist);
 
+/** Render the launchd plist body for the daemon service. */
 export const renderPlist = (binPath: string): string => {
   const { out, err } = serviceLogPaths();
   const plist = `<?xml version="1.0" encoding="UTF-8"?>
@@ -352,6 +388,7 @@ export const renderUnitRestart = (systemdMajorVersion: number): string => {
   return "Restart=always\nRestartSec=5\n";
 };
 
+/** Render the systemd user unit body for the daemon service. */
 export const renderUnit = (binPath: string): string => `[Unit]
 Description=OpenLLM local daemon
 After=network-online.target
@@ -399,6 +436,7 @@ const waitForBootout = (target: string, timeoutMs = 10_000): boolean => {
   return false;
 };
 
+/** Install and enable the LaunchAgent so the daemon self-restores on macOS. */
 const startMac = (binPath: string): void => {
   const plist = plistPath();
   mkdirSync(join(homedir(), "Library", "LaunchAgents"), { recursive: true });
@@ -414,7 +452,7 @@ const startMac = (binPath: string): void => {
     // Teardown never completed — bootstrapping now would land on the
     // half-registered label (the exact race this guard exists to close).
     throw new Error(
-      `launchd did not finish tearing down ${LABEL} within 10s — run 'openllmd restart' to retry`,
+      `launchd did not finish tearing down ${LABEL} within 10s — run 'openllm restart' to retry`,
     );
   }
   tryRun("launchctl", ["enable", target]);
@@ -427,19 +465,33 @@ const startMac = (binPath: string): void => {
   tryRun("launchctl", ["kickstart", "-k", target]);
 };
 
-const startLinux = (binPath: string): void => {
+/**
+ * Linux start: prefer a systemd --user unit when the user bus is reachable;
+ * otherwise spawn a detached daemon (no linger note — it will not restart at
+ * boot). Returns which supervisor took the process.
+ */
+const startLinux = (binPath: string): "systemd" | "detached" => {
+  mkdirSync(stateDir(), { recursive: true });
+  if (!systemdUserBusAvailable()) {
+    // Best-effort: tear down a leftover unit that would fight for the port
+    // even when the bus probe failed closed for us (ignore failure).
+    tryRun("systemctl", ["--user", "disable", "--now", "openllmd.service"]);
+    rmSync(unitPath(), { force: true });
+    tryRun("systemctl", ["--user", "daemon-reload"]);
+    // Reuse a live detached daemon — do not spawn a second copy.
+    startDetachedDaemon(binPath);
+    return "detached";
+  }
+  // A leftover detached daemon would fight the supervised unit for the port.
+  stopDetachedDaemon();
   mkdirSync(unitDir(), { recursive: true });
   // systemd opens the `append:` log targets (renderUnitLogging) at exec time —
   // the state dir must exist first or the unit fails to start.
-  mkdirSync(stateDir(), { recursive: true });
   writeFileSync(unitPath(), renderUnit(binPath));
-  if (!tryRun("systemctl", ["--version"])) {
-    throw new Error("systemctl not found — cannot register a systemd unit");
-  }
   // Keep the user manager (and the daemon) alive across logout + at boot —
   // critical on headless servers where logind would otherwise reap it when the
   // SSH session ends. Self-linger usually needs no root (polkit); fall back to
-  // sudo, then a hint.
+  // sudo, then a hint. Skipped on the detached path (no boot restore).
   const user =
     capture("id", ["-un"]).trim() || homedir().split("/").pop() || "";
   if (
@@ -453,13 +505,23 @@ const startLinux = (binPath: string): void => {
   }
   tryRun("systemctl", ["--user", "daemon-reload"]);
   if (!tryRun("systemctl", ["--user", "enable", "--now", "openllmd.service"])) {
-    throw new Error("failed to enable openllmd.service");
+    // Bus looked reachable but enable still failed — fall back rather than
+    // leave the user with nothing (agent hosts often hit this). Disable,
+    // drop the unit, and reload so status does not report a loaded-but-
+    // inactive systemd supervisor while the real daemon is detached.
+    tryRun("systemctl", ["--user", "disable", "--now", "openllmd.service"]);
+    rmSync(unitPath(), { force: true });
+    tryRun("systemctl", ["--user", "daemon-reload"]);
+    startDetachedDaemon(binPath);
+    return "detached";
   }
   // Restart so a re-run with changed config takes effect (enable --now no-ops
   // when already running).
   tryRun("systemctl", ["--user", "restart", "openllmd.service"]);
+  return "systemd";
 };
 
+/** Stop the macOS launchd-managed daemon service. */
 const stopMac = (): void => {
   const target = guiTarget();
   tryRun("launchctl", ["bootout", target]);
@@ -468,10 +530,13 @@ const stopMac = (): void => {
   tryRun("launchctl", ["disable", target]);
 };
 
+/** Disable the user unit and reap any detached pidfile on Linux. */
 const stopLinux = (): void => {
-  // `disable --now` stops it AND removes the WantedBy symlink (no boot start);
-  // a manual stop does not re-trigger Restart=always, so it stays down.
+  // Always attempt `disable --now` (ignore failure): a bus that looked gone
+  // at probe time may still accept the stop, and a leftover unit would
+  // respawn against a detached daemon. Then reap any detached pidfile.
   tryRun("systemctl", ["--user", "disable", "--now", "openllmd.service"]);
+  stopDetachedDaemon();
 };
 
 // ─── Supervisor state (real, not a boolean) ──────────────────────────
@@ -534,43 +599,75 @@ export const renderLaunchdSupervisor = (s: {
 };
 
 export type TSupervisorInfo = {
+  readonly kind: TSupervisorKind;
   readonly pid: number | null;
+  /** Status `supervisor:` value — `launchd · <detail>` / `systemd · <detail>` / `detached (pid N)` / `none`. */
   readonly state: string;
 };
 
 /** Capture the daemon supervisor once for callers that need both state and PID. */
 export const supervisorInfo = (): TSupervisorInfo => {
+  // Prefer a live detached pidfile first: an enable-failure fallback may leave
+  // a loaded unit on disk while the real daemon is detached — status must
+  // name the process that is actually serving.
+  const detached = readLiveDetachedDaemon();
+  if (detached !== null) {
+    return {
+      kind: "detached",
+      state: formatSupervisorKind("detached", detached.pid),
+      pid: detached.pid,
+    };
+  }
   if (isMac) {
     // `launchctl print` exits non-zero (empty capture) when the label isn't
     // bootstrapped at all.
     const out = capture("launchctl", ["print", guiTarget()]);
-    if (out.length === 0) return { state: "not loaded", pid: null };
-    const parsed = parseLaunchctlPrint(out);
-    return { state: renderLaunchdSupervisor(parsed), pid: parsed.pid };
+    if (out.length > 0) {
+      const parsed = parseLaunchctlPrint(out);
+      return {
+        kind: "launchd",
+        state: formatSupervisorKind(
+          "launchd",
+          parsed.pid,
+          renderLaunchdSupervisor(parsed),
+        ),
+        pid: parsed.pid,
+      };
+    }
+  } else if (systemdUserBusAvailable()) {
+    const out = capture("systemctl", [
+      "--user",
+      "show",
+      "-p",
+      "LoadState,ActiveState,SubState,NRestarts,ExecMainStatus,Result,MainPID",
+      "openllmd.service",
+    ]);
+    const fields = parseKeyValues(out);
+    // A loaded unit (even inactive) means systemd owns this install.
+    if (out.length > 0 && fields.LoadState === "loaded") {
+      const pid = Number.parseInt(fields.MainPID ?? "", 10);
+      return {
+        kind: "systemd",
+        state: formatSupervisorKind(
+          "systemd",
+          Number.isFinite(pid) && pid > 0 ? pid : null,
+          renderSystemdSupervisor(fields),
+        ),
+        pid: Number.isFinite(pid) && pid > 0 ? pid : null,
+      };
+    }
   }
-  const out = capture("systemctl", [
-    "--user",
-    "show",
-    "-p",
-    "ActiveState,SubState,NRestarts,ExecMainStatus,Result,MainPID",
-    "openllmd.service",
-  ]);
-  if (out.length === 0) return { state: "unknown", pid: null };
-  const fields = parseKeyValues(out);
-  const pid = Number.parseInt(fields.MainPID ?? "", 10);
-  return {
-    state: renderSystemdSupervisor(fields),
-    pid: Number.isFinite(pid) && pid > 0 ? pid : null,
-  };
+  return { kind: "none", state: formatSupervisorKind("none", null), pid: null };
 };
 
+/** Human-readable supervisor kind/state string for status output. */
 export const supervisorState = (): string => supervisorInfo().state;
 
 /**
  * The RUNNING daemon's PID as reported by the service supervisor — launchd on
- * macOS, systemd `MainPID` on Linux — or null when no supervised daemon is
- * live. Callers running as a SEPARATE process (e.g. `openllm doctor`) must use
- * this, never `process.pid`, to inspect the daemon's own process tree.
+ * macOS, systemd `MainPID` on Linux, or the detached pidfile — or null when no
+ * daemon is live. Callers running as a SEPARATE process (e.g. `openllm doctor`)
+ * must use this, never `process.pid`, to inspect the daemon's own process tree.
  */
 export const supervisorPid = (): number | null => supervisorInfo().pid;
 
@@ -603,6 +700,10 @@ const rejectSourceServiceRegistration = (): never => {
   process.exit(2);
 };
 
+/**
+ * Register and start the supervised daemon once the credential gate has proof;
+ * no-ops (returns false) when the account is not yet ready.
+ */
 const startServiceAfterCredentialGate = (
   gate: TCredentialGateResult,
 ): boolean => {
@@ -619,14 +720,44 @@ const startServiceAfterCredentialGate = (
     setAutoUpdate(autoUpdateEnv !== "0" && autoUpdateEnv !== "false");
   }
   hardenMacBinary(binPath); // arm64 SIGKILLs an unsigned binary launchd spawns
-  if (isMac) startMac(binPath);
-  else startLinux(binPath);
-  process.stdout.write(
-    `openllmd v${DAEMON_VERSION} started in self-restore mode (listening on http://127.0.0.1:${servicePort()}).\n`,
-  );
+  const listen = `http://127.0.0.1:${servicePort()}`;
+  if (isMac) {
+    startMac(binPath);
+    process.stdout.write(
+      `openllm v${DAEMON_VERSION} started in self-restore mode (listening on ${listen}).\n`,
+    );
+    return true;
+  }
+  const detachedBefore = readLiveDetachedDaemon();
+  const mode = startLinux(binPath);
+  if (mode === "detached") {
+    const live = readLiveDetachedDaemon();
+    const pid = live?.pid;
+    const reused =
+      detachedBefore !== null &&
+      live !== null &&
+      detachedBefore.pid === live.pid;
+    const pidNote = pid !== undefined ? `pid ${pid}; ` : "";
+    process.stdout.write(
+      reused
+        ? // Reused process may still be bound to its prior listen address —
+          // do not claim the newly configured one.
+          `openllm v${DAEMON_VERSION} already running detached${
+            pid !== undefined ? ` (pid ${pid})` : ""
+          }.\n` +
+            "It is not supervised and will not restart at boot.\n"
+        : `openllm v${DAEMON_VERSION} started detached (${pidNote}listening on ${listen}).\n` +
+            "It is not supervised and will not restart at boot.\n",
+    );
+  } else {
+    process.stdout.write(
+      `openllm v${DAEMON_VERSION} started in self-restore mode (listening on ${listen}).\n`,
+    );
+  }
   return true;
 };
 
+/** Start the platform service (launchd/systemd) for the daemon. */
 export const serviceStart = (): boolean => {
   // Refuse a from-source run BEFORE the credential gate can prompt for or
   // persist a key: a dev run is rejected either way, so it must never solicit
@@ -645,7 +776,16 @@ export const serviceStart = (): boolean => {
 export const serviceStop = (): void => {
   if (isMac) stopMac();
   else stopLinux();
-  process.stdout.write("openllmd stopped; self-restore disabled.\n");
+  // Mac path has no detached fallback today, but clear a stale pidfile anyway.
+  if (isMac) stopDetachedDaemon();
+  const survivor = readLiveDetachedDaemon();
+  if (survivor !== null) {
+    process.stderr.write(
+      `[openllm] detached daemon pid ${survivor.pid} is still running after stop\n`,
+    );
+    return;
+  }
+  process.stdout.write("openllm stopped; self-restore disabled.\n");
 };
 
 /**
@@ -685,7 +825,8 @@ export type TKickstartSupervisedDaemonDeps = {
  * Does NOT touch the crash-loop floor: `ThrottleInterval` stays in the plist,
  * and `boot-guard.ts` remains the hard ceiling. Returns whether kickstart was
  * invoked successfully. Linux returns false — callers should `process.exit` and
- * let systemd's `RestartSec` (2s) relaunch.
+ * let systemd's `RestartSec` (2s) relaunch, OR call {@link restartForUpdate}
+ * which also respawns a detached daemon.
  */
 export const kickstartSupervisedDaemon = (
   deps: TKickstartSupervisedDaemonDeps = {},
@@ -693,6 +834,35 @@ export const kickstartSupervisedDaemon = (
   if (!isMac) return false;
   const run = deps.run ?? tryRun;
   return run("launchctl", ["kickstart", "-k", guiTarget()]);
+};
+
+/**
+ * Restart path used by the binary updater after a swap. macOS kickstarts
+ * launchd; a detached Linux daemon is respawned in place; a systemd unit
+ * returns false so the caller can exit and let `RestartSec` relaunch.
+ */
+export const restartForUpdate = (
+  deps: TKickstartSupervisedDaemonDeps = {},
+): boolean => {
+  if (isMac) return kickstartSupervisedDaemon(deps);
+  const info = supervisorInfo();
+  if (info.kind === "detached" || readLiveDetachedDaemon() !== null) {
+    // This process IS the live detached daemon (or its pidfile still points at
+    // one). Spawn the replacement first; the caller exits afterwards.
+    startDetachedDaemon(serviceBinPath(), { replace: true });
+    return true;
+  }
+  // Pidfile missing (e.g. cleared by a transient `ps` failure before the
+  // null-read fix) but this process is still the serving daemon on the
+  // no-systemd path — `restartForUpdate` only runs from the live daemon
+  // during a binary swap, so kind "none" means we must respawn ourselves.
+  // A unit file means systemd owns this install (e.g. the bus is briefly
+  // unreachable): let `Restart=` relaunch it rather than racing a detached copy.
+  if (info.kind === "none" && !existsSync(unitPath())) {
+    startDetachedDaemon(serviceBinPath(), { replace: true });
+    return true;
+  }
+  return false;
 };
 
 /**
@@ -708,18 +878,30 @@ export const serviceUninstall = (): string | null => {
   // 1. Stop + disable self-restore so nothing respawns while we tear down.
   if (isMac) stopMac();
   else stopLinux();
+  // Always reap a detached daemon (Linux fallback, or a stale pidfile on macOS).
+  stopDetachedDaemon();
+  // Keep the record of a daemon that survived the stop, so it can still be
+  // found and stopped; a stale pidfile is cleared by readLiveDetachedDaemon.
+  const survivor = readLiveDetachedDaemon();
+  if (survivor !== null) {
+    process.stderr.write(
+      `[openllm] detached daemon pid ${survivor.pid} is still running; stop it and re-run uninstall\n`,
+    );
+  }
   // 2. Remove the registration file itself.
   const path = isMac ? plistPath() : unitPath();
   const existed = existsSync(path);
   rmSync(path, { force: true });
-  // Linux: drop the removed unit from the in-memory view so it's fully gone.
-  if (!isMac && existed) tryRun("systemctl", ["--user", "daemon-reload"]);
+  // Linux: always attempt daemon-reload (ignore failure) so a removed unit
+  // cannot linger in the user manager's in-memory view.
+  if (!isMac && existed) {
+    tryRun("systemctl", ["--user", "daemon-reload"]);
+  }
   return existed ? path : null;
 };
 
 export type TStatusFields = {
   readonly version: string;
-  readonly registered: boolean;
   readonly supervisor: string;
   readonly health: TDaemonHealth | null;
   readonly port: number;
@@ -730,6 +912,7 @@ export type TStatusFields = {
   readonly stderrLog: string;
 };
 
+/** Pad a status row label to the status table width. */
 const padStatusLabel = (label: string, width: number): string => {
   const spaces = Math.max(1, width - label.length);
   return `  ${label}: ${" ".repeat(spaces)}`;
@@ -752,10 +935,6 @@ export const formatStatus = (fields: TStatusFields): string => {
     {
       label: "installed",
       value: `v${fields.health?.installed_version ?? fields.version}`,
-    },
-    {
-      label: "service",
-      value: fields.registered ? "registered" : "not registered",
     },
     {
       label: "supervisor",
@@ -813,10 +992,10 @@ export const formatStatus = (fields: TStatusFields): string => {
   const installed = fields.health?.installed_version ?? fields.version;
   const header =
     running === undefined
-      ? `openllmd v${fields.version} (installed; daemon not responding)`
+      ? `openllm v${fields.version} (installed; daemon not responding)`
       : running === installed
-        ? `openllmd v${running}`
-        : `openllmd v${running} running · v${installed} installed (daemon code unchanged — applies on next restart)`;
+        ? `openllm v${running}`
+        : `openllm v${running} running · v${installed} installed (daemon code unchanged — applies on next restart)`;
   return [
     header,
     ...rows.map((row) => `${padStatusLabel(row.label, width)}${row.value}`),
@@ -825,16 +1004,14 @@ export const formatStatus = (fields: TStatusFields): string => {
 };
 
 /**
- * Print the service's registration + RUN state. Three independent signals:
- *   - service:    is a launch agent / systemd unit registered (file on disk);
- *   - supervisor: the OS supervisor's REAL state (sub-state, restarts, last
- *                 exit) — a crash loop shows here, not a false "running";
+ * Print the daemon's RUN state. Two independent signals:
+ *   - supervisor: `launchd · <detail>` / `systemd · <detail>` / `detached (pid N)` / `none` — which
+ *                 mechanism (if any) owns the process;
  *   - health:     a live `/status` probe — the authoritative "actually serving"
  *                 signal, and the source of the live sandbox + cloud state.
  * Async because of the health probe.
  */
 export const serviceStatus = async (): Promise<void> => {
-  const registered = isMac ? existsSync(plistPath()) : existsSync(unitPath());
   const port = servicePort();
   const supervisor = supervisorState();
   const health = await probeHealth(port);
@@ -842,7 +1019,6 @@ export const serviceStatus = async (): Promise<void> => {
   process.stdout.write(
     formatStatus({
       version: DAEMON_VERSION,
-      registered,
       supervisor,
       health,
       port,

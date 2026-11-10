@@ -44,9 +44,11 @@ const PROMPT_FLAGS: readonly string[] = [
   "--json",
   "--output-format",
 ];
+/** Whether an argv token is a prompt-passing CLI flag. */
 const isPromptFlag = (s: string): boolean =>
   PROMPT_FLAGS.includes(s) || /^--(prompt|model|system|output-format)=/.test(s);
 
+/** Whether a CLI group should exec through to a client. */
 const isExecGroup = (s: string): s is TExecGroup =>
   (EXEC_GROUPS as readonly string[]).includes(s);
 
@@ -54,6 +56,7 @@ const isExecGroup = (s: string): s is TExecGroup =>
 const wantsHelp = (rest: readonly string[]): boolean =>
   rest.includes("-h") || rest.includes("--help");
 
+/** Print top-level CLI usage to stderr. */
 const usage = (text: string, exit: number): never => {
   (exit === 0 ? process.stdout : process.stderr).write(text);
   return process.exit(exit);
@@ -174,6 +177,7 @@ your online devices. Both come from ~/.openllm/.env (.dev.env in dev).
 `;
 };
 
+/** Dispatch `openllm` argv to client runners, setup, and daemon helpers. */
 export const runCli = async (argv: readonly string[]): Promise<void> => {
   // OUR client flags sit BEFORE the subcommand (`openllm -d -r claude …`), so
   // they're stripped here — everything after the client name belongs to the
@@ -323,7 +327,25 @@ export const runCli = async (argv: readonly string[]): Promise<void> => {
           return process.exit(1);
         }
       }
-      return process.exit(await runManagedDaemonCommand(command));
+      // Start the daemon first so serving is never delayed by vendor installs.
+      // Full mode then provisions missing vendor CLIs (same install.sh path as
+      // first-run) — bounded and best-effort; failures are reported, not fatal.
+      const exitCode = await runManagedDaemonCommand(command);
+      if (command === "start" && exitCode === 0) {
+        const { isMinimalSetupMode } = await import("./setup-mode");
+        if (!isMinimalSetupMode()) {
+          const { provisionMissingVendorClis } = await import(
+            "./vendor-provision"
+          );
+          const provisionCode = await provisionMissingVendorClis();
+          if (provisionCode !== 0) {
+            process.stderr.write(
+              `[start] vendor provisioning finished with exit ${provisionCode}\n`,
+            );
+          }
+        }
+      }
+      return process.exit(exitCode);
     }
     case "auth": {
       const { authHelp } = await import("./generated/local-auth");

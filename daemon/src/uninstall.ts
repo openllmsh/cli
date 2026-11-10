@@ -36,7 +36,9 @@ import { uninstallCompletion } from "./completion";
 import { stateDir } from "./env";
 import { drainHoldOutbox, pendingHoldRecords } from "./hold-outbox";
 import { serviceUninstall } from "./service";
+import { stopLiveSessionHostsIn } from "./session-host-stop";
 
+/** Write a line to uninstall stdout. */
 const out = (s: string): void => {
   process.stdout.write(s);
 };
@@ -73,12 +75,24 @@ const DAEMON_STATE_ENTRIES: readonly string[] = [
   ".env", // paired API key + origin
   "state.json", // daemon runtime state (update cooldowns, boot history)
   "x25519-priv", // the daemon's encryption private key
-  "sessions", // remote PTY session state
+  "sessions", // remote PTY + durable session-host state
   "debug", // debug artifacts
+  "daemon.pid", // detached (no-systemd) daemon pidfile
   "openllmd.log",
   "openllmd.out.log",
   "openllmd.err.log",
+  "openllmd.dev.log",
+  "openllmd.diagnostics.jsonl",
 ];
+
+/**
+ * Stop every live durable session host under `~/.openllm/sessions` before the
+ * directory is removed. Uses the shared unpinned session-host reader (not the
+ * child-supervisor LC_ALL=C/TZ=UTC pin) so hosts from a prior release are
+ * still recognized. Prefers ctl.sock when present + pid alive. Exported for tests.
+ */
+export const stopLiveSessionHosts = async (): Promise<number> =>
+  stopLiveSessionHostsIn(join(stateDir(), "sessions"));
 
 /**
  * Remove the daemon's own state, leaving every CLI-owned entry untouched. When
@@ -218,12 +232,20 @@ export const runUninstall = async (args: readonly string[]): Promise<never> => {
 
   out("\nRemoving the OpenLLM daemon…\n");
 
-  // 1. Stop + unregister the service (kills self-restore before we delete).
+  // 1. Stop + unregister the service (kills self-restore + detached daemon).
   const removedService = serviceUninstall();
   out(
     removedService !== null
       ? `  ✓ stopped + unregistered the service (${removedService})\n`
       : "  ✓ service stopped (no registration found)\n",
+  );
+
+  // 1b. Stop durable session hosts before their registry directory is removed.
+  const stoppedHosts = await stopLiveSessionHosts();
+  out(
+    stoppedHosts > 0
+      ? `  ✓ stopped ${stoppedHosts} session host${stoppedHosts === 1 ? "" : "s"}\n`
+      : "  ✓ session hosts (none running)\n",
   );
 
   // 2. Shell completion.

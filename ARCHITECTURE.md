@@ -143,24 +143,47 @@ Config: `OPENLLM_CLOUD_ORIGIN` / `OPENLLM_API_KEY` env (the same contract the
 MCP mapping + hooks carry), falling back to the SHARED `~/.openllm/.env` (the
 same file the daemon boots from — one pairing covers every tool), falling back
 to the compile-time cloud-origin bake. Product setup mode is
-`OPENLLM_SETUP_MODE=full|minimal` (persisted in that env file). The curl
-installer (`install.sh`) asks Full vs Minimal on a controlling tty when neither
-an explicit `--minimal` / `OPENLLM_SETUP_MODE` nor a saved mode is present
-(Enter → Full; EOF/cancel aborts before mode-dependent work); headless /
-non-interactive installs pick Full silently (including bare `curl … | bash`).
-Automation that wants Minimal must pass `--minimal` or
-`OPENLLM_SETUP_MODE=minimal`. Full installs vendor CLIs by default (opt out
-with `OPENLLM_SKIP_VENDOR_CLIS`); the Mac desktop app passes
-`OPENLLM_SETUP_MODE=full` plus key and origin explicitly so its run never
-prompts. The installer exits nonzero only for a missing first-install key or a
-daemon that did not start; skipped, pending, failed or timed-out vendor CLIs
-are a warning naming `~/.openllm/cli-install.log`. Updates / re-runs with a
-saved mode never prompt, and an update that replaced the binary restarts a
+`OPENLLM_SETUP_MODE=full|minimal` (persisted in that env file).
+
+The curl installer (`install.sh`) has two auto-detected modes (override with
+`--interactive` / `--non-interactive` / `-y`, or `OPENLLM_INTERACTIVE=1|0`):
+- **Interactive** (controlling tty): today's walkthrough; asks Full vs Minimal
+  when neither an explicit `--minimal` / `OPENLLM_SETUP_MODE` nor a saved mode
+  is present (Enter → Full; EOF/cancel aborts before mode-dependent work);
+  Full **starts the daemon** when a key is available; keyless runs
+  `openllm login --no-restart` on the tty.
+- **Headless**: Full with no prompts (including bare `curl … | bash`); does
+  **not** start or register the daemon unless `--start` /
+  `OPENLLM_START_DAEMON=1`; never runs `openllm login` (even on a PTY under
+  `--non-interactive`) — keyless ends with the summary's `Next: openllm login`.
+  Ends with a fixed parseable summary (`OpenLLM install summary`, `vendors:`,
+  `daemon:`, `path:`, `Next:`). When `openllm` does not already resolve to this
+  install, `path:` prints `export PATH="$HOME/.openllm/bin:$PATH"`.
+
+Flags are taken at face value (flag > env > `~/.openllm/.env` > default).
+Unknown / contradictory flags fail before any install side effect. Full-only
+sub-flags (`--start` / `--no-start`, `--vendors=` / `--no-vendors`) with
+`--minimal` are rejected the same way. Automation that wants Minimal must pass
+`--minimal` or `OPENLLM_SETUP_MODE=minimal`. Full provisions vendor CLIs by
+default (opt out with `--no-vendors` / `OPENLLM_SKIP_VENDOR_CLIS`); headless
+waits on launched workers up to `OPENLLM_VENDOR_WAIT_SECS` (default 600) **after**
+daemon start when start was wanted, so a stuck vendor never delays serving.
+The Mac desktop app passes `OPENLLM_SETUP_MODE=full`, key, origin, and
+`OPENLLM_START_DAEMON=1` explicitly so its headless run never prompts and still
+starts the daemon. Exit 0 when the install worked and next steps were printed
+(keyless included); nonzero only for a real failure, including a start that was
+explicitly requested and failed. Skipped, pending, failed or timed-out vendor
+CLIs are a warning naming `~/.openllm/cli-install.log`. Updates / re-runs with
+a saved mode never prompt, and an update that replaced the binary restarts a
 running daemon even in Minimal (which still never starts a stopped one).
-**full** is ordinary vendor provisioning + daemon startup; **minimal** sends
-every client launch cloud-direct and never probes, starts or brokers through
-the local daemon, even a running one (`clients/gateway.ts` skips the loopback
-probe and `clients/session.ts` the durable session host; only
+`openllm start` in Full mode best-effort provisions missing vendor CLIs via the
+same `install.sh` vendors path (curl/bash timeouts; fail soft) before starting
+the daemon, so the keyless → login → start path ends in the same state as an
+install that already had a key.
+**full** is ordinary vendor provisioning + optional daemon startup; **minimal**
+sends every client launch cloud-direct and never probes, starts or brokers
+through the local daemon, even a running one (`clients/gateway.ts` skips the
+loopback probe and `clients/session.ts` the durable session host; only
 `OPENLLM_GATEWAY=local` overrides). To use the local daemon, switch to Full:
 `openllm login --start` (the desktop app's pairing call) saves
 `OPENLLM_SETUP_MODE=full` and starts it, or set the variable yourself;

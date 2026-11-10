@@ -90,11 +90,15 @@ export type TSessionHostClient = {
 const isCli: (value: unknown) => value is TDeviceSessionCli =
   S.is(DeviceSessionCli);
 
+/** Root directory for durable session-host registries. */
 const sessionHostsRoot = (): string => join(stateDir(), "sessions");
+/** Per-host directory under the session-hosts root. */
 const sessionHostDir = (id: string): string => join(sessionHostsRoot(), id);
+/** Path of a host's private control socket. */
 const sessionHostSocketPath = (id: string): string =>
   join(sessionHostDir(id), "ctl.sock");
 
+/** Narrow unknown JSON to a session-host metadata record. */
 const isSessionHostMeta = (value: unknown): value is TSessionHostMeta => {
   if (typeof value !== "object" || value === null || Array.isArray(value))
     return false;
@@ -131,6 +135,8 @@ const readProcessStartTime = async (
 ): Promise<string | null | undefined> => {
   if (budget.expired()) return undefined;
   try {
+    // Unpinned env — must match session-host writers / CLI discovery readers
+    // (hosts from a prior release look dead if LC_ALL/TZ differ).
     const proc = Bun.spawn(["ps", "-o", "lstart=", "-p", String(pid)], {
       stdout: "pipe",
       stderr: "ignore",
@@ -186,6 +192,7 @@ const forEachLimited = async <T>(
   );
 };
 
+/** Whether the host control socket path currently exists. */
 const socketPresent = (path: string): boolean => {
   try {
     return statSync(path).isSocket();
@@ -202,6 +209,7 @@ type TDiscoveryCandidate = {
   readonly socketReady: boolean;
 };
 
+/** Best-effort recursive delete of a stale host directory. */
 const reapSessionHostDir = (directory: string): void => {
   try {
     rmSync(directory, { recursive: true, force: true });
@@ -215,6 +223,7 @@ type TDiscoveryOutcome = {
   readonly complete: boolean;
 };
 
+/** Resolved path of the openllm binary that hosts the daemon. */
 const daemonBinary = (): readonly string[] => {
   // The detached session host is what actually owns the PTY and spawns the
   // openllm CLI. Re-exec THIS daemon's own code: the source runner in dev (so
@@ -236,6 +245,7 @@ const spawnHostProcessDefault: TSpawnHostProcess = (argv) => {
   return proc;
 };
 
+/** Construct the session-host client facade for this daemon. */
 const buildSessionHostClient = (
   deps: TSessionHostClientDeps = {},
 ): TSessionHostClient => {

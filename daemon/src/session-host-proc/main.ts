@@ -48,26 +48,18 @@ import {
   RESUME_ID_PATTERN,
   setSessionLifecycleHooks,
 } from "../session-core";
+import { readSessionHostProcessStartTime } from "../session-host-stop";
 
 const SESSION_DIR_MODE = 0o700;
 const ACTIVITY_POLL_MS = 15_000;
 
-const processStartTime = (): string | null => {
-  try {
-    const output = Bun.spawnSync(
-      ["ps", "-o", "lstart=", "-p", String(process.pid)],
-      {
-        stdout: "pipe",
-        stderr: "ignore",
-      },
-    );
-    if (output.exitCode !== 0) return null;
-    const value = new TextDecoder().decode(output.stdout).trim();
-    return value.length > 0 ? value : null;
-  } catch {
-    return null;
-  }
-};
+/**
+ * Unpinned `ps -o lstart=` — must match CLI discovery / uninstall readers.
+ * Child-supervisor keeps its own LC_ALL=C/TZ=UTC pin separately; do not share it
+ * here or hosts started by a prior release look dead after upgrade.
+ */
+const processStartTime = (): string | null =>
+  readSessionHostProcessStartTime(process.pid);
 
 export type TSessionHostArgs = {
   readonly id: string;
@@ -109,6 +101,7 @@ type TEnvelope = {
   readonly p?: unknown;
 };
 
+/** Whether a value is a plain non-null object record. */
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null && !Array.isArray(value);
 
@@ -126,6 +119,7 @@ export const sessionHostResetPayload = (
 const isCli: (value: unknown) => value is TDeviceSessionCli =
   S.is(DeviceSessionCli);
 
+/** Parse a positive terminal dimension integer from input. */
 const parseDimension = (value: string | undefined): number | null => {
   if (value === undefined) return null;
   const parsed = Number.parseInt(value, 10);
@@ -133,9 +127,11 @@ const parseDimension = (value: string | undefined): number | null => {
   return S.is(TerminalDimension)(parsed) ? parsed : null;
 };
 
+/** Whether a number is a usable terminal dimension. */
 const isDimension = (value: unknown): value is number =>
   S.is(TerminalDimension)(value);
 
+/** Whether a vendor CLI spawn argument is safe to exec. */
 const validVendorArg = (value: string): boolean =>
   value.length >= 1 && value.length <= 512 && !value.includes("\0");
 
@@ -251,8 +247,10 @@ export const parseSessionHostArgs = (
   };
 };
 
+/** Per-host directory under the session-hosts root. */
 export const sessionHostDir = (id: string): string =>
   join(stateDir(), "sessions", id);
+/** Path of a host's private control socket. */
 export const sessionHostSocketPath = (id: string): string =>
   join(sessionHostDir(id), "ctl.sock");
 
@@ -326,12 +324,14 @@ class SessionHostStream implements TSessionStream {
   };
 }
 
+/** Build a protocol-error payload for the session-host socket. */
 const protocolError = (socket: TSocket): void => {
   const stream = socket.data.stream ?? new SessionHostStream(socket);
   socket.data.stream = stream;
   stream.reset(encodeJsonPayload({ code: "protocol_error" }));
 };
 
+/** Parse an attach-open frame from the session-host protocol. */
 const parseAttachOpen = (
   value: unknown,
   expected: TSessionHostArgs,
