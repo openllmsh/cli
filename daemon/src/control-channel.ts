@@ -1176,6 +1176,12 @@ const onCommand = async (command: TRelayFrame): Promise<void> => {
     await statusReadTail;
     return;
   }
+  // `auth` runs the loopback handler, which schedules the work it starts
+  // itself; a held status long-poll must not occupy a queue slot.
+  if (command.command.kind === "auth") {
+    await run();
+    return;
+  }
   if (command.command.kind === "list_local_sessions") {
     listLocalReadTail = listLocalReadTail.catch(() => undefined).then(run);
     await listLocalReadTail;

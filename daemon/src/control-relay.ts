@@ -144,6 +144,16 @@ const runCommandInAccount = async (
 ): Promise<TDaemonCommandAck> => {
   try {
     switch (cmd.kind) {
+      case "auth": {
+        // Lazy: local-auth executes through this module (static import cycles).
+        const { runRelayedAuth } = await import("./local-auth");
+        // Always `done`: the reply (errors included) is the result, as on loopback.
+        return {
+          id: cmd.id,
+          status: "done",
+          result: await runRelayedAuth(cmd.payload),
+        };
+      }
       case "add_account": {
         const r = await addAccount(cmd.payload.slug, cmd.payload.label);
         return { id: cmd.id, status: r.ok ? "done" : "error", result: r };

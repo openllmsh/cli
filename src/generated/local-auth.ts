@@ -6,6 +6,16 @@ export const AUTH_LOCAL_MAX_BODY_BYTES = 16_384;
 export const AUTH_CODE_MAX_BYTES = 8_192;
 /** Longest a `status` long-poll (`wait_ms`) may hold before replying unchanged. */
 export const AUTH_WAIT_MAX_MS = 60_000;
+/** The same long-poll over the relay `auth` command: kept well under the
+ *  browser's command-result wait so a held status never reads as a timeout. */
+export const AUTH_RELAY_WAIT_MAX_MS = 20_000;
+
+/** What the daemon acks for a relayed `auth` command: the loopback reply
+ *  verbatim, with the HTTP status it would have carried. */
+export type TAuthRelayResult = {
+  readonly status: number;
+  readonly body: Record<string, unknown>;
+};
 
 export const AUTH_COMMANDS = [
   {
@@ -115,6 +125,11 @@ export const AUTH_COMMANDS = [
   },
 ] as const;
 export type TAuthOperation = (typeof AUTH_COMMANDS)[number]["name"];
+/** Every operation name, as a tuple for literal schemas. */
+export const AUTH_OPERATIONS = AUTH_COMMANDS.map((one) => one.name) as [
+  TAuthOperation,
+  ...TAuthOperation[],
+];
 export type TLocalAuthMethod = "browser" | "device";
 export type TLocalAuthRequest = {
   readonly operation: TAuthOperation;

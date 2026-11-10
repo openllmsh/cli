@@ -1,5 +1,7 @@
 /** Authenticated OS-local adapter. Provider work stays in the running daemon. */
 import type {
+  TAuthPayload,
+  TAuthRelayResult,
   TDaemonCommand,
   TDaemonCommandAck,
   TDaemonStatus,
@@ -27,7 +29,7 @@ import type { TCliProvider } from "./cli-paths";
 import { runCommandInner } from "./control-relay";
 import { DELEGATES, getDelegate } from "./delegation";
 import { loginSlot } from "./delegation/login-flow";
-import { daemonPublicKey, sealTo } from "./keypair";
+import { daemonPublicKey, openSealed, sealTo } from "./keypair";
 import {
   localAccessFailure,
   localJson,
@@ -228,6 +230,37 @@ export const handleLocalAuth = async (req: Request): Promise<Response> => {
   return runWithAccount(input.account ?? 0, () =>
     handleParsed(input, req.signal),
   );
+};
+
+/**
+ * The relay's `auth` command: the same request, the same handler and the same
+ * reply as loopback `/local/auth`. Only the transport differs — the code is
+ * opened from its sealed box here, then the request is validated exactly as a
+ * CLI request is. The flow token in a `login` reply goes back only to the
+ * caller that sent it, so holding it is what owns the flow on every surface.
+ */
+export const runRelayedAuth = async (
+  payload: TAuthPayload,
+): Promise<TAuthRelayResult> => {
+  const { sealed_code: sealed, ...rest } = payload;
+  let input: TLocalAuthRequest;
+  try {
+    input = parseLocalAuthRequest(
+      sealed === undefined ? rest : { ...rest, code: await openSealed(sealed) },
+    );
+  } catch {
+    return {
+      status: 400,
+      body: { version: AUTH_LOCAL_VERSION, error: "invalid" },
+    };
+  }
+  const response = await runWithAccount(input.account ?? 0, () =>
+    handleParsed(input),
+  );
+  return {
+    status: response.status,
+    body: (await response.json()) as Record<string, unknown>,
+  };
 };
 
 /** The roster slot `account` of `provider` exists (account 0 always does). */

@@ -100,6 +100,9 @@ export const commandLaneOf = (cmd: TDaemonCommand): TCommandLane => {
       return "mutation";
     case "refresh":
       return "usage";
+    // Never queued itself: control-channel runs it directly and the work it
+    // starts goes through this scheduler as the matching command.
+    case "auth":
     case "status":
     case "list_local_sessions":
     case "local_rescan":
