@@ -19,6 +19,7 @@ import type {
   TContextOverflowStrategy,
   TDaemonBootstrap,
   TDaemonCatalogEntry,
+  TDaemonCloudState,
   TDaemonReportingPolicy,
   TExecutionSelection,
   TModelCapsDefaultRule,
@@ -57,12 +58,7 @@ const EMPTY = EMPTY_DAEMON_BOOTSTRAP;
  * `invalid_key`), a retry hint (`unreachable`), a still-booting hint
  * (`connecting`), or the provider cards (`ok`).
  */
-export type TCloudState =
-  | "ok"
-  | "no_key"
-  | "invalid_key"
-  | "unreachable"
-  | "connecting";
+export type TCloudState = TDaemonCloudState;
 
 /**
  * Initial `/status` cloud state before the first bootstrap attempt finishes.
