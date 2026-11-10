@@ -8,6 +8,9 @@
  * install that already had a key without delaying the listen port.
  */
 
+import { existsSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
 import { cliConfig } from "./env";
 import { awaitPipeCodes, bunSubprocessPeer } from "./process-pipe";
 import { isSecureOrigin } from "./self-update";
@@ -33,6 +36,79 @@ export type TVendorProvisionSpawn = (
 
 export type TProvisionMissingVendorClisDeps = {
   readonly spawn?: TVendorProvisionSpawn;
+  /** Override home for dest checks (tests). */
+  readonly home?: string;
+  /** Override PATH lookup (tests). */
+  readonly which?: (command: string) => string | null;
+};
+
+/**
+ * Vendor CLIs the Full installer provisions — mirrors
+ * `build_vendor_status_line` in `packages/cli/install.sh`.
+ */
+export const PROVISIONED_VENDOR_CLIS: readonly {
+  readonly command: string;
+  readonly dest: (home: string) => string;
+}[] = [
+  {
+    command: "claude",
+    dest: (home) => join(home, ".local", "bin", "claude"),
+  },
+  {
+    command: "codex",
+    dest: (home) => join(home, ".local", "bin", "codex"),
+  },
+  {
+    command: "kimi",
+    dest: (home) => join(home, ".kimi-code", "bin", "kimi"),
+  },
+  {
+    command: "grok",
+    dest: (home) => join(home, ".grok", "bin", "grok"),
+  },
+  {
+    command: "cursor-agent",
+    dest: (home) => join(home, ".local", "bin", "cursor-agent"),
+  },
+  {
+    command: "muse",
+    dest: (home) => join(home, ".local", "bin", "muse"),
+  },
+  {
+    command: "agy_acp_server.par",
+    dest: (home) =>
+      join(
+        home,
+        ".openllm",
+        "vendor",
+        "antigravity",
+        "current",
+        "agy_acp_server.par",
+      ),
+  },
+];
+
+/** True when every Full-installer vendor CLI is already on PATH or at its dest. */
+export const allProvisionedVendorClisPresent = (
+  deps: {
+    readonly home?: string;
+    readonly which?: (command: string) => string | null;
+  } = {},
+): boolean => {
+  const home = deps.home ?? homedir();
+  const which =
+    deps.which ??
+    ((command: string): string | null => Bun.which(command) ?? null);
+  for (const vendor of PROVISIONED_VENDOR_CLIS) {
+    const onPath = which(vendor.command);
+    if (onPath !== null && onPath.length > 0) continue;
+    const dest = vendor.dest(home);
+    if (existsSync(dest)) continue;
+    const localBin = join(home, ".local", "bin", vendor.command);
+    if (existsSync(localBin)) continue;
+    return false;
+  }
+  return true;
 };
 
 /**
@@ -49,6 +125,18 @@ export const provisionMissingVendorClis = async (
   if (!isSecureOrigin(gatewayUrl)) {
     process.stderr.write(
       `[start] skipping vendor provisioning over an insecure origin (${gatewayUrl})\n`,
+    );
+    return 0;
+  }
+
+  if (
+    allProvisionedVendorClisPresent({
+      home: deps?.home,
+      which: deps?.which,
+    })
+  ) {
+    process.stderr.write(
+      `[start] all vendor CLIs already present — skipping /install fetch\n`,
     );
     return 0;
   }
