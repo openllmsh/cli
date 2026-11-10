@@ -48,10 +48,14 @@ import {
   RESUME_ID_PATTERN,
   setSessionLifecycleHooks,
 } from "../session-core";
+import { sleepSyncMs } from "../child-supervisor/posix";
 import { readSessionHostProcessStartTime } from "../session-host-stop";
 
 const SESSION_DIR_MODE = 0o700;
 const ACTIVITY_POLL_MS = 15_000;
+/** Brief retries for a transient `ps -o lstart=` miss after PTY spawn. */
+const CHILD_START_TIME_RETRY_ATTEMPTS = 10;
+const CHILD_START_TIME_RETRY_MS = 20;
 
 /**
  * Unpinned `ps -o lstart=` — must match CLI discovery / uninstall readers.
@@ -60,6 +64,40 @@ const ACTIVITY_POLL_MS = 15_000;
  */
 const processStartTimeFor = (pid: number): string | null =>
   readSessionHostProcessStartTime(pid);
+
+/** Retry a transient process-table miss before giving up on child identity. */
+const processStartTimeForRetried = (
+  pid: number,
+  reader: (pid: number) => string | null = processStartTimeFor,
+): string | null => {
+  for (let i = 0; i < CHILD_START_TIME_RETRY_ATTEMPTS; i++) {
+    const live = reader(pid);
+    if (live !== null) return live;
+    if (i + 1 < CHILD_START_TIME_RETRY_ATTEMPTS) {
+      sleepSyncMs(CHILD_START_TIME_RETRY_MS);
+    }
+  }
+  return null;
+};
+
+/**
+ * Persistable detached-child identity for meta.json. Omits both fields when
+ * start-time cannot be recorded — a pid-only record permanently blocks
+ * uninstall (cannot signal safely, still listed as a survivor).
+ * Exported for tests.
+ */
+export const sessionChildMetaFields = (
+  childPid: number | null,
+  readStart: (pid: number) => string | null = processStartTimeForRetried,
+): {
+  readonly childPid?: number;
+  readonly childProcessStartTime?: string;
+} => {
+  if (childPid === null) return {};
+  const childProcessStartTime = readStart(childPid);
+  if (childProcessStartTime === null) return {};
+  return { childPid, childProcessStartTime };
+};
 
 const processStartTime = (): string | null => processStartTimeFor(process.pid);
 
@@ -499,8 +537,6 @@ export const runSessionHost = (
         session.pid !== null && Number.isInteger(session.pid) && session.pid > 1
           ? session.pid
           : null;
-      const childProcessStartTime =
-        childPid === null ? null : processStartTimeFor(childPid);
       meta = {
         id: args.id,
         cli: args.cli,
@@ -512,8 +548,7 @@ export const runSessionHost = (
         processStartTime: ownProcessStartTime,
         generation: session.generation,
         ...(dangerous ? { dangerous: true } : {}),
-        ...(childPid === null ? {} : { childPid }),
-        ...(childProcessStartTime === null ? {} : { childProcessStartTime }),
+        ...sessionChildMetaFields(childPid),
       };
       if (dangerous) {
         for (const id of [args.id, session.vendorSessionId, resumedId])
