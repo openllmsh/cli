@@ -743,6 +743,19 @@ if [ "$SETUP_MODE" = minimal ]; then
   if [ "$FLAG_NO_VENDORS" = 1 ]; then
     die "--no-vendors cannot be combined with --minimal (pass --full to override a saved Minimal setup)"
   fi
+  # Explicit `--minimal` + OPENLLM_START_DAEMON=1 is the env equivalent of
+  # `--minimal --start` and must fail the same way. A saved Minimal mode with
+  # a harness/desktop OPENLLM_START_DAEMON=1 is ignored (WANT_START stays 0).
+  if [ "$FLAG_SETUP_MODE" = minimal ] && [ "${OPENLLM_START_DAEMON+set}" = set ]; then
+    raw_start="$(trim_whitespace "${OPENLLM_START_DAEMON}")"
+    case "$raw_start" in
+      1|true|yes|YES|True)
+        die "OPENLLM_START_DAEMON=1 cannot be combined with --minimal (pass --full to override a saved Minimal setup)"
+        ;;
+      0|false|no|NO|False|"") ;;
+      *) die "OPENLLM_START_DAEMON must be 1 or 0" ;;
+    esac
+  fi
   OPENLLM_SKIP_VENDOR_CLIS=1
 fi
 
@@ -753,8 +766,7 @@ resolve_want_start() {
   local raw
   WANT_START=0
   if [ "$SETUP_MODE" = minimal ]; then
-    # Full-only sub-flags already rejected above. A bare OPENLLM_START_DAEMON
-    # from a caller/harness is ignored under Minimal.
+    # Full-only start requests already rejected above (flags + OPENLLM_START_DAEMON).
     WANT_START=0
     return 0
   fi
@@ -2507,8 +2519,12 @@ build_vendor_status_line() {
       if [ -f "$path" ]; then
         body="$(cat "$path" 2>/dev/null || true)"
         case "$body" in
-          *'"stage":"awaiting_detection"'*|*'"stage":"installed"'*|*'"stage": "awaiting_detection"'*|*'"stage": "installed"'*)
-            stage="installed" ; reason="" ;;
+          *'"stage":"installed"'*|*'"stage": "installed"'*)
+            # Progress claimed installed but has_command/dest checks above
+            # already failed — report the mismatch instead of lying.
+            stage="pending" ; reason="awaiting_detection" ;;
+          *'"stage":"awaiting_detection"'*|*'"stage": "awaiting_detection"'*)
+            stage="pending" ; reason="awaiting_detection" ;;
           *'"stage":"installing"'*|*'"stage": "installing"'*)
             stage="pending" ; reason="still installing" ;;
           *'"stage":"failed"'*|*'"stage": "failed"'*)
@@ -2565,8 +2581,12 @@ print_install_summary() {
   path_hint_line
   if [ "$INSTALL_MODE" = update ]; then
     echo "Next: openllm status"
+  elif [ "${AUTH_FAILED:-0}" = 1 ]; then
+    echo "auth: failed"
+    echo "Next: openllm login"
   elif [ -z "$API_KEY" ]; then
     echo "Next: openllm login --non-interactive"
+    echo "Next: after approval, run the printed resume command"
     if [ "$SETUP_MODE" != minimal ] && [ "$DAEMON_STATE" != "running" ]; then
       echo "Next: openllm start"
     fi
@@ -2612,8 +2632,12 @@ EOF
 fi
 
 # Nonzero only on real failure. Keyless success with next steps prints exit 0.
+# A failed interactive login is distinct from deliberate keyless deferral.
 # A failed start (--start / interactive Full) or a failed update restart is
 # nonzero. Vendor failures are not.
+if [ "${AUTH_FAILED:-0}" = 1 ]; then
+  exit 1
+fi
 if [ "$DAEMON_START_FAILED" = 1 ]; then
   exit 1
 fi
