@@ -97,6 +97,17 @@ const localFlowOf = (provider: string, id: string): TLocalFlow | null => {
 };
 
 const MESSAGE_MAX = 200;
+/** Command error codes a reply passes through as `error`; anything else is `command_failed`. */
+const COMMAND_ERROR_CODES: readonly string[] = [
+  "login_conflict",
+  "flow_mismatch",
+  "overflow",
+  "apply_busy",
+  "continuation_idle",
+  "duplicate_account",
+  "unknown account",
+  "unknown provider",
+];
 /**
  * A failure's readable reason (the daemon's `error` / `detail` text), for
  * people and agents alike. Scrubbed: gateway keys and links are replaced and
@@ -105,12 +116,18 @@ const MESSAGE_MAX = 200;
 export const outcomeMessage = (result: unknown): string | undefined => {
   if (result === null || typeof result !== "object") return undefined;
   const record = result as Record<string, unknown>;
-  const raw =
-    typeof record.detail === "string" && record.detail.trim() !== ""
-      ? record.detail
-      : typeof record.error === "string"
-        ? record.error
-        : undefined;
+  // A bare machine code (`login_conflict`) is not a message: the reply's
+  // `error` already carries it, and callers have copy for it.
+  const prose = (value: unknown): value is string =>
+    typeof value === "string" &&
+    value.trim() !== "" &&
+    !COMMAND_ERROR_CODES.includes(value.trim()) &&
+    !/^[a-z][a-z0-9]*(_[a-z0-9]+)+$/.test(value.trim());
+  const raw = prose(record.detail)
+    ? record.detail
+    : prose(record.error)
+      ? record.error
+      : undefined;
   if (raw === undefined) return undefined;
   const scrubbed = raw
     .replace(/sk-llm-[A-Za-z0-9._-]+/g, "[key]")
@@ -135,16 +152,7 @@ const commandOutcome = (ack: TDaemonCommandAck): Record<string, unknown> => {
       ? {
           error:
             typeof result?.error === "string" &&
-            [
-              "login_conflict",
-              "flow_mismatch",
-              "overflow",
-              "apply_busy",
-              "continuation_idle",
-              "duplicate_account",
-              "unknown account",
-              "unknown provider",
-            ].includes(result.error)
+            COMMAND_ERROR_CODES.includes(result.error)
               ? result.error
               : "command_failed",
         }
@@ -428,11 +436,14 @@ const handleParsed = async (
           account,
           flow,
         );
+      // The hold counts from the request, computing included, so a held status
+      // never outlasts `wait_ms` and reads as a timeout to the caller.
+      const deadline =
+        input.wait_ms !== undefined ? Date.now() + input.wait_ms : 0;
       let result = await body(true);
       let revision = authRevision(result);
       // Long-poll: hold until the snapshot differs from the caller's revision.
       if (input.since !== undefined && input.wait_ms !== undefined) {
-        const deadline = Date.now() + input.wait_ms;
         while (revision === input.since) {
           const left = deadline - Date.now();
           if (left <= 0) break;

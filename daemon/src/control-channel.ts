@@ -16,6 +16,7 @@ import type {
   TRelayFrame,
 } from "@openllmsh/sdk/protocol";
 import {
+  AUTH_COMMANDS,
   RELAY_PROTOCOL_VERSION,
   RelayFrame,
   RelayStampedChannelOpenFrame,
@@ -1130,6 +1131,17 @@ const onCommand = async (command: TRelayFrame): Promise<void> => {
       });
       send({ type: "ack", ack });
       if (pendingAfterAck !== null) await pendingAfterAck();
+      // A read-only `auth` (status long-polls, every few seconds per watching
+      // tab) changes nothing to publish; its mutating operations request their
+      // own push, and the periodic tick still publishes what a read noticed.
+      const ran = command.command;
+      if (ran.kind === "auth") {
+        const operation = ran.payload.operation;
+        if (
+          AUTH_COMMANDS.find((one) => one.name === operation)?.mutating !== true
+        )
+          return;
+      }
       // `pushStatus` returning is the publish *request* settling (compute /
       // enqueue / local send attempt). It is not browser receipt or relay persistence.
       if (isAuthCommand) {
