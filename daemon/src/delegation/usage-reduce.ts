@@ -52,8 +52,9 @@ const SEVEN_DAYS_MS = 7 * 86_400_000;
  * Reduce Anthropic's OAuth usage payload into the same windows /
  * extra_pools split ChatGPT uses for main meters vs. per-feature pools.
  *
- *   - `windows` — the shared plan meters (`five_hour` + `seven_day`).
- *     These alone drive overall status, the card's tightest-window
+ *   - `windows` — the shared plan meters (`five_hour` + `seven_day`),
+ *     each only when the payload reports it (verified Ultra has no
+ *     `five_hour`). These alone drive overall status, the card's tightest-window
  *     face, and calibration. Hitting them means the whole subscription
  *     is constrained.
  *   - `extra_pools` — model-scoped 7-day caps (Opus / Sonnet / Fable /
@@ -81,17 +82,21 @@ export type TClaudeUsageReduced = {
 
 export const reduceClaudeUsage = (payload: unknown): TClaudeUsageReduced => {
   const data = isRecord(payload) ? payload : {};
+  // A window exists only when the payload REPORTS that meter (an object
+  // with a numeric `utilization`). Verified Claude Ultra accounts have no
+  // five-hour limit, so `five_hour` comes back null / absent — inventing a
+  // 0% row with no reset would show a limit the account doesn't have
+  // (and headline the card when the 7-day also reads 0%).
   const reduceWindow = (
     label: string,
     raw: unknown,
     windowMs: number,
-  ): TProviderUsageWindow => {
-    const value = isRecord(raw) ? raw : {};
+  ): TProviderUsageWindow | null => {
+    if (!isRecord(raw) || typeof raw.utilization !== "number") return null;
     return {
       label,
-      percent_used:
-        typeof value.utilization === "number" ? value.utilization : 0,
-      reset_at_ms: toEpochMs(value.resets_at),
+      percent_used: raw.utilization,
+      reset_at_ms: toEpochMs(raw.resets_at),
       window_ms: windowMs,
     };
   };
@@ -100,7 +105,7 @@ export const reduceClaudeUsage = (payload: unknown): TClaudeUsageReduced => {
   const windows: TProviderUsageWindow[] = [
     reduceWindow("5-hour", data.five_hour, FIVE_HOURS_MS),
     reduceWindow("7-day", data.seven_day, SEVEN_DAYS_MS),
-  ];
+  ].filter((w): w is TProviderUsageWindow => w !== null);
 
   // Per-model caps — display-only, like Codex Spark.
   const scopedClaudePool = ({

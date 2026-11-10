@@ -1086,7 +1086,7 @@ export const claudeCodeDelegate: TProviderDelegate = {
             resp.status === 401
               ? "Claude authorization was rejected — re-sign in via the Claude Code CLI."
               : resp.status === 403
-                ? "No active Claude Pro/Max subscription on this account."
+                ? "No active Claude Pro, Max or Ultra subscription on this account."
                 : resp.status === 429
                   ? // The usage cache serves the last known good figures (stamped
                     // `stale`) when one exists, so this bare reason only ever
@@ -1109,7 +1109,7 @@ export const claudeCodeDelegate: TProviderDelegate = {
           ...(plan !== null ? { plan, plan_source: "private-client" } : {}),
           windows,
           ...(extra_pools.length > 0 ? { extra_pools } : {}),
-          note: "Pro/Max subscription — read locally via Claude Code",
+          note: "Claude subscription — read locally via Claude Code",
         };
       } catch (err) {
         return {
