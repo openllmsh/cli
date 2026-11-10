@@ -36,12 +36,12 @@ import { uninstallHermes } from "./clients/hermes";
 import { removeCompletion } from "./completion";
 import { runManagedDaemonCommand } from "./daemon-delegation";
 import { openllmDir } from "./env";
+import type { TLiveSessionHost } from "./session-host";
 import {
   discoverLiveSessionHosts,
   stopAllLiveSessionHosts,
   stopSessionHosts,
 } from "./session-host";
-import type { TLiveSessionHost } from "./session-host";
 import { removeOwnedLinks, removeRcBlock } from "./setup-cmd";
 
 /** Directory of embedded client overlay data inside the binary. */
@@ -140,15 +140,15 @@ export const runUninstall = async (
     process.stdout.write(UNINSTALL_USAGE);
     return 0;
   }
-  const confirmedNonInteractive =
-    args.includes("--yes") || args.includes("-y");
+  const confirmedNonInteractive = args.includes("--yes") || args.includes("-y");
   // Stop hosts only once the uninstall is confirmed. With `--yes`/`-y` that is
   // now; otherwise capture targets without reaping so a declined / non-TTY
   // abort leaves sessions untouched, then stop the captured set after the
   // daemon half succeeds (it may already have pruned `sessions/` metas).
   let capturedHosts: readonly TLiveSessionHost[] = [];
+  let hostsStopped = 0;
   if (confirmedNonInteractive) {
-    await stopAllLiveSessionHosts();
+    hostsStopped = await stopAllLiveSessionHosts();
   } else {
     capturedHosts = discoverLiveSessionHosts({ reapStale: false });
   }
@@ -158,6 +158,7 @@ export const runUninstall = async (
   const forwarded = args.filter((a) => DAEMON_FLAGS.has(a));
   const code = await runManagedDaemonCommand("uninstall", forwarded, {
     OPENLLM_UNINSTALL_DELEGATED: "1",
+    OPENLLM_UNINSTALL_HOSTS_STOPPED: String(hostsStopped),
   });
   if (code !== 0) {
     // User aborted at the daemon prompt, or daemon teardown failed — stop

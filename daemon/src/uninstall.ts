@@ -71,6 +71,18 @@ export const formatServiceUninstallLine = (
  * snapshotted before the daemon was stopped (hosts may exit with it);
  * `stopped` is how many `stopLiveSessionHosts` itself signalled.
  */
+/**
+ * Session hosts the top-level `openllm uninstall --yes` already stopped before
+ * delegating here (`OPENLLM_UNINSTALL_HOSTS_STOPPED`), so this half's line
+ * counts them instead of reporting "none running".
+ */
+export const hostsStoppedByCli = (
+  env: Readonly<Record<string, string | undefined>>,
+): number => {
+  const n = Number.parseInt(env.OPENLLM_UNINSTALL_HOSTS_STOPPED ?? "", 10);
+  return Number.isInteger(n) && n > 0 ? n : 0;
+};
+
 export const formatSessionHostsUninstallLine = (
   liveBefore: number,
   stopped: number,
@@ -291,7 +303,12 @@ export const runUninstall = async (args: readonly string[]): Promise<never> => {
 
   // 1b. Stop durable session hosts before their registry directory is removed.
   const stoppedHosts = await stopLiveSessionHosts();
-  out(formatSessionHostsUninstallLine(liveHostsBefore, stoppedHosts));
+  out(
+    formatSessionHostsUninstallLine(
+      liveHostsBefore,
+      stoppedHosts + hostsStoppedByCli(process.env),
+    ),
+  );
 
   // Never claim success / delete state while an OpenLLM process is still live.
   // Deleting daemon.pid while a detached daemon survives is what left bots with
