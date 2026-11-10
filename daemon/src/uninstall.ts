@@ -33,7 +33,10 @@ import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { postRecord } from "./cloud-client";
 import { uninstallCompletion } from "./completion";
-import { readLiveDetachedDaemon } from "./detached-daemon";
+import {
+  holdJournalSurvivorPid,
+  readLiveDetachedDaemon,
+} from "./detached-daemon";
 import { stateDir } from "./env";
 import { drainHoldOutbox, pendingHoldRecords } from "./hold-outbox";
 import type { TServiceUninstallResult } from "./service";
@@ -314,8 +317,12 @@ export const runUninstall = async (args: readonly string[]): Promise<never> => {
   // Deleting daemon.pid while a detached daemon survives is what left bots with
   // orphan processes after `openllm uninstall --yes --remove-logins`.
   if (removedService.survivorPid !== null) {
+    const who =
+      removedService.survivorPid > 0
+        ? `pid ${String(removedService.survivorPid)}`
+        : "holding the state dir";
     out(
-      `\nUninstall stopped — detached daemon pid ${removedService.survivorPid} is still running.\n` +
+      `\nUninstall stopped — detached daemon ${who} is still running.\n` +
         "Stop it (or kill that process) and re-run uninstall.\n",
     );
     process.exit(1);
@@ -324,6 +331,18 @@ export const runUninstall = async (args: readonly string[]): Promise<never> => {
   if (leftover !== null) {
     out(
       `\nUninstall stopped — detached daemon pid ${leftover.pid} is still running.\n` +
+        "Stop it (or kill that process) and re-run uninstall.\n",
+    );
+    process.exit(1);
+  }
+  const journalLeftover = holdJournalSurvivorPid();
+  if (journalLeftover !== null) {
+    const who =
+      journalLeftover > 0
+        ? `pid ${String(journalLeftover)}`
+        : "holding the state dir";
+    out(
+      `\nUninstall stopped — detached daemon ${who} is still running.\n` +
         "Stop it (or kill that process) and re-run uninstall.\n",
     );
     process.exit(1);

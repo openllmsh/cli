@@ -72,6 +72,8 @@ type THoldJournalFlockLibrary = {
 
 /** LOCK_EX | LOCK_NB — same flags {@link acquireHoldJournalLock} uses. */
 const HOLD_JOURNAL_LOCK_EX_NB = 2 | 4;
+/** LOCK_EX — blocking exclusive, for short critical sections (detached start). */
+const HOLD_JOURNAL_LOCK_EX = 2;
 
 const openHoldJournalFlockLibrary = (
   libraryNames?: readonly string[],
@@ -121,6 +123,34 @@ export const holdJournalLockIsHeld = (
   library.close();
   // Acquiring briefly means nobody held it; closing releases without writing a PID.
   return !acquired;
+};
+
+/**
+ * Run `fn` while holding an exclusive flock on `lockPath`. Serializes short
+ * critical sections across processes (detached daemon start). When FFI locking
+ * is unavailable, runs `fn` without a lock (same posture as the hold-journal
+ * no-op fallback) rather than inventing a weaker file-create mutex.
+ */
+export const withExclusiveFlock = <T>(
+  lockPath: string,
+  fn: () => T,
+  libraryNames?: readonly string[],
+): T => {
+  mkdirSync(dirname(lockPath), { recursive: true, mode: 0o700 });
+  const library = openHoldJournalFlockLibrary(libraryNames);
+  if (library === null) return fn();
+  const fd = openSync(lockPath, "a+", 0o600);
+  try {
+    if (library.symbols.flock(fd, HOLD_JOURNAL_LOCK_EX) !== 0) {
+      // Blocking LOCK_EX should not fail; fall through unlocked rather than hang
+      // the caller on an unexpected errno.
+      return fn();
+    }
+    return fn();
+  } finally {
+    closeSync(fd);
+    library.close();
+  }
 };
 
 /** The kernel releases this lock on process death; the file itself is never removed. */

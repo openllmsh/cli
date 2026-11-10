@@ -41,6 +41,7 @@ import type { TCredentialGateResult } from "./credential-gate";
 import { hasCredentialProof, requireServiceApiKey } from "./credential-gate";
 import {
   formatDetachedSupervisor,
+  holdJournalSurvivorPid,
   readLiveDetachedDaemon,
   startDetachedDaemon,
   stopDetachedDaemon,
@@ -795,6 +796,20 @@ export const serviceStop = (): boolean => {
     );
     return false;
   }
+  // Concurrent start can leave a flock winner serving with no pidfile — the
+  // hold-journal lock is the remaining identity of that process.
+  const journalPid = holdJournalSurvivorPid();
+  if (journalPid !== null) {
+    const pidPart =
+      journalPid > 0 ? ` pid ${String(journalPid)}` : " holding the state dir";
+    process.stderr.write(
+      `[openllm] detached daemon${pidPart} is still running after stop` +
+        (journalPid > 0
+          ? ` — if stop refused to signal it, run: kill ${String(journalPid)}\n`
+          : "\n"),
+    );
+    return false;
+  }
   process.stdout.write("openllm stopped; self-restore disabled.\n");
   return true;
 };
@@ -906,7 +921,11 @@ export const restartForUpdate = (
 export type TServiceUninstallResult = {
   /** Registration path removed, or null when none was present. */
   readonly removedPath: string | null;
-  /** True when a detached daemon is still running after the stop attempt. */
+  /**
+   * Detached daemon still running after the stop attempt — pidfile identity, or
+   * the hold-journal holder when the pidfile was cleared under a live flock
+   * winner (0 when the flock is held but the holder pid is unreadable).
+   */
   readonly survivorPid: number | null;
   /**
    * Detached daemon pid that was live before the stop and is gone after —
@@ -928,9 +947,16 @@ export const serviceUninstall = (): TServiceUninstallResult => {
   // Keep the record of a daemon that survived the stop, so it can still be
   // found and stopped; a stale pidfile is cleared by readLiveDetachedDaemon.
   const survivor = readLiveDetachedDaemon();
-  if (survivor !== null) {
+  const journalSurvivor =
+    survivor === null ? holdJournalSurvivorPid() : null;
+  const survivorPid = survivor?.pid ?? journalSurvivor;
+  if (survivorPid !== null) {
+    const who =
+      survivorPid > 0
+        ? `pid ${String(survivorPid)}`
+        : "holding the state dir";
     process.stderr.write(
-      `[openllm] detached daemon pid ${survivor.pid} is still running; stop it and re-run uninstall\n`,
+      `[openllm] detached daemon ${who} is still running; stop it and re-run uninstall\n`,
     );
   }
   // 2. Remove the registration file itself.
@@ -943,10 +969,12 @@ export const serviceUninstall = (): TServiceUninstallResult => {
     tryRun("systemctl", ["--user", "daemon-reload"]);
   }
   const stoppedDetachedPid =
-    detachedBefore !== null && survivor === null ? detachedBefore.pid : null;
+    detachedBefore !== null && survivorPid === null
+      ? detachedBefore.pid
+      : null;
   return {
     removedPath: existed ? path : null,
-    survivorPid: survivor?.pid ?? null,
+    survivorPid,
     stoppedDetachedPid,
   };
 };

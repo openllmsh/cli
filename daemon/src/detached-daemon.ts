@@ -30,7 +30,11 @@ import {
   serviceEnvFilePath,
   stateDir,
 } from "./env";
-import { holdJournalLockIsHeld, readHoldJournalHolderPid } from "./hold-outbox";
+import {
+  holdJournalLockIsHeld,
+  readHoldJournalHolderPid,
+  withExclusiveFlock,
+} from "./hold-outbox";
 
 export type TDetachedDaemonRecord = {
   readonly pid: number;
@@ -507,6 +511,25 @@ export const awaitDetachedHandoff = (
   }
 };
 
+/** Serializes check → spawn → pidfile so two overlapping starts cannot orphan. */
+const detachedStartLockPath = (): string =>
+  join(stateDir(), "detached-start.lock");
+
+/**
+ * A daemon still holding the hold-journal flock after the pidfile is gone —
+ * concurrent start can leave the flock winner serving with no pidfile. Stop /
+ * uninstall must treat this as a live survivor and never delete state under it.
+ * Returns the recorded holder pid when available, else null when the flock is
+ * free. When the flock is held but the pid is unreadable, returns 0 so callers
+ * still refuse (0 is never a real process id we would signal).
+ */
+export const holdJournalSurvivorPid = (): number | null => {
+  if (!holdJournalLockIsHeld()) return null;
+  const holder = readHoldJournalHolderPid();
+  if (holder !== null && holder !== process.pid) return holder;
+  return 0;
+};
+
 /**
  * Spawn `binPath daemon` detached. Logs append to the supervised capture
  * files. Returns the new record, or the existing live one when `replace` is
@@ -517,109 +540,115 @@ export const startDetachedDaemon = (
   binPath: string,
   opts: TStartDetachedDaemonOpts = {},
 ): TDetachedDaemonRecord => {
-  if (opts.replace !== true) {
-    const existing = readLiveDetachedDaemon();
-    if (existing !== null) return existing;
-    // Pidfile missing/cleared but another daemon still holds the state dir —
-    // refuse before spawning a crash-loop against the hold journal. Probe the
-    // flock itself: the lock file keeps a stale PID after a clean release, and
-    // a recycled PID that merely looks owned must not block start or earn a
-    // `kill` hint.
-    if (holdJournalLockIsHeld()) {
-      const holder = readHoldJournalHolderPid();
-      const pidPart =
-        holder !== null && holder !== process.pid ? ` (pid ${holder})` : "";
-      const suggestKill =
-        holder !== null &&
-        holder !== process.pid &&
-        processAlive(holder) &&
-        detachedProcessLooksOwned(holder);
-      const killPart = suggestKill ? ` — stop it with: kill ${holder}` : "";
+  mkdirSync(stateDir(), { recursive: true });
+  const run = (): TDetachedDaemonRecord => {
+    if (opts.replace !== true) {
+      const existing = readLiveDetachedDaemon();
+      if (existing !== null) return existing;
+      // Pidfile missing/cleared but another daemon still holds the state dir —
+      // refuse before spawning a crash-loop against the hold journal. Probe the
+      // flock itself: the lock file keeps a stale PID after a clean release, and
+      // a recycled PID that merely looks owned must not block start or earn a
+      // `kill` hint.
+      if (holdJournalLockIsHeld()) {
+        const holder = readHoldJournalHolderPid();
+        const pidPart =
+          holder !== null && holder !== process.pid ? ` (pid ${holder})` : "";
+        const suggestKill =
+          holder !== null &&
+          holder !== process.pid &&
+          processAlive(holder) &&
+          detachedProcessLooksOwned(holder);
+        const killPart = suggestKill ? ` — stop it with: kill ${holder}` : "";
+        throw new Error(
+          `another daemon${pidPart} holds the state dir${killPart}`,
+        );
+      }
+    }
+    const outPath = daemonStdoutLogFilePath();
+    const errPath = daemonStderrLogFilePath();
+    // Ensure the capture files exist so open(append) never surprises.
+    closeSync(openSync(outPath, "a", 0o600));
+    closeSync(openSync(errPath, "a", 0o600));
+    const outFd = openSync(outPath, "a");
+    const errFd = openSync(errPath, "a");
+    const spawn =
+      opts.spawn ??
+      ((
+        argv,
+        spawnOpts,
+      ): { readonly pid: number; readonly unref: () => void } => {
+        const proc = Bun.spawn([...argv], spawnOpts);
+        return { pid: proc.pid, unref: () => proc.unref() };
+      });
+    const argv = [binPath, "daemon"];
+    let proc: { readonly pid: number; readonly unref: () => void };
+    try {
+      proc = spawn(argv, {
+        detached: true,
+        stdin: "ignore",
+        stdout: outFd,
+        stderr: errFd,
+        env: {
+          ...(opts.replace === true
+            ? withoutEnvFileKeys(process.env)
+            : withoutEnvFileKeys(
+                process.env,
+                serviceEnvFilePath(),
+                SAVED_SERVICE_KEYS,
+              )),
+          OPENLLM_DAEMON_ENV_FILE: serviceEnvFilePath(),
+          ...(opts.replace === true
+            ? {
+                [DETACHED_HANDOFF_PID_ENV]: String(
+                  opts.replaceWaitPid ?? process.pid,
+                ),
+              }
+            : {}),
+        },
+      });
+    } finally {
+      closeSync(outFd);
+      closeSync(errFd);
+    }
+    const readStart = opts.readStartTime ?? detachedProcessStartTime;
+    // A freshly spawned pid should be readable immediately; retry briefly for a
+    // slow process table rather than recording an unsafe pid-only identity.
+    // On Linux `detachedProcessStartTime` returns only `proc:` (or null) — never
+    // a wall-clock lstart — so these retries are what close a transient `/proc`
+    // miss instead of poisoning the pidfile with `ps lstart`.
+    const startTime = readStartTimeRetried(
+      proc.pid,
+      readStart,
+      START_TIME_WRITE_RETRY_ATTEMPTS,
+    );
+    if (startTime === null) {
+      const stillAlive = processAlive(proc.pid);
+      terminateOwnedPidSync(proc.pid, () => processAlive(proc.pid), 500, 500);
       throw new Error(
-        `another daemon${pidPart} holds the state dir${killPart}`,
+        stillAlive
+          ? `failed to record start time for detached daemon (pid ${proc.pid}; process still alive)`
+          : `failed to record start time for detached daemon (pid ${proc.pid}; process already exited)`,
       );
     }
-  }
-  mkdirSync(stateDir(), { recursive: true });
-  const outPath = daemonStdoutLogFilePath();
-  const errPath = daemonStderrLogFilePath();
-  // Ensure the capture files exist so open(append) never surprises.
-  closeSync(openSync(outPath, "a", 0o600));
-  closeSync(openSync(errPath, "a", 0o600));
-  const outFd = openSync(outPath, "a");
-  const errFd = openSync(errPath, "a");
-  const spawn =
-    opts.spawn ??
-    ((
-      argv,
-      spawnOpts,
-    ): { readonly pid: number; readonly unref: () => void } => {
-      const proc = Bun.spawn([...argv], spawnOpts);
-      return { pid: proc.pid, unref: () => proc.unref() };
-    });
-  const argv = [binPath, "daemon"];
-  let proc: { readonly pid: number; readonly unref: () => void };
-  try {
-    proc = spawn(argv, {
-      detached: true,
-      stdin: "ignore",
-      stdout: outFd,
-      stderr: errFd,
-      env: {
-        ...(opts.replace === true
-          ? withoutEnvFileKeys(process.env)
-          : withoutEnvFileKeys(
-              process.env,
-              serviceEnvFilePath(),
-              SAVED_SERVICE_KEYS,
-            )),
-        OPENLLM_DAEMON_ENV_FILE: serviceEnvFilePath(),
-        ...(opts.replace === true
-          ? {
-              [DETACHED_HANDOFF_PID_ENV]: String(
-                opts.replaceWaitPid ?? process.pid,
-              ),
-            }
-          : {}),
-      },
-    });
-  } finally {
-    closeSync(outFd);
-    closeSync(errFd);
-  }
-  const readStart = opts.readStartTime ?? detachedProcessStartTime;
-  // A freshly spawned pid should be readable immediately; retry briefly for a
-  // slow process table rather than recording an unsafe pid-only identity.
-  // On Linux `detachedProcessStartTime` returns only `proc:` (or null) — never
-  // a wall-clock lstart — so these retries are what close a transient `/proc`
-  // miss instead of poisoning the pidfile with `ps lstart`.
-  const startTime = readStartTimeRetried(
-    proc.pid,
-    readStart,
-    START_TIME_WRITE_RETRY_ATTEMPTS,
-  );
-  if (startTime === null) {
-    const stillAlive = processAlive(proc.pid);
-    terminateOwnedPidSync(proc.pid, () => processAlive(proc.pid), 500, 500);
-    throw new Error(
-      stillAlive
-        ? `failed to record start time for detached daemon (pid ${proc.pid}; process still alive)`
-        : `failed to record start time for detached daemon (pid ${proc.pid}; process already exited)`,
-    );
-  }
-  const record: TDetachedDaemonRecord = {
-    pid: proc.pid,
-    processStartTime: startTime,
+    const record: TDetachedDaemonRecord = {
+      pid: proc.pid,
+      processStartTime: startTime,
+    };
+    try {
+      writeDetachedPidfile(record);
+    } catch (error) {
+      // Pidfile write failed after spawn — do not leave an untracked daemon.
+      terminateOwnedPidSync(proc.pid, () => processAlive(proc.pid), 500, 500);
+      throw error;
+    }
+    proc.unref();
+    return record;
   };
-  try {
-    writeDetachedPidfile(record);
-  } catch (error) {
-    // Pidfile write failed after spawn — do not leave an untracked daemon.
-    terminateOwnedPidSync(proc.pid, () => processAlive(proc.pid), 500, 500);
-    throw error;
-  }
-  proc.unref();
-  return record;
+  // Replace handoff is single-writer (the dying daemon); skip the start lock so
+  // a stuck waiter cannot block self-update. Ordinary starts serialize.
+  if (opts.replace === true) return run();
+  return withExclusiveFlock(detachedStartLockPath(), run);
 };
 
 export type TSystemdUserBusDeps = {
