@@ -22,6 +22,10 @@ export const authCommandArgs = (
     ? ["--account", String(request.account)]
     : []),
   ...(request.label !== undefined ? ["--label", request.label] : []),
+  ...(request.since !== undefined ? ["--since", request.since] : []),
+  ...(request.wait_ms !== undefined
+    ? ["--wait-ms", String(request.wait_ms)]
+    : []),
   "--json",
 ];
 

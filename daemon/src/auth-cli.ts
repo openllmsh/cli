@@ -104,6 +104,49 @@ export const readAuthCode = async (
     .replace(/\r?\n$/, "");
 };
 
+/** Long-poll hold per round; under the loopback fetch timeout. */
+const WATCH_WAIT_MS = 55_000;
+
+/** A watched flow is over once it connected or ended; nothing more will change for it. */
+const flowSettled = (body: Record<string, unknown>): boolean => {
+  const flow = body.flow as Record<string, unknown> | undefined;
+  return flow?.state === "connected" || flow?.state === "ended";
+};
+
+/**
+ * `auth status --watch`: one snapshot per change, each the same shape as a
+ * one-shot `status` reply. Ends when a watched `--flow-id` settles, on any
+ * error reply, or on Ctrl-C.
+ */
+export const watchStatus = async (
+  request: TLocalAuthRequest,
+  output: (body: Record<string, unknown>) => void,
+  call: typeof callLocalAuth = callLocalAuth,
+): Promise<number> => {
+  let since: string | undefined;
+  for (;;) {
+    const result = await call({
+      ...request,
+      ...(since !== undefined ? { since, wait_ms: WATCH_WAIT_MS } : {}),
+    });
+    if (!result.ok) {
+      output(result.body);
+      return 1;
+    }
+    const revision = result.body.revision;
+    if (typeof revision !== "string") {
+      output({
+        error: "upgrade_required",
+        message: "Running daemon does not support --watch. Restart it.",
+      });
+      return 1;
+    }
+    if (revision !== since) output(result.body);
+    if (request.flow_id !== undefined && flowSettled(result.body)) return 0;
+    since = revision;
+  }
+};
+
 export const runAuthCli = async (args: readonly string[]): Promise<number> => {
   if (args.length === 0 || args.includes("--help") || args.includes("-h")) {
     process.stdout.write(authHelp("openllmd"));
@@ -131,6 +174,7 @@ export const runAuthCli = async (args: readonly string[]): Promise<number> => {
       args,
       args[0] === "submit-code" ? await readAuthCode(process.stdin) : undefined,
     );
+    if (args.includes("--watch")) return await watchStatus(request, output);
     const result = await callLocalAuth(request);
     output(result.body);
     return result.ok ? 0 : 1;

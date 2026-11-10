@@ -5,6 +5,7 @@ import {
   AUTH_CODE_MAX_BYTES,
   AUTH_COMMANDS,
   AUTH_LABEL_MAX_LENGTH,
+  AUTH_WAIT_MAX_MS,
 } from "../generated/local-auth";
 import type { TToolResult } from "./types";
 
@@ -45,26 +46,40 @@ export const localAuthToolDefs = AUTH_COMMANDS.map((descriptor) => {
                 description:
                   "Optional user-facing name for the new account slot",
               }
-            : field === "code"
+            : field === "since"
               ? {
                   type: "string",
-                  minLength: 1,
-                  maxLength: AUTH_CODE_MAX_BYTES,
                   description:
-                    "User-supplied paste-back code, forwarded over stdin only; never log or echo it",
+                    "The revision from your previous local_auth_status reply; with wait_ms, the reply waits until the state differs from it",
                 }
-              : {
-                  type: "string",
-                  description:
-                    "Originating login flow_id returned by local_auth_login",
-                };
+              : field === "wait_ms"
+                ? {
+                    type: "integer",
+                    minimum: 0,
+                    maximum: AUTH_WAIT_MAX_MS,
+                    description:
+                      "With since: wait up to this many ms for a change instead of polling; replies at once when the state already differs",
+                  }
+                : field === "code"
+                  ? {
+                      type: "string",
+                      minLength: 1,
+                      maxLength: AUTH_CODE_MAX_BYTES,
+                      description:
+                        "User-supplied paste-back code, forwarded over stdin only; never log or echo it",
+                    }
+                  : {
+                      type: "string",
+                      description:
+                        "Originating login flow_id returned by local_auth_login",
+                    };
   }
   if (descriptor.name === "submit-code") required.push("flow_id", "code");
   if (descriptor.name === "remove-account" || descriptor.name === "pin-account")
     required.push("account");
   return {
     name: `local_auth_${descriptor.name.replaceAll("-", "_")}`,
-    description: `${descriptor.description}. This machine only; never controls another device or falls back to cloud. ${descriptor.mutating ? "MUTATING — call only when the user explicitly requested this action. Vendor consent may still require the user. Command acceptance is not authenticated success; explicitly check status with the returned flow_id. No autonomous polling or login." : "Read-only; does not start authentication or refresh usage. Status returns a login prompt only for a matching locally initiated flow_id; recheck explicitly and boundedly."}`,
+    description: `${descriptor.description}. This machine only; never controls another device or falls back to cloud. ${descriptor.mutating ? "MUTATING — call only when the user explicitly requested this action. Vendor consent may still require the user. Command acceptance is not authenticated success; explicitly check status with the returned flow_id. No autonomous polling or login." : "Read-only; does not start authentication or refresh usage. Status returns a login prompt only for a matching locally initiated flow_id; to follow a change, pass the previous revision as since with wait_ms instead of re-polling."}`,
     inputSchema: {
       type: "object",
       properties,

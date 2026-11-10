@@ -2,6 +2,7 @@
 import type {
   TDaemonCommand,
   TDaemonCommandAck,
+  TDaemonStatus,
   TLocalAuthMethod,
   TLocalAuthRequest,
 } from "@openllmsh/sdk/protocol";
@@ -17,6 +18,11 @@ import { Schema } from "effect";
 import { readRoster } from "./account-roster";
 import { AccountKeyedMap } from "./account-scope";
 import { requestStatusPush } from "./auth-events";
+import {
+  authRevision,
+  latestAuthStatus,
+  waitForAuthChange,
+} from "./auth-watch";
 import type { TCliProvider } from "./cli-paths";
 import { runCommandInner } from "./control-relay";
 import { DELEGATES, getDelegate } from "./delegation";
@@ -152,6 +158,40 @@ const flowSnapshot = (
   };
 };
 
+const statusBody = (
+  status: TDaemonStatus,
+  provider: string | undefined,
+  account: number | undefined,
+  flow: TLocalFlow | null,
+): Record<string, unknown> => {
+  const providers = status.connections
+    .filter((one) => provider === undefined || one.provider === provider)
+    .filter(
+      (one) => account === undefined || (one.account_index ?? 0) === account,
+    )
+    .map((one) => {
+      // Browser-originated prompts never escape through OS-local discovery.
+      if (one.pending_auth === undefined || one.pending_auth === null)
+        return one;
+      const { pending_auth: pending, detail: _detail, ...rest } = one;
+      return {
+        ...rest,
+        detail: "Sign-in is running on this machine.",
+        pending_auth: {
+          pending: true,
+          started_at_ms: pending.started_at_ms,
+          cancel_requested: pending.cancel_requested,
+        },
+      };
+    });
+  return {
+    providers,
+    ...(flow !== null && provider !== undefined
+      ? { flow: flowSnapshot(provider, flow) }
+      : {}),
+  };
+};
+
 const execute = async (
   command: TDaemonCommand,
   flowId?: string,
@@ -185,7 +225,9 @@ export const handleLocalAuth = async (req: Request): Promise<Response> => {
     return localJson(400, { error: "invalid" });
   }
   // Flows, pending prompts and login slots are per account slot.
-  return runWithAccount(input.account ?? 0, () => handleParsed(input));
+  return runWithAccount(input.account ?? 0, () =>
+    handleParsed(input, req.signal),
+  );
 };
 
 /** The roster slot `account` of `provider` exists (account 0 always does). */
@@ -195,7 +237,10 @@ const knownAccount = (provider: string, account: number): boolean =>
     (a) => a.index === account,
   );
 
-const handleParsed = async (input: TLocalAuthRequest): Promise<Response> => {
+const handleParsed = async (
+  input: TLocalAuthRequest,
+  signal?: AbortSignal,
+): Promise<Response> => {
   const provider = input.provider;
   const delegate = provider !== undefined ? getDelegate(provider) : null;
   if (provider !== undefined && delegate === null)
@@ -270,34 +315,32 @@ const handleParsed = async (input: TLocalAuthRequest): Promise<Response> => {
           : null;
       if (input.flow_id !== undefined && flow === null)
         return reply(409, { error: "flow_not_owned_or_expired" });
-      const status = await computeStatus();
-      const providers = status.connections
-        .filter((one) => provider === undefined || one.provider === provider)
-        .filter(
-          (one) =>
-            account === undefined || (one.account_index ?? 0) === account,
-        )
-        .map((one) => {
-          // Browser-originated prompts never escape through OS-local discovery.
-          if (one.pending_auth === undefined || one.pending_auth === null)
-            return one;
-          const { pending_auth: pending, detail: _detail, ...rest } = one;
-          return {
-            ...rest,
-            detail: "Sign-in is running on this machine.",
-            pending_auth: {
-              pending: true,
-              started_at_ms: pending.started_at_ms,
-              cancel_requested: pending.cancel_requested,
-            },
-          };
-        });
-      return reply(200, {
-        providers,
-        ...(flow !== null && provider !== undefined
-          ? { flow: flowSnapshot(provider, flow) }
-          : {}),
-      });
+      const body = async (
+        recompute: boolean,
+      ): Promise<Record<string, unknown>> =>
+        statusBody(
+          recompute
+            ? await computeStatus()
+            : (latestAuthStatus() ?? (await computeStatus())),
+          provider,
+          account,
+          flow,
+        );
+      let result = await body(true);
+      let revision = authRevision(result);
+      // Long-poll: hold until the snapshot differs from the caller's revision.
+      if (input.since !== undefined && input.wait_ms !== undefined) {
+        const deadline = Date.now() + input.wait_ms;
+        while (revision === input.since) {
+          const left = deadline - Date.now();
+          if (left <= 0) break;
+          const wake = await waitForAuthChange(left, signal);
+          if (wake === "timeout") break;
+          result = await body(wake === "event");
+          revision = authRevision(result);
+        }
+      }
+      return reply(200, { ...result, revision });
     }
     const candidate =
       provider !== undefined ? localFlows.get(provider) : undefined;

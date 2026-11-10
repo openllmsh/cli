@@ -4,6 +4,8 @@ export const AUTH_LOCAL_PATH = "/local/auth";
 export const AUTH_LOCAL_VERSION = 1;
 export const AUTH_LOCAL_MAX_BODY_BYTES = 16_384;
 export const AUTH_CODE_MAX_BYTES = 8_192;
+/** Longest a `status` long-poll (`wait_ms`) may hold before replying unchanged. */
+export const AUTH_WAIT_MAX_MS = 60_000;
 
 export const AUTH_COMMANDS = [
   {
@@ -16,12 +18,12 @@ export const AUTH_COMMANDS = [
   },
   {
     name: "status",
-    args: "[provider] [--account <n>] [--flow-id <id>]",
+    args: "[provider] [--account <n>] [--flow-id <id>] [--since <revision> --wait-ms <ms>] [--watch]",
     description:
-      "Read local provider state and explicitly check an originating login flow",
+      "Read local provider state and explicitly check an originating login flow; with since + wait_ms, wait until it differs from that revision",
     mutating: false,
     provider: "optional",
-    fields: ["account", "flow_id"],
+    fields: ["account", "flow_id", "since", "wait_ms"],
   },
   {
     name: "usage",
@@ -123,6 +125,10 @@ export type TLocalAuthRequest = {
   /** Device-local account slot (multi-account); absent ⇒ account 0. */
   readonly account?: number;
   readonly label?: string;
+  /** `status` only: the `revision` the caller already holds. */
+  readonly since?: string;
+  /** `status` only: hold up to this long for a reply whose revision differs from `since`. */
+  readonly wait_ms?: number;
 };
 
 export const AUTH_ACCOUNT_MAX = 1023;
@@ -195,6 +201,19 @@ export const parseLocalAuthRequest = (input: unknown): TLocalAuthRequest => {
       ))
   )
     return invalid();
+  if (
+    record.since !== undefined &&
+    (typeof record.since !== "string" || !/^[a-f0-9]{1,64}$/.test(record.since))
+  )
+    return invalid();
+  if (
+    record.wait_ms !== undefined &&
+    (typeof record.wait_ms !== "number" ||
+      !Number.isSafeInteger(record.wait_ms) ||
+      record.wait_ms < 0 ||
+      record.wait_ms > AUTH_WAIT_MAX_MS)
+  )
+    return invalid();
   if (descriptor.name === "submit-code") {
     if (
       record.flow_id === undefined ||
@@ -212,7 +231,17 @@ export const parseLocalAuthRequest = (input: unknown): TLocalAuthRequest => {
 };
 
 export const authHelp = (binary: string): string =>
-  `${AUTH_COMMANDS.map((item) => `${binary} auth ${item.name}${item.args ? ` ${item.args}` : ""} [--json]\n  ${item.description}`).join("\n")}\n\nLogin acceptance is not authentication success. Follow vendor consent and check status explicitly.\nsubmit-code reads the code from stdin, never an argument. No remote devices or cloud fallback.\n`;
+  `${AUTH_COMMANDS.map((item) => `${binary} auth ${item.name}${item.args ? ` ${item.args}` : ""} [--json]\n  ${item.description}`).join("\n")}\n\nstatus --watch prints one JSON snapshot per line (NDJSON with --json) each time the state changes, until the flow ends or Ctrl-C.\nLogin acceptance is not authentication success. Follow vendor consent and check status explicitly.\nsubmit-code reads the code from stdin, never an argument. No remote devices or cloud fallback.\n`;
+
+const AUTH_OPTION_KEYS = {
+  "--method": "method",
+  "--flow-id": "flow_id",
+  "--account": "account",
+  "--label": "label",
+  "--since": "since",
+  "--wait-ms": "wait_ms",
+} as const;
+type TAuthOption = keyof typeof AUTH_OPTION_KEYS;
 
 export const parseAuthArgs = (
   args: readonly string[],
@@ -222,26 +251,24 @@ export const parseAuthArgs = (
   for (let index = 1; index < args.length; index += 1) {
     const arg = args[index];
     if (arg === "--json") continue;
-    if (
-      arg === "--method" ||
-      arg === "--flow-id" ||
-      arg === "--account" ||
-      arg === "--label"
-    ) {
-      const key =
-        arg === "--method"
-          ? "method"
-          : arg === "--flow-id"
-            ? "flow_id"
-            : arg === "--account"
-              ? "account"
-              : "label";
+    if (arg === "--watch") {
+      if (args[0] !== "status") throw new Error("--watch is status only");
+      continue;
+    }
+    const key =
+      arg !== undefined && Object.hasOwn(AUTH_OPTION_KEYS, arg)
+        ? AUTH_OPTION_KEYS[arg as TAuthOption]
+        : undefined;
+    if (key !== undefined) {
       const value = args[index + 1];
       if (request[key] !== undefined || value === undefined)
         throw new Error("Missing or repeated auth option");
       index += 1;
       request[key] =
-        key === "account" && /^[0-9]{1,4}$/.test(value) ? Number(value) : value;
+        (key === "account" && /^[0-9]{1,4}$/.test(value)) ||
+        (key === "wait_ms" && /^[0-9]{1,5}$/.test(value))
+          ? Number(value)
+          : value;
     } else if (
       arg !== undefined &&
       !arg.startsWith("-") &&

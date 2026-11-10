@@ -8,6 +8,7 @@
  * → delegates → login-flow).
  */
 import type { TAuthEvent } from "@openllmsh/sdk/protocol";
+import { notifyAuthChange } from "./auth-watch";
 import { withoutCommandReplayContext } from "./op-context";
 
 export type TAuthSink = {
@@ -88,9 +89,11 @@ export const emitAuth = (event: TAuthEvent): void => {
       // Observers are advisory and must never disrupt relay delivery or peers.
     }
   }
+  notifyAuthChange();
 };
 
 /** Best-effort status push so a background login finalize flips the card. */
 export const requestStatusPush = (): void => {
   withoutCommandReplayContext(() => sink?.pushStatus());
+  notifyAuthChange();
 };

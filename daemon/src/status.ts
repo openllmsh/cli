@@ -7,6 +7,7 @@
  * it; the relay status watcher also recomputes on a gentle interval while the
  * daemon is connected, even with no dashboard SSE client.
  */
+
 import { accessSync, constants, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -34,6 +35,7 @@ import type { TRosterAccount } from "./account-roster";
 import { readRoster } from "./account-roster";
 import { AccountKeyedMap, AccountKeyedSet } from "./account-scope";
 import { setVerifiedLoginAdmitter } from "./auth-events";
+import { notifyAuthStatus } from "./auth-watch";
 import { autoUpdateEnabled } from "./auto-update-pref";
 import type { TCliProvider } from "./cli-paths";
 import { DEFAULT_ACCOUNT_INDEX } from "./cli-paths";
@@ -968,7 +970,10 @@ export const computeStatusFresh = (
   const tick_id = nextStatusTickId();
   return withoutCommandReplayContext(() =>
     opTickContext.run({ tick_id }, () => computeStatusFreshInner(options)),
-  );
+  ).then((status) => {
+    notifyAuthStatus(status);
+    return status;
+  });
 };
 
 export const computeStatus = async (): Promise<TDaemonStatus> => {
