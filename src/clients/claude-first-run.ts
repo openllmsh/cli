@@ -140,7 +140,7 @@ export type TSeedClaudeFirstRunResult =
  */
 export const shouldSeedClaudeFirstRun = (
   clientId: string,
-  env: Readonly<Record<string, string | undefined>>,
+  env: TClaudeFirstRunEnv,
 ): boolean =>
   clientId === "claude" && (env.OPENLLM_DEVICE_SESSION_ID ?? "").trim() !== "";
 

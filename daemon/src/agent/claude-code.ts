@@ -1794,8 +1794,7 @@ export const createClaudeTuiSession = (
           emit({
             type: "runtime.error",
             code: "engine_not_ready",
-            message:
-              "Claude Code is waiting for input (a first-run or trust dialog). Answer any approval shown in this chat; if none appears and the device has a terminal, run `openllm sessions attach` there. Your prompt is sent once Claude Code is ready.",
+            message: `Claude Code is waiting for input (a first-run or trust dialog). Answer any approval shown in this chat; if none appears and the device has a terminal, run \`openllm sessions attach ${opened.hostId}\` there. Your prompt is sent once Claude Code is ready.`,
             fatal: false,
           });
         }, deps.readyMaxMs ?? READY_MAX_MS);
