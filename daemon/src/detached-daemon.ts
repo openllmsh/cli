@@ -193,22 +193,43 @@ export const readDetachedProcessCommandLine = (pid: number): string | null => {
 
 /**
  * True when a command line looks like our detached daemon (`openllm daemon` /
- * `openllmd daemon`) or a durable `__session-host` child. Exported for tests.
+ * `openllmd daemon` / a target-named compile like `openllm-linux-x64-baseline
+ * daemon` that `serviceBinPath()` may launch) or a durable `__session-host`
+ * child. Exported for tests.
  */
 export const detachedCommandLineLooksOwned = (commandLine: string): boolean => {
   // `/proc/.../cmdline` is NUL-separated; normalize without a control-char regex.
   const normalized = commandLine.split("\0").join(" ");
   if (/(?:^|[\s/])__session-host(?:\s|$)/.test(normalized)) return true;
-  return /(?:^|\/)(openllm|openllmd)(?:\.exe)?[\s]+daemon(?:\s|$)/i.test(
+  // Managed `openllm`/`openllmd`, or a release/compile target binary
+  // (`openllm-darwin-arm64`, `openllm-linux-x64-baseline`, …).
+  return /(?:^|\/)(openllm(?:-[A-Za-z0-9._-]+)?|openllmd)(?:\.exe)?[\s]+daemon(?:\s|$)/i.test(
     normalized,
   );
 };
 
-/** True when the live pid's cmdline matches an OpenLLM daemon we own. */
-export const detachedProcessLooksOwned = (pid: number): boolean => {
-  const cmd = readDetachedProcessCommandLine(pid);
-  return cmd !== null && detachedCommandLineLooksOwned(cmd);
+/** Ownership of a live pid relative to our detached daemon. */
+export type TDetachedOwnership = "owned" | "foreign" | "unknown";
+
+/**
+ * Classify a pid's cmdline. `unknown` means the cmdline could not be read —
+ * callers must not clear the pidfile (a live daemon would be orphaned).
+ * Exported for tests.
+ */
+export const detachedProcessOwnership = (
+  pid: number,
+  readCommandLine: (
+    pid: number,
+  ) => string | null = readDetachedProcessCommandLine,
+): TDetachedOwnership => {
+  const cmd = readCommandLine(pid);
+  if (cmd === null) return "unknown";
+  return detachedCommandLineLooksOwned(cmd) ? "owned" : "foreign";
 };
+
+/** True when the live pid's cmdline matches an OpenLLM daemon we own. */
+export const detachedProcessLooksOwned = (pid: number): boolean =>
+  detachedProcessOwnership(pid) === "owned";
 
 /** Read start-time with a short retry for transient process-table blips. */
 const readStartTimeRetried = (
@@ -244,6 +265,7 @@ export const detachedRecordAlive = (
  */
 export const readLiveDetachedDaemon = (
   readStartTime?: (pid: number) => string | null,
+  readCommandLine?: (pid: number) => string | null,
 ): TDetachedDaemonRecord | null => {
   const record = readDetachedPidfile();
   if (record === null) return null;
@@ -255,9 +277,14 @@ export const readLiveDetachedDaemon = (
       clearDetachedPidfile();
       return null;
     }
-    // Unreadable start-time with a live pid: trust cmdline ownership, else
-    // clear a recycled-PID pidfile so start is not a no-op.
-    if (detachedProcessLooksOwned(record.pid)) return record;
+    // Unreadable start-time with a live pid: trust cmdline ownership. A
+    // foreign cmdline clears a recycled-PID pidfile so start is not a no-op;
+    // an unreadable cmdline keeps the pidfile (ownership uncertain).
+    const ownership = detachedProcessOwnership(
+      record.pid,
+      readCommandLine ?? readDetachedProcessCommandLine,
+    );
+    if (ownership === "owned" || ownership === "unknown") return record;
     clearDetachedPidfile();
     return null;
   }
@@ -277,11 +304,13 @@ export const readLiveDetachedDaemon = (
  */
 export const stopDetachedDaemon = (
   readStartTime?: (pid: number) => string | null,
+  readCommandLine?: (pid: number) => string | null,
 ): number | null => {
   const record = readDetachedPidfile();
   if (record === null) return null;
   const reader =
     readStartTime ?? detachedStartTimeReaderFor(record.processStartTime);
+  const cmdlineReader = readCommandLine ?? readDetachedProcessCommandLine;
   const live = readStartTimeRetried(record.pid, reader);
   if (live === null) {
     if (!processAlive(record.pid)) {
@@ -290,16 +319,27 @@ export const stopDetachedDaemon = (
     }
     // Identity via start-time failed — signal only when cmdline still looks
     // like our daemon (avoids PID-reuse kills; unblocks uninstall/stop).
-    if (!detachedProcessLooksOwned(record.pid)) {
+    // Unknown cmdline: keep the pidfile and report the live pid rather than
+    // treating a possibly-ours daemon as stale.
+    const ownership = detachedProcessOwnership(record.pid, cmdlineReader);
+    if (ownership === "unknown") {
       process.stderr.write(
-        `[openllm] detached daemon pid ${record.pid}: cannot verify process identity; clearing stale pidfile\n`,
+        `[openllm] detached daemon pid ${record.pid}: cannot verify process identity; leaving pidfile in place\n`,
+      );
+      return record.pid;
+    }
+    if (ownership === "foreign") {
+      process.stderr.write(
+        `[openllm] detached daemon pid ${record.pid}: process is not an OpenLLM daemon; clearing stale pidfile\n`,
       );
       clearDetachedPidfile();
       return null;
     }
     terminateOwnedPidSync(
       record.pid,
-      () => processAlive(record.pid) && detachedProcessLooksOwned(record.pid),
+      () =>
+        processAlive(record.pid) &&
+        detachedProcessOwnership(record.pid, cmdlineReader) === "owned",
     );
   } else if (live !== record.processStartTime) {
     clearDetachedPidfile();
