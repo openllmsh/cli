@@ -1013,8 +1013,10 @@ install_component() {
     on_disk_version="${on_disk_version#openllm }"
     on_disk_version="${on_disk_version#v}"
     installed="$(sha256_of "$dest" || true)"
+    # When `$version` is pinned, require a verified on-disk `--version` match
+    # before any digest/stamp short-circuit. An empty `--version` is not a match.
     if [ -n "$installed" ] && {
-      [ -z "$version" ] || [ -z "$on_disk_version" ] || [ "$on_disk_version" = "$version" ]
+      [ -z "$version" ] || [ "$on_disk_version" = "$version" ]
     }; then
       if [ "$installed" = "$published" ]; then
         echo "  $name is already up to date"
@@ -1028,8 +1030,12 @@ install_component() {
           return 0
         fi
       fi
-    elif [ -n "$version" ] && [ -n "$on_disk_version" ] && [ "$on_disk_version" != "$version" ]; then
-      echo "  $name on disk is v$on_disk_version; pinned release is v$version — downloading"
+    elif [ -n "$version" ] && [ "$on_disk_version" != "$version" ]; then
+      if [ -n "$on_disk_version" ]; then
+        echo "  $name on disk is v$on_disk_version; pinned release is v$version — downloading"
+      else
+        echo "  $name on disk has no usable --version; pinned release is v$version — downloading"
+      fi
       # Re-fetch the digest: a stale cached `.sha256` may have matched the
       # on-disk bytes above; the bytes we are about to download must verify
       # against the live pin.
@@ -1084,6 +1090,18 @@ install_component() {
 
   update_lease_phase install "$version"
   chmod 0755 "$bin"
+  # A matching checksum alone can be a stale cached asset. When a version is
+  # pinned, require the staged binary's `--version` to equal it before replacing
+  # the destination — leave the installed binary unchanged on mismatch.
+  if [ -n "$version" ]; then
+    local staged_version=""
+    staged_version="$("$bin" --version 2>/dev/null | head -n 1 | tr -d '\r' || true)"
+    staged_version="${staged_version#openllm }"
+    staged_version="${staged_version#v}"
+    if [ "$staged_version" != "$version" ]; then
+      die "downloaded $name reports version '${staged_version:-unknown}' but pin is '$version' — refusing to replace $dest"
+    fi
+  fi
   mv -f "$bin" "$dest"
 
   # macOS: strip quarantine. Preserve a valid Developer ID / notarized

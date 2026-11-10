@@ -65,32 +65,32 @@ export const readHoldJournalHolderPid = (): number | null => {
   }
 };
 
-/** The kernel releases this lock on process death; the file itself is never removed. */
-export const acquireHoldJournalLock = (
+type THoldJournalFlockLibrary = {
+  symbols: { flock: (fd: number, flags: number) => number };
+  close: () => void;
+};
+
+/** LOCK_EX | LOCK_NB — same flags {@link acquireHoldJournalLock} uses. */
+const HOLD_JOURNAL_LOCK_EX_NB = 2 | 4;
+
+const openHoldJournalFlockLibrary = (
   libraryNames?: readonly string[],
-): (() => void) => {
-  const path = holdJournalLockPath();
-  mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+): THoldJournalFlockLibrary | null => {
   const libraries =
     libraryNames ??
     (process.platform === "darwin"
       ? ["/usr/lib/libSystem.B.dylib"]
       : ["libc.so.6", "libc.so"]);
-  let library: {
-    symbols: { flock: (fd: number, flags: number) => number };
-    close: () => void;
-  } | null = null;
   try {
     const ffi: typeof import("bun:ffi") = require("bun:ffi");
     for (const name of libraries) {
       try {
-        library = ffi.dlopen(name, {
+        return ffi.dlopen(name, {
           flock: {
             args: [ffi.FFIType.i32, ffi.FFIType.i32],
             returns: ffi.FFIType.i32,
           },
         });
-        break;
       } catch {
         /* try the next libc */
       }
@@ -98,9 +98,41 @@ export const acquireHoldJournalLock = (
   } catch {
     /* FFI is unavailable */
   }
+  return null;
+};
+
+/**
+ * True when another process currently holds the hold-journal flock. A stale PID
+ * left in the lock file after a clean exit is NOT enough — the kernel releases
+ * the flock on process death, so a non-blocking exclusive acquire is the source
+ * of truth. When FFI locking is unavailable, returns false (same posture as
+ * {@link acquireHoldJournalLock}'s no-op fallback).
+ */
+export const holdJournalLockIsHeld = (
+  libraryNames?: readonly string[],
+): boolean => {
+  const path = holdJournalLockPath();
+  mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+  const library = openHoldJournalFlockLibrary(libraryNames);
+  if (library === null) return false;
+  const fd = openSync(path, "a+", 0o600);
+  const acquired = library.symbols.flock(fd, HOLD_JOURNAL_LOCK_EX_NB) === 0;
+  closeSync(fd);
+  library.close();
+  // Acquiring briefly means nobody held it; closing releases without writing a PID.
+  return !acquired;
+};
+
+/** The kernel releases this lock on process death; the file itself is never removed. */
+export const acquireHoldJournalLock = (
+  libraryNames?: readonly string[],
+): (() => void) => {
+  const path = holdJournalLockPath();
+  mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+  const library = openHoldJournalFlockLibrary(libraryNames);
   if (library === null) return withoutJournalLock();
   const fd = openSync(path, "a+", 0o600);
-  if (library.symbols.flock(fd, 2 | 4) !== 0) {
+  if (library.symbols.flock(fd, HOLD_JOURNAL_LOCK_EX_NB) !== 0) {
     let holder = "";
     try {
       const raw = readFileSync(path, "utf8").trim();
@@ -128,6 +160,11 @@ export const acquireHoldJournalLock = (
   return () => {
     if (released) return;
     released = true;
+    try {
+      ftruncateSync(fd, 0);
+    } catch {
+      /* best-effort clear of the recorded PID while we still hold the flock */
+    }
     closeSync(fd);
     library.close();
   };

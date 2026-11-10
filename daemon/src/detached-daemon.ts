@@ -30,7 +30,7 @@ import {
   serviceEnvFilePath,
   stateDir,
 } from "./env";
-import { readHoldJournalHolderPid } from "./hold-outbox";
+import { holdJournalLockIsHeld, readHoldJournalHolderPid } from "./hold-outbox";
 
 export type TDetachedDaemonRecord = {
   readonly pid: number;
@@ -516,16 +516,22 @@ export const startDetachedDaemon = (
     const existing = readLiveDetachedDaemon();
     if (existing !== null) return existing;
     // Pidfile missing/cleared but another daemon still holds the state dir —
-    // refuse before spawning a crash-loop against the hold journal.
-    const holder = readHoldJournalHolderPid();
-    if (
-      holder !== null &&
-      holder !== process.pid &&
-      processAlive(holder) &&
-      detachedProcessLooksOwned(holder)
-    ) {
+    // refuse before spawning a crash-loop against the hold journal. Probe the
+    // flock itself: the lock file keeps a stale PID after a clean release, and
+    // a recycled PID that merely looks owned must not block start or earn a
+    // `kill` hint.
+    if (holdJournalLockIsHeld()) {
+      const holder = readHoldJournalHolderPid();
+      const pidPart =
+        holder !== null && holder !== process.pid ? ` (pid ${holder})` : "";
+      const suggestKill =
+        holder !== null &&
+        holder !== process.pid &&
+        processAlive(holder) &&
+        detachedProcessLooksOwned(holder);
+      const killPart = suggestKill ? ` — stop it with: kill ${holder}` : "";
       throw new Error(
-        `another daemon (pid ${holder}) holds the state dir — stop it with: kill ${holder}`,
+        `another daemon${pidPart} holds the state dir${killPart}`,
       );
     }
   }
