@@ -58,8 +58,10 @@ const ACTIVITY_POLL_MS = 15_000;
  * Child-supervisor keeps its own LC_ALL=C/TZ=UTC pin separately; do not share it
  * here or hosts started by a prior release look dead after upgrade.
  */
-const processStartTime = (): string | null =>
-  readSessionHostProcessStartTime(process.pid);
+const processStartTimeFor = (pid: number): string | null =>
+  readSessionHostProcessStartTime(pid);
+
+const processStartTime = (): string | null => processStartTimeFor(process.pid);
 
 export type TSessionHostArgs = {
   readonly id: string;
@@ -85,6 +87,13 @@ export type TSessionHostMeta = {
   readonly generation: number;
   /** Launched with skip-permissions (asked for, or kept from its start). */
   readonly dangerous?: boolean;
+  /**
+   * Detached PTY child process-group leader (`session.pid`). Recorded so
+   * uninstall / host stop can reap the child group after the host exits.
+   */
+  readonly childPid?: number;
+  /** Unpinned `ps -o lstart=` for `childPid` (TOCTOU identity). */
+  readonly childProcessStartTime?: string;
 };
 
 type TSocketData = {
@@ -486,6 +495,12 @@ export const runSessionHost = (
 
   setSessionLifecycleHooks({
     onSpawn: (session) => {
+      const childPid =
+        session.pid !== null && Number.isInteger(session.pid) && session.pid > 1
+          ? session.pid
+          : null;
+      const childProcessStartTime =
+        childPid === null ? null : processStartTimeFor(childPid);
       meta = {
         id: args.id,
         cli: args.cli,
@@ -497,6 +512,8 @@ export const runSessionHost = (
         processStartTime: ownProcessStartTime,
         generation: session.generation,
         ...(dangerous ? { dangerous: true } : {}),
+        ...(childPid === null ? {} : { childPid }),
+        ...(childProcessStartTime === null ? {} : { childProcessStartTime }),
       };
       if (dangerous) {
         for (const id of [args.id, session.vendorSessionId, resumedId])

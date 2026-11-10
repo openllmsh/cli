@@ -121,7 +121,14 @@ const isSessionHostMeta = (value: unknown): value is TSessionHostMeta => {
     meta.processStartTime.length > 0 &&
     typeof meta.generation === "number" &&
     Number.isInteger(meta.generation) &&
-    meta.generation >= 1
+    meta.generation >= 1 &&
+    (meta.childPid === undefined ||
+      (typeof meta.childPid === "number" &&
+        Number.isInteger(meta.childPid) &&
+        meta.childPid > 1)) &&
+    (meta.childProcessStartTime === undefined ||
+      (typeof meta.childProcessStartTime === "string" &&
+        meta.childProcessStartTime.length > 0))
   );
 };
 

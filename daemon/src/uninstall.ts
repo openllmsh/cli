@@ -37,7 +37,10 @@ import { readLiveDetachedDaemon } from "./detached-daemon";
 import { stateDir } from "./env";
 import { drainHoldOutbox, pendingHoldRecords } from "./hold-outbox";
 import { serviceUninstall } from "./service";
-import { stopLiveSessionHostsIn } from "./session-host-stop";
+import {
+  listSurvivingSessionChildrenIn,
+  stopLiveSessionHostsIn,
+} from "./session-host-stop";
 
 /** Write a line to uninstall stdout. */
 const out = (s: string): void => {
@@ -269,6 +272,17 @@ export const runUninstall = async (args: readonly string[]): Promise<never> => {
   if (leftover !== null) {
     out(
       `\nUninstall stopped — detached daemon pid ${leftover.pid} is still running.\n` +
+        "Stop it (or kill that process) and re-run uninstall.\n",
+    );
+    process.exit(1);
+  }
+  const sessionChildren = listSurvivingSessionChildrenIn(
+    join(stateDir(), "sessions"),
+  );
+  const survivingChild = sessionChildren[0];
+  if (survivingChild !== undefined) {
+    out(
+      `\nUninstall stopped — session child pid ${String(survivingChild.childPid)} is still running.\n` +
         "Stop it (or kill that process) and re-run uninstall.\n",
     );
     process.exit(1);

@@ -30,6 +30,7 @@ import {
   encodeJsonPayload,
 } from "@openllmsh/sdk/tunnel/codec";
 import { Terminal } from "@xterm/headless";
+import { signalProcessTree } from "./child-supervisor/posix";
 import { resolveOpenllmCli } from "./cli-path";
 import { sessionEnv } from "./cli-paths";
 import { spawnEnv } from "./delegation/spawn";
@@ -196,7 +197,13 @@ const bunPtySpawner: TPtySpawner = (args) => {
     resize: (cols, rows) => terminal.resize(cols, rows),
     kill: (signal = "SIGTERM") => {
       try {
-        proc.kill(signal);
+        // Detached PTY children lead their own process group; kill the group
+        // so vendor grandchildren (claude/codex/…) cannot survive the host.
+        if (typeof proc.pid === "number" && proc.pid > 1) {
+          signalProcessTree(proc.pid, signal);
+        } else {
+          proc.kill(signal);
+        }
       } catch {
         /* already gone */
       }
