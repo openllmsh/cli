@@ -19,6 +19,7 @@ packages/sdk/openapi/index.ts
 packages/sdk/openapi/openapi.json
 packages/sdk/openapi/operations.ts
 packages/sdk/package.json
+packages/sdk/protocol/access.ts
 packages/sdk/protocol/agent-prompt-text.ts
 packages/sdk/protocol/agent.ts
 packages/sdk/protocol/api-key-syntax.ts
