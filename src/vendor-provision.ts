@@ -8,11 +8,22 @@
  * install that already had a key without delaying the listen port.
  */
 
-import { existsSync } from "node:fs";
+import { accessSync, constants, statSync } from "node:fs";
 import { join } from "node:path";
 import { cliConfig, userHome } from "./env";
 import { awaitPipeCodes, bunSubprocessPeer } from "./process-pipe";
 import { isSecureOrigin } from "./self-update";
+
+/** True when `path` is a regular file this process can execute (`install.sh -x`). */
+const isExecutableFile = (path: string): boolean => {
+  try {
+    if (!statSync(path).isFile()) return false;
+    accessSync(path, constants.X_OK);
+    return true;
+  } catch {
+    return false;
+  }
+};
 
 /** Bound the headless vendor wait inside the installer for start-time runs. */
 const VENDOR_WAIT_SECS = "120";
@@ -102,9 +113,9 @@ export const allProvisionedVendorClisPresent = (
     const onPath = which(vendor.command);
     if (onPath !== null && onPath.length > 0) continue;
     const dest = vendor.dest(home);
-    if (existsSync(dest)) continue;
+    if (isExecutableFile(dest)) continue;
     const localBin = join(home, ".local", "bin", vendor.command);
-    if (existsSync(localBin)) continue;
+    if (isExecutableFile(localBin)) continue;
     return false;
   }
   return true;
