@@ -133,34 +133,10 @@ export const beginMarketplaceLoad = (
         }),
     ...(options.connect === undefined
       ? {
-          connect: (servers) =>
-            connectUpstreamsWithStdio(
-              servers.map((s) => ({
-                id: s.id,
-                transport: s.transport,
-                url: s.url,
-                headers: s.headers,
-                command: s.command,
-                args: s.args,
-                env: s.env,
-                blocked_tools: s.blocked_tools,
-              })),
-            ),
+          connect: (servers) => connectUpstreamsWithStdio(servers),
         }
       : {
-          connect: async (servers) =>
-            options.connect?.(
-              servers.map((s) => ({
-                id: s.id,
-                transport: s.transport,
-                url: s.url,
-                headers: s.headers,
-                command: s.command,
-                args: s.args,
-                env: s.env,
-                blocked_tools: s.blocked_tools,
-              })),
-            ) ?? [],
+          connect: async (servers) => options.connect?.(servers) ?? [],
         }),
   };
   return beginMarketplaceLoadSdk(config, sdkOptions);
