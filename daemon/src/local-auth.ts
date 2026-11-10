@@ -19,6 +19,11 @@ import {
 import { Schema } from "effect";
 import { readRoster } from "./account-roster";
 import { AccountKeyedMap } from "./account-scope";
+import {
+  localAgentRefusal,
+  localAgentRefusalResponse,
+  localPreflightRefusal,
+} from "./agent/loopback";
 import { requestStatusPush } from "./auth-events";
 import {
   authRevision,
@@ -30,6 +35,7 @@ import { runCommandInner } from "./control-relay";
 import { DELEGATES, getDelegate } from "./delegation";
 import { loginSlot } from "./delegation/login-flow";
 import { daemonPublicKey, openSealed, sealTo } from "./keypair";
+import { localControlCorsHeaders } from "./local-device-control";
 import {
   localAccessFailure,
   localJson,
@@ -244,9 +250,39 @@ const execute = async (
   return denied ?? result ?? { id: command.id, status: "error" };
 };
 
-export const handleLocalAuth = async (req: Request): Promise<Response> => {
+/**
+ * `/local/auth`. A caller without an `Origin` (the CLI, MCP) keeps the strict
+ * owner gate. A page — only the desktop app's, which alone is handed the
+ * capability (`local_agent_auth`) — gets the same admission and CORS as
+ * `/local/device-control`: loopback peer, an allowed origin, the capability.
+ */
+export const handleLocalAuth = async (
+  req: Request,
+  remoteAddress?: string | null,
+): Promise<Response> => {
+  if (req.headers.has("origin")) {
+    if (req.method === "OPTIONS") {
+      const refused = localPreflightRefusal(req, remoteAddress);
+      return refused !== null
+        ? localAgentRefusalResponse(refused)
+        : withLocalCors(req, new Response(null, { status: 204 }));
+    }
+    const refused = localAgentRefusal(req, remoteAddress);
+    if (refused !== null) return localAgentRefusalResponse(refused);
+    return withLocalCors(req, await serveLocalAuth(req));
+  }
   const failure = localAccessFailure(req);
   if (failure !== null) return localJson(403, { error: failure });
+  return serveLocalAuth(req);
+};
+
+const withLocalCors = (req: Request, res: Response): Response => {
+  for (const [name, value] of Object.entries(localControlCorsHeaders(req)))
+    res.headers.set(name, value);
+  return res;
+};
+
+const serveLocalAuth = async (req: Request): Promise<Response> => {
   if (new URL(req.url).pathname !== AUTH_LOCAL_PATH)
     return localJson(404, { error: "not_found" });
   if (req.method !== "POST")

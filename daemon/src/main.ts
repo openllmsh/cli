@@ -606,7 +606,8 @@ export const main = async (): Promise<void> => {
         if (isLocalDeviceControlPath(url.pathname)) {
           return handleLocalDeviceControl(req, server.requestIP(req)?.address);
         }
-        if (url.pathname === AUTH_LOCAL_PATH) return handleLocalAuth(req);
+        if (url.pathname === AUTH_LOCAL_PATH)
+          return handleLocalAuth(req, server.requestIP(req)?.address);
         {
           const doctor = await loadDoctor();
           if (doctor.isDoctorLocalPath(url.pathname)) {
