@@ -105,8 +105,22 @@ export const runManagedDaemonCommand = async (
   args: readonly string[] = [],
   extraEnv: Readonly<Record<string, string>> = {},
 ): Promise<number> => {
+  let proc: ReturnType<typeof Bun.spawn> | undefined;
+  const forward = (signal: NodeJS.Signals): void => {
+    try {
+      proc?.kill(signal);
+    } catch {
+      // already exited
+    }
+  };
+  const onSigint = (): void => forward("SIGINT");
+  const onSigterm = (): void => forward("SIGTERM");
+  const onSighup = (): void => forward("SIGHUP");
+  process.on("SIGINT", onSigint);
+  process.on("SIGTERM", onSigterm);
+  process.on("SIGHUP", onSighup);
   try {
-    const proc = Bun.spawn([...daemonInvocation(), command, ...args], {
+    proc = Bun.spawn([...daemonInvocation(), command, ...args], {
       stdin: "inherit",
       stdout: "inherit",
       stderr: "inherit",
@@ -118,5 +132,9 @@ export const runManagedDaemonCommand = async (
       `[openllm] could not run managed daemon: ${error instanceof Error ? error.message : String(error)}\n`,
     );
     return 1;
+  } finally {
+    process.off("SIGINT", onSigint);
+    process.off("SIGTERM", onSigterm);
+    process.off("SIGHUP", onSighup);
   }
 };
