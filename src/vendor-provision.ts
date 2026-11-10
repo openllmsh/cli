@@ -9,9 +9,8 @@
  */
 
 import { existsSync } from "node:fs";
-import { homedir } from "node:os";
 import { join } from "node:path";
-import { cliConfig } from "./env";
+import { cliConfig, userHome } from "./env";
 import { awaitPipeCodes, bunSubprocessPeer } from "./process-pipe";
 import { isSecureOrigin } from "./self-update";
 
@@ -95,7 +94,7 @@ export const allProvisionedVendorClisPresent = (
     readonly which?: (command: string) => string | null;
   } = {},
 ): boolean => {
-  const home = deps.home ?? homedir();
+  const home = deps.home ?? userHome();
   const which =
     deps.which ??
     ((command: string): string | null => Bun.which(command) ?? null);
