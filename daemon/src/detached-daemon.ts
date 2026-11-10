@@ -30,6 +30,7 @@ import {
   serviceEnvFilePath,
   stateDir,
 } from "./env";
+import { holdJournalLockIsHeld, readHoldJournalHolderPid } from "./hold-outbox";
 
 export type TDetachedDaemonRecord = {
   readonly pid: number;
@@ -65,16 +66,18 @@ export const detachedProcStartTime = (pid: number): string | null => {
 };
 
 /**
- * Detached-daemon process identity for NEW records. Prefers `ps -o lstart=`;
- * on Linux hosts without `ps` (slim containers / agent VMs), falls back to
- * `/proc/<pid>/stat` field 22 prefixed with
- * {@link DETACHED_PROC_STARTTIME_PREFIX}. Session-host identity keeps using
- * unpinned `ps` via {@link processStartTime}.
+ * Detached-daemon process identity for NEW records. On Linux prefers
+ * `/proc/<pid>/stat` field 22 (`proc:<ticks>`) — boot-relative, stable across
+ * wall-clock steps (VM suspend/resume). Falls back to `ps -o lstart=` (macOS,
+ * or Linux when `/proc` is unreadable). Session-host identity keeps using
+ * {@link processStartTime}.
  */
 export const detachedProcessStartTime = (pid: number): string | null => {
-  const fromPs = processStartTime(pid);
-  if (fromPs !== null) return fromPs;
-  return detachedProcStartTime(pid);
+  if (process.platform === "linux") {
+    const fromProc = detachedProcStartTime(pid);
+    if (fromProc !== null) return fromProc;
+  }
+  return processStartTime(pid);
 };
 
 /**
@@ -259,9 +262,33 @@ export const detachedRecordAlive = (
 };
 
 /**
- * Return the pidfile record only while it still names a live matching process;
- * clears stale pidfiles. A transient null start-time is retried, then confirmed
- * via cmdline — never treated as live on pid liveness alone (PID reuse).
+ * Resolve a live pid whose recorded start time is missing or disagrees.
+ * Owned/unknown keep the pidfile (ours-but-unverified); foreign clears a
+ * recycled-PID record. Dead pids always clear. Exported for tests.
+ */
+export const resolveDetachedIdentityMismatch = (
+  record: TDetachedDaemonRecord,
+  readCommandLine: (
+    pid: number,
+  ) => string | null = readDetachedProcessCommandLine,
+): TDetachedDaemonRecord | null => {
+  if (!processAlive(record.pid)) {
+    clearDetachedPidfile();
+    return null;
+  }
+  const ownership = detachedProcessOwnership(record.pid, readCommandLine);
+  if (ownership === "owned" || ownership === "unknown") return record;
+  clearDetachedPidfile();
+  return null;
+};
+
+/**
+ * Return the pidfile record while it still names a live process we own (or
+ * cannot rule out). Clears only dead or foreign-cmdline pidfiles — never when
+ * the pid is alive and its cmdline is our daemon but the start time disagrees
+ * (wall-clock `ps lstart` can shift after a VM suspend; `/proc` ticks do not).
+ * A transient null start-time is retried, then confirmed via cmdline — never
+ * treated as live on pid liveness alone (PID reuse).
  */
 export const readLiveDetachedDaemon = (
   readStartTime?: (pid: number) => string | null,
@@ -271,25 +298,18 @@ export const readLiveDetachedDaemon = (
   if (record === null) return null;
   const reader =
     readStartTime ?? detachedStartTimeReaderFor(record.processStartTime);
+  const cmdlineReader = readCommandLine ?? readDetachedProcessCommandLine;
   const live = readStartTimeRetried(record.pid, reader);
   if (live === null) {
-    if (!processAlive(record.pid)) {
-      clearDetachedPidfile();
-      return null;
-    }
-    // Unreadable start-time with a live pid: trust cmdline ownership. A
-    // foreign cmdline clears a recycled-PID pidfile so start is not a no-op;
-    // an unreadable cmdline keeps the pidfile (ownership uncertain).
-    const ownership = detachedProcessOwnership(
-      record.pid,
-      readCommandLine ?? readDetachedProcessCommandLine,
-    );
-    if (ownership === "owned" || ownership === "unknown") return record;
-    clearDetachedPidfile();
-    return null;
+    return resolveDetachedIdentityMismatch(record, cmdlineReader);
   }
-  // A matching start time can still be a zombie (exited, not reaped).
-  if (live !== record.processStartTime || !processAlive(record.pid)) {
+  if (live !== record.processStartTime) {
+    // Readable but disagreeing start time: keep when cmdline still looks like
+    // ours (clock-shifted lstart on an older pidfile); clear foreign PIDs.
+    return resolveDetachedIdentityMismatch(record, cmdlineReader);
+  }
+  // Matching start time can still be a zombie (exited, not reaped).
+  if (!processAlive(record.pid)) {
     clearDetachedPidfile();
     return null;
   }
@@ -298,9 +318,14 @@ export const readLiveDetachedDaemon = (
 
 /**
  * Stop a live detached daemon (pidfile). Idempotent. Returns the pid that was
- * signalled, or null when nothing was running. Clears the pidfile only when
- * the process is gone; if it is still alive after the bounded wait, leaves the
- * pidfile and reports that it is still running.
+ * signalled (or left running when identity could not be verified), or null when
+ * nothing was running. Clears the pidfile only when the process is gone or
+ * proven foreign; never clears an alive owned cmdline on a start-time mismatch.
+ *
+ * Signalling requires a matching start time (verified identity). An owned
+ * cmdline with a disagreeing start time is reported with the pid and left
+ * alone — callers exit non-zero rather than silently ignoring or risking a
+ * PID-reuse kill after a wall-clock shift.
  */
 export const stopDetachedDaemon = (
   readStartTime?: (pid: number) => string | null,
@@ -342,8 +367,26 @@ export const stopDetachedDaemon = (
         detachedProcessOwnership(record.pid, cmdlineReader) === "owned",
     );
   } else if (live !== record.processStartTime) {
-    clearDetachedPidfile();
-    return null;
+    if (!processAlive(record.pid)) {
+      clearDetachedPidfile();
+      return null;
+    }
+    const ownership = detachedProcessOwnership(record.pid, cmdlineReader);
+    if (ownership === "foreign") {
+      process.stderr.write(
+        `[openllm] detached daemon pid ${record.pid}: process is not an OpenLLM daemon; clearing stale pidfile\n`,
+      );
+      clearDetachedPidfile();
+      return null;
+    }
+    // Owned or unknown with a disagreeing start time: do not signal (start
+    // time is the PID-reuse gate) and do not clear — report for a manual kill.
+    process.stderr.write(
+      `[openllm] detached daemon pid ${record.pid}: start time does not match the pidfile` +
+        `${ownership === "owned" ? " but the cmdline is an OpenLLM daemon" : ""}; ` +
+        `refusing to signal — stop it with: kill ${record.pid}\n`,
+    );
+    return record.pid;
   } else {
     const stillOwned = (): boolean => detachedRecordAlive(record, reader);
     terminateOwnedPidSync(record.pid, stillOwned);
@@ -472,6 +515,25 @@ export const startDetachedDaemon = (
   if (opts.replace !== true) {
     const existing = readLiveDetachedDaemon();
     if (existing !== null) return existing;
+    // Pidfile missing/cleared but another daemon still holds the state dir —
+    // refuse before spawning a crash-loop against the hold journal. Probe the
+    // flock itself: the lock file keeps a stale PID after a clean release, and
+    // a recycled PID that merely looks owned must not block start or earn a
+    // `kill` hint.
+    if (holdJournalLockIsHeld()) {
+      const holder = readHoldJournalHolderPid();
+      const pidPart =
+        holder !== null && holder !== process.pid ? ` (pid ${holder})` : "";
+      const suggestKill =
+        holder !== null &&
+        holder !== process.pid &&
+        processAlive(holder) &&
+        detachedProcessLooksOwned(holder);
+      const killPart = suggestKill ? ` — stop it with: kill ${holder}` : "";
+      throw new Error(
+        `another daemon${pidPart} holds the state dir${killPart}`,
+      );
+    }
   }
   mkdirSync(stateDir(), { recursive: true });
   const outPath = daemonStdoutLogFilePath();

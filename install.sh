@@ -988,7 +988,10 @@ install_component() {
   local url="$ORIGIN/$route/$TARGET"
   local published installed stamp="$BIN_DIR/.$name.sha256.stamp"
 
-  published="$(curl -fsSL "$url.sha256" 2>/dev/null | cut -d' ' -f1 || true)"
+  # Bypass intermediary caches: `/api/cli/version` is no-store but a cached
+  # `.sha256` used to false-positive the digest short-circuit below.
+  published="$(curl -fsSL -H 'Cache-Control: no-cache' -H 'Pragma: no-cache' \
+    "$url.sha256" 2>/dev/null | cut -d' ' -f1 || true)"
   case "$published" in
     [0-9a-f]*)
       [[ "$published" =~ ^[0-9a-f]{64}$ ]] || die "malformed checksum for $name"
@@ -1001,9 +1004,20 @@ install_component() {
   # disk (we no longer force ad-hoc re-sign when codesign --verify passes).
   # The stamp remains for the fallback ad-hoc path (unsigned/invalid) where
   # re-signing rewrites bytes after the published digest check.
+  # Also require the on-disk `--version` to match the pinned `$version` so a
+  # stale cached digest cannot claim "up to date" while `/api/install` already
+  # names a newer release.
   if [ -x "$dest" ]; then
+    local on_disk_version=""
+    on_disk_version="$("$dest" --version 2>/dev/null | head -n 1 | tr -d '\r' || true)"
+    on_disk_version="${on_disk_version#openllm }"
+    on_disk_version="${on_disk_version#v}"
     installed="$(sha256_of "$dest" || true)"
-    if [ -n "$installed" ]; then
+    # When `$version` is pinned, require a verified on-disk `--version` match
+    # before any digest/stamp short-circuit. An empty `--version` is not a match.
+    if [ -n "$installed" ] && {
+      [ -z "$version" ] || [ "$on_disk_version" = "$version" ]
+    }; then
       if [ "$installed" = "$published" ]; then
         echo "  $name is already up to date"
         return 0
@@ -1016,6 +1030,23 @@ install_component() {
           return 0
         fi
       fi
+    elif [ -n "$version" ] && [ "$on_disk_version" != "$version" ]; then
+      if [ -n "$on_disk_version" ]; then
+        echo "  $name on disk is v$on_disk_version; pinned release is v$version — downloading"
+      else
+        echo "  $name on disk has no usable --version; pinned release is v$version — downloading"
+      fi
+      # Re-fetch the digest: a stale cached `.sha256` may have matched the
+      # on-disk bytes above; the bytes we are about to download must verify
+      # against the live pin.
+      published="$(curl -fsSL -H 'Cache-Control: no-cache' -H 'Pragma: no-cache' \
+        "$url.sha256" 2>/dev/null | cut -d' ' -f1 || true)"
+      case "$published" in
+        [0-9a-f]*)
+          [[ "$published" =~ ^[0-9a-f]{64}$ ]] || die "malformed checksum for $name"
+          ;;
+        *) die "no published checksum for $name ($TARGET) — nothing to install" ;;
+      esac
     fi
   fi
 
@@ -1059,6 +1090,18 @@ install_component() {
 
   update_lease_phase install "$version"
   chmod 0755 "$bin"
+  # A matching checksum alone can be a stale cached asset. When a version is
+  # pinned, require the staged binary's `--version` to equal it before replacing
+  # the destination — leave the installed binary unchanged on mismatch.
+  if [ -n "$version" ]; then
+    local staged_version=""
+    staged_version="$("$bin" --version 2>/dev/null | head -n 1 | tr -d '\r' || true)"
+    staged_version="${staged_version#openllm }"
+    staged_version="${staged_version#v}"
+    if [ "$staged_version" != "$version" ]; then
+      die "downloaded $name reports version '${staged_version:-unknown}' but pin is '$version' — refusing to replace $dest"
+    fi
+  fi
   mv -f "$bin" "$dest"
 
   # macOS: strip quarantine. Preserve a valid Developer ID / notarized
@@ -2571,11 +2614,16 @@ path_hint_line() {
 }
 
 print_install_summary() {
-  local vendor_line
+  local vendor_line on_disk=""
   vendor_line="$(build_vendor_status_line)"
+  if [ -x "$BIN_DIR/openllm" ]; then
+    on_disk="$("$BIN_DIR/openllm" --version 2>/dev/null | head -n 1 | tr -d '\r' || true)"
+    on_disk="${on_disk#openllm }"
+    on_disk="${on_disk#v}"
+  fi
   echo
   echo "OpenLLM install summary"
-  echo "installed: openllm v${CLI_VERSION:-unknown} ($BIN_DIR/openllm)"
+  echo "installed: openllm v${on_disk:-${CLI_VERSION:-unknown}} ($BIN_DIR/openllm)"
   echo "vendors: ${vendor_line:-none}"
   echo "daemon: $DAEMON_STATE"
   path_hint_line
@@ -2596,10 +2644,17 @@ print_install_summary() {
 }
 
 if [ "$INSTALL_MODE" = update ]; then
-  cat <<EOF
+  if [ "${BINARY_CHANGED:-0}" = 1 ]; then
+    cat <<EOF
+
+OpenLLM updated to v${CLI_VERSION:-unknown}.
+EOF
+  else
+    cat <<EOF
 
 OpenLLM is up to date.
 EOF
+  fi
   print_install_summary
 elif [ "$INSTALL_MODE" = vendors ]; then
   print_install_summary
