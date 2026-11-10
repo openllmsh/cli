@@ -34,7 +34,10 @@ import {
 } from "../session-host";
 import { isMinimalSetupMode } from "../setup-mode";
 import { attachBrokerSession } from "./attach";
-import { seedClaudeFirstRun } from "./claude-first-run";
+import {
+  seedClaudeFirstRun,
+  shouldSeedClaudeFirstRun,
+} from "./claude-first-run";
 import { codexCatalogFor } from "./codex-catalog";
 import { fetchModelCatalog, fetchTier, resolveGateway } from "./gateway";
 import { hermesBundledTuiDir, hermesProfileConfigPath } from "./hermes-home";
@@ -594,9 +597,10 @@ export const runSessionClient = async (
         : [];
 
     // Claude's first-run dialogs live in `~/.claude.json`, outside the run-dir
-    // `--settings` overlay. Seed only missing keys so a fresh / TTY-less host
-    // does not stall before SessionStart; an existing value is never overwritten.
-    if (client.id === "claude") {
+    // `--settings` overlay. In a device session (no terminal to answer them)
+    // seed only missing keys so it does not stall before SessionStart; an
+    // existing value is never overwritten.
+    if (shouldSeedClaudeFirstRun(client.id, process.env)) {
       seedClaudeFirstRun(userHome(), process.env, {
         cwd: process.cwd(),
         apiKey: gateway.apiKey,

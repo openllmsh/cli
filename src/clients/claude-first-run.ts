@@ -133,6 +133,18 @@ export type TSeedClaudeFirstRunResult =
   | { readonly ok: false; readonly path: string; readonly reason: string };
 
 /**
+ * Only a device session (started from the browser, `OPENLLM_DEVICE_SESSION_ID`
+ * set) has no terminal to answer Claude's first-run dialogs, and there the
+ * user already chose the folder and permission mode. An interactive
+ * `openllm claude` keeps Claude's own trust and bypass-permissions prompts.
+ */
+export const shouldSeedClaudeFirstRun = (
+  clientId: string,
+  env: Readonly<Record<string, string | undefined>>,
+): boolean =>
+  clientId === "claude" && (env.OPENLLM_DEVICE_SESSION_ID ?? "").trim() !== "";
+
+/**
  * Merge missing first-run keys into Claude's global config. Best-effort: a
  * missing file is created; an unreadable / oversized / invalid file is skipped
  * so a launch never fails because of this helper.
