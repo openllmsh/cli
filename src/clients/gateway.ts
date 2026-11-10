@@ -9,6 +9,8 @@
  * that comes and goes therefore needs no reinstall.
  */
 
+import type { TPermission } from "@openllmsh/sdk/mcp";
+import { parseKeyPermissions } from "@openllmsh/sdk/mcp";
 import type { TCliConfig } from "../env";
 import { cliConfig, sharedFileConfig } from "../env";
 import {
@@ -170,10 +172,27 @@ export const fetchModelCatalog = async (
  * authority either way. Best-effort and fast: a slow gateway must not stall a
  * launch (same `CATALOG_TIMEOUT_MS` budget as the catalog fetch).
  */
+export type TGatewayAccess = {
+  readonly tier: "free" | "trial" | "pro" | undefined;
+  /** This key's permissions; `undefined` when the gateway didn't say. */
+  readonly permissions: readonly TPermission[] | undefined;
+};
+
+const UNKNOWN_ACCESS: TGatewayAccess = {
+  tier: undefined,
+  permissions: undefined,
+};
+
 export const fetchTier = async (
   gateway: TGateway,
-): Promise<"free" | "trial" | "pro" | undefined> => {
-  if (gateway.apiKey.length === 0) return undefined;
+): Promise<"free" | "trial" | "pro" | undefined> =>
+  (await fetchAccess(gateway)).tier;
+
+/** Tier + this key's own permissions, from one `/api/user/tier` read. */
+export const fetchAccess = async (
+  gateway: TGateway,
+): Promise<TGatewayAccess> => {
+  if (gateway.apiKey.length === 0) return UNKNOWN_ACCESS;
   try {
     // `/api/user/tier`, not `/api/user`: a device key runs AI and holds no
     // account.manage, which the whole account read needs.
@@ -181,12 +200,17 @@ export const fetchTier = async (
       headers: { authorization: `Bearer ${gateway.apiKey}` },
       signal: AbortSignal.timeout(CATALOG_TIMEOUT_MS),
     });
-    if (!res.ok) return undefined;
-    const body = (await res.json()) as { tier?: unknown };
-    return body.tier === "free" || body.tier === "trial" || body.tier === "pro"
-      ? body.tier
-      : undefined;
+    if (!res.ok) return UNKNOWN_ACCESS;
+    const body = (await res.json()) as {
+      tier?: unknown;
+      permissions?: unknown;
+    };
+    const tier =
+      body.tier === "free" || body.tier === "trial" || body.tier === "pro"
+        ? body.tier
+        : undefined;
+    return { tier, permissions: parseKeyPermissions(body.permissions) };
   } catch {
-    return undefined;
+    return UNKNOWN_ACCESS;
   }
 };

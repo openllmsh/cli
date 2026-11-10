@@ -1,24 +1,22 @@
 /**
  * CLI marketplace upstream dialer. HTTP/SSE remotes go through
  * `@openllmsh/sdk/mcp` (`connectUpstream` / `connectUpstreams`); this module
- * only adds the stdio transport the compiled CLI can spawn, and fans both
- * kinds into one `<id>__<tool>` surface.
- *
- * A minimal JSON-RPC client: initialize → tools/list → tools/call. Every
- * upstream fails open on its own — a dead vendor drops only its tools.
+ * only adds the Bun.spawn stdio transport the compiled CLI can spawn.
  */
 
-import type { CallToolResult } from "@modelcontextprotocol/server";
 import type {
+  TConnectUpstreamOptions,
+  TConnectUpstreamsOptions,
   TMarketplaceLaunchServer,
+  TMcpChannel,
   TUpstream,
   TUpstreamTool,
 } from "@openllmsh/sdk/mcp";
 import {
   CALL_TIMEOUT_MS,
   CONNECT_TIMEOUT_MS,
-  connectUpstream as connectHttpUpstream,
-  connectUpstreams as connectHttpUpstreams,
+  connectUpstream as connectSdkUpstream,
+  connectUpstreams as connectSdkUpstreams,
   UPSTREAM_TOOL_SEPARATOR,
   upstreamToolName,
 } from "@openllmsh/sdk/mcp";
@@ -26,20 +24,6 @@ import { CLI_VERSION } from "../../cli-version";
 
 export type { TUpstream, TUpstreamTool };
 export { UPSTREAM_TOOL_SEPARATOR, upstreamToolName };
-
-type TRpc = (
-  method: string,
-  params?: Record<string, unknown>,
-) => Promise<unknown>;
-type TNotify = (method: string) => Promise<void>;
-type TChannel = {
-  readonly rpc: TRpc;
-  readonly notify: TNotify;
-  readonly close: () => Promise<void>;
-};
-
-const PROTOCOL_VERSION = "2025-06-18";
-const MAX_TOOL_PAGES = 10;
 
 type TRpcMessage = {
   id?: unknown;
@@ -53,7 +37,8 @@ const unwrap = (msg: TRpcMessage): unknown => {
   return msg.result;
 };
 
-const stdioChannel = (server: TMarketplaceLaunchServer): TChannel => {
+/** Bun.spawn newline-delimited JSON-RPC channel for a stdio launch entry. */
+const stdioChannel = (server: TMarketplaceLaunchServer): TMcpChannel => {
   const child = Bun.spawn([server.command ?? "", ...(server.args ?? [])], {
     stdin: "pipe",
     stdout: "pipe",
@@ -124,127 +109,43 @@ const stdioChannel = (server: TMarketplaceLaunchServer): TChannel => {
   };
 };
 
-const isRecord = (v: unknown): v is Record<string, unknown> =>
-  v !== null && typeof v === "object" && !Array.isArray(v);
-
-const toTool = (v: unknown): TUpstreamTool | undefined => {
-  if (!isRecord(v) || typeof v.name !== "string") return undefined;
-  return {
-    name: v.name,
-    ...(typeof v.description === "string"
-      ? { description: v.description }
-      : {}),
-    inputSchema: isRecord(v.inputSchema)
-      ? v.inputSchema
-      : { type: "object", properties: {} },
-    ...(isRecord(v.annotations) ? { annotations: v.annotations } : {}),
-  };
-};
-
-const listTools = async (rpc: TRpc): Promise<TUpstreamTool[]> => {
-  const tools: TUpstreamTool[] = [];
-  let cursor: string | undefined;
-  for (let page = 0; page < MAX_TOOL_PAGES; page++) {
-    const result = await rpc(
-      "tools/list",
-      cursor === undefined ? {} : { cursor },
-    );
-    if (!isRecord(result) || !Array.isArray(result.tools)) break;
-    for (const raw of result.tools) {
-      const tool = toTool(raw);
-      if (tool !== undefined) tools.push(tool);
-    }
-    if (typeof result.nextCursor !== "string") break;
-    cursor = result.nextCursor;
-  }
-  return tools;
-};
-
-const errorResult = (text: string): CallToolResult => ({
-  content: [{ type: "text", text }],
-  isError: true,
-});
-
-/** Dial one stdio upstream; rejects on any handshake failure. */
-const connectStdioUpstream = async (
+const channelForStdio = (
   server: TMarketplaceLaunchServer,
-): Promise<TUpstream> => {
-  if (server.command === undefined)
-    throw new Error(`${server.id}: incomplete launch entry`);
-  const channel = stdioChannel(server);
-  try {
-    await channel.rpc("initialize", {
-      protocolVersion: PROTOCOL_VERSION,
-      capabilities: {},
-      clientInfo: { name: "openllm", version: CLI_VERSION },
-    });
-    await channel.notify("notifications/initialized");
-    const blocked = new Set(server.blocked_tools ?? []);
-    const tools = (await listTools(channel.rpc)).filter(
-      (tool) => !blocked.has(tool.name),
-    );
-    return {
-      id: server.id,
-      tools,
-      call: async (name, args) => {
-        if (blocked.has(name))
-          return errorResult(`${server.id}: ${name} is not available`);
-        try {
-          const result = await channel.rpc("tools/call", {
-            name,
-            arguments: args,
-          });
-          return isRecord(result) && Array.isArray(result.content)
-            ? (result as CallToolResult)
-            : errorResult(`${server.id}: malformed tool result`);
-        } catch (err) {
-          return errorResult(
-            `${server.id}: ${err instanceof Error ? err.message : String(err)}`,
-          );
-        }
-      },
-      close: channel.close,
-    };
-  } catch (err) {
-    await channel.close();
-    throw err;
-  }
+): TMcpChannel | undefined => {
+  if (server.transport !== "stdio") return undefined;
+  if (server.command === undefined) return undefined;
+  return stdioChannel(server);
 };
 
-/** Dial one upstream (HTTP/SSE via SDK, stdio here); rejects on handshake failure. */
+/** Dial one upstream (HTTP/SSE via SDK, stdio via Bun.spawn). */
 export const connectUpstream = async (
   server: TMarketplaceLaunchServer,
+  options: TConnectUpstreamOptions = {},
 ): Promise<TUpstream> => {
-  if (server.transport === "stdio") return connectStdioUpstream(server);
-  return connectHttpUpstream(server, { clientVersion: CLI_VERSION });
+  if (server.transport === "stdio") {
+    if (server.command === undefined)
+      throw new Error(`${server.id}: incomplete launch entry`);
+    return connectSdkUpstream(server, {
+      clientVersion: CLI_VERSION,
+      ...options,
+      channel: options.channel ?? stdioChannel(server),
+    });
+  }
+  return connectSdkUpstream(server, {
+    clientVersion: CLI_VERSION,
+    ...options,
+  });
 };
 
-/** Dial every upstream in parallel; failures are logged and dropped. */
+/** Dial every upstream in parallel; stdio entries get a Bun.spawn channel. */
 export const connectUpstreams = async (
   servers: readonly TMarketplaceLaunchServer[],
-): Promise<readonly TUpstream[]> => {
-  const remote = servers.filter((server) => server.transport !== "stdio");
-  const local = servers.filter((server) => server.transport === "stdio");
-  const [httpUpstreams, stdioSettled] = await Promise.all([
-    connectHttpUpstreams(remote, {
-      clientVersion: CLI_VERSION,
-      onWarn: (message) => console.warn(message),
-    }),
-    Promise.allSettled(local.map(connectStdioUpstream)),
-  ]);
-  const stdioUpstreams = stdioSettled.flatMap((r, i) => {
-    if (r.status === "fulfilled") return [r.value];
-    console.warn(
-      `[MCP] marketplace ${local[i]?.id}: ${r.reason instanceof Error ? r.reason.message : String(r.reason)}`,
-    );
-    return [];
+  options: TConnectUpstreamsOptions = {},
+): Promise<readonly TUpstream[]> =>
+  connectSdkUpstreams(servers, {
+    clientVersion: CLI_VERSION,
+    onWarn: (message) => console.warn(message),
+    ...options,
+    channelFor: (server) =>
+      options.channelFor?.(server) ?? channelForStdio(server),
   });
-  // Preserve launch order: walk the original list and pick from each pool.
-  const byId = new Map(
-    [...httpUpstreams, ...stdioUpstreams].map((u) => [u.id, u]),
-  );
-  return servers.flatMap((server) => {
-    const upstream = byId.get(server.id);
-    return upstream === undefined ? [] : [upstream];
-  });
-};

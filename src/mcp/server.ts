@@ -10,6 +10,7 @@ import type {
   TBeginMarketplaceLoadOptions,
   TMarketplaceLaunch,
   TMarketplaceLoad,
+  TPermission,
   TUpstream,
 } from "@openllmsh/sdk/mcp";
 import {
@@ -20,7 +21,7 @@ import {
   OPENLLM_MEMORY_BUILTIN_ID,
 } from "@openllmsh/sdk/mcp";
 import type { TGateway } from "../clients/gateway";
-import { fetchTier, resolveGateway } from "../clients/gateway";
+import { fetchAccess, resolveGateway } from "../clients/gateway";
 import type { TMarketplaceLaunch as TCliMarketplaceLaunch } from "../clients/marketplace";
 import type { TMcpGroup } from "../commands";
 import { mcpGroupsForTier } from "../commands";
@@ -74,11 +75,14 @@ const registerLocalAuthTools = (server: McpServer): void => {
 export const createCliMcpServer = ({
   requested,
   tier,
+  permissions,
   config,
   upstreams = [],
 }: {
   requested: readonly TMcpGroup[];
   tier: Parameters<typeof mcpGroupsForTier>[1];
+  /** The key's permissions; only tools it may call are listed. */
+  permissions?: readonly TPermission[];
   config: { baseUrl: string; apiKey: string };
   upstreams?: readonly TUpstream[];
 }): McpServer => {
@@ -89,6 +93,7 @@ export const createCliMcpServer = ({
     config,
     upstreams,
     includeFreeTierOnlyTools: tier === "free",
+    ...(permissions !== undefined ? { permissions } : {}),
     // Upload to this machine's daemon when it answers: subscription hops
     // (Grok, Claude Dictation) then serve locally, past Vercel's 4.5 MB body
     // cap on 16 kHz WAV, and the daemon forwards API-key hops to the cloud.
@@ -133,34 +138,10 @@ export const beginMarketplaceLoad = (
         }),
     ...(options.connect === undefined
       ? {
-          connect: (servers) =>
-            connectUpstreamsWithStdio(
-              servers.map((s) => ({
-                id: s.id,
-                transport: s.transport,
-                url: s.url,
-                headers: s.headers,
-                command: s.command,
-                args: s.args,
-                env: s.env,
-                blocked_tools: s.blocked_tools,
-              })),
-            ),
+          connect: (servers) => connectUpstreamsWithStdio(servers),
         }
       : {
-          connect: async (servers) =>
-            options.connect?.(
-              servers.map((s) => ({
-                id: s.id,
-                transport: s.transport,
-                url: s.url,
-                headers: s.headers,
-                command: s.command,
-                args: s.args,
-                env: s.env,
-                blocked_tools: s.blocked_tools,
-              })),
-            ) ?? [],
+          connect: async (servers) => options.connect?.(servers) ?? [],
         }),
   };
   return beginMarketplaceLoadSdk(config, sdkOptions);
@@ -191,7 +172,7 @@ export const runMcpServer = async (
     cloudOrigin: cfg.gatewayUrl,
     local: false,
   };
-  const tierPromise = fetchTier(gateway);
+  const accessPromise = fetchAccess(gateway);
   // Wrapper defaults connect to the CLI stdio+HTTP dialer.
   const { launchPromise, marketplacePromise } = beginMarketplaceLoad(
     requested,
@@ -223,8 +204,8 @@ export const runMcpServer = async (
 
   let attachedLate = false;
   serveStdio(async () => {
-    const [tier] = await Promise.all([
-      tierPromise,
+    const [{ tier, permissions }] = await Promise.all([
+      accessPromise,
       Promise.race([
         launchPromise.then(() => undefined),
         new Promise<void>((resolve) => {
@@ -236,6 +217,7 @@ export const runMcpServer = async (
     const server = createCliMcpServer({
       requested,
       tier,
+      ...(permissions !== undefined ? { permissions } : {}),
       config,
       upstreams: includedAtCreate,
     });
