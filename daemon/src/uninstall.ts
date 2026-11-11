@@ -77,9 +77,10 @@ export const formatServiceUninstallLine = (
  * `stopped` is how many `stopLiveSessionHosts` itself signalled.
  */
 /**
- * Session hosts the top-level `openllm uninstall --yes` already stopped before
- * delegating here (`OPENLLM_UNINSTALL_HOSTS_STOPPED`), so this half's line
- * counts them instead of reporting "none running".
+ * Session hosts an older top-level `openllm uninstall --yes` stopped before
+ * delegating here (`OPENLLM_UNINSTALL_HOSTS_STOPPED`). Current CLI always
+ * passes 0 and stops any remainder after this half succeeds; the env is kept
+ * so a pre-stop CLI's count still shows on this half's line.
  */
 export const hostsStoppedByCli = (
   env: Readonly<Record<string, string | undefined>>,

@@ -6,18 +6,19 @@
  * enumerates the other's — so the two teardowns compose without cross-mapping.
  *
  * Order:
- *   1. with `--yes`/`-y`, stop durable session hosts first (confirmed) so an
- *      older daemon that doesn't reap them still loses them before it prunes
- *      `sessions/`. Without `--yes`, capture live host targets with a
- *      side-effect-free discovery (no reaping) and leave them running until
- *      confirm succeeds — the daemon half may prune `sessions/` metas.
+ *   1. capture live host targets with a side-effect-free discovery (no
+ *      reaping) and leave them running until the daemon half succeeds — so a
+ *      declined / failed daemon uninstall (interactive OR `--yes`) never
+ *      stops sessions. The daemon half may prune `sessions/` metas and stop
+ *      hosts itself; `OPENLLM_UNINSTALL_HOSTS_STOPPED` stays 0 here so its
+ *      count is not double-counted.
  *   2. delegate to `openllm daemon uninstall` — it prompts (confirm + keep-logins),
  *      stops/unregisters the service, and removes DAEMON-owned state, leaving
  *      the CLI's client ledgers in place. A nonzero exit (user aborted, or the
  *      daemon failed) stops the whole uninstall before any CLI change.
- *   3. if confirm was interactive, stop the hosts captured in step 1 (covers
- *      older daemons that confirmed but did not reap hosts, even after metas
- *      are gone).
+ *   3. after the daemon half succeeds, stop the hosts captured in step 1
+ *      (covers older daemons that confirmed but did not reap hosts, even
+ *      after metas are gone).
  *   4. reverse always-on client wiring (Raycast region; ChatGPT launcher; Hermes sticky profile) —
  *      still readable because the daemon left `clients/*.json` untouched.
  *   5. drop the openllm/ollm PATH symlinks, the managed rc block, and completion.
@@ -37,11 +38,7 @@ import { removeCompletion } from "./completion";
 import { runManagedDaemonCommand } from "./daemon-delegation";
 import { openllmDir } from "./env";
 import type { TLiveSessionHost } from "./session-host";
-import {
-  discoverLiveSessionHosts,
-  stopAllLiveSessionHosts,
-  stopSessionHosts,
-} from "./session-host";
+import { discoverLiveSessionHosts, stopSessionHosts } from "./session-host";
 import { removeOwnedLinks, removeRcBlock } from "./setup-cmd";
 
 /** Directory of embedded client overlay data inside the binary. */
@@ -140,39 +137,33 @@ export const runUninstall = async (
     process.stdout.write(UNINSTALL_USAGE);
     return 0;
   }
-  const confirmedNonInteractive = args.includes("--yes") || args.includes("-y");
-  // Stop hosts only once the uninstall is confirmed. With `--yes`/`-y` that is
-  // now; otherwise capture targets without reaping so a declined / non-TTY
-  // abort leaves sessions untouched, then stop the captured set after the
-  // daemon half succeeds (it may already have pruned `sessions/` metas).
-  let capturedHosts: readonly TLiveSessionHost[] = [];
-  let hostsStopped = 0;
-  if (confirmedNonInteractive) {
-    hostsStopped = await stopAllLiveSessionHosts();
-  } else {
-    capturedHosts = discoverLiveSessionHosts({ reapStale: false });
-  }
+  // Capture targets without reaping so a declined / failed daemon half
+  // (interactive OR `--yes`) leaves sessions untouched. Stop the captured
+  // set only after the daemon half succeeds — it may already have pruned
+  // `sessions/` metas and stopped hosts itself.
+  const capturedHosts: readonly TLiveSessionHost[] = discoverLiveSessionHosts({
+    reapStale: false,
+  });
 
   // Delegate daemon teardown — the daemon owns the destructive confirmation
   // AND the keep-logins question. We only forward the flags it understands.
+  // `OPENLLM_UNINSTALL_HOSTS_STOPPED` stays 0: this half has not stopped any
+  // hosts yet; the daemon counts what it stops itself.
   const forwarded = args.filter((a) => DAEMON_FLAGS.has(a));
   const code = await runManagedDaemonCommand("uninstall", forwarded, {
     OPENLLM_UNINSTALL_DELEGATED: "1",
-    OPENLLM_UNINSTALL_HOSTS_STOPPED: String(hostsStopped),
+    OPENLLM_UNINSTALL_HOSTS_STOPPED: "0",
   });
   if (code !== 0) {
     // User aborted at the daemon prompt, or daemon teardown failed — stop
-    // before touching anything CLI-owned. Session hosts were not stopped
-    // unless `--yes` already confirmed the uninstall.
+    // before touching anything CLI-owned. Session hosts were left running.
     process.stdout.write("Uninstall stopped — nothing further was removed.\n");
     return code;
   }
 
-  if (!confirmedNonInteractive) {
-    // Best-effort for older daemons that confirmed but did not reap hosts.
-    // Use the pre-daemon capture: rediscovery would miss pruned metas.
-    await stopSessionHosts(capturedHosts);
-  }
+  // Best-effort for older daemons that confirmed but did not reap hosts.
+  // Use the pre-daemon capture: rediscovery would miss pruned metas.
+  await stopSessionHosts(capturedHosts);
 
   // Always-on clients FIRST — while the ledgers and this binary still exist.
   for (const client of appliedAlwaysOnClients()) {
