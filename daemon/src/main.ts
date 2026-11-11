@@ -66,11 +66,10 @@ import {
 import { runCli } from "./cli";
 import { postRecord } from "./cloud-client";
 import {
-  ensureIdentityPublished,
   getCloudState,
   latestCliVersion,
-  nextIdentityPublishDelayMs,
   refreshBootstrap,
+  waitUntilIdentityAccepted,
 } from "./config";
 import { corsHeaders, isPreflight, preflightResponse } from "./cors";
 import { isSurvivableTransportError } from "./crash-policy";
@@ -766,45 +765,59 @@ export const main = async (): Promise<void> => {
   // Publish the durable identity BEFORE the control channel paints this key
   // online. The cloud online-lock refuses a different pubkey while the pinned
   // device is still online; going online first would wedge a replacement
-  // forever (the online device would be this one). Await a definitive outcome:
+  // forever (the online device would be this one). Retry in the BACKGROUND so
+  // local loopback (agent runtime, bootstrap → invalid_key/catalog, discovery,
+  // healthy-boot) starts immediately; only the relay waits on acceptance.
+  // Shares ensureIdentityPublished's in-flight promise with bootstrap.
   // accepted (ok / skipped) → connect; identity_conflict → stop; transient
-  // failure → retry with backoff and stay offline to the relay. Local loopback
-  // already serves (listener is bound above). cloudFetch bounds each attempt.
-  {
-    let identityStreak = 0;
-    for (;;) {
-      const identityResult = await ensureIdentityPublished();
-      if (identityResult === "conflict") {
-        await stopForIdentityConflict();
-      }
-      if (identityResult === "ok" || identityResult === "skipped") {
-        break;
-      }
-      identityStreak += 1;
-      const delayMs = nextIdentityPublishDelayMs(identityStreak);
+  // failure → backoff and stay offline to the relay. cloudFetch bounds each attempt.
+  const identityGate = waitUntilIdentityAccepted({
+    onRetry: ({ delayMs, streak }) => {
       logInfo(
         "identity",
         safeDiagnosticMessage`identity publish failed; retrying before control channel`,
-        { delay_ms: delayMs, streak: identityStreak },
+        { delay_ms: delayMs, streak },
       );
-      await new Promise<void>((resolve) => {
-        const timer = setTimeout(resolve, delayMs);
-        timer.unref?.();
-      });
+    },
+  }).then(async (identityResult) => {
+    if (identityResult === "conflict") {
+      await stopForIdentityConflict();
     }
-  }
+    return identityResult;
+  });
 
-  // Dial the control channel once identity is accepted so a planned restart
-  // reconnects in seconds, not after session-host reconcile. Commands stay
-  // deferred until reconcile finishes (handlers must not race that pass).
-  // See `docs/audit/2026-10-20-deploy-zero-downtime.md` fix #3.
-  // Register the agent dispatcher BEFORE the hello so its caps carry `agent1`.
+  // Register the agent dispatcher immediately so `/local/agent` is not 503
+  // while identity publish retries. Caps on the later hello still carry `agent1`.
   try {
     agentRuntime = await import("./agent/runtime");
     agentRuntime.startAgentSessions();
   } catch (err) {
     logError("agent", err);
   }
+
+  // Local discovery is demand-adjacent and not required to bind the port —
+  // load it after listen so its probe graph stays off the cold boot path (§3).
+  void import("./local-servers")
+    .then((m) => {
+      m.startLocalServerDiscovery();
+    })
+    .catch((err) => logError("main", err));
+
+  // Bootstrap runs without waiting on the relay so `/status` can leave
+  // `connecting` for real outcomes (`invalid_key`, catalog, …) while publish
+  // retries. Its identity publish coalesces with the gate above.
+  startBootstrapLoop();
+
+  // Mark this boot as healthy once the listener is bound and a small stabilization
+  // window has elapsed, then clear the crash-loop history so transient restarts do
+  // not accumulate into a permanent park.
+  setTimeout(() => {
+    markHealthyBoot();
+  }, 3_000);
+
+  // Gate ONLY the control channel (+ reconcile / ready) on accepted publish.
+  // See `docs/audit/2026-10-20-deploy-zero-downtime.md` fix #3.
+  await identityGate;
 
   const cc = await loadControlChannel();
   cc.startControlChannel({ deferCommandsUntilReady: true });
@@ -821,26 +834,6 @@ export const main = async (): Promise<void> => {
     logError("session", err);
   }
   cc.markControlChannelCommandsReady();
-
-  // Local discovery is demand-adjacent and not required to bind the port —
-  // load it after listen so its probe graph stays off the cold boot path (§3).
-  void import("./local-servers")
-    .then((m) => {
-      m.startLocalServerDiscovery();
-    })
-    .catch((err) => logError("main", err));
-
-  // Bootstrap is intentionally last: the listener is already bound and relay
-  // presence can only be published after it is routeable. Keep cloud-dependent
-  // device/model work chained to the initial refresh.
-  startBootstrapLoop();
-
-  // Mark this boot as healthy once the listener is bound and a small stabilization
-  // window has elapsed, then clear the crash-loop history so transient restarts do
-  // not accumulate into a permanent park.
-  setTimeout(() => {
-    markHealthyBoot();
-  }, 3_000);
 };
 
 /**

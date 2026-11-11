@@ -85,33 +85,97 @@ export const nextIdentityPublishDelayMs = (
 };
 
 /**
+ * In-flight identity publish shared by the boot gate and bootstrap refresh so
+ * concurrent callers never double-POST `/api/daemon/identity`.
+ */
+let identityPublishInFlight: Promise<TEnsureIdentityPublishedResult> | null =
+  null;
+
+/**
  * Await a publish of the persisted X25519 identity when one exists on disk.
- * Callers must run this before starting the control channel so the online-lock
- * model can refuse a different identity while another device still holds the
- * key — painting the key online first would wedge a replacement forever.
+ * Concurrent callers share one in-flight attempt (boot retry loop + bootstrap).
+ *
+ * The control channel must not dial until a call returns `"ok"` / `"skipped"`
+ * (see {@link waitUntilIdentityAccepted}) so the online-lock model can refuse a
+ * different identity while another device still holds the key — painting the
+ * key online first would wedge a replacement forever.
  *
  * Awaiting the real {@link publishIdentity} outcome (cloudFetch's own timeout)
  * — never racing an arbitrary boot deadline that proceeds as success.
  */
 export const ensureIdentityPublished =
   async (): Promise<TEnsureIdentityPublishedResult> => {
+    if (identityPublishInFlight !== null) return identityPublishInFlight;
+
+    const flight = (async (): Promise<TEnsureIdentityPublishedResult> => {
+      try {
+        // No API key yet (keyless install): nothing to attest. The control channel
+        // dials once a key lands; do not spin on publish retries beforehand.
+        if (!hasApiKey()) return "skipped";
+        const identity = loadIdentityKey();
+        if (!identity.persisted) return "skipped";
+        const result: TPublishIdentityResult = await publishIdentity(
+          identity.publicKeyB64,
+        );
+        if (result === "conflict") return "conflict";
+        if (result === "failed") return "failed";
+        return "ok";
+      } catch {
+        // loadIdentityKey sync failures: no durable key to publish this run.
+        return "skipped";
+      }
+    })();
+
+    identityPublishInFlight = flight;
     try {
-      // No API key yet (keyless install): nothing to attest. The control channel
-      // dials once a key lands; do not spin on publish retries beforehand.
-      if (!hasApiKey()) return "skipped";
-      const identity = loadIdentityKey();
-      if (!identity.persisted) return "skipped";
-      const result: TPublishIdentityResult = await publishIdentity(
-        identity.publicKeyB64,
-      );
-      if (result === "conflict") return "conflict";
-      if (result === "failed") return "failed";
-      return "ok";
-    } catch {
-      // loadIdentityKey sync failures: no durable key to publish this run.
-      return "skipped";
+      return await flight;
+    } finally {
+      if (identityPublishInFlight === flight) {
+        identityPublishInFlight = null;
+      }
     }
   };
+
+export type TWaitUntilIdentityAcceptedOptions = {
+  readonly nextDelayMs?: (streak: number) => number;
+  readonly sleep?: (ms: number) => Promise<void>;
+  readonly onRetry?: (info: {
+    readonly delayMs: number;
+    readonly streak: number;
+  }) => void;
+};
+
+/**
+ * Retry {@link ensureIdentityPublished} with jittered backoff until the publish
+ * is accepted (`ok` / `skipped`) or conflicts. Intended to run in the background
+ * at boot: local loopback services start immediately; only the control channel
+ * awaits this promise.
+ */
+export const waitUntilIdentityAccepted = async (
+  options?: TWaitUntilIdentityAcceptedOptions,
+): Promise<"ok" | "skipped" | "conflict"> => {
+  const nextDelay =
+    options?.nextDelayMs ??
+    ((streak: number) => nextIdentityPublishDelayMs(streak));
+  const sleep =
+    options?.sleep ??
+    ((ms: number): Promise<void> =>
+      new Promise<void>((resolve) => {
+        const timer = setTimeout(resolve, ms);
+        timer.unref?.();
+      }));
+
+  let streak = 0;
+  for (;;) {
+    const result = await ensureIdentityPublished();
+    if (result === "conflict") return "conflict";
+    if (result === "ok" || result === "skipped") return result;
+    streak += 1;
+    const delayMs = nextDelay(streak);
+    options?.onRetry?.({ delayMs, streak });
+    await sleep(delayMs);
+  }
+};
 
 /** Empty bootstrap row for offline/seeded hosts and harnesses. */
 export const EMPTY_DAEMON_BOOTSTRAP: TDaemonBootstrap = {
