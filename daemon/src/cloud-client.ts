@@ -493,11 +493,25 @@ const pushIdentityConflictIfChanged = async (): Promise<void> => {
 };
 
 /**
+ * Outcome of publishing the durable X25519 identity.
+ *
+ * - `ok` — accepted (or already pinned to this pubkey)
+ * - `conflict` — explicit `409 identity_conflict` (another identity holds the key)
+ * - `failed` — network / non-conflict HTTP / malformed body — NOT a conflict
+ */
+export type TPublishIdentityResult = "ok" | "conflict" | "failed";
+
+/**
  * Publish this daemon's long-lived X25519 SPKI to the cloud so browser/fleet
  * peers pin against a cloud-attested identity (not solely relay status_push).
- * Best-effort: identity pin lag is non-fatal (RTC falls back to status_push).
+ *
+ * Network and non-conflict failures return `"failed"` without throwing — only
+ * an explicit `identity_conflict` is `"conflict"`. Callers shut down on
+ * conflict; `"failed"` must not stop the daemon.
  */
-export const publishIdentity = async (pubkey: string): Promise<void> => {
+export const publishIdentity = async (
+  pubkey: string,
+): Promise<TPublishIdentityResult> => {
   try {
     const response = await cloudFetch(cloudUrl("/api/daemon/identity"), {
       method: "POST",
@@ -520,29 +534,33 @@ export const publishIdentity = async (pubkey: string): Promise<void> => {
           code = "identity_conflict";
         }
       } catch {
-        // A malformed conflict envelope remains non-fatal and unreported.
+        // A malformed conflict envelope is not an identity_conflict.
       }
       if (code === "identity_conflict") {
         const wasConflict = hasIdentityConflict();
         setIdentityConflict(true);
         logWarn(
           "identity",
-          safeDiagnosticMessage`Cloud key pin conflicts with the local device key; RTC fails until it is reset.`,
+          safeDiagnosticMessage`this key is now used by another device; stopping`,
           {},
         );
-        // Push once per false→true; repeated 409s (bootstrap ~5min) stay silent.
+        // Push once per false→true; repeated 409s stay silent.
         if (!wasConflict) await pushIdentityConflictIfChanged();
+        return "conflict";
       }
-      return;
+      return "failed";
     }
     if (response.ok) {
       const wasConflict = hasIdentityConflict();
       setIdentityConflict(false);
       // Push the true→false recovery so a reset is visible without an unrelated flip.
       if (wasConflict) await pushIdentityConflictIfChanged();
+      return "ok";
     }
+    return "failed";
   } catch {
-    // swallow — identity pin is best-effort hardening
+    // Network / fetch failures are transient — not a conflict.
+    return "failed";
   }
 };
 

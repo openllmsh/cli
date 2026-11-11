@@ -415,7 +415,7 @@ export const renderDaemonHealthRows = (
   if (raw.identity_conflict === true) {
     rows.push({
       label: "identity conflict",
-      value: "yes — on the dashboard open Keys and press Reset daemon identity",
+      value: "yes — this key is now used by another device",
     });
   }
 

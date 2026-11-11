@@ -1,9 +1,10 @@
 /**
  * Process-local outcome of publishing the daemon's durable X25519 identity.
  *
- * The cloud pin is intentionally immutable to API-key callers. A regenerated
- * local key therefore needs an explicit browser-session reset before RTC can
- * work again; retain that conflict in status so the owning dashboard can act.
+ * Under the online-lock model a `409 identity_conflict` means another device
+ * now holds this API key. The daemon records the flag for `openllm status` /
+ * doctor, then stops via {@link stopForIdentityConflict} so the supervisor
+ * does not relaunch into the same conflict.
  */
 let identityConflict = false;
 

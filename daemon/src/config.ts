@@ -32,6 +32,7 @@ import {
   NoApiKeyError,
   publishIdentity,
 } from "./cloud-client";
+import type { TPublishIdentityResult } from "./cloud-client";
 import {
   invalidateDeviceAccessPin,
   setDeviceAccessPubkey,
@@ -40,6 +41,37 @@ import { daemonApiKeyId, hasApiKey } from "./env";
 import { loadIdentityKey } from "./keypair";
 import { withoutCommandReplayContext } from "./op-context";
 import { clearPlanCache, observePolicyRevision } from "./plan-cache";
+
+/**
+ * Outcome of ensuring the durable identity is published before (or during)
+ * online presence. `"conflict"` is the only value that must stop the daemon;
+ * `"failed"` from the underlying publish is folded into `"ok"` here so a
+ * transient network blip never blocks the control channel.
+ */
+export type TEnsureIdentityPublishedResult = "ok" | "conflict" | "skipped";
+
+/**
+ * Await a publish of the persisted X25519 identity when one exists on disk.
+ * Callers must run this before starting the control channel so the online-lock
+ * model can refuse a different identity while another device still holds the
+ * key — painting the key online first would wedge a replacement forever.
+ */
+export const ensureIdentityPublished =
+  async (): Promise<TEnsureIdentityPublishedResult> => {
+    try {
+      const identity = loadIdentityKey();
+      if (!identity.persisted) return "skipped";
+      const result: TPublishIdentityResult = await publishIdentity(
+        identity.publicKeyB64,
+      );
+      if (result === "conflict") return "conflict";
+      // `ok` and `failed` both proceed — only an explicit conflict stops us.
+      return "ok";
+    } catch {
+      // loadIdentityKey sync failures must not block boot / bootstrap.
+      return "skipped";
+    }
+  };
 
 /** Empty bootstrap row for offline/seeded hosts and harnesses. */
 export const EMPTY_DAEMON_BOOTSTRAP: TDaemonBootstrap = {
@@ -165,26 +197,13 @@ export const refreshBootstrap = (): Promise<boolean> =>
             : { rotations: snapshot.device_access_rotations }),
         });
       }
-      // Best-effort: publish the durable X25519 pin on every successful
-      // bootstrap so cold dashboards / fleet peers pin via the cloud path
-      // (not solely relay status_push). Isolated from cloudState — a local
-      // keypair/construction failure must not flip a successful bootstrap
-      // to "unreachable".
-      try {
-        // R5: publish ONLY a key that reached disk. The cloud pin is write-once,
-        // so pinning an in-memory key that a failed write never persisted means
-        // the next boot generates a different key and 409s forever — a transient
-        // full disk becomes a permanent wedge. Skipping leaves no pin, and the
-        // next boot pins cleanly. `keypair.ts` already logged the errno.
-        // Fire-and-forget: a slow POST must not hold bootstrap. Sync throws from
-        // loadIdentityKey still land in this catch (must not flip cloudState).
-        const identity = loadIdentityKey();
-        if (identity.persisted) {
-          void publishIdentity(identity.publicKeyB64).catch(() => {});
-        }
-      } catch {
-        // swallow — identity pin is non-critical hardening
-      }
+      // Await the durable X25519 pin on every successful bootstrap so cold
+      // dashboards / fleet peers pin via the cloud path, and so a mid-run
+      // `identity_conflict` can shut the daemon down (see main.ts). Isolated
+      // from cloudState — a local keypair failure or network blip must not flip
+      // a successful bootstrap to "unreachable". R5: publish ONLY a key that
+      // reached disk (`ensureIdentityPublished` skips otherwise).
+      await ensureIdentityPublished();
     } catch (err) {
       if (reportingRevision !== reportingPolicyRevision) return false;
       if (err instanceof NoApiKeyError) cloudState = "no_key";

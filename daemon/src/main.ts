@@ -65,7 +65,14 @@ import {
 } from "./child-supervisor";
 import { runCli } from "./cli";
 import { postRecord } from "./cloud-client";
-import { getCloudState, latestCliVersion, refreshBootstrap } from "./config";
+import {
+  ensureIdentityPublished,
+  getCloudState,
+  latestCliVersion,
+  refreshBootstrap,
+} from "./config";
+import { stopForIdentityConflict } from "./identity-conflict-exit";
+import { hasIdentityConflict } from "./identity-state";
 import { corsHeaders, isPreflight, preflightResponse } from "./cors";
 import { isSurvivableTransportError } from "./crash-policy";
 import { requireServiceApiKey } from "./credential-gate";
@@ -360,6 +367,11 @@ export const main = async (): Promise<void> => {
         // the relay socket immediately on change (the channel's own watcher
         // would catch it within a couple seconds anyway).
         const changed = await refreshBootstrap();
+        // A mid-run identity_conflict must tear down the channel and exit the
+        // same way as boot — never keep serving while another device holds the key.
+        if (hasIdentityConflict()) {
+          await stopForIdentityConflict({ stopChannel: true });
+        }
         noteBootstrapOutcome();
         // Cap-hold records left undelivered (offline, or a previous run).
         if (getCloudState() === "ok") void flushHoldOutbox();
@@ -394,7 +406,10 @@ export const main = async (): Promise<void> => {
   };
   const startBootstrapLoop = (): void => {
     void refreshBootstrap()
-      .then(() => {
+      .then(async () => {
+        if (hasIdentityConflict()) {
+          await stopForIdentityConflict({ stopChannel: true });
+        }
         noteBootstrapOutcome();
         // Converge the single binary to the cloud's pinned release (no-op
         // from source / when already current). It restarts the daemon only
@@ -746,6 +761,17 @@ export const main = async (): Promise<void> => {
   void sweepStaleChildrenOnBoot().catch((err: unknown) => {
     logError("child-supervisor", err);
   });
+
+  // Publish the durable identity BEFORE the control channel paints this key
+  // online. The cloud online-lock refuses a different pubkey while the pinned
+  // device is still online; going online first would wedge a replacement.
+  // A real `identity_conflict` stops the service (no channel, no relaunch).
+  {
+    const identityResult = await ensureIdentityPublished();
+    if (identityResult === "conflict") {
+      await stopForIdentityConflict();
+    }
+  }
 
   // Dial the control channel as soon as the listener is bound so a planned
   // restart reconnects in seconds, not after session-host reconcile. Commands
