@@ -68,6 +68,7 @@ import { postRecord } from "./cloud-client";
 import {
   ensureIdentityPublished,
   getCloudState,
+  IDENTITY_BOOT_PUBLISH_TIMEOUT_MS,
   latestCliVersion,
   refreshBootstrap,
 } from "./config";
@@ -766,8 +767,12 @@ export const main = async (): Promise<void> => {
   // online. The cloud online-lock refuses a different pubkey while the pinned
   // device is still online; going online first would wedge a replacement.
   // A real `identity_conflict` stops the service (no channel, no relaunch).
+  // Bound the wait so a black-holed cloud cannot delay the control-channel
+  // dial by the full cloudFetch timeout; a timeout proceeds like `"failed"`.
   {
-    const identityResult = await ensureIdentityPublished();
+    const identityResult = await ensureIdentityPublished({
+      timeoutMs: IDENTITY_BOOT_PUBLISH_TIMEOUT_MS,
+    });
     if (identityResult === "conflict") {
       await stopForIdentityConflict();
     }

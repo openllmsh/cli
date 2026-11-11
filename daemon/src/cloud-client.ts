@@ -486,10 +486,21 @@ export const fetchChannel = async (
 /**
  * Lazy import: control-channel already imports this module. Push only on a
  * conflict *transition* so the dashboard sees the flag without an extra backoff.
+ * Best-effort: a push failure must never change the HTTP publish outcome.
  */
 const pushIdentityConflictIfChanged = async (): Promise<void> => {
-  const { pushStatusIfChanged } = await import("./control-channel");
-  await pushStatusIfChanged("bootstrap");
+  try {
+    const { pushStatusIfChanged } = await import("./control-channel");
+    await pushStatusIfChanged("bootstrap");
+  } catch (err) {
+    logWarn(
+      "identity",
+      safeDiagnosticMessage`identity conflict status push failed`,
+      {
+        error: err instanceof Error ? err.message : "unknown",
+      },
+    );
+  }
 };
 
 /**

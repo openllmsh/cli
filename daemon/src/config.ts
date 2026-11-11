@@ -51,27 +51,51 @@ import { clearPlanCache, observePolicyRevision } from "./plan-cache";
 export type TEnsureIdentityPublishedResult = "ok" | "conflict" | "skipped";
 
 /**
+ * Boot-only ceiling for {@link ensureIdentityPublished}. The underlying
+ * `cloudFetch` can wait up to 15s; a black-holed cloud must not delay the
+ * control-channel dial that long. A timeout is treated like `"failed"`
+ * (boot continues; bootstrap retries and still stops on conflict).
+ */
+export const IDENTITY_BOOT_PUBLISH_TIMEOUT_MS = 5_000;
+
+export type TEnsureIdentityPublishedOptions = {
+  readonly timeoutMs?: number;
+};
+
+/**
  * Await a publish of the persisted X25519 identity when one exists on disk.
  * Callers must run this before starting the control channel so the online-lock
  * model can refuse a different identity while another device still holds the
  * key — painting the key online first would wedge a replacement forever.
  */
-export const ensureIdentityPublished =
-  async (): Promise<TEnsureIdentityPublishedResult> => {
-    try {
-      const identity = loadIdentityKey();
-      if (!identity.persisted) return "skipped";
-      const result: TPublishIdentityResult = await publishIdentity(
-        identity.publicKeyB64,
-      );
-      if (result === "conflict") return "conflict";
-      // `ok` and `failed` both proceed — only an explicit conflict stops us.
-      return "ok";
-    } catch {
-      // loadIdentityKey sync failures must not block boot / bootstrap.
-      return "skipped";
-    }
-  };
+export const ensureIdentityPublished = async (
+  options?: TEnsureIdentityPublishedOptions,
+): Promise<TEnsureIdentityPublishedResult> => {
+  try {
+    const identity = loadIdentityKey();
+    if (!identity.persisted) return "skipped";
+    const publish = publishIdentity(identity.publicKeyB64);
+    const result: TPublishIdentityResult =
+      options?.timeoutMs !== undefined
+        ? await Promise.race([
+            publish,
+            new Promise<"failed">((resolve) => {
+              const timer = setTimeout(
+                () => resolve("failed"),
+                options.timeoutMs,
+              );
+              timer.unref?.();
+            }),
+          ])
+        : await publish;
+    if (result === "conflict") return "conflict";
+    // `ok` and `failed` both proceed — only an explicit conflict stops us.
+    return "ok";
+  } catch {
+    // loadIdentityKey sync failures must not block boot / bootstrap.
+    return "skipped";
+  }
+};
 
 /** Empty bootstrap row for offline/seeded hosts and harnesses. */
 export const EMPTY_DAEMON_BOOTSTRAP: TDaemonBootstrap = {
