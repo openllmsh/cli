@@ -35,6 +35,7 @@ import {
   MEDIA_PERSISTENCE_RESPONSE_HEADER,
 } from "@openllmsh/sdk/protocol";
 import { TUNNEL_MEDIA_MAX_BODY_BYTES } from "@openllmsh/sdk/tunnel";
+import { errorEnvelopeFrom } from "@openllmsh/sdk/wire/lib/error-envelope";
 import type { TWebSocketFactory } from "./audio/claude-ws";
 import { runClaudeDictationSession } from "./audio/claude-ws";
 import {
@@ -124,6 +125,54 @@ const acquireAudioUpstream = async (
     };
   } catch {
     return "retry";
+  }
+};
+
+/**
+ * The miss response for a vendor's non-2xx audio answer. A body already in
+ * the OpenAI `{error:{message}}` shape passes through untouched; anything
+ * else (ChatGPT's `{"detail":…}`, an HTML page, an empty body) is wrapped so
+ * every client reads a message, not a bare status. A 401/403 says the
+ * device's sign-in was refused, since that is the one fix the user can make.
+ */
+export const audioUpstreamErrorResponse = (
+  resp: Response,
+  body: string,
+  provider: string,
+): Response => {
+  if (hasOpenAiErrorShape(body)) {
+    return new Response(body, {
+      status: resp.status,
+      headers: passthroughHeaders(resp),
+    });
+  }
+  if (resp.status === 401 || resp.status === 403) {
+    return errorJson(
+      resp.status,
+      `${provider} refused this device's sign-in (${resp.status}). Sign in to ${provider} again on the device running OpenLLM.`,
+      "upstream_auth_error",
+    );
+  }
+  const detail = errorEnvelopeFrom(body)?.error.message;
+  return errorJson(
+    resp.status,
+    detail !== undefined && detail.length > 0
+      ? `${provider}: ${detail}`
+      : `${provider} answered ${resp.status}.`,
+    "upstream_error",
+  );
+};
+
+const hasOpenAiErrorShape = (body: string): boolean => {
+  try {
+    const json = JSON.parse(body) as { error?: unknown };
+    return (
+      json.error !== null &&
+      typeof json.error === "object" &&
+      typeof (json.error as { message?: unknown }).message === "string"
+    );
+  } catch {
+    return false;
   }
 };
 
@@ -640,10 +689,7 @@ const dialAudioTranscriptionHop = async (
     reportResult("error", latencyMs);
     return {
       kind: "miss",
-      error: new Response(body.length > 0 ? body : null, {
-        status: resp.status,
-        headers: passthroughHeaders(resp),
-      }),
+      error: audioUpstreamErrorResponse(resp, body, hop.provider),
       advances:
         !finalHop &&
         mediaHopAdvancesForHttp(
@@ -1051,10 +1097,7 @@ const dialAudioSpeechHop = async (
     reportResult("error");
     return {
       kind: "miss",
-      error: new Response(body.length > 0 ? body : null, {
-        status: resp.status,
-        headers: passthroughHeaders(resp),
-      }),
+      error: audioUpstreamErrorResponse(resp, body, hop.provider),
       advances:
         !finalHop &&
         mediaHopAdvancesForHttp(
