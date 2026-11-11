@@ -45,7 +45,11 @@ import {
 import { runWithAccount } from "./op-context";
 import { getPendingAuth, pendingAuthWire } from "./pending-auth";
 import { scheduleDaemonCommand } from "./scheduled-command";
-import { computeStatus, loginAdmittedForCommand } from "./status";
+import {
+  computeStatus,
+  computeStatusFresh,
+  loginAdmittedForCommand,
+} from "./status";
 import { peekUsage } from "./usage-cache";
 
 export const localAuthProviders = (): readonly {
@@ -448,15 +452,34 @@ const handleParsed = async (
         return reply(409, { error: "flow_not_owned_or_expired" });
       const body = async (
         recompute: boolean,
-      ): Promise<Record<string, unknown>> =>
-        statusBody(
-          recompute
-            ? await computeStatus()
-            : (latestAuthStatus() ?? (await computeStatus())),
-          provider,
-          account,
-          flow,
-        );
+      ): Promise<Record<string, unknown>> => {
+        if (!recompute) {
+          const cached = latestAuthStatus();
+          if (cached !== null) {
+            return statusBody(cached, provider, account, flow);
+          }
+        }
+        // Join the shared in-flight compute. `notifyAuthStatus` bumps
+        // generation too, so "generation moved" alone is not an invalidation
+        // signal — an intervening `notifyAuthChange` clears `latest` and the
+        // compute's publish fence skips restoring it. Prefer a published
+        // snapshot; if the cache is still empty after the await, recompute.
+        const startGeneration = authGeneration();
+        const status = await computeStatus();
+        const published = latestAuthStatus();
+        if (published !== null) {
+          return statusBody(published, provider, account, flow);
+        }
+        if (authGeneration() !== startGeneration) {
+          return statusBody(
+            await computeStatusFresh(),
+            provider,
+            account,
+            flow,
+          );
+        }
+        return statusBody(status, provider, account, flow);
+      };
       // The hold counts from the request, computing included, so a held status
       // never outlasts `wait_ms` and reads as a timeout to the caller.
       const deadline =

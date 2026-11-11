@@ -8,7 +8,14 @@
  * install that already had a key without delaying the listen port.
  */
 
-import { accessSync, constants, existsSync, statSync } from "node:fs";
+import {
+  accessSync,
+  appendFileSync,
+  constants,
+  existsSync,
+  mkdirSync,
+  statSync,
+} from "node:fs";
 import { join } from "node:path";
 import { ANTIGRAVITY_ENABLED_MARKER } from "../daemon/src/antigravity-feature";
 import { cliConfig, openllmDir, userHome } from "./env";
@@ -242,19 +249,37 @@ export const provisionMissingVendorClis = async (
 
   // Detached: one session that outlives `openllm login` (desktop kills login
   // after 60s). Interactive install.sh does the same — vendors never block
-  // "daemon is serving".
+  // "daemon is serving". Append the pipeline's stdout/stderr to
+  // `~/.openllm/cli-install.log` so a failed curl download is diagnosable —
+  // vendor workers already log there; without this, detach discarded stderr.
   if (deps?.detach === true) {
     process.stderr.write(
       `[start] provisioning missing vendor CLIs in the background via ${url}\n`,
     );
+    const home = deps.home ?? userHome();
+    const dir = openllmDirFor(home);
+    const logPath = join(dir, "cli-install.log");
+    try {
+      mkdirSync(dir, { recursive: true, mode: 0o700 });
+      appendFileSync(
+        logPath,
+        `\n[openllm] detached vendor provision via ${url} at ${new Date().toISOString()}\n`,
+        { encoding: "utf8", mode: 0o600 },
+      );
+    } catch {
+      // Best-effort log prep — still spawn even if the log can't be opened.
+    }
     try {
       const child = spawn(
         [
           "bash",
           "-c",
-          `curl -fsSL --connect-timeout ${CURL_CONNECT_TIMEOUT_SECS} --max-time ${CURL_MAX_TIME_SECS} "$1" | bash -s -- --no-start --no-shell-setup`,
+          // Quote the log path for the shell; append both streams so curl
+          // failures (which never reach install.sh) land next to vendor lines.
+          `curl -fsSL --connect-timeout ${CURL_CONNECT_TIMEOUT_SECS} --max-time ${CURL_MAX_TIME_SECS} "$1" 2>>"$2" | bash -s -- --no-start --no-shell-setup >>"$2" 2>&1`,
           "openllm-vendor-provision",
           url,
+          logPath,
         ],
         {
           stdin: "ignore",

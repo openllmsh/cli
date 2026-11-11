@@ -36,7 +36,7 @@ import type { TRosterAccount } from "./account-roster";
 import { readRoster } from "./account-roster";
 import { AccountKeyedMap, AccountKeyedSet } from "./account-scope";
 import { setVerifiedLoginAdmitter } from "./auth-events";
-import { notifyAuthStatus } from "./auth-watch";
+import { authGeneration, notifyAuthStatus } from "./auth-watch";
 import { autoUpdateEnabled } from "./auto-update-pref";
 import type { TCliProvider } from "./cli-paths";
 import { DEFAULT_ACCOUNT_INDEX } from "./cli-paths";
@@ -969,11 +969,16 @@ export const computeStatusFresh = (
   if (options?.reuseSettledSlugProbes !== true) {
     dropSettledSlugProbes();
   }
+  // Fence publication: if `notifyAuthChange` lands while we probe, publishing
+  // this snapshot would restore a pre-event row over the cleared cache.
+  const startGeneration = authGeneration();
   const tick_id = nextStatusTickId();
   return withoutCommandReplayContext(() =>
     opTickContext.run({ tick_id }, () => computeStatusFreshInner(options)),
   ).then((status) => {
-    notifyAuthStatus(status);
+    if (authGeneration() === startGeneration) {
+      notifyAuthStatus(status);
+    }
     return status;
   });
 };

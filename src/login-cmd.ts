@@ -191,6 +191,12 @@ export type TLoginIo = {
    * detached `provisionMissingVendorClis`. Best-effort / non-fatal.
    */
   readonly provisionVendors?: () => Promise<number>;
+  /**
+   * When true, await the provision kickoff even with an injected
+   * `provisionVendors`. Production default path (no inject) always awaits
+   * spawn; injects stay fire-and-forget unless a test sets this.
+   */
+  readonly awaitProvisionKickoff?: boolean;
   /** Injectable process signal bus for OAuth Ctrl-C (tests). */
   readonly signalProcess?: TSignalProcess;
 };
@@ -701,13 +707,20 @@ export const runLogin = async (
   // vendors install in the background (interactive install.sh does the same).
   // Terminal `openllm start` still awaits so the user sees vendor results.
   if (command !== null && !isMinimalSetupMode()) {
+    // Default path: dynamic-import + detached spawn. Await the kickoff (spawn
+    // returns once the child is launched) so `process.exit` cannot race ahead
+    // of the import. An injected `io.provisionVendors` stays fire-and-forget —
+    // desktop Connect's 60s kill depends on login returning while vendors run
+    // — unless a test sets `awaitProvisionKickoff`.
+    const shouldAwaitKickoff =
+      io.awaitProvisionKickoff === true || io.provisionVendors === undefined;
     const provision =
       io.provisionVendors ??
       ((): Promise<number> =>
         import("./vendor-provision").then((mod) =>
           mod.provisionMissingVendorClis({ detach: true }),
         ));
-    void Promise.resolve()
+    const kickoff = Promise.resolve()
       .then(() => provision())
       .then((provisionCode) => {
         if (provisionCode !== 0) {
@@ -721,6 +734,8 @@ export const runLogin = async (
           `[openllm] Vendor CLI provisioning failed: ${error instanceof Error ? error.message : String(error)}; the daemon is running.\n`,
         );
       });
+    if (shouldAwaitKickoff) await kickoff;
+    else void kickoff;
   }
   const daemon: TLoginDaemonOutcome =
     command === "restart"
