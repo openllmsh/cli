@@ -420,8 +420,10 @@ export type TStartDetachedDaemonOpts = {
    * When true, spawn even if a live detached daemon is recorded (used by the
    * self-update path: this process IS the recorded daemon and is about to
    * exit, so a replacement must be launched first). The replacement gets
-   * {@link DETACHED_HANDOFF_PID_ENV} and waits in-process for this pid to
-   * exit before binding ({@link awaitDetachedHandoff}).
+   * {@link DETACHED_HANDOFF_PID_ENV} (+ {@link DETACHED_HANDOFF_START_ENV}
+   * when known) and waits in-process for this pid to exit — or for its
+   * start time to stop matching — before binding
+   * ({@link awaitDetachedHandoff}).
    */
   readonly replace?: boolean;
   /** Override spawn (tests). */
@@ -441,6 +443,13 @@ export type TStartDetachedDaemonOpts = {
    * still-running daemon that called replace).
    */
   readonly replaceWaitPid?: number;
+  /**
+   * Recorded {@link processStartTime} of the pid in
+   * {@link replaceWaitPid}. Defaults to the live pidfile's start time, then
+   * a fresh read of the wait pid. Passed as {@link DETACHED_HANDOFF_START_ENV}
+   * so a recycled PID does not hang the handoff.
+   */
+  readonly replaceWaitStart?: string;
 };
 
 /**
@@ -479,6 +488,14 @@ const SAVED_SERVICE_KEYS = ["OPENLLM_API_KEY"] as const;
 /** Env var naming the old daemon pid a detached replacement waits on. */
 export const DETACHED_HANDOFF_PID_ENV = "OPENLLM_DAEMON_HANDOFF_PID";
 
+/**
+ * Env var naming the old daemon's recorded {@link processStartTime}. When set,
+ * a recycled PID (alive but different start time) counts as the old daemon
+ * having exited — otherwise a PID reuse would time the handoff out and leave
+ * no daemon bound.
+ */
+export const DETACHED_HANDOFF_START_ENV = "OPENLLM_DAEMON_HANDOFF_START";
+
 /** Upper bound on the handoff wait — refuse to boot if the old pid survives. */
 export const DETACHED_HANDOFF_WAIT_MS = 30_000;
 
@@ -486,25 +503,38 @@ export const DETACHED_HANDOFF_WAIT_MS = 30_000;
  * Called first thing on daemon boot. When this process is a detached
  * self-update replacement, wait (bounded) for the old daemon to exit so the
  * listen port is free. In-process (Atomics sleep) — no external `sleep`, no
- * shell. The env var is removed so children never inherit it. Throws when the
- * old pid is still alive after the bound — never proceed into a bind fight.
+ * shell. The env vars are removed so children never inherit them. Throws when
+ * the old pid is still the same process after the bound — never proceed into
+ * a bind fight. A recycled PID (start time no longer matches) counts as done.
  */
 export const awaitDetachedHandoff = (
   alive: (pid: number) => boolean = processAlive,
   timeoutMs: number = DETACHED_HANDOFF_WAIT_MS,
+  readStartTime: (pid: number) => string | null = detachedProcessStartTime,
 ): void => {
   const raw = process.env[DETACHED_HANDOFF_PID_ENV];
+  const expectedStart = process.env[DETACHED_HANDOFF_START_ENV];
   delete process.env[DETACHED_HANDOFF_PID_ENV];
+  delete process.env[DETACHED_HANDOFF_START_ENV];
   if (raw === undefined) return;
   const pid = Number.parseInt(raw, 10);
   if (!Number.isInteger(pid) || pid <= 1 || pid === process.pid) return;
   const deadline = Date.now() + timeoutMs;
-  let stillAlive = alive(pid);
-  while (Date.now() < deadline && stillAlive) {
+  const stillOldDaemon = (): boolean => {
+    if (!alive(pid)) return false;
+    if (expectedStart !== undefined && expectedStart.length > 0) {
+      const live = readStartTime(pid);
+      // Readable disagreeing start time ⇒ PID was reused; old daemon is gone.
+      if (live !== null && live !== expectedStart) return false;
+    }
+    return true;
+  };
+  let waiting = stillOldDaemon();
+  while (Date.now() < deadline && waiting) {
     sleepSyncMs(100);
-    stillAlive = alive(pid);
+    waiting = stillOldDaemon();
   }
-  if (stillAlive) {
+  if (waiting) {
     throw new Error(
       `detached handoff timed out: old daemon pid ${pid} is still running`,
     );
@@ -584,6 +614,15 @@ export const startDetachedDaemon = (
     const argv = [binPath, "daemon"];
     let proc: { readonly pid: number; readonly unref: () => void };
     try {
+      const waitPid =
+        opts.replace === true ? (opts.replaceWaitPid ?? process.pid) : null;
+      const waitStart =
+        waitPid === null
+          ? null
+          : (opts.replaceWaitStart ??
+            readDetachedPidfile()?.processStartTime ??
+            detachedProcessStartTime(waitPid) ??
+            null);
       proc = spawn(argv, {
         detached: true,
         stdin: "ignore",
@@ -598,11 +637,12 @@ export const startDetachedDaemon = (
                 SAVED_SERVICE_KEYS,
               )),
           OPENLLM_DAEMON_ENV_FILE: serviceEnvFilePath(),
-          ...(opts.replace === true
+          ...(waitPid !== null
             ? {
-                [DETACHED_HANDOFF_PID_ENV]: String(
-                  opts.replaceWaitPid ?? process.pid,
-                ),
+                [DETACHED_HANDOFF_PID_ENV]: String(waitPid),
+                ...(waitStart !== null && waitStart.length > 0
+                  ? { [DETACHED_HANDOFF_START_ENV]: waitStart }
+                  : {}),
               }
             : {}),
         },
