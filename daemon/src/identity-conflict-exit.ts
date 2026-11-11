@@ -6,6 +6,8 @@
  * KeepAlive via {@link serviceStop}, then exit 0 so launchd/systemd/
  * detached self-restore do not relaunch us into the same conflict.
  */
+import { daemonEnv } from "./env";
+import { recordIdentityConflict } from "./identity-state";
 import { logWarn, safeDiagnosticMessage } from "./logger";
 import { serviceStop } from "./service";
 
@@ -31,6 +33,8 @@ export const stopForIdentityConflict = async (
     safeDiagnosticMessage`this key is now used by another device; stopping`,
     {},
   );
+  const { apiKey, cloudOrigin } = daemonEnv();
+  if (apiKey !== null) recordIdentityConflict(apiKey, cloudOrigin);
   if (options?.stopChannel === true) {
     try {
       const { stopControlChannel } = await import("./control-channel");

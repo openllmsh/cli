@@ -133,6 +133,7 @@ const hasLogins = (): boolean => {
 const DAEMON_STATE_ENTRIES: readonly string[] = [
   ".env", // paired API key + origin
   "state.json", // daemon runtime state (update cooldowns, boot history)
+  "identity-conflict.json", // last identity-conflict stop
   "x25519-priv", // the daemon's encryption private key
   "sessions", // remote PTY + durable session-host state
   "debug", // debug artifacts

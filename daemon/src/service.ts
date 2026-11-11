@@ -60,6 +60,7 @@ import {
 } from "./env";
 import { hardenMacBinary } from "./harden-binary";
 import type { TDaemonHealth } from "./health";
+import { hasRecordedIdentityConflict } from "./identity-state";
 import { DAEMON_VERSION } from "./version";
 
 /** How the daemon is being kept alive — reported by `status`. */
@@ -1016,6 +1017,7 @@ export type TStatusFields = {
   readonly version: string;
   readonly supervisor: string;
   readonly health: TDaemonHealth | null;
+  readonly identityConflictStopped?: boolean;
   readonly port: number;
   readonly binary: string;
   readonly stateDir: string;
@@ -1044,6 +1046,14 @@ export const formatStatus = (fields: TStatusFields): string => {
       label: "running",
       value: fields.health !== null ? `v${fields.health.version}` : unknown,
     },
+    ...(fields.health === null && fields.identityConflictStopped === true
+      ? [
+          {
+            label: "stopped",
+            value: "identity conflict — this key is now used by another device",
+          },
+        ]
+      : []),
     {
       label: "installed",
       value: `v${fields.health?.installed_version ?? fields.version}`,
@@ -1128,11 +1138,13 @@ export const serviceStatus = async (): Promise<void> => {
   const supervisor = supervisorState();
   const health = await probeHealth(port);
   const logs = serviceLogPaths();
+  const { apiKey, cloudOrigin } = daemonEnv();
   process.stdout.write(
     formatStatus({
       version: DAEMON_VERSION,
       supervisor,
       health,
+      identityConflictStopped: hasRecordedIdentityConflict(apiKey, cloudOrigin),
       port,
       binary: process.execPath,
       stateDir: stateDir(),

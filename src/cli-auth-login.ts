@@ -19,8 +19,10 @@
  */
 
 import { spawn, spawnSync } from "node:child_process";
+import { randomBytes, randomUUID } from "node:crypto";
 import {
   chmodSync,
+  linkSync,
   mkdirSync,
   readFileSync,
   unlinkSync,
@@ -838,6 +840,57 @@ const startFailed = (reason: string): TCreateOutcome => ({
   message: `[openllm] could not start login (${reason}). Try again, or paste a key with \`openllm login --api-key\`.\n`,
 });
 
+/** Publish a complete random installation secret atomically, before any HTTP. */
+const INSTALLATION_SECRET_RE = /^[A-Za-z0-9_-]{43}$/;
+
+const installationLoginSecret = (): string => {
+  const dir = join(openllmDir(), "cli-auth");
+  const path = join(dir, "installation-secret");
+  mkdirSync(dir, { recursive: true, mode: 0o700 });
+  const first = publishInstallationSecret(dir, path);
+  if (first !== null) return first;
+  // Corrupt or truncated file: replace it once. Losing it only means the next
+  // login can't supersede requests made under the old secret.
+  try {
+    unlinkSync(path);
+  } catch {
+    /* already gone */
+  }
+  const second = publishInstallationSecret(dir, path);
+  if (second === null) throw new Error("invalid installation secret");
+  return second;
+};
+
+const publishInstallationSecret = (
+  dir: string,
+  path: string,
+): string | null => {
+  const temp = join(dir, `.installation-${randomUUID()}`);
+  try {
+    writeFileSync(temp, randomBytes(32).toString("base64url"), {
+      mode: 0o600,
+      flag: "wx",
+    });
+    try {
+      linkSync(temp, path);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+    }
+  } finally {
+    try {
+      unlinkSync(temp);
+    } catch {
+      /* no temp file */
+    }
+  }
+  try {
+    const secret = readFileSync(path, "utf8");
+    return INSTALLATION_SECRET_RE.test(secret) ? secret : null;
+  } catch {
+    return null;
+  }
+};
+
 /** POST /api/cli/auth and validate what comes back. Never prints. */
 const createCliAuth = async (
   base: string,
@@ -847,6 +900,12 @@ const createCliAuth = async (
   deadline: number,
 ): Promise<TCreateOutcome> => {
   if (r.signal?.aborted) return { ok: false, message: CANCELLED_MESSAGE };
+  let installationSecret: string;
+  try {
+    installationSecret = installationLoginSecret();
+  } catch {
+    return startFailed("could not save installation identity");
+  }
   const createOutcome = await fetchBounded(
     r.fetch,
     `${base}/api/cli/auth`,
@@ -856,7 +915,11 @@ const createCliAuth = async (
         "content-type": "application/json",
         accept: "application/json",
       },
-      body: JSON.stringify({ caller_pubkey: publicKeyB64, label }),
+      body: JSON.stringify({
+        caller_pubkey: publicKeyB64,
+        label,
+        installation_secret: installationSecret,
+      }),
     },
     deadline,
     r.now,

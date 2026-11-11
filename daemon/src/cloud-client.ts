@@ -47,7 +47,11 @@ import {
 import { Schema } from "effect";
 import { daemonEnv, deviceId } from "./env";
 import { enqueueHoldRecord } from "./hold-outbox";
-import { hasIdentityConflict, setIdentityConflict } from "./identity-state";
+import {
+  clearIdentityConflictRecord,
+  hasIdentityConflict,
+  setIdentityConflict,
+} from "./identity-state";
 import { logWarn, safeDiagnosticMessage } from "./logger";
 import { clearPlanCache } from "./plan-cache";
 import { teamServeEnabled } from "./team-serve";
@@ -562,6 +566,7 @@ export const publishIdentity = async (
       return "failed";
     }
     if (response.ok) {
+      clearIdentityConflictRecord();
       const wasConflict = hasIdentityConflict();
       setIdentityConflict(false);
       // Push the true→false recovery so a reset is visible without an unrelated flip.
