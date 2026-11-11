@@ -1022,12 +1022,37 @@ export const dropInFlightStatus = (): void => {
 onAuthChange(dropInFlightStatus);
 
 /**
+ * Cache options for an on-demand usage read. Manual bypasses TTL entirely and
+ * may renew tokens; automatic reads keep token policy but use the once-per-
+ * reset bypass so an expired window is not served from a still-fresh success
+ * cache (the dashboard auto-refresh marks the slot fetched after one try).
+ * Exported for tests.
+ */
+export const usageRefreshCacheOpts = (options: {
+  readonly manual: boolean;
+  readonly accountHash?: string;
+}): {
+  readonly accountHash?: string;
+  readonly force?: true;
+  readonly resetExpired?: true;
+} => ({
+  ...(options.accountHash !== undefined
+    ? { accountHash: options.accountHash }
+    : {}),
+  ...(options.manual
+    ? { force: true as const }
+    : { resetExpired: true as const }),
+});
+
+/**
  * Command-driven usage read for connected providers (or just `slug`). The
  * subsequent status push serves the result through `peekUsage`. Automatic
- * callers respect cache TTLs and never renew tokens. Explicit manual refresh
- * bypasses the usage TTL and permits existing native renewal, scoped per
- * provider/account. Each provider is best-effort: a failed read preserves its
- * last-good figures plus failure metadata without blocking other providers.
+ * callers never renew tokens and keep ordinary failure back-off, but pass
+ * `resetExpired` so a passed quota window is not stuck behind a still-fresh
+ * success TTL. Explicit manual refresh bypasses the usage TTL and permits
+ * existing native renewal, scoped per provider/account. Each provider is
+ * best-effort: a failed read preserves its last-good figures plus failure
+ * metadata without blocking other providers.
  */
 export const refreshUsage = async (
   slug?: string,
@@ -1088,9 +1113,13 @@ export const refreshUsage = async (
     manual
       ? withUsageNativeRefresh(() => d.usage(), conn.account_hash)
       : d.usage();
-  await cachedUsage(slug, fetchUsage, {
-    accountHash: conn.account_hash,
-    ...(manual ? { force: true } : {}),
-  });
+  await cachedUsage(
+    slug,
+    fetchUsage,
+    usageRefreshCacheOpts({
+      manual,
+      accountHash: conn.account_hash,
+    }),
+  );
   return { deferred: [] };
 };
