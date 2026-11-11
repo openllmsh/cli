@@ -467,6 +467,37 @@ const startMac = (binPath: string): void => {
 };
 
 /**
+ * Detached daemon still alive after a stop attempt — either the pidfile
+ * identity or the hold-journal flock winner (pid 0 when the flock is held
+ * but the holder pid is unreadable). Exported for tests.
+ */
+export type TDetachedSurvivor =
+  | { readonly kind: "pidfile"; readonly pid: number }
+  | { readonly kind: "journal"; readonly pid: number };
+
+/** Read a surviving detached daemon after {@link stopDetachedDaemon}. */
+export const readDetachedSurvivor = (): TDetachedSurvivor | null => {
+  const survivor = readLiveDetachedDaemon();
+  if (survivor !== null) return { kind: "pidfile", pid: survivor.pid };
+  const journalPid = holdJournalSurvivorPid();
+  if (journalPid !== null) return { kind: "journal", pid: journalPid };
+  return null;
+};
+
+/**
+ * Error text when enabling systemd would contend with a surviving detached
+ * daemon. Same voice as {@link serviceStop}/{@link serviceUninstall}.
+ * Exported for tests.
+ */
+export const formatDetachedSurvivorStartError = (
+  survivor: TDetachedSurvivor,
+): string => {
+  const who =
+    survivor.pid > 0 ? `pid ${String(survivor.pid)}` : "holding the state dir";
+  return `detached daemon ${who} is still running; stop it and re-run start`;
+};
+
+/**
  * Linux start: prefer a systemd --user unit when the user bus is reachable;
  * otherwise spawn a detached daemon (no linger note — it will not restart at
  * boot). Returns which supervisor took the process.
@@ -485,6 +516,13 @@ const startLinux = (binPath: string): "systemd" | "detached" => {
   }
   // A leftover detached daemon would fight the supervised unit for the port.
   stopDetachedDaemon();
+  // stopDetachedDaemon can leave a survivor (PID-reuse gate, unverified
+  // identity). Enabling systemd over it would contend for the listen port —
+  // fail clearly, same as stop/uninstall, instead of starting a second copy.
+  const survivor = readDetachedSurvivor();
+  if (survivor !== null) {
+    throw new Error(formatDetachedSurvivorStartError(survivor));
+  }
   mkdirSync(unitDir(), { recursive: true });
   // systemd opens the `append:` log targets (renderUnitLogging) at exec time —
   // the state dir must exist first or the unit fails to start.
