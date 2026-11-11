@@ -26,13 +26,13 @@ import type {
   TModelSettingsOverrides,
 } from "@openllmsh/sdk/protocol";
 import { resolveContextOverflowStrategy } from "@openllmsh/sdk/wire";
+import type { TPublishIdentityResult } from "./cloud-client";
 import {
   fetchBootstrap,
   InvalidApiKeyError,
   NoApiKeyError,
   publishIdentity,
 } from "./cloud-client";
-import type { TPublishIdentityResult } from "./cloud-client";
 import {
   invalidateDeviceAccessPin,
   setDeviceAccessPubkey,

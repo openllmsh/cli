@@ -71,8 +71,6 @@ import {
   latestCliVersion,
   refreshBootstrap,
 } from "./config";
-import { stopForIdentityConflict } from "./identity-conflict-exit";
-import { hasIdentityConflict } from "./identity-state";
 import { corsHeaders, isPreflight, preflightResponse } from "./cors";
 import { isSurvivableTransportError } from "./crash-policy";
 import { requireServiceApiKey } from "./credential-gate";
@@ -93,6 +91,8 @@ import {
   startHoldOutbox,
 } from "./hold-outbox";
 import { finishOpenHoldSessions, inferenceAdmission } from "./hold-session";
+import { stopForIdentityConflict } from "./identity-conflict-exit";
+import { hasIdentityConflict } from "./identity-state";
 import { handleLocalAuth } from "./local-auth";
 import {
   handleLocalDeviceControl,
