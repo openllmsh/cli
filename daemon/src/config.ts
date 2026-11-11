@@ -224,6 +224,8 @@ export const getReportingPolicy = (): TDaemonReportingPolicy | null =>
  * policy revision so delayed diagnostics callbacks can fence — unless
  * {@link refreshBootstrap} already claimed the revision for this fetch.
  */
+let snapshotAppliedAtMs = 0;
+
 export const applyBootstrapSnapshot = (
   next: TDaemonBootstrap,
   options?: { readonly preserveReportingRevision?: boolean },
@@ -234,6 +236,7 @@ export const applyBootstrapSnapshot = (
   // The bootstrap body is trusted JSON, not decoded: a degraded or older cloud
   // can omit a collection. Default the required ones so a partial snapshot
   // never leaves `catalog` undefined for every later lookup to crash on.
+  snapshotAppliedAtMs = Date.now();
   snapshot = {
     ...next,
     catalog: next.catalog ?? [],
@@ -373,22 +376,28 @@ export const activeExecutionSelectionOverrides = (): Readonly<
 export const planCacheEnabled = (): boolean => snapshot.plan_cache === true;
 
 /**
- * The fleet-peer key id serving `provider` (subscription tunnel — feature
- * §1), from the last bootstrap. Null when no online fleet daemon serves it
- * (or the cloud predates the field), or when a stale cloud snapshot names this
- * daemon's own key — local serving is handled separately and must not tunnel
- * back to itself.
+ * Every fleet-peer key id serving `provider` (subscription tunnel — feature
+ * §1), in the cloud's stable order, from the last bootstrap. Empty when no
+ * online fleet daemon serves it (or the cloud predates the field). This
+ * daemon's own key is skipped (a stale snapshot can name it; local serving is
+ * handled separately and must never tunnel back to itself), as are
+ * duplicates. The walker tries each in order — like origin's
+ * `everyServer` walk — so one stale peer never hides a live one.
  */
-export const fleetSubscriptionServerFor = (provider: string): string | null => {
-  // Skip THIS device, not the whole list: when this device is listed first,
-  // a peer listed after it is still a valid server.
+export const fleetSubscriptionServersFor = (
+  provider: string,
+): ReadonlyArray<string> => {
   const self = daemonApiKeyId();
-  return (
-    snapshot.fleet_subscriptions?.find(
-      (f) => f.provider === provider && f.key_id !== self,
-    )?.key_id ?? null
-  );
+  const out: string[] = [];
+  for (const f of snapshot.fleet_subscriptions ?? []) {
+    if (f.provider !== provider || f.key_id === self) continue;
+    if (!out.includes(f.key_id)) out.push(f.key_id);
+  }
+  return out;
 };
+
+/** When the current bootstrap snapshot was applied (epoch ms; 0 = never). */
+export const bootstrapAppliedAtMs = (): number => snapshotAppliedAtMs;
 
 /** Serving daemon X25519 pubkey for a fleet peer, when its bootstrap status supplied one. */
 export const fleetSubscriptionPubkeyFor = (keyId: string): string | null =>

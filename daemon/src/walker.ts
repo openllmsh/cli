@@ -215,12 +215,14 @@ import {
 import {
   activeExecutionSelection,
   activeExecutionSelectionOverrides,
+  bootstrapAppliedAtMs,
   contextOverflowStrategy as bootstrapContextOverflowStrategy,
   catalogCapsDefaults,
-  fleetSubscriptionServerFor,
+  fleetSubscriptionServersFor,
   lookupCatalogEntry,
   modelSettingsOverrides,
   planSigningKey,
+  refreshBootstrap,
 } from "./config";
 import { errorJson } from "./cors";
 import { getDelegate, isOAuthSlug } from "./delegation";
@@ -261,7 +263,7 @@ import {
 import { observeTeamResponseStream } from "./team-leg-body";
 import { isTeamHop, tryDirectTeamLeg } from "./team-leg-client";
 import type { TTunnelToPeer } from "./tunnel-client";
-import { tunnelToPeer } from "./tunnel-client";
+import { isPreDispatchTunnelError, tunnelToPeer } from "./tunnel-client";
 import { sampleUsageAfterRequest } from "./usage-cache";
 
 export const noteWalkerStreamTerminal = (opts: {
@@ -2383,6 +2385,65 @@ const largestContextHop = (
   return best;
 };
 
+// A miss with no known peer re-reads the bootstrap (a peer that came online
+// after the last 5-minute poll is otherwise invisible). At most one re-read
+// per interval, timed on the monotonic clock from the last ATTEMPT, so a
+// failing or slow cloud (or a wall-clock jump) never makes every miss wait.
+// Concurrent misses share the one in flight, and all of them stop waiting at
+// the first miss's deadline.
+const FLEET_MISS_REFRESH_INTERVAL_MS = 30_000;
+const FLEET_MISS_REFRESH_WAIT_MS = 3_000;
+let lastFleetMissRefreshAttemptAt: number | null = null;
+let fleetMissRefresh: {
+  readonly done: Promise<boolean>;
+  readonly deadline: number;
+} | null = null;
+
+const bootstrapIsFresh = (): boolean => {
+  const age = Date.now() - bootstrapAppliedAtMs();
+  // A negative age means the wall clock moved back: treat it as stale.
+  return age >= 0 && age < FLEET_MISS_REFRESH_INTERVAL_MS;
+};
+
+const refreshFleetPeersAfterMiss = async (): Promise<boolean> => {
+  const now = performance.now();
+  if (fleetMissRefresh === null) {
+    if (bootstrapIsFresh()) return false;
+    if (
+      lastFleetMissRefreshAttemptAt !== null &&
+      now - lastFleetMissRefreshAttemptAt < FLEET_MISS_REFRESH_INTERVAL_MS
+    )
+      return false;
+    lastFleetMissRefreshAttemptAt = now;
+    fleetMissRefresh = {
+      done: refreshBootstrap().finally(() => {
+        fleetMissRefresh = null;
+      }),
+      deadline: now + FLEET_MISS_REFRESH_WAIT_MS,
+    };
+  }
+  const { done, deadline } = fleetMissRefresh;
+  const waitMs = deadline - now;
+  if (waitMs <= 0) return false;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    await Promise.race([
+      done,
+      new Promise<void>((resolve) => {
+        timer = setTimeout(resolve, waitMs);
+      }),
+    ]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
+  return true;
+};
+
+// The error's class only: a peer's RESET message can carry request content,
+// and log metadata is not redacted.
+const fleetTunnelErrorReason = (error: unknown): string =>
+  error instanceof Error && error.name.length > 0 ? error.name : "unknown";
+
 /**
  * Fleet subscription tunnel — the consuming-daemon fallback for a
  * subscription hop this box could not serve locally.
@@ -2401,7 +2462,9 @@ const largestContextHop = (
  * itself tunnel-borne from a fleet daemon (loop guard — stamped by
  * tunnel-server only for `consumer:"daemon"`; browser→device omits it so
  * this selected device can still fleet once), no peer serves the
- * provider, or the tunnel fails before the response head.
+ * provider (after one throttled bootstrap re-read), or every listed peer's
+ * tunnel fails before the response head. Each miss is logged (`no_peer`
+ * with the snapshot age, `tunnel_failed` with the peer and reason).
  */
 const tryFleetTunnel = async (
   hop: THop,
@@ -2409,44 +2472,68 @@ const tryFleetTunnel = async (
 ): Promise<Response | null> => {
   if (args.req.headers.get(TUNNELED_REQUEST_HEADER) === TUNNELED_REQUEST_VALUE)
     return null;
-  const peerKeyId = fleetSubscriptionServerFor(hop.provider);
-  if (peerKeyId === null) return null;
-  const clientWantsStream =
-    (args.rawBody as { stream?: unknown } | null)?.stream === true;
-  try {
-    const res = await tunnelToPeer({
-      keyId: peerKeyId,
-      surface:
-        args.surface === "messages"
-          ? "messages"
-          : args.surface === "responses"
-            ? "responses"
-            : "chat_completions",
-      body: new Uint8Array(args.rawBytes),
-      accept: clientWantsStream ? "text/event-stream" : "application/json",
-      ...(args.tunnelToPeer !== undefined
-        ? { transport: args.tunnelToPeer }
-        : {}),
-      anthropicVersion:
-        args.surface === "messages"
-          ? args.req.headers.get("anthropic-version")
-          : null,
-      anthropicBeta:
-        args.surface === "messages"
-          ? args.req.headers.get("anthropic-beta")
-          : null,
-      userAgent: args.req.headers.get("user-agent"),
-      signal: args.req.signal,
+  let peers = fleetSubscriptionServersFor(hop.provider);
+  if (peers.length === 0 && (await refreshFleetPeersAfterMiss()))
+    peers = fleetSubscriptionServersFor(hop.provider);
+  if (peers.length === 0) {
+    const appliedAt = bootstrapAppliedAtMs();
+    logWarn("fleet", "No other device serves this provider.", {
+      outcome: "no_peer",
+      provider: hop.provider,
+      snapshot_age_ms: appliedAt === 0 ? null : Date.now() - appliedAt,
     });
-    // Any peer response head (success or terminal failure) ends this
-    // consumer walk: the peer already ran its full plan. Pre-head
-    // failures throw below and fall through to the next local hop.
-    return res;
-  } catch {
-    if (args.req.signal.aborted)
-      return errorJson(499, "client aborted request");
     return null;
   }
+  const clientWantsStream =
+    (args.rawBody as { stream?: unknown } | null)?.stream === true;
+  for (const peerKeyId of peers) {
+    try {
+      const res = await tunnelToPeer({
+        keyId: peerKeyId,
+        surface:
+          args.surface === "messages"
+            ? "messages"
+            : args.surface === "responses"
+              ? "responses"
+              : "chat_completions",
+        body: new Uint8Array(args.rawBytes),
+        accept: clientWantsStream ? "text/event-stream" : "application/json",
+        ...(args.tunnelToPeer !== undefined
+          ? { transport: args.tunnelToPeer }
+          : {}),
+        anthropicVersion:
+          args.surface === "messages"
+            ? args.req.headers.get("anthropic-version")
+            : null,
+        anthropicBeta:
+          args.surface === "messages"
+            ? args.req.headers.get("anthropic-beta")
+            : null,
+        userAgent: args.req.headers.get("user-agent"),
+        signal: args.req.signal,
+      });
+      // Any peer response head (success or terminal failure) ends this
+      // consumer walk: the peer already ran its full plan. Pre-head
+      // failures throw below and move on to the next peer, then fall
+      // through to the next local hop.
+      return res;
+    } catch (error) {
+      if (args.req.signal.aborted)
+        return errorJson(499, "client aborted request");
+      const preDispatch = isPreDispatchTunnelError(error);
+      logWarn("fleet", "Couldn't reach another device for this provider.", {
+        outcome: "tunnel_failed",
+        provider: hop.provider,
+        peer_key_id: peerKeyId,
+        pre_dispatch: preDispatch,
+        reason: fleetTunnelErrorReason(error),
+      });
+      // Availability over strict once-only: even after dispatch (the peer
+      // may have started the inference) a dropped tunnel moves on to the
+      // next peer, then the next hop, so the user never sees the drop.
+    }
+  }
+  return null;
 };
 
 export const runWalker = async (args: TWalkArgs): Promise<Response> => {
