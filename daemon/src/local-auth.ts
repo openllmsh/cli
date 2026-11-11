@@ -45,11 +45,7 @@ import {
 import { runWithAccount } from "./op-context";
 import { getPendingAuth, pendingAuthWire } from "./pending-auth";
 import { scheduleDaemonCommand } from "./scheduled-command";
-import {
-  computeStatus,
-  computeStatusFresh,
-  loginAdmittedForCommand,
-} from "./status";
+import { computeStatus, loginAdmittedForCommand } from "./status";
 import { peekUsage } from "./usage-cache";
 
 export const localAuthProviders = (): readonly {
@@ -471,7 +467,15 @@ const handleParsed = async (
         if (published !== null) {
           return statusBody(published, provider, account, flow);
         }
-        return statusBody(await computeStatusFresh(), provider, account, flow);
+        // Join a second single-flight compute rather than bypassing via
+        // computeStatusFresh — concurrent long-polls share the retry.
+        const retried = await computeStatus();
+        return statusBody(
+          latestAuthStatus() ?? retried,
+          provider,
+          account,
+          flow,
+        );
       };
       // The hold counts from the request, computing included, so a held status
       // never outlasts `wait_ms` and reads as a timeout to the caller.

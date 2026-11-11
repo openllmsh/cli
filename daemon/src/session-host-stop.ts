@@ -419,10 +419,11 @@ export const sessionChildCommandLineLooksOwned = (
   commandLine: string,
 ): boolean => {
   if (detachedCommandLineLooksOwned(commandLine)) return true;
-  const normalized = commandLine.split("\0").join(" ");
-  return /(?:^|[\s/])(claude|codex|grok|hermes|opencode)(?:\.exe)?(?:\s|$)/i.test(
-    normalized,
-  );
+  // Match vendor names only as the executable basename of argv0 (first
+  // NUL-separated field, then first whitespace token). Later argument tokens
+  // like `grep claude` or `/usr/bin/vim notes/claude` must not count as ours.
+  const argv0 = commandLine.split("\0")[0]?.trim().split(/\s+/)[0] ?? "";
+  return /(?:^|\/)(claude|codex|grok|hermes|opencode)(?:\.exe)?$/i.test(argv0);
 };
 
 export type TSessionChildSurvivorKind =
