@@ -20,6 +20,10 @@ import {
   terminateOwnedPidSync,
   terminateProcessGroup,
 } from "./child-supervisor/posix";
+import {
+  detachedCommandLineLooksOwned,
+  readDetachedProcessCommandLine,
+} from "./detached-daemon";
 
 export type TSessionHostStopTarget = {
   readonly id: string;
@@ -404,6 +408,65 @@ export const listSurvivingSessionChildrenIn = (
     if (child !== null && sessionChildGroupAlive(child)) survivors.push(child);
   }
   return survivors;
+};
+
+/**
+ * True when a command line looks like a vendor session CLI (claude/codex/…)
+ * or an OpenLLM session-host / daemon we own. Used to corroborate an
+ * unverified (no start-time) survivor before uninstall refuses to proceed.
+ */
+export const sessionChildCommandLineLooksOwned = (
+  commandLine: string,
+): boolean => {
+  if (detachedCommandLineLooksOwned(commandLine)) return true;
+  const normalized = commandLine.split("\0").join(" ");
+  return /(?:^|[\s/])(claude|codex|grok|hermes|opencode)(?:\.exe)?(?:\s|$)/i.test(
+    normalized,
+  );
+};
+
+export type TSessionChildSurvivorKind =
+  | "verified"
+  | "unverified-ours"
+  | "unverified-foreign";
+
+/**
+ * Classify a live survivor for uninstall messaging.
+ * - `verified` — start-time identity present (safe to suggest kill).
+ * - `unverified-ours` — no start time, but cmdline corroborates a vendor /
+ *   openllm session: block uninstall, never suggest `kill <pid>`.
+ * - `unverified-foreign` — no start time and cmdline does not look like ours:
+ *   warn only; do not fail uninstall (the pid may be recycled).
+ */
+export const classifySessionChildSurvivor = (
+  child: TSessionChildStopTarget,
+  readCommandLine: (
+    pid: number,
+  ) => string | null = readDetachedProcessCommandLine,
+): TSessionChildSurvivorKind => {
+  if (child.childProcessStartTime !== undefined) return "verified";
+  const cmd = readCommandLine(child.childPid);
+  if (cmd !== null && sessionChildCommandLineLooksOwned(cmd)) {
+    return "unverified-ours";
+  }
+  return "unverified-foreign";
+};
+
+/** Uninstall copy for a blocking session-child survivor. Exported for tests. */
+export const formatSessionChildSurvivorBlock = (
+  child: TSessionChildStopTarget,
+  kind: Exclude<TSessionChildSurvivorKind, "unverified-foreign">,
+): string => {
+  if (kind === "verified") {
+    return (
+      `\nUninstall stopped — session child pid ${String(child.childPid)} is still running.\n` +
+      "Stop it (or kill that process) and re-run uninstall.\n"
+    );
+  }
+  return (
+    `\nUninstall stopped — a session process may still be running (pid ${String(child.childPid)}, unverified).\n` +
+    "Stop that session and re-run uninstall.\n"
+  );
 };
 
 /**

@@ -42,7 +42,9 @@ import { drainHoldOutbox, pendingHoldRecords } from "./hold-outbox";
 import type { TServiceUninstallResult } from "./service";
 import { serviceUninstall } from "./service";
 import {
+  classifySessionChildSurvivor,
   countLiveSessionHostsIn,
+  formatSessionChildSurvivorBlock,
   listSurvivingSessionChildrenIn,
   stopLiveSessionHostsIn,
 } from "./session-host-stop";
@@ -350,12 +352,17 @@ export const runUninstall = async (args: readonly string[]): Promise<never> => {
   const sessionChildren = listSurvivingSessionChildrenIn(
     join(stateDir(), "sessions"),
   );
-  const survivingChild = sessionChildren[0];
-  if (survivingChild !== undefined) {
-    out(
-      `\nUninstall stopped — session child pid ${String(survivingChild.childPid)} is still running.\n` +
-        "Stop it (or kill that process) and re-run uninstall.\n",
-    );
+  for (const survivingChild of sessionChildren) {
+    const kind = classifySessionChildSurvivor(survivingChild);
+    if (kind === "unverified-foreign") {
+      // Pid may be recycled into an unrelated process — warn, never kill-hint,
+      // and do not fail uninstall solely on an unverified uncorroborated leader.
+      out(
+        `\nNote — a session process may still be running (pid ${String(survivingChild.childPid)}, unverified); continuing uninstall.\n`,
+      );
+      continue;
+    }
+    out(formatSessionChildSurvivorBlock(survivingChild, kind));
     process.exit(1);
   }
 
