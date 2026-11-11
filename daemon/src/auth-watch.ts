@@ -15,6 +15,9 @@ import type { TDaemonStatus } from "@openllmsh/sdk/protocol";
 export type TAuthWake = "event" | "status";
 
 const waiters = new Set<(reason: TAuthWake) => void>();
+/** Extra work on invalidate (e.g. drop an in-flight status compute) — kept as
+ *  a listener so this module stays free of a status.ts import cycle. */
+const changeListeners = new Set<() => void>();
 let latest: TDaemonStatus | null = null;
 /** Bumps on every notify so a waiter can detect a lost wakeup between its
  *  snapshot and registration (register-then-recheck). */
@@ -26,6 +29,17 @@ export const latestAuthStatus = (): TDaemonStatus | null => latest;
 /** Generation counter for lost-wakeup detection; record before a snapshot. */
 export const authGeneration = (): number => generation;
 
+/**
+ * Register work to run on every {@link notifyAuthChange}. Returns an unsubscribe.
+ * Used by status.ts to drop a pre-invalidate in-flight compute.
+ */
+export const onAuthChange = (listener: () => void): (() => void) => {
+  changeListeners.add(listener);
+  return (): void => {
+    changeListeners.delete(listener);
+  };
+};
+
 /** Something auth-relevant happened; waiters recompute. */
 export const notifyAuthChange = (): void => {
   // Drop the cached snapshot first. A long-poll that samples generation after
@@ -34,6 +48,7 @@ export const notifyAuthChange = (): void => {
   // baseline-vs-stale-latest gap in tests/daemon/local-auth-watch.test.ts.
   latest = null;
   generation += 1;
+  for (const listener of [...changeListeners]) listener();
   for (const wake of [...waiters]) wake("event");
 };
 

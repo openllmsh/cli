@@ -463,22 +463,15 @@ const handleParsed = async (
         // generation too, so "generation moved" alone is not an invalidation
         // signal — an intervening `notifyAuthChange` clears `latest` and the
         // compute's publish fence skips restoring it. Prefer a published
-        // snapshot; if the cache is still empty after the await, recompute.
-        const startGeneration = authGeneration();
-        const status = await computeStatus();
+        // snapshot; if the cache is still empty after the await, always
+        // recompute fresh (a joined pre-invalidate flight can leave
+        // generation unchanged while returning a stale snapshot).
+        await computeStatus();
         const published = latestAuthStatus();
         if (published !== null) {
           return statusBody(published, provider, account, flow);
         }
-        if (authGeneration() !== startGeneration) {
-          return statusBody(
-            await computeStatusFresh(),
-            provider,
-            account,
-            flow,
-          );
-        }
-        return statusBody(status, provider, account, flow);
+        return statusBody(await computeStatusFresh(), provider, account, flow);
       };
       // The hold counts from the request, computing included, so a held status
       // never outlasts `wait_ms` and reads as a timeout to the caller.

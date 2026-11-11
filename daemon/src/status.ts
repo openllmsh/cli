@@ -36,7 +36,7 @@ import type { TRosterAccount } from "./account-roster";
 import { readRoster } from "./account-roster";
 import { AccountKeyedMap, AccountKeyedSet } from "./account-scope";
 import { setVerifiedLoginAdmitter } from "./auth-events";
-import { authGeneration, notifyAuthStatus } from "./auth-watch";
+import { authGeneration, notifyAuthStatus, onAuthChange } from "./auth-watch";
 import { autoUpdateEnabled } from "./auto-update-pref";
 import type { TCliProvider } from "./cli-paths";
 import { DEFAULT_ACCOUNT_INDEX } from "./cli-paths";
@@ -139,6 +139,9 @@ type TDaemonStatusState = {
   readonly probeBackoff: Map<string, TProbeBackoff>;
   readonly inFlightSlugProbes: Map<string, TSlugProbe>;
   inFlightStatus: Promise<TDaemonStatus> | null;
+  /** `authGeneration()` sampled when `inFlightStatus` was started — refuse to
+   *  join a flight that began before the current generation. */
+  inFlightStatusGeneration: number | null;
 };
 
 const daemonStatusState = stateScoped(
@@ -152,6 +155,7 @@ const daemonStatusState = stateScoped(
     probeBackoff: new AccountKeyedMap(),
     inFlightSlugProbes: new AccountKeyedMap(),
     inFlightStatus: null,
+    inFlightStatusGeneration: null,
   }),
 );
 
@@ -985,16 +989,37 @@ export const computeStatusFresh = (
 
 export const computeStatus = async (): Promise<TDaemonStatus> => {
   const state = daemonStatusState();
-  if (state.inFlightStatus === null) {
+  const generation = authGeneration();
+  // Drop a pre-invalidate flight so a long-poll that samples generation after
+  // `notifyAuthChange` never joins a stale compute and returns its snapshot.
+  if (
+    state.inFlightStatus === null ||
+    state.inFlightStatusGeneration !== generation
+  ) {
+    const flightGeneration = generation;
     const flight = computeStatusFresh().finally(() => {
       if (state.inFlightStatus === flight) {
         state.inFlightStatus = null;
+        state.inFlightStatusGeneration = null;
       }
     });
     state.inFlightStatus = flight;
+    state.inFlightStatusGeneration = flightGeneration;
   }
   return state.inFlightStatus;
 };
+
+/** Drop any in-flight status so the next `computeStatus` starts fresh. */
+export const dropInFlightStatus = (): void => {
+  const state = daemonStatusState();
+  state.inFlightStatus = null;
+  state.inFlightStatusGeneration = null;
+};
+
+// `notifyAuthChange` must also drop a pre-invalidate flight — otherwise a
+// long-poll that samples the new generation can still join it and return a
+// stale snapshot when the publish fence skipped restoring `latest`.
+onAuthChange(dropInFlightStatus);
 
 /**
  * Command-driven usage read for connected providers (or just `slug`). The
