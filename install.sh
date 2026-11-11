@@ -704,7 +704,8 @@ resolve_interactive
 # Product setup mode. Explicit env / --minimal|--full wins and never prompts. A
 # saved OPENLLM_SETUP_MODE in the env file is preserved on re-run / update.
 # Fresh install with no saved mode: interactive terminals ask Full vs Minimal;
-# headless never hangs and picks Full silently.
+# headless never hangs and picks Full silently. `--dry-run` also defaults to
+# Full without prompting — a plan print must not block on a chooser.
 # `${VAR+set}` (not `-n`) so an explicit empty / whitespace-only value is still
 # treated as supplied.
 if [ "${OPENLLM_SETUP_MODE+set}" = set ]; then
@@ -713,7 +714,9 @@ if [ "${OPENLLM_SETUP_MODE+set}" = set ]; then
 else
   SETUP_MODE="$(trim_whitespace "$(env_file_value OPENLLM_SETUP_MODE || true)")"
   if [ -z "$SETUP_MODE" ] && [ "$INSTALL_MODE" != update ] && [ "$INSTALL_MODE" != vendors ]; then
-    if [ "$INTERACTIVE" = 1 ]; then
+    if [ "$FLAG_DRY_RUN" = 1 ]; then
+      SETUP_MODE=full
+    elif [ "$INTERACTIVE" = 1 ]; then
       if ! prompt_setup_mode; then
         die "setup cancelled — re-run and choose Full or Minimal (or pass --minimal / OPENLLM_SETUP_MODE=…)"
       fi
