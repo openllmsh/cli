@@ -44,22 +44,44 @@ import { clearPlanCache, observePolicyRevision } from "./plan-cache";
 
 /**
  * Outcome of ensuring the durable identity is published before (or during)
- * online presence. `"conflict"` is the only value that must stop the daemon;
- * `"failed"` from the underlying publish is folded into `"ok"` here so a
- * transient network blip never blocks the control channel.
+ * online presence.
+ *
+ * - `"ok"` / `"skipped"` — safe to paint the key online (control channel).
+ * - `"conflict"` — another identity holds the key; the daemon must stop.
+ * - `"failed"` — transient network / non-conflict HTTP. Must NOT go online yet;
+ *   retry the publish with backoff and connect only once accepted. Going online
+ *   first wedges a replacement forever (the online device is itself).
  */
-export type TEnsureIdentityPublishedResult = "ok" | "conflict" | "skipped";
+export type TEnsureIdentityPublishedResult =
+  | "ok"
+  | "conflict"
+  | "skipped"
+  | "failed";
 
 /**
- * Boot-only ceiling for {@link ensureIdentityPublished}. The underlying
- * `cloudFetch` can wait up to 15s; a black-holed cloud must not delay the
- * control-channel dial that long. A timeout is treated like `"failed"`
- * (boot continues; bootstrap retries and still stops on conflict).
+ * Backoff for transient identity-publish failures before the control channel
+ * may dial. Event-driven: each delay gates the next publish attempt after a
+ * failed request settles (cloudFetch already bounds a single attempt).
  */
-export const IDENTITY_BOOT_PUBLISH_TIMEOUT_MS = 5_000;
+export const identityPublishBackoffConfig = {
+  baseMs: 1_000,
+  maxMs: 60_000,
+} as const;
 
-export type TEnsureIdentityPublishedOptions = {
-  readonly timeoutMs?: number;
+/**
+ * Jittered delay before the next identity-publish attempt after `streak`
+ * consecutive transient failures (1-based).
+ */
+export const nextIdentityPublishDelayMs = (
+  streak: number,
+  random: () => number = Math.random,
+): number => {
+  const shift = Math.max(streak - 1, 0);
+  const standDown = Math.min(
+    identityPublishBackoffConfig.maxMs,
+    identityPublishBackoffConfig.baseMs * 2 ** Math.min(shift, 30),
+  );
+  return standDown / 2 + random() * (standDown / 2);
 };
 
 /**
@@ -67,35 +89,29 @@ export type TEnsureIdentityPublishedOptions = {
  * Callers must run this before starting the control channel so the online-lock
  * model can refuse a different identity while another device still holds the
  * key — painting the key online first would wedge a replacement forever.
+ *
+ * Awaiting the real {@link publishIdentity} outcome (cloudFetch's own timeout)
+ * — never racing an arbitrary boot deadline that proceeds as success.
  */
-export const ensureIdentityPublished = async (
-  options?: TEnsureIdentityPublishedOptions,
-): Promise<TEnsureIdentityPublishedResult> => {
-  try {
-    const identity = loadIdentityKey();
-    if (!identity.persisted) return "skipped";
-    const publish = publishIdentity(identity.publicKeyB64);
-    const result: TPublishIdentityResult =
-      options?.timeoutMs !== undefined
-        ? await Promise.race([
-            publish,
-            new Promise<"failed">((resolve) => {
-              const timer = setTimeout(
-                () => resolve("failed"),
-                options.timeoutMs,
-              );
-              timer.unref?.();
-            }),
-          ])
-        : await publish;
-    if (result === "conflict") return "conflict";
-    // `ok` and `failed` both proceed — only an explicit conflict stops us.
-    return "ok";
-  } catch {
-    // loadIdentityKey sync failures must not block boot / bootstrap.
-    return "skipped";
-  }
-};
+export const ensureIdentityPublished =
+  async (): Promise<TEnsureIdentityPublishedResult> => {
+    try {
+      // No API key yet (keyless install): nothing to attest. The control channel
+      // dials once a key lands; do not spin on publish retries beforehand.
+      if (!hasApiKey()) return "skipped";
+      const identity = loadIdentityKey();
+      if (!identity.persisted) return "skipped";
+      const result: TPublishIdentityResult = await publishIdentity(
+        identity.publicKeyB64,
+      );
+      if (result === "conflict") return "conflict";
+      if (result === "failed") return "failed";
+      return "ok";
+    } catch {
+      // loadIdentityKey sync failures: no durable key to publish this run.
+      return "skipped";
+    }
+  };
 
 /** Empty bootstrap row for offline/seeded hosts and harnesses. */
 export const EMPTY_DAEMON_BOOTSTRAP: TDaemonBootstrap = {

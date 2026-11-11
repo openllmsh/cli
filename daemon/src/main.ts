@@ -68,8 +68,8 @@ import { postRecord } from "./cloud-client";
 import {
   ensureIdentityPublished,
   getCloudState,
-  IDENTITY_BOOT_PUBLISH_TIMEOUT_MS,
   latestCliVersion,
+  nextIdentityPublishDelayMs,
   refreshBootstrap,
 } from "./config";
 import { corsHeaders, isPreflight, preflightResponse } from "./cors";
@@ -765,22 +765,38 @@ export const main = async (): Promise<void> => {
 
   // Publish the durable identity BEFORE the control channel paints this key
   // online. The cloud online-lock refuses a different pubkey while the pinned
-  // device is still online; going online first would wedge a replacement.
-  // A real `identity_conflict` stops the service (no channel, no relaunch).
-  // Bound the wait so a black-holed cloud cannot delay the control-channel
-  // dial by the full cloudFetch timeout; a timeout proceeds like `"failed"`.
+  // device is still online; going online first would wedge a replacement
+  // forever (the online device would be this one). Await a definitive outcome:
+  // accepted (ok / skipped) → connect; identity_conflict → stop; transient
+  // failure → retry with backoff and stay offline to the relay. Local loopback
+  // already serves (listener is bound above). cloudFetch bounds each attempt.
   {
-    const identityResult = await ensureIdentityPublished({
-      timeoutMs: IDENTITY_BOOT_PUBLISH_TIMEOUT_MS,
-    });
-    if (identityResult === "conflict") {
-      await stopForIdentityConflict();
+    let identityStreak = 0;
+    for (;;) {
+      const identityResult = await ensureIdentityPublished();
+      if (identityResult === "conflict") {
+        await stopForIdentityConflict();
+      }
+      if (identityResult === "ok" || identityResult === "skipped") {
+        break;
+      }
+      identityStreak += 1;
+      const delayMs = nextIdentityPublishDelayMs(identityStreak);
+      logInfo(
+        "identity",
+        safeDiagnosticMessage`identity publish failed; retrying before control channel`,
+        { delay_ms: delayMs, streak: identityStreak },
+      );
+      await new Promise<void>((resolve) => {
+        const timer = setTimeout(resolve, delayMs);
+        timer.unref?.();
+      });
     }
   }
 
-  // Dial the control channel as soon as the listener is bound so a planned
-  // restart reconnects in seconds, not after session-host reconcile. Commands
-  // stay deferred until reconcile finishes (handlers must not race that pass).
+  // Dial the control channel once identity is accepted so a planned restart
+  // reconnects in seconds, not after session-host reconcile. Commands stay
+  // deferred until reconcile finishes (handlers must not race that pass).
   // See `docs/audit/2026-10-20-deploy-zero-downtime.md` fix #3.
   // Register the agent dispatcher BEFORE the hello so its caps carry `agent1`.
   try {
