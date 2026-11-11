@@ -700,13 +700,18 @@ export const runLogin = async (
     if (parsed.json) io.writeStdout(loginJson("start_failed"));
     return LOGIN_DAEMON_START_FAILED_EXIT;
   }
-  // After a successful Full start/restart, kick off vendor provisioning but
-  // do NOT await it. Desktop Connect / re-pair runs `login --start` under a
-  // 60s kill (`packages/native/.../daemon.rs` CLI_TIMEOUT); the vendor pipe
-  // can wait ~210s. The daemon is already serving — return now, and let
-  // vendors install in the background (interactive install.sh does the same).
-  // Terminal `openllm start` still awaits so the user sees vendor results.
-  if (command !== null && !isMinimalSetupMode()) {
+  // After a successful Full start/restart — or when `--start` finds the
+  // daemon already serving the same config (desktop Update / Re-pair) — kick
+  // off vendor provisioning but do NOT await it. Desktop Connect / re-pair
+  // runs `login --start` under a 60s kill (`packages/native/.../daemon.rs`
+  // CLI_TIMEOUT); the vendor pipe can wait ~210s. The daemon is already
+  // serving — return now, and let vendors install in the background
+  // (interactive install.sh does the same). Terminal `openllm start` still
+  // awaits so the user sees vendor results.
+  if (
+    !isMinimalSetupMode() &&
+    (command !== null || (parsed.start && running))
+  ) {
     // Default path: dynamic-import + detached spawn. Await the kickoff (spawn
     // returns once the child is launched) so `process.exit` cannot race ahead
     // of the import. An injected `io.provisionVendors` stays fire-and-forget —
