@@ -194,7 +194,8 @@ export const allProvisionedVendorClisPresent = (
     if (vendor.installable !== undefined && !vendor.installable(platformDeps))
       continue;
     const onPath = which(vendor.command);
-    if (onPath !== null && onPath.length > 0) continue;
+    if (onPath !== null && onPath.length > 0 && isExecutableFile(onPath))
+      continue;
     const dest = vendor.dest(home);
     if (isExecutableFile(dest)) continue;
     const localBin = join(home, ".local", "bin", vendor.command);

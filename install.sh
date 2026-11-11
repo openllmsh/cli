@@ -108,6 +108,15 @@ INTERACTIVE=0
 
 has_command() { command -v "$1" >/dev/null 2>&1; }
 
+# True only when PATH resolves to an executable regular file. bash's
+# `command -v` can return a non-executable PATH hit; vendor presence must
+# not treat that as "already installed".
+has_executable_command() {
+  local resolved
+  resolved="$(command -v "$1" 2>/dev/null)" || return 1
+  [ -n "$resolved" ] && [ -f "$resolved" ] && [ -x "$resolved" ]
+}
+
 die() { echo "Error: $*" >&2; exit 1; }
 
 print_installer_help() {
@@ -2275,7 +2284,7 @@ provision_clis() {
   for spec in "${specs[@]}"; do
     IFS='|' read -r name cmd slug dest url <<<"$spec"
     vendor_cli_selected "$slug" || continue
-    if has_command "$cmd" || [ -x "$dest" ]; then
+    if has_executable_command "$cmd" || [ -x "$dest" ]; then
       echo "  $name CLI: already installed."
       # Mirror the skip into the log too — previously only the backgrounded
       # installer output landed there, so a skipped provider left the log
@@ -2551,7 +2560,7 @@ build_vendor_status_line() {
       reason=""
     # Prefer a live binary over a stale progress record (e.g. leftover
     # stage=installing / failed after a successful vendor install).
-    elif has_command "$bin" || [ -x "$dest" ] || [ -x "$HOME/.local/bin/$bin" ]; then
+    elif has_executable_command "$bin" || [ -x "$dest" ] || [ -x "$HOME/.local/bin/$bin" ]; then
       stage="installed"
       reason=""
     elif case "$VENDOR_LAUNCH_FAILED_SLUGS" in *",$slug,"*) true ;; *) false ;; esac; then
@@ -2563,8 +2572,8 @@ build_vendor_status_line() {
         body="$(cat "$path" 2>/dev/null || true)"
         case "$body" in
           *'"stage":"installed"'*|*'"stage": "installed"'*)
-            # Progress claimed installed but has_command/dest checks above
-            # already failed — report the mismatch instead of lying.
+            # Progress claimed installed but has_executable_command/dest checks
+            # above already failed — report the mismatch instead of lying.
             stage="pending" ; reason="awaiting_detection" ;;
           *'"stage":"awaiting_detection"'*|*'"stage": "awaiting_detection"'*)
             stage="pending" ; reason="awaiting_detection" ;;
