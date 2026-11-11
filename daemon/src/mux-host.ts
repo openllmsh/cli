@@ -1,6 +1,7 @@
 import type { TRelayFrame } from "@openllmsh/sdk/protocol";
 import {
   AGENT_CAP,
+  CLIENT_ORIGIN_CAP,
   MEDIA_HTTP_CAP,
   MEDIA_HTTP_VIDEO_CAP,
   MUX_CAP,
@@ -91,6 +92,9 @@ export const DAEMON_MUX_CAPS = [
   REALTIME_DUPLEX_CAP,
   MEDIA_HTTP_CAP,
   MEDIA_HTTP_VIDEO_CAP,
+  // Accepts the consumer-derived `client_kind` / `client_host` on a tunnel
+  // OPEN (origin sends them only to daemons advertising this).
+  CLIENT_ORIGIN_CAP,
 ] as const;
 // `REALTIME_DUPLEX_CAP` ("realtime1") ENABLED — the prior "not yet advertised"
 // state is resolved. A live probe through this exact source path

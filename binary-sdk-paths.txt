@@ -27,6 +27,7 @@ packages/sdk/protocol/audio.ts
 packages/sdk/protocol/auth.ts
 packages/sdk/protocol/changelog.ts
 packages/sdk/protocol/chat.ts
+packages/sdk/protocol/client-origin.ts
 packages/sdk/protocol/client-registry.ts
 packages/sdk/protocol/config.ts
 packages/sdk/protocol/control-channel.ts

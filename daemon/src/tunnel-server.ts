@@ -37,6 +37,10 @@ import {
 import { StreamResetError } from "@openllmsh/sdk/tunnel/stream-reset-error";
 import type { TServeTunnel } from "@openllmsh/sdk/tunnel/streams";
 import { warmCapTokenCounter } from "@openllmsh/sdk/wire/lib/canonical/token-estimate";
+import {
+  FORWARDED_CLIENT_HOST_HEADER,
+  FORWARDED_CLIENT_KIND_HEADER,
+} from "./client-request-context";
 import { handleInference } from "./listener";
 import { logInfo, logWarn, safeDiagnosticMessage } from "./logger";
 import { beginRequest, endRequest } from "./self-update";
@@ -137,6 +141,13 @@ const forwardedHeaders = (open: {
     headers.set("anthropic-beta", open.headers.anthropic_beta);
   if (open.headers?.user_agent !== undefined)
     headers.set("user-agent", open.headers.user_agent);
+  // The client origin derived for the request (a tunneled browser request
+  // arrives without its `Origin`). Read back by `handleInference` for
+  // tunneled requests only — see `client-request-context.ts`.
+  if (open.headers?.client_kind !== undefined)
+    headers.set(FORWARDED_CLIENT_KIND_HEADER, open.headers.client_kind);
+  if (open.headers?.client_host !== undefined)
+    headers.set(FORWARDED_CLIENT_HOST_HEADER, open.headers.client_host);
   // Team grant: re-check on the request path (model / local cap / kill switch).
   // Same-user hops omit it. See docs/plan/2026-10-26-teams.md §16.1 / §16.4.
   if (open.headers?.team_grant !== undefined) {

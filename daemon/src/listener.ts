@@ -45,6 +45,7 @@ import {
   runAudioSpeechWalker,
   runAudioTranscriptionWalker,
 } from "./audio-walker";
+import { withRequestClient } from "./client-request-context";
 import {
   fetchMediaDefaultPlan,
   fetchPlan,
@@ -172,8 +173,15 @@ export const handleInference = async (
       Date.now(),
       inferenceAdmission.signal,
     );
-    return withHoldSession(session, () =>
-      handleInferenceIn(admitted, session, direct),
+    // A tunneled request (`direct === false`) carries the client origin
+    // derived; the loopback surface derives its own from the headers.
+    return withRequestClient(
+      admitted,
+      () =>
+        withHoldSession(session, () =>
+          handleInferenceIn(admitted, session, direct),
+        ),
+      !direct,
     );
   });
 };

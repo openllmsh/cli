@@ -45,6 +45,7 @@ import {
   VideoJobPlanRequest,
 } from "@openllmsh/sdk/protocol";
 import { Schema } from "effect";
+import { clientFieldsForRecord } from "./client-request-context";
 import { daemonEnv, deviceId } from "./env";
 import { enqueueHoldRecord } from "./hold-outbox";
 import {
@@ -588,9 +589,15 @@ export const publishIdentity = async (
  * durable {@link enqueueHoldRecord} outbox instead.
  */
 export const recordRequest = async (
-  row: TDaemonRecordRequest,
+  inputRow: TDaemonRecordRequest,
   origin?: string | null,
 ): Promise<void> => {
+  // Stamp the client that sent the request (read from the request's own
+  // context, so a record made after its stream ends still carries it).
+  const row: TDaemonRecordRequest =
+    inputRow.client_kind === undefined
+      ? { ...inputRow, ...clientFieldsForRecord() }
+      : inputRow;
   if (row.hold_nonce !== undefined) {
     await enqueueHoldRecord(row, origin ?? null, postRecord);
     return;
