@@ -149,6 +149,7 @@ import { decodeProviderEventStream } from "@openllmsh/sdk/wire/lib/streaming/pro
 import { responseToChunkStream } from "@openllmsh/sdk/wire/lib/streaming/response-stream";
 import {
   firstByteDeadlineAt,
+  readResponseWithin,
   remainingTimeoutMs,
   streamFirstByteTimeoutMs,
   streamingHopNeedsSilence,
@@ -1626,25 +1627,15 @@ export const serveSubscription = async (
   if (!resp.ok) {
     let readable = true;
     let errorBodyStalled = false;
-    const remainingErrorBodyMs = remainingTimeoutMs(firstByteDeadline);
-    const raw = await Promise.race([
-      resp.text().catch(() => {
-        readable = false;
-        return "";
-      }),
-      ...(remainingErrorBodyMs > 0
-        ? [
-            new Promise<string>((resolve) => {
-              setTimeout(() => {
-                errorBodyStalled = true;
-                readable = false;
-                void resp.body?.cancel("openllm-upstream-stalled");
-                resolve("");
-              }, remainingErrorBodyMs);
-            }),
-          ]
-        : []),
-    ]);
+    const raw = await readResponseWithin(
+      resp,
+      remainingTimeoutMs(firstByteDeadline),
+      (body) => body.text(),
+    ).catch((err: unknown) => {
+      if (isUpstreamStalledError(err)) errorBodyStalled = true;
+      readable = false;
+      return "";
+    });
     if (errorBodyStalled) {
       return hopRetry("upstream stalled reading error body", {
         status: 504,
