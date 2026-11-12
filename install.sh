@@ -2625,6 +2625,27 @@ path_hint_line() {
   fi
 }
 
+supervisor_usable() {
+  case "$(uname -s)" in
+    Linux) command -v systemctl >/dev/null 2>&1 && systemctl --user show-environment >/dev/null 2>&1 ;;
+    Darwin) command -v launchctl >/dev/null 2>&1 && launchctl print "gui/$(id -u)" >/dev/null 2>&1 ;;
+    *) return 1 ;;
+  esac
+}
+
+print_start_hint() {
+  if [ "$INSTALL_MODE" = install ] && [ "$INTERACTIVE" = 0 ] && ! supervisor_usable; then
+    if [ "$(uname -s)" = Linux ]; then
+      echo "Next: openllm start (no systemd user bus here: runs detached, no restart at boot)"
+    else
+      echo "Next: openllm start"
+    fi
+    echo "Next: on an agent sandbox or ephemeral box, re-run the installer with --non-interactive --minimal instead (cloud-only)"
+  else
+    echo "Next: openllm start"
+  fi
+}
+
 print_install_summary() {
   local vendor_line on_disk=""
   vendor_line="$(build_vendor_status_line)"
@@ -2648,10 +2669,10 @@ print_install_summary() {
     echo "Next: openllm login --non-interactive"
     echo "Next: after approval, run the printed resume command"
     if [ "$SETUP_MODE" != minimal ] && [ "$DAEMON_STATE" != "running" ]; then
-      echo "Next: openllm start"
+      print_start_hint
     fi
   elif [ "$SETUP_MODE" != minimal ] && [ "$DAEMON_STATE" != "running" ]; then
-    echo "Next: openllm start"
+    print_start_hint
   fi
 }
 
