@@ -63,6 +63,7 @@ import {
   AGENT_MAX_ATTACHMENT_BYTES,
   AGENT_MAX_ATTACHMENT_PATH_LENGTH,
   AGENT_MAX_LINE_BYTES,
+  AGENT_MAX_LOCAL_ATTACHMENT_BYTES,
   AGENT_MAX_QUEUED_PROMPTS,
   AGENT_MODEL_SWITCH_DECLINED_CODE,
   AGENT_MODEL_SWITCH_FAILED_CODE,
@@ -993,7 +994,9 @@ export const writeAgentAttachments = (
       if (!resolved.ok) {
         throw new Error(`${resolved.code}: ${resolved.message}`);
       }
-      if (resolved.size > AGENT_MAX_ATTACHMENT_BYTES) {
+      // A local path carries no bytes, so the wire cap doesn't apply; the
+      // local cap matches what attachment_get can preview.
+      if (resolved.size > AGENT_MAX_LOCAL_ATTACHMENT_BYTES) {
         throw new Error("invalid_path: attachment exceeds the size cap");
       }
       let name = sanitizeAttachmentName(attachment.name ?? resolved.name);
@@ -1124,7 +1127,7 @@ export const resolveAgentAttachment = (
         };
       }
       try {
-        if (resolved.size > AGENT_MAX_ATTACHMENT_BYTES) {
+        if (resolved.size > AGENT_MAX_LOCAL_ATTACHMENT_BYTES) {
           return {
             ok: false,
             code: "attachment_too_large",
@@ -1142,9 +1145,10 @@ export const resolveAgentAttachment = (
           };
         }
         try {
-          const buffer = Buffer.alloc(AGENT_MAX_ATTACHMENT_BYTES + 1);
+          // Sized to the file (+1 to catch growth since the stat).
+          const buffer = Buffer.alloc(resolved.size + 1);
           const read = readSync(fd, buffer, 0, buffer.length, 0);
-          if (read > AGENT_MAX_ATTACHMENT_BYTES) {
+          if (read > resolved.size) {
             return {
               ok: false,
               code: "attachment_too_large",
