@@ -256,15 +256,21 @@ import { isClaudeCodeOriginator, resolveHopExecution } from "./sub-method";
 import type { TLocalSubscriptionAuth } from "./subscription-accounts";
 import {
   ensureLocalSubscription,
+  healUsageForActiveAccount,
   noteAccountFailure,
   planSubscriptionAccounts,
+  unverifiedAsUnknown,
   usageForActiveAccount,
 } from "./subscription-accounts";
 import { observeTeamResponseStream } from "./team-leg-body";
 import { isTeamHop, tryDirectTeamLeg } from "./team-leg-client";
 import type { TTunnelToPeer } from "./tunnel-client";
 import { isPreDispatchTunnelError, tunnelToPeer } from "./tunnel-client";
-import { sampleUsageAfterRequest } from "./usage-cache";
+import {
+  healUsage,
+  sampleUsageAfterRequest,
+  usageCredentialStale,
+} from "./usage-cache";
 
 export const noteWalkerStreamTerminal = (opts: {
   readonly aborted: boolean;
@@ -858,14 +864,21 @@ export const report = (
     origin,
     attempt,
   );
-  if (
-    recordedRow.status !== "success" ||
-    !isOAuthSlug(recordedRow.provider) ||
-    recordedRow.tokens_in + recordedRow.tokens_out <= 0
-  ) {
+  if (recordedRow.status !== "success" || !isOAuthSlug(recordedRow.provider)) {
     return;
   }
   const delegate = getDelegate(recordedRow.provider);
+  // The dispatch just used a live token, so a usage state left by an expired
+  // one is now curable by a plain stored-token read — clear it right away
+  // rather than leaving the dashboard on "access token expired".
+  if (delegate !== null) {
+    void healUsage(
+      recordedRow.provider,
+      () => delegate.usage(),
+      recordedRow.account_hash,
+    )?.catch(() => {});
+  }
+  if (recordedRow.tokens_in + recordedRow.tokens_out <= 0) return;
   if (delegate !== null) {
     sampleUsageAfterRequest(
       recordedRow.provider,
@@ -3158,12 +3171,34 @@ const walkPlan = async (
       return HOP_CONTINUE;
     }
 
-    const gateSnapshot = await usageForActiveAccount(
+    let gateSnapshot = await usageForActiveAccount(
       hop.provider,
       accountHashByProvider,
       connectedByProvider,
     );
     const gateMeter = lookupCatalogEntry(hop.modelId)?.subscription_meter;
+    // Figures whose last refresh failed only because the stored token had
+    // expired are unverified: never skip a hop on them without first healing
+    // (renew + re-read) on this request's demand.
+    if (
+      usageCredentialStale(gateSnapshot) &&
+      quotaGateDecision({
+        snapshot: gateSnapshot,
+        meter: gateMeter,
+        finalHop: false,
+        staleCapMs: GATE_STALE_CAP_MS,
+        now: Date.now(),
+      }).kind === "skip"
+    ) {
+      const healed = await healUsageForActiveAccount(
+        hop.provider,
+        accountHashByProvider,
+      );
+      // Still unverified (heal timed out, backing off, or failed): dial
+      // anyway — the dispatch renews the token itself, and a real
+      // exhaustion fails fast and cools the hop like any other.
+      gateSnapshot = unverifiedAsUnknown(healed ?? gateSnapshot);
+    }
     const gateNow = Date.now();
     // This device's only account is exhausted or cooling: another device of
     // this user may hold a different account with quota — ask it before
