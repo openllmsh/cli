@@ -1244,6 +1244,20 @@ usage-cache TTL without discarding last-good figures. Automatic refresh and old
 payloads omit the flag and remain non-renewing. Automatic catalog observation
 uses `discoverModels` instead and must not call `readToken()`.
 
+**A request heals an expired-token usage state (`healUsage`).** `credential_expired`
+(bare, or as `refresh_failure` over cached figures) is the normal idle state, so
+the dashboard shows it as a neutral "Usage updates on next use", never an error.
+The quota-gate revalidate stays stored-only. When such unverified figures would
+make the gate SKIP a hop, the walker first awaits `healUsageForActiveAccount`
+(renew under `withUsageNativeRefresh` scoped to the account hash + re-read, at
+most 10 s; it finishes detached past that); if the figures are still unverified
+it dials anyway rather than skipping on them. Multi-account ranking likewise
+treats them as unknown (`unverifiedAsUnknown`). After any successful subscription dispatch
+the token is live, so the walker fires a plain stored-token `healUsage` that
+clears the state at once. `healUsage` bypasses the success back-off, keeps the
+20 s failure retry, and shares an in-flight read; it never runs off the request
+path.
+
 **Claude / Cursor idle observations are reused while store identity is stable
 (`delegation/observation-cache.ts`).** Reuse is keyed by path + inode + mtime +
 size (and on macOS, keychain replacement identity), not a clock TTL. Determinate
