@@ -2635,7 +2635,11 @@ supervisor_usable() {
 
 print_start_hint() {
   if [ "$INSTALL_MODE" = install ] && [ "$INTERACTIVE" = 0 ] && ! supervisor_usable; then
-    echo "Next: openllm start (no service manager here: runs detached, no restart at boot)"
+    if [ "$(uname -s)" = Linux ]; then
+      echo "Next: openllm start (no systemd user bus here: runs detached, no restart at boot)"
+    else
+      echo "Next: openllm start"
+    fi
     echo "Next: on an agent sandbox or ephemeral box, re-run the installer with --non-interactive --minimal instead (cloud-only)"
   else
     echo "Next: openllm start"

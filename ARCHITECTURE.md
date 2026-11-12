@@ -159,7 +159,8 @@ The curl installer (`install.sh`) has two auto-detected modes (override with
   Ends with a fixed parseable summary (`OpenLLM install summary`, `vendors:`,
   `daemon:`, `path:`, `Next:`). When `openllm` does not already resolve to this
   install, `path:` prints `export PATH="$HOME/.openllm/bin:$PATH"`. Headless Full
-  without a usable user supervisor prints the detached `openllm start` step and
+  without a usable user supervisor prints the `openllm start` step (noting the
+  detached fallback on Linux) and
   suggests a Minimal re-run for agent sandboxes / ephemeral boxes.
 
 Flags are taken at face value (flag > env > `~/.openllm/.env` > default).
