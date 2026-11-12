@@ -142,8 +142,14 @@ import {
 } from "@openllmsh/sdk/wire/lib/streaming/peek";
 import { decodeProviderEventStream } from "@openllmsh/sdk/wire/lib/streaming/provider-decode";
 import { responseToChunkStream } from "@openllmsh/sdk/wire/lib/streaming/response-stream";
+import {
+  streamSilenceTimeoutMs,
+  withByteSilenceGuard,
+  withStreamingHeadersTimeout,
+} from "@openllmsh/sdk/wire/lib/streaming/silence";
 import { withFrameAlignedHeartbeat } from "@openllmsh/sdk/wire/lib/streaming/sse";
 import {
+  isUpstreamStalledError,
   partialUsageFrom,
   streamFailureCause,
   UpstreamStreamError,
@@ -1553,13 +1559,17 @@ export const serveSubscription = async (
               };
         })()
       : null;
+  // Streaming hops only: short silence budget on headers wait. Non-streaming
+  // JSON responses legitimately take as long as the model needs with no bytes.
+  const silenceMs = clientWantsStream ? streamSilenceTimeoutMs() : 0;
+  const headersGuard = withStreamingHeadersTimeout(args.req.signal, silenceMs);
   const dispatch = (): Promise<Response | null> =>
     postWithReplayStripRetry(
       url,
       headers,
       body,
       wire,
-      args.req.signal,
+      headersGuard.signal,
       (failure) => {
         transport.failure = failure;
       },
@@ -1569,11 +1579,17 @@ export const serveSubscription = async (
     cacheProbe !== null
       ? await cacheProbeWrap(cacheProbe, dispatch)
       : await dispatch();
+  headersGuard.clear();
   if (resp === null) {
     // An inbound cancellation aborts the fetch by design. It is terminal but
     // not an upstream failure, so it must neither walk nor write a cooldown row.
     if (args.req.signal.aborted)
       return errorJson(499, "client aborted request");
+    if (headersGuard.didStall()) {
+      return hopRetry("upstream stalled waiting for response headers", {
+        cooldownReason: "upstream_stalled",
+      });
+    }
     return hopRetry(transport.failure?.reason ?? "network error", {
       cooldownReason: "network",
     });
@@ -1702,10 +1718,16 @@ export const serveSubscription = async (
     ...(accountHash !== null ? { account_hash: accountHash } : {}),
   } satisfies Partial<TDaemonRecordRequest>;
   const elapsed = (): number => Date.now() - args.startedAt;
-  const upstreamBody =
+  const rawUpstreamBody =
     wire === "chatgpt" && process.env.OPENLLM_DEBUG_CODEX_SSE === "1"
       ? tapCodexSseStream(resp.body, Date.now())
       : resp.body;
+  // Raw-byte silence before the first client-forwarded chunk. Keepalives
+  // reset the timer; release() after a successful peek disarms it.
+  const silenceGuard = withByteSilenceGuard(rawUpstreamBody, {
+    silenceTimeoutMs: upstreamStreams ? streamSilenceTimeoutMs() : 0,
+  });
+  const upstreamBody = silenceGuard.stream;
   const streamObserver = createUsageObserver(hopFormat(wire), "sse");
   const streamAttempt = (): TAttemptOutcome => ({
     sent: true,
@@ -1761,16 +1783,25 @@ export const serveSubscription = async (
   // recorded as an ERROR row.
   const peekedError = (error: unknown): THopServeOutcome => {
     const detail = streamFailureDetail(error);
-    const cls = classifyRawResponse(
-      502,
-      detail,
-      hopFormat(wire),
-      args.req.signal.aborted,
-      hop.provider,
-    );
+    const stalled = isUpstreamStalledError(error);
+    const cls = classifyHopError({
+      status: stalled ? 0 : 502,
+      envelope: {
+        error: {
+          message: detail,
+          type: stalled ? "upstream_stalled" : "stream_error",
+          ...(stalled ? { code: "upstream_stalled" as const } : {}),
+        },
+      },
+      providerFormat: hopFormat(wire),
+      aborted: args.req.signal.aborted,
+      provider: hop.provider,
+    });
     const upstreamResponse = errorJson(
-      502,
-      `upstream stream ended before producing output: ${detail}`,
+      stalled ? 504 : 502,
+      stalled
+        ? detail
+        : `upstream stream ended before producing output: ${detail}`,
     );
     if (!finalHop && !args.req.signal.aborted) {
       // Preserve the terminal response this pre-output error would have
@@ -1780,7 +1811,7 @@ export const serveSubscription = async (
       // pre-commit branch above. Critically, classify the body before
       // returning: HTTP 200 stream failures can still be context overflow.
       return hopRetry(detail, {
-        status: 502,
+        status: stalled ? 504 : 502,
         bodySnippet: detail,
         ...(cls.kind === "transient" ? { cooldownReason: cls.reason } : {}),
         upstreamResponse,
@@ -1899,6 +1930,7 @@ export const serveSubscription = async (
         void peeked.chunks.cancel().catch(() => undefined);
         return hopRetry("content filter refusal");
       }
+      silenceGuard.release();
       meter(peeked.chunks);
       return new Response(heartbeat(toClient), {
         status: resp.status,
@@ -1928,6 +1960,7 @@ export const serveSubscription = async (
       void peeked.chunks.cancel().catch(() => undefined);
       return hopRetry("content filter refusal");
     }
+    silenceGuard.release();
     return deliverChunkStream(peeked.chunks, {
       surface: args.surface,
       clientWire,
@@ -1968,6 +2001,7 @@ export const serveSubscription = async (
       void peeked.chunks.cancel().catch(() => undefined);
       return hopRetry("content filter refusal");
     }
+    silenceGuard.release();
     let canonical: TChatCompletionResponse;
     try {
       canonical = await accumulateChunksToResponse(
