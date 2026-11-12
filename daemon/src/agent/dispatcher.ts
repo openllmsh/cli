@@ -28,6 +28,7 @@ import {
   SESSION_ID_PATTERN,
 } from "@openllmsh/sdk/protocol";
 import { logError, logInfo } from "../logger";
+import { createAttachmentUploads } from "./attachment-cache";
 import {
   AGENT_TOOL_OUTPUT_MAX_CHARS,
   chunkAgentAttachment,
@@ -509,9 +510,12 @@ export const createAgentDispatcher = (
       };
       let bound: TSession | null = null;
       let closing = false;
+      // This consumer's attachment uploads in flight (`attachment_put`).
+      const uploads = createAttachmentUploads();
 
       const endAfterDrain = (): void => {
         closing = true;
+        uploads.abort();
         void state.chain.then(() => {
           if (!state.gone) {
             state.gone = true;
@@ -1023,6 +1027,27 @@ export const createAgentDispatcher = (
             reply(state, session, pageEvent, commandId);
             return;
           }
+          case "attachment_put": {
+            // No session needed: the bytes go into the device's cache, and a
+            // later `send` names them by hash.
+            const result = uploads.put(command);
+            if (!result.ok) {
+              error(state, bound, result.code, result.message, commandId);
+              return;
+            }
+            reply(
+              state,
+              bound,
+              {
+                type: "attachment.status",
+                sha256: result.sha256,
+                stored: result.stored,
+                received: result.received,
+              },
+              commandId,
+            );
+            return;
+          }
           case "attachment_get": {
             const session = bound;
             if (session === null) {
@@ -1100,6 +1125,8 @@ export const createAgentDispatcher = (
           if (bound !== null) reconcileFocus(bound);
         },
         detach: () => {
+          // Every way out drops this consumer's unfinished uploads.
+          uploads.abort();
           if (state.gone) return;
           state.gone = true;
           if (bound !== null) {

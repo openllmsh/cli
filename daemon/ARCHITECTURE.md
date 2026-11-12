@@ -973,22 +973,35 @@ by the client. The engine runs with its normal permission model (approvals
 surfaced as events; skip-permissions is a per-session opt-in), not an extra
 sandbox layer. Attach via `--resume <id>` where the engine supports resume;
 spawn and attach both go through the same engine adapter. Attachments a `send`
-carries are either base64 (`data`) written to the session's own
-`~/.openllm/agent-attachments/<id>/` (0700, files 0600), or — **loopback only** —
-an absolute local `path` that is realpath'd to a readable regular file and
-referenced in place as `@"<realpath>"` (Claude Code's quoted @-mention; no
-copy). A per-session index (`agent-attachments/<id>.path-index.json`, beside the
-session dir so `attachment_get` cannot serve it) maps the turn's attachment
-meta name to that realpath so loopback `attachment_get` can still serve the
-bytes; mux/RTC never sees the index (`allowLocalPaths`). Path attachments are refused on mux/RTC
-(`local_path_forbidden`); the desktop app's `/local/agent` consumer sets
-`allowsLocalPaths`. Paths reach the page from the native file dialog
-(`pick_attachments`) or from a Rust drop queue claimed via
-`take_dropped_attachments` (the DOM drop event is payload-less). Residual risk
-is XSS in the desktop webview forging a path over loopback — the same class as
-`local_agent_auth`. Attachment dirs are never inside the host's
-`sessions/<id>/` registry dir (the host removes that on exit and refuses to
-start over an existing one); `delete_session` removes copied attachments and
+carries are one of two kinds, and both reach Claude as a plain absolute path in
+the prompt (no `@`), up to `AGENT_MAX_ATTACHMENT_BYTES` (64 MiB):
+
+- **`sha256`** — bytes a consumer uploaded first with `attachment_put` (1 MiB
+  chunks over the agent stream, each answered by `attachment.status`; an empty
+  first chunk asks whether the device already has the file, so nothing is sent
+  twice). They land once in `~/.openllm/agent-attachment-cache/<sha256>`
+  (`attachment-cache.ts`: verified hash, read-only, re-hashed on a later hit),
+  and a `send` hard-links that file into the session's own
+  `~/.openllm/agent-attachments/<id>/`. The link count is the reference count:
+  a sweep (after a session's attachments go, on orphan reap, after an upload)
+  removes cache files no session links any more once an hour old.
+  `attachment_get` serves them on any transport, like any session upload.
+- **`path`** — a file already on the device (this Mac's desktop app picks
+  them), realpath'd to a readable regular file and named in place (no copy),
+  on any transport: it is only a prompt mention, which the device's own
+  account can type anyway. A per-session index
+  (`agent-attachments/<id>.path-index.json`, beside the session dir) maps the
+  turn's attachment meta name to that realpath so **loopback** `attachment_get`
+  can serve the bytes; mux/RTC never reads it (`allowsLocalPaths`).
+
+Paths reach the page from the native file dialog (`pick_attachments`) or from
+a Rust drop queue claimed via `take_dropped_attachments` (the DOM drop event is
+payload-less). Claude Code drops a submitting Enter now and then when the Mac
+is busy, so after the paste the daemon re-presses Enter until Claude's
+`UserPromptSubmit` hook confirms the prompt (never for slash commands).
+Attachment dirs are never inside the host's `sessions/<id>/` registry dir (the
+host removes that on exit and refuses to start over an existing one);
+`delete_session` removes the session's attachments and
 the path index with the transcript. See the
 [agent sessions plan](../../docs/plan/2026-10-23-agent-sessions-replace-remote-pty.md).
 

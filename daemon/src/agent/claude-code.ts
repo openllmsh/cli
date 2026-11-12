@@ -63,7 +63,6 @@ import {
   AGENT_MAX_ATTACHMENT_BYTES,
   AGENT_MAX_ATTACHMENT_PATH_LENGTH,
   AGENT_MAX_LINE_BYTES,
-  AGENT_MAX_LOCAL_ATTACHMENT_BYTES,
   AGENT_MAX_QUEUED_PROMPTS,
   AGENT_MODEL_SWITCH_DECLINED_CODE,
   AGENT_MODEL_SWITCH_FAILED_CODE,
@@ -79,6 +78,7 @@ import { stateDir } from "../env";
 import { readClaudeSessionIdUnderPid } from "../local-sessions/claude";
 import { logError } from "../logger";
 import { defaultSessionHostClient } from "../session-host-proc";
+import { linkCachedAttachment, sweepAttachmentCache } from "./attachment-cache";
 import { createClaudeHistory } from "./claude-history";
 import {
   createSubagentFollower,
@@ -147,6 +147,8 @@ const REPLAY_OPEN_TURN_MESSAGE =
   "The session stopped before this turn finished.";
 /** Gap between the bracketed paste and the submitting CR. */
 const SUBMIT_DELAY_MS = 80;
+/** Retry a dropped Enter while waiting for Claude's submit hook. */
+const SUBMIT_RETRY_DELAYS_MS = [1_500, 3_000, 6_000] as const;
 /**
  * Events one transcript drain emits at most. Attach replays a terminal
  * session's WHOLE transcript; a long one is cut at a turn boundary so it fits
@@ -721,13 +723,9 @@ export type TResolvedLocalAttachmentPath =
     }
   | { readonly ok: false; readonly code: string; readonly message: string };
 
-/**
- * Claude Code's @-mention form for a local path. Always quoted — unquoted
- * mentions truncate at the first space (`@"…"`, see Claude's
- * `extractAtMentionedFiles` / bridge inbound attachments).
- */
+/** Reference a validated absolute path directly, including paths with spaces. */
 export const formatAgentAttachmentMention = (absolutePath: string): string =>
-  `@"${absolutePath}"`;
+  absolutePath;
 
 /**
  * Validate a loopback `path` attachment: absolute, within the path-length cap,
@@ -968,9 +966,9 @@ export const pathAttachmentIndexOf = (
 };
 
 /**
- * Materialise attachments for a turn. Base64 (`data`) entries are written under
- * the session attachments dir; `path` entries are validated and referenced in
- * place (no copy) — caller must already have refused them off loopback.
+ * Materialise attachments for a turn. Cached uploads (`sha256`) are hard-linked
+ * from the attachment cache into the session attachments dir; `path` entries
+ * are validated and referenced in place (no copy).
  * `sessionId` keys the path-attachment index for later `attachment_get`.
  */
 export const writeAgentAttachments = (
@@ -996,7 +994,7 @@ export const writeAgentAttachments = (
       }
       // A local path carries no bytes, so the wire cap doesn't apply; the
       // local cap matches what attachment_get can preview.
-      if (resolved.size > AGENT_MAX_LOCAL_ATTACHMENT_BYTES) {
+      if (resolved.size > AGENT_MAX_ATTACHMENT_BYTES) {
         throw new Error("invalid_path: attachment exceeds the size cap");
       }
       let name = sanitizeAttachmentName(attachment.name ?? resolved.name);
@@ -1018,24 +1016,25 @@ export const writeAgentAttachments = (
         },
       };
     }
-    const data = attachment.data;
-    if (data === undefined) {
+    const sha256 = attachment.sha256;
+    if (sha256 === undefined) {
       throw new Error(
-        "attachment_failed: attachment has neither data nor path",
+        "attachment_failed: attachment has neither sha256 nor path",
       );
     }
     let name = sanitizeAttachmentName(attachment.name);
     if (!name.includes(".")) name += extensionOf(attachment.media_type);
     const storedName = `${counter.value}-${name}`;
     const path = join(dir, storedName);
-    const bytes = Buffer.from(data, "base64");
-    writeFileSync(path, bytes, { mode: 0o600 });
+    // The consumer's upload, linked from the cache: no copy, and the link
+    // keeps the cached file for as long as this session has it.
+    const { size } = linkCachedAttachment(sha256, path);
     return {
       path,
       meta: {
         name: storedName,
         mime: attachment.media_type,
-        size: bytes.byteLength,
+        size,
       },
     };
   });
@@ -1055,6 +1054,8 @@ export const deleteAgentAttachments = (sessionId: string): void => {
   } catch {
     /* already gone */
   }
+  // Its links are gone: cached uploads no other session uses go too.
+  sweepAttachmentCache();
 };
 
 /**
@@ -1127,7 +1128,7 @@ export const resolveAgentAttachment = (
         };
       }
       try {
-        if (resolved.size > AGENT_MAX_LOCAL_ATTACHMENT_BYTES) {
+        if (resolved.size > AGENT_MAX_ATTACHMENT_BYTES) {
           return {
             ok: false,
             code: "attachment_too_large",
@@ -1324,7 +1325,8 @@ export const reapOrphanAgentAttachments = (
   try {
     entries = readdirSync(root);
   } catch {
-    return [];
+    // No session has an attachments dir yet; the cache is still swept below.
+    entries = [];
   }
   const deleted: string[] = [];
   const suffix = ".path-index.json";
@@ -1345,6 +1347,9 @@ export const reapOrphanAgentAttachments = (
       /* best-effort */
     }
   }
+  // The device's own cache only (a test passing its own root has none):
+  // uploads these sessions linked, and ones never sent, once unused.
+  if (options.attachmentsRoot === undefined) sweepAttachmentCache();
   return deleted;
 };
 
@@ -1480,6 +1485,7 @@ export type TClaudeTuiDeps = {
   readonly readyMaxMs?: number;
   readonly readySettleMs?: number;
   readonly submitDelayMs?: number;
+  readonly submitRetryDelaysMs?: readonly number[];
   readonly pollMs?: number;
   readonly stopGraceMs?: number;
   readonly stopSettleMs?: number;
@@ -1906,6 +1912,63 @@ export const createClaudeTuiSession = (
     link?.write(textEncoder.encode(text));
   };
 
+  const isSlashPrompt = (prompt: string): boolean =>
+    prompt.trimStart().startsWith("/");
+  const normalizePrompt = (text: string): string =>
+    text.replace(/\s+/g, " ").trim();
+  const submissions: { text: string; turnId: string; acknowledged: boolean }[] =
+    [];
+  let latestSubmission: (typeof submissions)[number] | null = null;
+  const submitPrompt = (
+    text: string,
+    turnId: string,
+    queuedSubmit: boolean,
+    /** From the typed prompt: a pasted attachment path also starts with "/". */
+    slashCommand: boolean,
+  ): void => {
+    // A later paste owns the input: an earlier retry must never submit it.
+    submissions.splice(
+      0,
+      submissions.length,
+      ...submissions.filter(
+        (item) => item.turnId === turnId && !item.acknowledged,
+      ),
+    );
+    writeText(`${PASTE_START}${text}${PASTE_END}`);
+    const submission = {
+      text: normalizePrompt(text),
+      turnId,
+      acknowledged: false,
+    };
+    const isSlashCommand = slashCommand;
+    latestSubmission = submission;
+    if (!isSlashCommand) submissions.push(submission);
+    const valid = (): boolean =>
+      !ended && parser.turnActive() && parser.turnField().turn_id === turnId;
+    const retry = (index: number): void => {
+      const delay = (deps.submitRetryDelaysMs ?? SUBMIT_RETRY_DELAYS_MS)[index];
+      if (delay === undefined) return;
+      const timer = setTimeout(() => {
+        if (
+          !valid() ||
+          latestSubmission !== submission ||
+          submission.acknowledged
+        )
+          return;
+        writeText("\r");
+        retry(index + 1);
+      }, delay);
+      timer.unref?.();
+    };
+    const first = (): void => {
+      if (!valid() || latestSubmission !== submission) return;
+      writeText(queuedSubmit ? QUEUE_SUBMIT : "\r");
+      if (!isSlashCommand && !submission.acknowledged) retry(0);
+    };
+    if (queuedSubmit) first();
+    else setTimeout(first, submitDelayMs);
+  };
+
   // Hooks from this session's Claude process (keyed by its host id).
   const hookKeys = new Set<string>([options.sessionId]);
   // The ONE screen read: Claude's folder-trust dialog. Input stays held (it is
@@ -2015,6 +2078,30 @@ export const createClaudeTuiSession = (
       maybeReady();
     }
     if (event === "SessionStart") return null;
+    if (event === "UserPromptSubmit") {
+      const prompt = normalizePrompt(str(payload.prompt) ?? "");
+      const candidates = submissions.filter(
+        (item) =>
+          !item.acknowledged && item.turnId === parser.turnField().turn_id,
+      );
+      const matches =
+        prompt === ""
+          ? []
+          : candidates.filter(
+              (item) =>
+                item.text.includes(prompt) || prompt.includes(item.text),
+            );
+      // Claude takes prompts in the order they were pasted: of several that
+      // match (the same text sent twice), the earliest is this one.
+      const match =
+        matches.length > 0
+          ? matches[0]
+          : candidates.length === 1
+            ? candidates[0]
+            : undefined;
+      if (match !== undefined) match.acknowledged = true;
+      return null;
+    }
     if (event === "PreToolUse") {
       // Claude's hook carries the same tool_use_id its transcript later uses.
       // The transcript's full call turns this into item.updated, not another
@@ -2257,8 +2344,7 @@ export const createClaudeTuiSession = (
       // An interrupt before readiness aborts this turn; never paste its prompt
       // once the TUI later becomes ready.
       if (ended || parser.turnField().turn_id !== turnId) return;
-      writeText(`${PASTE_START}${text}${PASTE_END}`);
-      setTimeout(() => writeText("\r"), submitDelayMs);
+      submitPrompt(text, turnId, false, isSlashPrompt(input.prompt));
       if (!localCommand) return;
       const settle = setTimeout(
         () => {
@@ -2396,8 +2482,14 @@ export const createClaudeTuiSession = (
             delivered.push(entry.id);
             continue;
           }
-          writeText(`${PASTE_START}${prepared.text}${PASTE_END}`);
-          writeText(QUEUE_SUBMIT);
+          const turnId = parser.turnField().turn_id;
+          if (turnId === undefined) return;
+          submitPrompt(
+            prepared.text,
+            turnId,
+            true,
+            isSlashPrompt(entry.input.prompt),
+          );
           delivered.push(entry.id);
         }
         if (delivered.length === 0) return;
