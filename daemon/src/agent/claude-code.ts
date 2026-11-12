@@ -774,7 +774,11 @@ export const resolveLocalAttachmentPath = (
       };
     }
     const real = realpathSync(requested);
-    if (real.length > AGENT_MAX_ATTACHMENT_PATH_LENGTH) {
+    if (
+      real.length > AGENT_MAX_ATTACHMENT_PATH_LENGTH ||
+      pathHasControlChars(real) ||
+      real.includes('"')
+    ) {
       return {
         ok: false,
         code: "invalid_path",
@@ -807,22 +811,36 @@ export const resolveLocalAttachmentPath = (
   }
 };
 
-/** Continue attachment names after files retained by a resumed session. */
-const attachmentCounterOf = (dir: string): { value: number } => {
-  let names: string[];
-  try {
-    names = readdirSync(dir);
-  } catch {
-    return { value: 0 };
-  }
+/** Highest `<n>-` prefix among a list of attachment basenames. */
+const maxAttachmentPrefix = (names: Iterable<string>): number => {
   let value = 0;
   for (const name of names) {
+    if (name === PATH_INDEX_FILENAME) continue;
     const match = /^(\d+)-/.exec(name);
     if (match?.[1] === undefined) continue;
     const prefix = Number(match[1]);
     if (Number.isSafeInteger(prefix) && prefix > value) value = prefix;
   }
-  return { value };
+  return value;
+};
+
+/**
+ * Continue attachment names after files retained by a resumed session, and
+ * after path-only index entries (which leave no file in the attachments dir).
+ */
+const attachmentCounterOf = (
+  dir: string,
+  sessionId: string,
+): { value: number } => {
+  let names: string[] = [];
+  try {
+    names = readdirSync(dir);
+  } catch {
+    names = [];
+  }
+  const fromDir = maxAttachmentPrefix(names);
+  const fromIndex = maxAttachmentPrefix(pathAttachmentIndexOf(sessionId).keys());
+  return { value: Math.max(fromDir, fromIndex) };
 };
 
 type TPathAttachmentIndexEntry = {
@@ -834,12 +852,66 @@ type TPathAttachmentIndexEntry = {
 /**
  * Per-session index of path-attachment meta names → realpath. Path attachments
  * are never copied into the attachments dir; `attachment_get` serves them from
- * here (loopback only). Cleared with {@link deleteAgentAttachments}.
+ * here (loopback only). Mirrored to `path-index.json` under the session's
+ * attachments dir so a daemon restart can still resolve replayed chips.
+ * Cleared with {@link deleteAgentAttachments}.
  */
 const pathAttachmentIndex = new Map<
   string,
   Map<string, TPathAttachmentIndexEntry>
 >();
+
+const PATH_INDEX_FILENAME = "path-index.json";
+
+const pathIndexFileOf = (sessionId: string): string =>
+  join(agentAttachmentsDir(sessionId), PATH_INDEX_FILENAME);
+
+const loadPathIndexFromDisk = (
+  sessionId: string,
+): Map<string, TPathAttachmentIndexEntry> => {
+  const loaded = new Map<string, TPathAttachmentIndexEntry>();
+  try {
+    const raw = readFileSync(pathIndexFileOf(sessionId), "utf8");
+    const parsed: unknown = JSON.parse(raw);
+    if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+      return loaded;
+    }
+    for (const [name, entry] of Object.entries(
+      parsed as Record<string, unknown>,
+    )) {
+      if (!isSafeAttachmentBasename(name)) continue;
+      if (entry === null || typeof entry !== "object" || Array.isArray(entry)) {
+        continue;
+      }
+      const record = entry as Record<string, unknown>;
+      const path = typeof record.path === "string" ? record.path : null;
+      const mime = typeof record.mime === "string" ? record.mime : null;
+      const size =
+        typeof record.size === "number" &&
+        Number.isFinite(record.size) &&
+        record.size >= 0
+          ? Math.floor(record.size)
+          : null;
+      if (path === null || mime === null || size === null) continue;
+      loaded.set(name, { path, mime, size });
+    }
+  } catch {
+    /* missing or unreadable */
+  }
+  return loaded;
+};
+
+const persistPathIndex = (sessionId: string): void => {
+  const byName = pathAttachmentIndex.get(sessionId);
+  if (byName === undefined || byName.size === 0) return;
+  const dir = agentAttachmentsDir(sessionId);
+  mkdirSync(dir, { recursive: true, mode: 0o700 });
+  writeFileSync(
+    pathIndexFileOf(sessionId),
+    `${JSON.stringify(Object.fromEntries(byName))}\n`,
+    { mode: 0o600 },
+  );
+};
 
 const rememberPathAttachment = (
   sessionId: string,
@@ -848,17 +920,23 @@ const rememberPathAttachment = (
 ): void => {
   let byName = pathAttachmentIndex.get(sessionId);
   if (byName === undefined) {
-    byName = new Map();
+    byName = loadPathIndexFromDisk(sessionId);
     pathAttachmentIndex.set(sessionId, byName);
   }
   byName.set(storedName, entry);
+  persistPathIndex(sessionId);
 };
 
-/** Test helper: peek the path-attachment index for a session. */
+/** Path-attachment index for a session (memory, else disk). */
 export const pathAttachmentIndexOf = (
   sessionId: string,
-): ReadonlyMap<string, TPathAttachmentIndexEntry> | undefined =>
-  pathAttachmentIndex.get(sessionId);
+): ReadonlyMap<string, TPathAttachmentIndexEntry> => {
+  const cached = pathAttachmentIndex.get(sessionId);
+  if (cached !== undefined) return cached;
+  const loaded = loadPathIndexFromDisk(sessionId);
+  if (loaded.size > 0) pathAttachmentIndex.set(sessionId, loaded);
+  return loaded;
+};
 
 /**
  * Materialise attachments for a turn. Base64 (`data`) entries are written under
@@ -997,7 +1075,7 @@ export const resolveAgentAttachment = (
     };
   }
   if (options.allowLocalPaths === true) {
-    const indexed = pathAttachmentIndex.get(sessionId)?.get(name);
+    const indexed = pathAttachmentIndexOf(sessionId).get(name);
     if (indexed !== undefined) {
       const resolved = resolveLocalAttachmentPath(indexed.path);
       if (!resolved.ok) {
@@ -1362,7 +1440,10 @@ export const createClaudeTuiSession = (
   const attachmentsDir = (deps.attachmentsDir ?? agentAttachmentsDir)(
     options.sessionId,
   );
-  const attachmentCounter = attachmentCounterOf(attachmentsDir);
+  const attachmentCounter = attachmentCounterOf(
+    attachmentsDir,
+    options.sessionId,
+  );
   let link: TPtyLink | null = null;
   /** Latest observer presence while the PTY link is still opening. */
   let focused: boolean | null = null;
