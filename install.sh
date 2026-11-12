@@ -991,25 +991,12 @@ release_update_lease() {
 }
 
 # --- fetch + verify + install one component -------------------------------
-# Bytes come from the per-component binary routes, which 302 to the pinned
-# GitHub release asset and serve the committed digest as a `.sha256` sibling —
-# the same pair the daemon's own self-update verifies against.
+# The asset URL and digest come from the `/api/install` manifest (the same
+# read that named the version), never from a second pin lookup.
 install_component() {
-  local name="$1" route="$2" version="$3"
+  local name="$1" url="$2" published="$3" version="$4"
   local dest="$BIN_DIR/$name"
-  local url="$ORIGIN/$route/$TARGET"
-  local published installed stamp="$BIN_DIR/.$name.sha256.stamp"
-
-  # Bypass intermediary caches: `/api/cli/version` is no-store but a cached
-  # `.sha256` used to false-positive the digest short-circuit below.
-  published="$(curl -fsSL -H 'Cache-Control: no-cache' -H 'Pragma: no-cache' \
-    "$url.sha256" 2>/dev/null | cut -d' ' -f1 || true)"
-  case "$published" in
-    [0-9a-f]*)
-      [[ "$published" =~ ^[0-9a-f]{64}$ ]] || die "malformed checksum for $name"
-      ;;
-    *) die "no published checksum for $name ($TARGET) — nothing to install" ;;
-  esac
+  local installed stamp="$BIN_DIR/.$name.sha256.stamp"
 
   # Skip a tens-of-MB download when what's installed already matches.
   # Developer-ID-signed + notarized binaries keep their published digest on
@@ -1048,17 +1035,6 @@ install_component() {
       else
         echo "  $name on disk has no usable --version; pinned release is v$version — downloading"
       fi
-      # Re-fetch the digest: a stale cached `.sha256` may have matched the
-      # on-disk bytes above; the bytes we are about to download must verify
-      # against the live pin.
-      published="$(curl -fsSL -H 'Cache-Control: no-cache' -H 'Pragma: no-cache' \
-        "$url.sha256" 2>/dev/null | cut -d' ' -f1 || true)"
-      case "$published" in
-        [0-9a-f]*)
-          [[ "$published" =~ ^[0-9a-f]{64}$ ]] || die "malformed checksum for $name"
-          ;;
-        *) die "no published checksum for $name ($TARGET) — nothing to install" ;;
-      esac
     fi
   fi
 
@@ -1131,7 +1107,18 @@ install_component() {
   release_update_lease
 }
 
-install_component openllm api/cli/binary "$CLI_VERSION"
+# Version, asset and digest all come from the ONE `/api/install` response read
+# above. Resolving the bytes through a second request let a deploy rollout
+# answer the two with different pins ("pin vN, bytes vN+1"). The asset URL names
+# an immutable release tag, so the bytes cannot drift after this read.
+CLI_URL="$(json_field "cli_url_$TARGET")"
+CLI_SHA256="$(json_field "cli_sha256_$TARGET")"
+[ -n "$CLI_URL" ] && [ -n "$CLI_SHA256" ] \
+  || die "$ORIGIN/api/install names no openllm binary for $TARGET — a release may be rolling out; try again in a minute"
+[[ "$CLI_SHA256" =~ ^[0-9a-f]{64}$ ]] || die "malformed checksum for openllm"
+[ "$CLI_URL" = "https://github.com/openllmsh/cli/releases/download/v$CLI_VERSION/openllm-$TARGET.gz" ] \
+  || die "unexpected openllm asset URL in $ORIGIN/api/install: $CLI_URL"
+install_component openllm "$CLI_URL" "$CLI_SHA256" "$CLI_VERSION"
 # The pre-merge daemon name stays as a symlink: existing launchd/systemd units
 # and scripts that exec `openllmd` keep working — the binary routes an
 # `openllmd`-named invocation to its daemon half.

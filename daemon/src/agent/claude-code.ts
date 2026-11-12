@@ -32,13 +32,20 @@
  *     its native dialog in the terminal. A timeout never allows.
  */
 import {
+  closeSync,
   existsSync,
+  constants as fsConstants,
+  fstatSync,
   lstatSync,
   mkdirSync,
+  openSync,
   readdirSync,
   readFileSync,
+  readSync,
   realpathSync,
+  renameSync,
   rmSync,
+  statSync,
   writeFileSync,
 } from "node:fs";
 import { basename, isAbsolute, join, resolve, sep } from "node:path";
@@ -54,12 +61,16 @@ import {
   AGENT_DETAIL_TEXT_MAX_LENGTH,
   AGENT_MAX_ATTACHMENT_BASE64_LENGTH,
   AGENT_MAX_ATTACHMENT_BYTES,
+  AGENT_MAX_ATTACHMENT_PATH_LENGTH,
   AGENT_MAX_LINE_BYTES,
+  AGENT_MAX_LOCAL_ATTACHMENT_BYTES,
   AGENT_MAX_QUEUED_PROMPTS,
   AGENT_MODEL_SWITCH_DECLINED_CODE,
   AGENT_MODEL_SWITCH_FAILED_CODE,
   AGENT_SHORT_TEXT_MAX_LENGTH,
   AGENT_SWITCH_MODEL_PATTERN,
+  agentAttachmentHasPath,
+  isAgentAttachmentMentionPath,
   MEDIA_TYPES,
   MIME_BY_MEDIA_EXT,
   SESSION_ID_PATTERN,
@@ -701,14 +712,121 @@ export type TWrittenAgentAttachment = {
   readonly meta: TAgentAttachmentMeta;
 };
 
-/** Continue attachment names after files retained by a resumed session. */
-const attachmentCounterOf = (dir: string): { value: number } => {
-  let names: string[];
-  try {
-    names = readdirSync(dir);
-  } catch {
-    return { value: 0 };
+export type TResolvedLocalAttachmentPath =
+  | {
+      readonly ok: true;
+      readonly path: string;
+      readonly size: number;
+      readonly name: string;
+    }
+  | { readonly ok: false; readonly code: string; readonly message: string };
+
+/**
+ * Claude Code's @-mention form for a local path. Always quoted — unquoted
+ * mentions truncate at the first space (`@"…"`, see Claude's
+ * `extractAtMentionedFiles` / bridge inbound attachments).
+ */
+export const formatAgentAttachmentMention = (absolutePath: string): string =>
+  `@"${absolutePath}"`;
+
+/**
+ * Validate a loopback `path` attachment: absolute, within the path-length cap,
+ * realpath'd to an existing readable regular file (symlinks resolved; the
+ * target must still be a regular file). No copy — the engine `@`-references
+ * the real path directly.
+ */
+export const resolveLocalAttachmentPath = (
+  requested: string,
+): TResolvedLocalAttachmentPath => {
+  if (
+    requested.length === 0 ||
+    requested.length > AGENT_MAX_ATTACHMENT_PATH_LENGTH
+  ) {
+    return {
+      ok: false,
+      code: "invalid_path",
+      message: "attachment path is empty or too long",
+    };
   }
+  if (!isAbsolute(requested) || !isAgentAttachmentMentionPath(requested)) {
+    return {
+      ok: false,
+      code: "invalid_path",
+      message: "attachment path must be an absolute file path",
+    };
+  }
+  try {
+    // lstat first so a dangling symlink is refused before realpath follows it.
+    const link = lstatSync(requested);
+    if (link.isSymbolicLink()) {
+      // Symlinks are fine when they resolve to a regular file — realpath below.
+    } else if (!link.isFile()) {
+      return {
+        ok: false,
+        code: "invalid_path",
+        message: "attachment path is not a regular file",
+      };
+    }
+    const real = realpathSync(requested);
+    if (!isAgentAttachmentMentionPath(real)) {
+      return {
+        ok: false,
+        code: "invalid_path",
+        message: "attachment path is empty or too long",
+      };
+    }
+    const stat = statSync(real);
+    if (!stat.isFile()) {
+      return {
+        ok: false,
+        code: "invalid_path",
+        message: "attachment path is not a regular file",
+      };
+    }
+    // Prove readability without retaining the handle.
+    const fd = openRegularFile(real);
+    if (fd === null) {
+      return {
+        ok: false,
+        code: "invalid_path",
+        message: "attachment path is not a regular file",
+      };
+    }
+    closeSync(fd);
+    return {
+      ok: true,
+      path: real,
+      size: stat.size,
+      name: basename(real),
+    };
+  } catch {
+    return {
+      ok: false,
+      code: "invalid_path",
+      message: "attachment path could not be read",
+    };
+  }
+};
+
+/**
+ * Open `path` for reading without blocking and confirm, on the opened
+ * descriptor, that it is a regular file. A pathname check followed by a plain
+ * open races a swap to a FIFO, whose blocking open would stall the daemon.
+ * Returns null (descriptor closed) when it is not a regular file.
+ */
+const openRegularFile = (path: string): number | null => {
+  const fd = openSync(path, fsConstants.O_RDONLY | fsConstants.O_NONBLOCK);
+  try {
+    if (fstatSync(fd).isFile()) return fd;
+  } catch {
+    /* fall through to close */
+  }
+  closeSync(fd);
+  return null;
+};
+
+/** Highest `<n>-` prefix among a list of attachment basenames. */
+const maxAttachmentPrefix = (names: Iterable<string>): number => {
   let value = 0;
   for (const name of names) {
     const match = /^(\d+)-/.exec(name);
@@ -716,24 +834,201 @@ const attachmentCounterOf = (dir: string): { value: number } => {
     const prefix = Number(match[1]);
     if (Number.isSafeInteger(prefix) && prefix > value) value = prefix;
   }
-  return { value };
+  return value;
 };
 
-/** Write attachments; return their absolute paths + metadata for turn events. */
+/**
+ * Continue attachment names after files retained by a resumed session, and
+ * after path-only index entries (which leave no file in the attachments dir).
+ */
+const attachmentCounterOf = (
+  dir: string,
+  sessionId: string,
+): { value: number } => {
+  let names: string[] = [];
+  try {
+    names = readdirSync(dir);
+  } catch {
+    names = [];
+  }
+  const fromDir = maxAttachmentPrefix(names);
+  const fromIndex = maxAttachmentPrefix(
+    pathAttachmentIndexOf(sessionId).keys(),
+  );
+  return { value: Math.max(fromDir, fromIndex) };
+};
+
+type TPathAttachmentIndexEntry = {
+  readonly path: string;
+  readonly mime: string;
+  readonly size: number;
+};
+
+/**
+ * Per-session index of path-attachment meta names → realpath. Path attachments
+ * are never copied into the attachments dir; `attachment_get` serves them from
+ * here (loopback only). Mirrored beside the session's attachments directory
+ * so a daemon restart can still resolve replayed chips.
+ * Cleared with {@link deleteAgentAttachments}.
+ */
+const pathAttachmentIndex = new Map<
+  string,
+  Map<string, TPathAttachmentIndexEntry>
+>();
+
+/**
+ * Durable path index lives BESIDE the session attachments dir (not inside
+ * it), so `attachment_get`'s ordinary file branch can never serve it to a
+ * remote consumer.
+ */
+const pathIndexFileOf = (sessionId: string): string =>
+  join(agentAttachmentsRoot(), `${sessionId}.path-index.json`);
+
+const loadPathIndexFromDisk = (
+  sessionId: string,
+): Map<string, TPathAttachmentIndexEntry> => {
+  const loaded = new Map<string, TPathAttachmentIndexEntry>();
+  try {
+    const raw = readFileSync(pathIndexFileOf(sessionId), "utf8");
+    const parsed: unknown = JSON.parse(raw);
+    if (
+      parsed === null ||
+      typeof parsed !== "object" ||
+      Array.isArray(parsed)
+    ) {
+      return loaded;
+    }
+    for (const [name, entry] of Object.entries(
+      parsed as Record<string, unknown>,
+    )) {
+      if (!isSafeAttachmentBasename(name)) continue;
+      if (entry === null || typeof entry !== "object" || Array.isArray(entry)) {
+        continue;
+      }
+      const record = entry as Record<string, unknown>;
+      const path = typeof record.path === "string" ? record.path : null;
+      const mime = typeof record.mime === "string" ? record.mime : null;
+      const size =
+        typeof record.size === "number" &&
+        Number.isFinite(record.size) &&
+        record.size >= 0
+          ? Math.floor(record.size)
+          : null;
+      if (path === null || mime === null || size === null) continue;
+      loaded.set(name, { path, mime, size });
+    }
+  } catch {
+    /* missing or unreadable */
+  }
+  return loaded;
+};
+
+const persistPathIndex = (sessionId: string): void => {
+  const byName = pathAttachmentIndex.get(sessionId);
+  if (byName === undefined || byName.size === 0) return;
+  mkdirSync(agentAttachmentsRoot(), { recursive: true, mode: 0o700 });
+  // Write a temp file and rename it over the index, so a failed or
+  // interrupted write never leaves a truncated index behind.
+  const target = pathIndexFileOf(sessionId);
+  const temp = `${target}.${process.pid}.tmp`;
+  try {
+    writeFileSync(temp, `${JSON.stringify(Object.fromEntries(byName))}\n`, {
+      mode: 0o600,
+    });
+    renameSync(temp, target);
+  } catch (error) {
+    rmSync(temp, { force: true });
+    throw error;
+  }
+};
+
+const rememberPathAttachment = (
+  sessionId: string,
+  storedName: string,
+  entry: TPathAttachmentIndexEntry,
+): void => {
+  let byName = pathAttachmentIndex.get(sessionId);
+  if (byName === undefined) {
+    byName = loadPathIndexFromDisk(sessionId);
+    pathAttachmentIndex.set(sessionId, byName);
+  }
+  byName.set(storedName, entry);
+  persistPathIndex(sessionId);
+};
+
+/** Path-attachment index for a session (memory, else disk). */
+export const pathAttachmentIndexOf = (
+  sessionId: string,
+): ReadonlyMap<string, TPathAttachmentIndexEntry> => {
+  const cached = pathAttachmentIndex.get(sessionId);
+  if (cached !== undefined) return cached;
+  const loaded = loadPathIndexFromDisk(sessionId);
+  if (loaded.size > 0) pathAttachmentIndex.set(sessionId, loaded);
+  return loaded;
+};
+
+/**
+ * Materialise attachments for a turn. Base64 (`data`) entries are written under
+ * the session attachments dir; `path` entries are validated and referenced in
+ * place (no copy) — caller must already have refused them off loopback.
+ * `sessionId` keys the path-attachment index for later `attachment_get`.
+ */
 export const writeAgentAttachments = (
   dir: string,
   attachments: TAgentSendInput["attachments"],
   counter: { value: number },
+  sessionId?: string,
 ): TWrittenAgentAttachment[] => {
   if (attachments.length === 0) return [];
-  mkdirSync(dir, { recursive: true, mode: 0o700 });
+  const needsDir = attachments.some(
+    (attachment) => !agentAttachmentHasPath(attachment),
+  );
+  if (needsDir) mkdirSync(dir, { recursive: true, mode: 0o700 });
+  const indexedSessionId =
+    sessionId ??
+    (SESSION_ID_PATTERN.test(basename(dir)) ? basename(dir) : undefined);
   return attachments.map((attachment) => {
     counter.value += 1;
+    if (agentAttachmentHasPath(attachment)) {
+      const resolved = resolveLocalAttachmentPath(attachment.path);
+      if (!resolved.ok) {
+        throw new Error(`${resolved.code}: ${resolved.message}`);
+      }
+      // A local path carries no bytes, so the wire cap doesn't apply; the
+      // local cap matches what attachment_get can preview.
+      if (resolved.size > AGENT_MAX_LOCAL_ATTACHMENT_BYTES) {
+        throw new Error("invalid_path: attachment exceeds the size cap");
+      }
+      let name = sanitizeAttachmentName(attachment.name ?? resolved.name);
+      if (!name.includes(".")) name += extensionOf(attachment.media_type);
+      const storedName = `${counter.value}-${name}`;
+      if (indexedSessionId !== undefined) {
+        rememberPathAttachment(indexedSessionId, storedName, {
+          path: resolved.path,
+          mime: attachment.media_type,
+          size: resolved.size,
+        });
+      }
+      return {
+        path: resolved.path,
+        meta: {
+          name: storedName,
+          mime: attachment.media_type,
+          size: resolved.size,
+        },
+      };
+    }
+    const data = attachment.data;
+    if (data === undefined) {
+      throw new Error(
+        "attachment_failed: attachment has neither data nor path",
+      );
+    }
     let name = sanitizeAttachmentName(attachment.name);
     if (!name.includes(".")) name += extensionOf(attachment.media_type);
     const storedName = `${counter.value}-${name}`;
     const path = join(dir, storedName);
-    const bytes = Buffer.from(attachment.data, "base64");
+    const bytes = Buffer.from(data, "base64");
     writeFileSync(path, bytes, { mode: 0o600 });
     return {
       path,
@@ -749,6 +1044,12 @@ export const writeAgentAttachments = (
 /** Delete one session's attachments dir (history delete / kill path). */
 export const deleteAgentAttachments = (sessionId: string): void => {
   if (!SESSION_ID_PATTERN.test(sessionId)) return;
+  pathAttachmentIndex.delete(sessionId);
+  try {
+    rmSync(pathIndexFileOf(sessionId), { force: true });
+  } catch {
+    /* already gone */
+  }
   try {
     rmSync(agentAttachmentsDir(sessionId), { recursive: true, force: true });
   } catch {
@@ -797,7 +1098,15 @@ const mimeOfStoredName = (name: string): string => {
 export const resolveAgentAttachment = (
   sessionId: string,
   name: string,
-  options: { readonly attachmentsDir?: string } = {},
+  options: {
+    readonly attachmentsDir?: string;
+    /**
+     * Serve path-attachment index entries (loopback only). Without this, a
+     * remote consumer cannot read files that were never copied into the
+     * attachments dir — even if it somehow learns the meta name.
+     */
+    readonly allowLocalPaths?: boolean;
+  } = {},
 ): TResolvedAgentAttachment => {
   if (!isSafeAttachmentBasename(name)) {
     return {
@@ -805,6 +1114,66 @@ export const resolveAgentAttachment = (
       code: "attachment_forbidden",
       message: "attachment name is not allowed",
     };
+  }
+  if (options.allowLocalPaths === true) {
+    const indexed = pathAttachmentIndexOf(sessionId).get(name);
+    if (indexed !== undefined) {
+      const resolved = resolveLocalAttachmentPath(indexed.path);
+      if (!resolved.ok) {
+        return {
+          ok: false,
+          code: "attachment_not_found",
+          message: "attachment not found",
+        };
+      }
+      try {
+        if (resolved.size > AGENT_MAX_LOCAL_ATTACHMENT_BYTES) {
+          return {
+            ok: false,
+            code: "attachment_too_large",
+            message: "attachment exceeds the size cap",
+          };
+        }
+        // Cap the read so a file that grows after the size check cannot
+        // allocate unbounded memory into the daemon.
+        const fd = openRegularFile(resolved.path);
+        if (fd === null) {
+          return {
+            ok: false,
+            code: "attachment_not_found",
+            message: "attachment not found",
+          };
+        }
+        try {
+          // Sized to the file (+1 to catch growth since the stat).
+          const buffer = Buffer.alloc(resolved.size + 1);
+          const read = readSync(fd, buffer, 0, buffer.length, 0);
+          if (read > resolved.size) {
+            return {
+              ok: false,
+              code: "attachment_too_large",
+              message: "attachment exceeds the size cap",
+            };
+          }
+          const bytes = buffer.subarray(0, read);
+          return {
+            ok: true,
+            path: resolved.path,
+            mime: indexed.mime,
+            size: bytes.byteLength,
+            bytes,
+          };
+        } finally {
+          closeSync(fd);
+        }
+      } catch {
+        return {
+          ok: false,
+          code: "attachment_not_found",
+          message: "attachment not found",
+        };
+      }
+    }
   }
   const dir = options.attachmentsDir ?? agentAttachmentsDir(sessionId);
   let dirReal: string;
@@ -958,13 +1327,19 @@ export const reapOrphanAgentAttachments = (
     return [];
   }
   const deleted: string[] = [];
-  for (const sessionId of entries) {
+  const suffix = ".path-index.json";
+  const sessionIds = new Set(
+    entries.map((entry) =>
+      entry.endsWith(suffix) ? entry.slice(0, -suffix.length) : entry,
+    ),
+  );
+  for (const sessionId of sessionIds) {
     if (live.has(sessionId) || !SESSION_ID_PATTERN.test(sessionId)) continue;
-    const attachments = join(root, sessionId);
-    if (!existsSync(attachments)) continue;
     if (transcriptExists(sessionId)) continue;
     try {
-      rmSync(attachments, { recursive: true, force: true });
+      rmSync(join(root, sessionId), { recursive: true, force: true });
+      rmSync(join(root, `${sessionId}${suffix}`), { force: true });
+      pathAttachmentIndex.delete(sessionId);
       deleted.push(sessionId);
     } catch {
       /* best-effort */
@@ -1129,7 +1504,10 @@ export const createClaudeTuiSession = (
   const attachmentsDir = (deps.attachmentsDir ?? agentAttachmentsDir)(
     options.sessionId,
   );
-  const attachmentCounter = attachmentCounterOf(attachmentsDir);
+  const attachmentCounter = attachmentCounterOf(
+    attachmentsDir,
+    options.sessionId,
+  );
   let link: TPtyLink | null = null;
   /** Latest observer presence while the PTY link is still opening. */
   let focused: boolean | null = null;
@@ -1835,17 +2213,28 @@ export const createClaudeTuiSession = (
         attachmentsDir,
         input.attachments,
         attachmentCounter,
+        options.sessionId,
       );
     } catch (err) {
       logError("agent", err);
+      const detail =
+        err instanceof Error && err.message.startsWith("invalid_path:")
+          ? err.message.slice("invalid_path: ".length)
+          : "an attachment could not be prepared on this device";
       return {
         ok: false,
-        code: "attachment_failed",
-        message: "an attachment could not be saved on this device",
+        code:
+          err instanceof Error && err.message.startsWith("invalid_path:")
+            ? "invalid_path"
+            : "attachment_failed",
+        message: detail,
       };
     }
     const text = pasteSafeText(
-      [input.prompt, ...written.map((entry) => `@${entry.path}`)]
+      [
+        input.prompt,
+        ...written.map((entry) => formatAgentAttachmentMention(entry.path)),
+      ]
         .filter((part) => part.trim() !== "")
         .join(input.prompt.includes("\n") ? "\n" : " "),
     );

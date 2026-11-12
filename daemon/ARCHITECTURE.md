@@ -973,10 +973,23 @@ by the client. The engine runs with its normal permission model (approvals
 surfaced as events; skip-permissions is a per-session opt-in), not an extra
 sandbox layer. Attach via `--resume <id>` where the engine supports resume;
 spawn and attach both go through the same engine adapter. Attachments a `send`
-carries are written to the session's own `~/.openllm/agent-attachments/<id>/`
-(0700, files 0600), never inside the host's `sessions/<id>/` registry dir (the
-host removes that on exit and refuses to start over an existing one);
-`delete_session` removes them with the transcript. See the
+carries are either base64 (`data`) written to the session's own
+`~/.openllm/agent-attachments/<id>/` (0700, files 0600), or — **loopback only** —
+an absolute local `path` that is realpath'd to a readable regular file and
+referenced in place as `@"<realpath>"` (Claude Code's quoted @-mention; no
+copy). A per-session index (`agent-attachments/<id>.path-index.json`, beside the
+session dir so `attachment_get` cannot serve it) maps the turn's attachment
+meta name to that realpath so loopback `attachment_get` can still serve the
+bytes; mux/RTC never sees the index (`allowLocalPaths`). Path attachments are refused on mux/RTC
+(`local_path_forbidden`); the desktop app's `/local/agent` consumer sets
+`allowsLocalPaths`. Paths reach the page from the native file dialog
+(`pick_attachments`) or from a Rust drop queue claimed via
+`take_dropped_attachments` (the DOM drop event is payload-less). Residual risk
+is XSS in the desktop webview forging a path over loopback — the same class as
+`local_agent_auth`. Attachment dirs are never inside the host's
+`sessions/<id>/` registry dir (the host removes that on exit and refuses to
+start over an existing one); `delete_session` removes copied attachments and
+the path index with the transcript. See the
 [agent sessions plan](../../docs/plan/2026-10-23-agent-sessions-replace-remote-pty.md).
 
 ## Localhost surfaces and provider auth
@@ -1254,6 +1267,20 @@ permits usage to call the existing native `readToken()` path and bypasses the
 usage-cache TTL without discarding last-good figures. Automatic refresh and old
 payloads omit the flag and remain non-renewing. Automatic catalog observation
 uses `discoverModels` instead and must not call `readToken()`.
+
+**A request heals an expired-token usage state (`healUsage`).** `credential_expired`
+(bare, or as `refresh_failure` over cached figures) is the normal idle state, so
+the dashboard shows it as a neutral "Usage updates on next use", never an error.
+The quota-gate revalidate stays stored-only. When such unverified figures would
+make the gate SKIP a hop, the walker first awaits `healUsageForActiveAccount`
+(renew under `withUsageNativeRefresh` scoped to the account hash + re-read, at
+most 10 s; it finishes detached past that); if the figures are still unverified
+it dials anyway rather than skipping on them. Multi-account ranking likewise
+treats them as unknown (`unverifiedAsUnknown`). After any successful subscription dispatch
+the token is live, so the walker fires a plain stored-token `healUsage` that
+clears the state at once. `healUsage` bypasses the success back-off, keeps the
+20 s failure retry, and shares an in-flight read; it never runs off the request
+path.
 
 **Claude / Cursor idle observations are reused while store identity is stable
 (`delegation/observation-cache.ts`).** Reuse is keyed by path + inode + mtime +

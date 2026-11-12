@@ -193,6 +193,9 @@ export const createLocalAgentWebSocket = (
     }
     let ended = false;
     socket.data.connection = active.connect({
+      // Desktop loopback only: path attachments reference files already on
+      // this Mac. Mux/RTC consumers never set this (see TAgentConsumer).
+      allowsLocalPaths: true,
       send: async (event: TAgentEvent) => {
         if (ended) return false;
         // Same size bound as a mux line; the socket carries one value per

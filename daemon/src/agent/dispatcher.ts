@@ -23,6 +23,7 @@ import type {
 import {
   AGENT_SESSION_ID_PATTERN,
   AGENT_SWITCH_MODEL_PATTERN,
+  agentAttachmentHasPath,
   encodeAgentLine,
   parseAgentEvent,
   SESSION_ID_PATTERN,
@@ -695,11 +696,27 @@ export const createAgentDispatcher = (
               );
               return;
             }
+            const attachments = command.attachments ?? [];
+            // Path attachments open arbitrary files on this Mac. Admit them
+            // only on the desktop loopback socket — never over mux/RTC.
+            if (
+              attachments.some(agentAttachmentHasPath) &&
+              state.consumer.allowsLocalPaths !== true
+            ) {
+              error(
+                state,
+                session,
+                "local_path_forbidden",
+                "Local file paths are only accepted on this Mac's loopback agent socket.",
+                commandId,
+              );
+              return;
+            }
             const engineSession = session.engineSession;
             const result = withCommand(session, commandId, () =>
               engineSession.send({
                 prompt: command.prompt,
-                attachments: command.attachments ?? [],
+                attachments,
               }),
             );
             if (!result.ok)
@@ -1026,7 +1043,9 @@ export const createAgentDispatcher = (
               );
               return;
             }
-            const resolved = resolveAgentAttachment(session.id, command.name);
+            const resolved = resolveAgentAttachment(session.id, command.name, {
+              allowLocalPaths: state.consumer.allowsLocalPaths === true,
+            });
             if (!resolved.ok) {
               error(state, session, resolved.code, resolved.message, commandId);
               return;

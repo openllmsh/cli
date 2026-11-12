@@ -280,7 +280,28 @@ export type TUsageCache = {
     accountHash?: string,
   ) => boolean;
   readonly usageReadDue: (slug: string, accountHash?: string) => boolean;
+  readonly healUsage: (
+    slug: string,
+    fetcher: () => Promise<TProviderUsageSnapshot>,
+    accountHash?: string,
+  ) => Promise<TProviderUsageSnapshot | null> | null;
 };
+
+/**
+ * True when the only thing wrong with a snapshot is that the stored access
+ * token had expired at the last read — not a quota verdict, not a vendor
+ * rejection. Usage reads never renew tokens, so such a state persists until
+ * something with demand renews the token; {@link healUsage} is how a request
+ * clears it.
+ */
+export const usageCredentialStale = (
+  snapshot: TProviderUsageSnapshot | null,
+): boolean =>
+  snapshot !== null &&
+  ((snapshot.kind === "unavailable" &&
+    snapshot.reason === "credential_expired") ||
+    (snapshot.kind === "quota" &&
+      snapshot.refresh_failure?.reason === "credential_expired"));
 
 /**
  * Build one usage cache instance. Production creates a SINGLE instance at
@@ -774,7 +795,33 @@ export const createUsageCache = (deps: TUsageCacheDeps = {}): TUsageCache => {
     persist();
   };
 
+  /**
+   * Re-read usage NOW when the cached state is {@link usageCredentialStale}
+   * — the request path's way to clear a state that only an expired token
+   * caused. Bypasses the success back-off (the last read failed, so cached
+   * figures are not a reason to wait) but keeps {@link FAILURE_RETRY_MS}
+   * between attempts and shares an in-flight read. Returns null when there is
+   * nothing to heal or it is too soon to try again.
+   */
+  const healUsage = (
+    slug: string,
+    fetcher: () => Promise<TProviderUsageSnapshot>,
+    accountHash?: string,
+  ): Promise<TProviderUsageSnapshot | null> | null => {
+    const entry = cache.get(usageCacheKey(slug, accountHash));
+    if (entry === undefined) return null;
+    if (!usageCredentialStale(entry.failure)) return null;
+    // A read already running may be stored-only and unable to renew: join it
+    // only for its answer, and report "not healed" if it is still stale.
+    if (entry.inFlight !== null) {
+      return entry.inFlight.then((s) => (usageCredentialStale(s) ? null : s));
+    }
+    if (Date.now() - entry.lastAttemptAtMs < FAILURE_RETRY_MS) return null;
+    return cachedUsage(slug, fetcher, { force: true, accountHash });
+  };
+
   return {
+    healUsage,
     cachedUsage,
     peekUsage,
     peekUsageForQuotaGate,
@@ -820,3 +867,5 @@ export const noteUsageReadFailed: TUsageCache["noteUsageReadFailed"] = (
 ) => active.noteUsageReadFailed(...args);
 export const usageReadDue: TUsageCache["usageReadDue"] = (...args) =>
   active.usageReadDue(...args);
+export const healUsage: TUsageCache["healUsage"] = (...args) =>
+  active.healUsage(...args);
