@@ -158,7 +158,8 @@ The curl installer (`install.sh`) has two auto-detected modes (override with
   `--non-interactive`) — keyless ends with the summary's `Next: openllm login`.
   Ends with a fixed parseable summary (`OpenLLM install summary`, `vendors:`,
   `daemon:`, `path:`, `Next:`). When `openllm` does not already resolve to this
-  install, `path:` prints `export PATH="$HOME/.openllm/bin:$PATH"`.
+  install, `path:` prints `export PATH="$HOME/.openllm/bin:$PATH"`. Headless Full
+  without a usable user supervisor suggests Minimal instead of starting a daemon.
 
 Flags are taken at face value (flag > env > `~/.openllm/.env` > default).
 Unknown / contradictory flags fail before any install side effect. Full-only

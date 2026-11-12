@@ -2625,6 +2625,22 @@ path_hint_line() {
   fi
 }
 
+supervisor_usable() {
+  case "$(uname -s)" in
+    Linux) command -v systemctl >/dev/null 2>&1 && systemctl --user show-environment >/dev/null 2>&1 ;;
+    Darwin) command -v launchctl >/dev/null 2>&1 ;;
+    *) return 1 ;;
+  esac
+}
+
+print_start_hint() {
+  if [ "$INTERACTIVE" = 0 ] && ! supervisor_usable; then
+    echo "Next: for a cloud-only install (e.g. an agent sandbox), re-run the installer with --non-interactive --minimal"
+  else
+    echo "Next: openllm start"
+  fi
+}
+
 print_install_summary() {
   local vendor_line on_disk=""
   vendor_line="$(build_vendor_status_line)"
@@ -2648,10 +2664,10 @@ print_install_summary() {
     echo "Next: openllm login --non-interactive"
     echo "Next: after approval, run the printed resume command"
     if [ "$SETUP_MODE" != minimal ] && [ "$DAEMON_STATE" != "running" ]; then
-      echo "Next: openllm start"
+      print_start_hint
     fi
   elif [ "$SETUP_MODE" != minimal ] && [ "$DAEMON_STATE" != "running" ]; then
-    echo "Next: openllm start"
+    print_start_hint
   fi
 }
 
