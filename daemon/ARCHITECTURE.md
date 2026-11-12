@@ -976,14 +976,19 @@ spawn and attach both go through the same engine adapter. Attachments a `send`
 carries are either base64 (`data`) written to the session's own
 `~/.openllm/agent-attachments/<id>/` (0700, files 0600), or — **loopback only** —
 an absolute local `path` that is realpath'd to a readable regular file and
-`@`-referenced in place with no copy. Path attachments are refused on mux/RTC
+referenced in place as `@"<realpath>"` (Claude Code's quoted @-mention; no
+copy). A per-session index maps the turn's attachment meta name to that
+realpath so loopback `attachment_get` can still serve the bytes; mux/RTC never
+sees the index (`allowLocalPaths`). Path attachments are refused on mux/RTC
 (`local_path_forbidden`); the desktop app's `/local/agent` consumer sets
-`allowsLocalPaths`. Paths reach the page only from the native file dialog /
-OS drop (`pick_attachments`), never as page-supplied strings; residual risk is
-XSS in the desktop webview (same class as `local_agent_auth`). Attachment
-dirs are never inside the host's `sessions/<id>/` registry dir (the host
-removes that on exit and refuses to start over an existing one);
-`delete_session` removes copied attachments with the transcript. See the
+`allowsLocalPaths`. Paths reach the page from the native file dialog
+(`pick_attachments`) or from a Rust drop queue claimed via
+`take_dropped_attachments` (the DOM drop event is payload-less). Residual risk
+is XSS in the desktop webview forging a path over loopback — the same class as
+`local_agent_auth`. Attachment dirs are never inside the host's
+`sessions/<id>/` registry dir (the host removes that on exit and refuses to
+start over an existing one); `delete_session` removes copied attachments and
+the path index with the transcript. See the
 [agent sessions plan](../../docs/plan/2026-10-23-agent-sessions-replace-remote-pty.md).
 
 ## Localhost surfaces and provider auth

@@ -1043,7 +1043,9 @@ export const createAgentDispatcher = (
               );
               return;
             }
-            const resolved = resolveAgentAttachment(session.id, command.name);
+            const resolved = resolveAgentAttachment(session.id, command.name, {
+              allowLocalPaths: state.consumer.allowsLocalPaths === true,
+            });
             if (!resolved.ok) {
               error(state, session, resolved.code, resolved.message, commandId);
               return;

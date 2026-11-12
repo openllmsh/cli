@@ -721,6 +721,25 @@ export type TResolvedLocalAttachmentPath =
  * target must still be a regular file). No copy — the engine `@`-references
  * the real path directly.
  */
+/** Reject NULs and other C0/C1 controls (and bare DEL) in a path string. */
+const pathHasControlChars = (value: string): boolean => {
+  for (let i = 0; i < value.length; i += 1) {
+    const code = value.charCodeAt(i);
+    if (code === 0x7f || code < 0x20 || (code >= 0x80 && code <= 0x9f)) {
+      return true;
+    }
+  }
+  return false;
+};
+
+/**
+ * Claude Code's @-mention form for a local path. Always quoted — unquoted
+ * mentions truncate at the first space (`@"…"`, see Claude's
+ * `extractAtMentionedFiles` / bridge inbound attachments).
+ */
+export const formatAgentAttachmentMention = (absolutePath: string): string =>
+  `@"${absolutePath}"`;
+
 export const resolveLocalAttachmentPath = (
   requested: string,
 ): TResolvedLocalAttachmentPath => {
@@ -731,7 +750,11 @@ export const resolveLocalAttachmentPath = (
       message: "attachment path is empty or too long",
     };
   }
-  if (!isAbsolute(requested) || requested.includes("\0")) {
+  if (
+    !isAbsolute(requested) ||
+    pathHasControlChars(requested) ||
+    requested.includes('"')
+  ) {
     return {
       ok: false,
       code: "invalid_path",
@@ -802,42 +825,96 @@ const attachmentCounterOf = (dir: string): { value: number } => {
   return { value };
 };
 
+type TPathAttachmentIndexEntry = {
+  readonly path: string;
+  readonly mime: string;
+  readonly size: number;
+};
+
+/**
+ * Per-session index of path-attachment meta names → realpath. Path attachments
+ * are never copied into the attachments dir; `attachment_get` serves them from
+ * here (loopback only). Cleared with {@link deleteAgentAttachments}.
+ */
+const pathAttachmentIndex = new Map<
+  string,
+  Map<string, TPathAttachmentIndexEntry>
+>();
+
+const rememberPathAttachment = (
+  sessionId: string,
+  storedName: string,
+  entry: TPathAttachmentIndexEntry,
+): void => {
+  let byName = pathAttachmentIndex.get(sessionId);
+  if (byName === undefined) {
+    byName = new Map();
+    pathAttachmentIndex.set(sessionId, byName);
+  }
+  byName.set(storedName, entry);
+};
+
+/** Test helper: peek the path-attachment index for a session. */
+export const pathAttachmentIndexOf = (
+  sessionId: string,
+): ReadonlyMap<string, TPathAttachmentIndexEntry> | undefined =>
+  pathAttachmentIndex.get(sessionId);
+
 /**
  * Materialise attachments for a turn. Base64 (`data`) entries are written under
  * the session attachments dir; `path` entries are validated and referenced in
  * place (no copy) — caller must already have refused them off loopback.
+ * `sessionId` keys the path-attachment index for later `attachment_get`.
  */
 export const writeAgentAttachments = (
   dir: string,
   attachments: TAgentSendInput["attachments"],
   counter: { value: number },
+  sessionId?: string,
 ): TWrittenAgentAttachment[] => {
   if (attachments.length === 0) return [];
   const needsDir = attachments.some(
     (attachment) => !agentAttachmentHasPath(attachment),
   );
   if (needsDir) mkdirSync(dir, { recursive: true, mode: 0o700 });
+  const indexedSessionId =
+    sessionId ??
+    (SESSION_ID_PATTERN.test(basename(dir)) ? basename(dir) : undefined);
   return attachments.map((attachment) => {
+    counter.value += 1;
     if (agentAttachmentHasPath(attachment)) {
       const resolved = resolveLocalAttachmentPath(attachment.path);
       if (!resolved.ok) {
         throw new Error(`${resolved.code}: ${resolved.message}`);
       }
+      let name = sanitizeAttachmentName(attachment.name ?? resolved.name);
+      if (!name.includes(".")) name += extensionOf(attachment.media_type);
+      const storedName = `${counter.value}-${name}`;
+      if (indexedSessionId !== undefined) {
+        rememberPathAttachment(indexedSessionId, storedName, {
+          path: resolved.path,
+          mime: attachment.media_type,
+          size: resolved.size,
+        });
+      }
       return {
         path: resolved.path,
         meta: {
-          name: sanitizeAttachmentName(attachment.name ?? resolved.name),
+          name: storedName,
           mime: attachment.media_type,
           size: resolved.size,
         },
       };
     }
-    counter.value += 1;
+    const data = attachment.data;
+    if (data === undefined) {
+      throw new Error("attachment_failed: attachment has neither data nor path");
+    }
     let name = sanitizeAttachmentName(attachment.name);
     if (!name.includes(".")) name += extensionOf(attachment.media_type);
     const storedName = `${counter.value}-${name}`;
     const path = join(dir, storedName);
-    const bytes = Buffer.from(attachment.data, "base64");
+    const bytes = Buffer.from(data, "base64");
     writeFileSync(path, bytes, { mode: 0o600 });
     return {
       path,
@@ -853,6 +930,7 @@ export const writeAgentAttachments = (
 /** Delete one session's attachments dir (history delete / kill path). */
 export const deleteAgentAttachments = (sessionId: string): void => {
   if (!SESSION_ID_PATTERN.test(sessionId)) return;
+  pathAttachmentIndex.delete(sessionId);
   try {
     rmSync(agentAttachmentsDir(sessionId), { recursive: true, force: true });
   } catch {
@@ -901,7 +979,15 @@ const mimeOfStoredName = (name: string): string => {
 export const resolveAgentAttachment = (
   sessionId: string,
   name: string,
-  options: { readonly attachmentsDir?: string } = {},
+  options: {
+    readonly attachmentsDir?: string;
+    /**
+     * Serve path-attachment index entries (loopback only). Without this, a
+     * remote consumer cannot read files that were never copied into the
+     * attachments dir — even if it somehow learns the meta name.
+     */
+    readonly allowLocalPaths?: boolean;
+  } = {},
 ): TResolvedAgentAttachment => {
   if (!isSafeAttachmentBasename(name)) {
     return {
@@ -909,6 +995,49 @@ export const resolveAgentAttachment = (
       code: "attachment_forbidden",
       message: "attachment name is not allowed",
     };
+  }
+  if (options.allowLocalPaths === true) {
+    const indexed = pathAttachmentIndex.get(sessionId)?.get(name);
+    if (indexed !== undefined) {
+      const resolved = resolveLocalAttachmentPath(indexed.path);
+      if (!resolved.ok) {
+        return {
+          ok: false,
+          code: "attachment_not_found",
+          message: "attachment not found",
+        };
+      }
+      try {
+        if (resolved.size > AGENT_MAX_ATTACHMENT_BYTES) {
+          return {
+            ok: false,
+            code: "attachment_too_large",
+            message: "attachment exceeds the size cap",
+          };
+        }
+        const bytes = readFileSync(resolved.path);
+        if (bytes.byteLength > AGENT_MAX_ATTACHMENT_BYTES) {
+          return {
+            ok: false,
+            code: "attachment_too_large",
+            message: "attachment exceeds the size cap",
+          };
+        }
+        return {
+          ok: true,
+          path: resolved.path,
+          mime: indexed.mime,
+          size: bytes.byteLength,
+          bytes,
+        };
+      } catch {
+        return {
+          ok: false,
+          code: "attachment_not_found",
+          message: "attachment not found",
+        };
+      }
+    }
   }
   const dir = options.attachmentsDir ?? agentAttachmentsDir(sessionId);
   let dirReal: string;
@@ -1939,6 +2068,7 @@ export const createClaudeTuiSession = (
         attachmentsDir,
         input.attachments,
         attachmentCounter,
+        options.sessionId,
       );
     } catch (err) {
       logError("agent", err);
@@ -1955,7 +2085,10 @@ export const createClaudeTuiSession = (
       };
     }
     const text = pasteSafeText(
-      [input.prompt, ...written.map((entry) => `@${entry.path}`)]
+      [
+        input.prompt,
+        ...written.map((entry) => formatAgentAttachmentMention(entry.path)),
+      ]
         .filter((part) => part.trim() !== "")
         .join(input.prompt.includes("\n") ? "\n" : " "),
     );
