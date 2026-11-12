@@ -385,8 +385,12 @@ const dropSettledSlugProbes = (): void => {
   }
 };
 
-const connectionFingerprint = (conn: TDaemonProviderConnection): string =>
-  JSON.stringify(conn);
+// The probe time changes on every probe; it is not a change in what the
+// device can serve, so it never makes a result count as new.
+const connectionFingerprint = (conn: TDaemonProviderConnection): string => {
+  const { last_probed_at_ms: _probedAt, ...rest } = conn;
+  return JSON.stringify(rest);
+};
 
 const requestLateProbePush = (): void => {
   void import("./control-channel")
@@ -574,7 +578,7 @@ const boundedDelegateStatus = async (
     const producer: Promise<TDaemonProviderConnection> = status(
       ownerBudget.signal,
     ).then(
-      (conn) => conn,
+      (conn) => ({ ...conn, last_probed_at_ms: Date.now() }),
       (err: unknown) => {
         logWarn("status", "Provider status probe failed.", {
           slug,

@@ -635,12 +635,16 @@ const consumerChannelFor = (
   return undefined;
 };
 
-const failOpen = (keyId: string, reason?: string): void => {
+const failOpen = (
+  keyId: string,
+  reason?: string,
+  cause: "presence" | "relay_unavailable" | "timeout" | "nack" = "nack",
+): void => {
   const pending = opening.get(keyId);
   if (pending === undefined) return;
   opening.delete(keyId);
   clearTimeout(pending.timer);
-  peerLinkFailureCache.set(keyId, "mux", "transport");
+  peerLinkFailureCache.set(keyId, "mux", cause);
   sendFrame?.({
     type: "channel_close",
     channel_id: pending.channelId,
@@ -675,12 +679,14 @@ export const muxChannelTo = async (
   // target is authorized by its signed grant and therefore cannot be rejected
   // by same-user capability discovery; the relay/supplier remains authoritative.
   const caps = peerCaps.get(keyId);
+  const lookupKey = channelLookupKey(keyId, options?.teamId);
   if (
     options?.teamGrant === undefined &&
     (caps === undefined || !caps.has(MUX_CAP))
-  )
+  ) {
+    peerLinkFailureCache.set(lookupKey, "mux", "presence");
     return null;
-  const lookupKey = channelLookupKey(keyId, options?.teamId);
+  }
   if (peerLinkFailureCache.has(lookupKey, "mux")) return null;
   const existing = consumerChannelFor(keyId, options?.teamId);
   if (existing !== undefined) return existing.channel;
@@ -695,11 +701,14 @@ export const muxChannelTo = async (
     });
   const send = sendFrame;
   const binary = sendBinary;
-  if (send === null || binary === null) return null;
+  if (send === null || binary === null) {
+    peerLinkFailureCache.set(lookupKey, "mux", "relay_unavailable");
+    return null;
+  }
   const channelId = crypto.randomUUID();
   return new Promise<TMuxChannel | null>((resolve) => {
     const timer = setTimeout(
-      () => failOpen(lookupKey, "consumer_gone"),
+      () => failOpen(lookupKey, "consumer_gone", "timeout"),
       muxAckTimeoutMs,
     );
     opening.set(lookupKey, {
@@ -742,7 +751,7 @@ export const handleChannelOpenAck = (frame: {
   if (binary === null) {
     opening.delete(keyId);
     clearTimeout(pending.timer);
-    peerLinkFailureCache.set(keyId, "mux", "transport");
+    peerLinkFailureCache.set(keyId, "mux", "relay_unavailable");
     sendFrame?.({
       type: "channel_close",
       channel_id: pending.channelId,
@@ -753,6 +762,9 @@ export const handleChannelOpenAck = (frame: {
   }
   opening.delete(keyId);
   clearTimeout(pending.timer);
+  // A late ACK can land after the open budget cached a timeout: the channel
+  // is live now, so the cached failure must not refuse it.
+  peerLinkFailureCache.clear(keyId, "mux");
   const record = registerChannel(pending.channelId, keyId, "consumer");
   pending.resolve(record.channel);
 };
@@ -1263,7 +1275,11 @@ export const closeChannelFromRelay = (frame: {
   // A close for a channel still being negotiated settles that open instead.
   for (const [keyId, pending] of [...opening.entries()]) {
     if (pending.channelId === frame.channel_id) {
-      failOpen(keyId, frame.reason);
+      failOpen(
+        keyId,
+        frame.reason,
+        frame.reason === "daemon_gone" ? "presence" : "nack",
+      );
     }
   }
   const record = channels.get(frame.channel_id);
@@ -1271,6 +1287,25 @@ export const closeChannelFromRelay = (frame: {
   channels.delete(frame.channel_id);
   record.sink = null;
   record.channel.close(frame.reason ?? "peer_gone");
+};
+
+/** Drop only the matching consumer channel; never remove a replacement. */
+export const dropMuxChannel = (
+  keyId: string,
+  channel: TMuxChannel,
+  options?: TMuxChannelOptions,
+): void => {
+  const record = consumerChannelFor(keyId, options?.teamId);
+  if (record === undefined || record.channel !== channel) return;
+  sendFrame?.({
+    type: "channel_close",
+    channel_id: record.channelId,
+    reason: "consumer_gone",
+  });
+  closeChannelFromRelay({
+    channel_id: record.channelId,
+    reason: "consumer_gone",
+  });
 };
 
 /** Feed a complete binary websocket message to the channel its envelope tags. */
@@ -1302,7 +1337,8 @@ export const muxHostOnBytes = (bytes: Uint8Array | null): void => {
 
 /** A dead relay socket tears down all stream state without ending agent sessions. */
 export const resetAllChannels = (): void => {
-  for (const keyId of [...opening.keys()]) failOpen(keyId);
+  for (const keyId of [...opening.keys()])
+    failOpen(keyId, undefined, "relay_unavailable");
   for (const record of [...channels.values()]) {
     channels.delete(record.channelId);
     record.sink = null;

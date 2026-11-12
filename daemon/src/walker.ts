@@ -45,6 +45,7 @@ import type {
   TChatCompletionResponse,
   TCooldownReason,
   TDaemonRecordRequest,
+  TFleetDeclineCause,
   TModelCaps,
   TModelSettings,
   TRequestStatus,
@@ -55,6 +56,10 @@ import {
   ChatCompletionChunk,
   cooldownPolicyFor,
   daemonPlanSigningPayload,
+  FLEET_DECLINE_HEADER,
+  FLEET_MODEL_HEADER,
+  FLEET_PROVIDER_HEADER,
+  isFleetDeclineCause,
   isLocalKeyProviderSlug,
   resolveDefaultModelCaps,
   resolveModelSettings,
@@ -2453,13 +2458,21 @@ const bootstrapIsFresh = (): boolean => {
   return age >= 0 && age < FLEET_MISS_REFRESH_INTERVAL_MS;
 };
 
-const refreshFleetPeersAfterMiss = async (): Promise<boolean> => {
-  const now = performance.now();
+const refreshFleetPeersAfterMiss = async (
+  bypassFresh = false,
+): Promise<boolean> => {
+  const now = Date.now();
   if (fleetMissRefresh === null) {
-    if (bootstrapIsFresh()) return false;
+    if (!bypassFresh && bootstrapIsFresh()) return false;
+    // A negative age means the wall clock moved back: don't stay throttled.
+    const sinceLastAttempt =
+      lastFleetMissRefreshAttemptAt === null
+        ? null
+        : now - lastFleetMissRefreshAttemptAt;
     if (
-      lastFleetMissRefreshAttemptAt !== null &&
-      now - lastFleetMissRefreshAttemptAt < FLEET_MISS_REFRESH_INTERVAL_MS
+      sinceLastAttempt !== null &&
+      sinceLastAttempt >= 0 &&
+      sinceLastAttempt < FLEET_MISS_REFRESH_INTERVAL_MS
     )
       return false;
     lastFleetMissRefreshAttemptAt = now;
@@ -2486,6 +2499,61 @@ const refreshFleetPeersAfterMiss = async (): Promise<boolean> => {
   }
   return true;
 };
+
+const FLEET_PEER_OUTCOME_TTL_MS = 120_000;
+const fleetPeerOutcomes = new Map<string, { ok: boolean; atMs: number }>();
+
+const recordFleetPeerOutcome = (
+  provider: string,
+  peer: string,
+  ok: boolean,
+): void => {
+  const key = `${provider}|${peer}`;
+  fleetPeerOutcomes.delete(key);
+  fleetPeerOutcomes.set(key, { ok, atMs: Date.now() });
+  if (fleetPeerOutcomes.size > 256) {
+    const oldest = fleetPeerOutcomes.keys().next().value;
+    if (oldest !== undefined) fleetPeerOutcomes.delete(oldest);
+  }
+};
+
+const rankFleetPeers = (
+  provider: string,
+  peers: readonly string[],
+): string[] => {
+  const now = Date.now();
+  const rank = (peer: string): number => {
+    const key = `${provider}|${peer}`;
+    const outcome = fleetPeerOutcomes.get(key);
+    if (outcome === undefined) return 1;
+    if (
+      now - outcome.atMs < 0 ||
+      now - outcome.atMs >= FLEET_PEER_OUTCOME_TTL_MS
+    ) {
+      fleetPeerOutcomes.delete(key);
+      return 1;
+    }
+    return outcome.ok ? 0 : 2;
+  };
+  return [...peers].sort((a, b) => rank(a) - rank(b));
+};
+
+const fleetDecline = (provider: string, cause: TFleetDeclineCause): Response =>
+  new Response(
+    JSON.stringify({
+      error: {
+        message: `${provider} can't be served on this device`,
+        type: "fleet_decline",
+      },
+    }),
+    {
+      status: 503,
+      headers: {
+        "content-type": "application/json",
+        [FLEET_DECLINE_HEADER]: cause,
+      },
+    },
+  );
 
 // The error's class only: a peer's RESET message can carry request content,
 // and log metadata is not redacted.
@@ -2534,52 +2602,88 @@ const tryFleetTunnel = async (
   }
   const clientWantsStream =
     (args.rawBody as { stream?: unknown } | null)?.stream === true;
-  for (const peerKeyId of peers) {
-    try {
-      const res = await tunnelToPeer({
-        keyId: peerKeyId,
-        surface:
-          args.surface === "messages"
-            ? "messages"
-            : args.surface === "responses"
-              ? "responses"
-              : "chat_completions",
-        body: new Uint8Array(args.rawBytes),
-        accept: clientWantsStream ? "text/event-stream" : "application/json",
-        ...(args.tunnelToPeer !== undefined
-          ? { transport: args.tunnelToPeer }
-          : {}),
-        anthropicVersion:
-          args.surface === "messages"
-            ? args.req.headers.get("anthropic-version")
-            : null,
-        anthropicBeta:
-          args.surface === "messages"
-            ? args.req.headers.get("anthropic-beta")
-            : null,
-        userAgent: args.req.headers.get("user-agent"),
-        signal: args.req.signal,
-      });
-      // Any peer response head (success or terminal failure) ends this
-      // consumer walk: the peer already ran its full plan. Pre-head
-      // failures throw below and move on to the next peer, then fall
-      // through to the next local hop.
-      return res;
-    } catch (error) {
-      if (args.req.signal.aborted)
-        return errorJson(499, "client aborted request");
-      const preDispatch = isPreDispatchTunnelError(error);
-      logWarn("fleet", "Couldn't reach another device for this provider.", {
-        outcome: "tunnel_failed",
-        provider: hop.provider,
-        peer_key_id: peerKeyId,
-        pre_dispatch: preDispatch,
-        reason: fleetTunnelErrorReason(error),
-      });
-      // Availability over strict once-only: even after dispatch (the peer
-      // may have started the inference) a dropped tunnel moves on to the
-      // next peer, then the next hop, so the user never sees the drop.
+  const attempted = new Set<string>();
+  let refreshedAfterExhaustion = false;
+  while (true) {
+    for (const peerKeyId of rankFleetPeers(hop.provider, peers)) {
+      if (attempted.has(peerKeyId)) continue;
+      attempted.add(peerKeyId);
+      try {
+        const res = await tunnelToPeer({
+          keyId: peerKeyId,
+          fleetProvider: hop.provider,
+          fleetModel: hop.modelId,
+          surface:
+            args.surface === "messages"
+              ? "messages"
+              : args.surface === "responses"
+                ? "responses"
+                : "chat_completions",
+          body: new Uint8Array(args.rawBytes),
+          accept: clientWantsStream ? "text/event-stream" : "application/json",
+          ...(args.tunnelToPeer !== undefined
+            ? { transport: args.tunnelToPeer }
+            : {}),
+          anthropicVersion:
+            args.surface === "messages"
+              ? args.req.headers.get("anthropic-version")
+              : null,
+          anthropicBeta:
+            args.surface === "messages"
+              ? args.req.headers.get("anthropic-beta")
+              : null,
+          userAgent: args.req.headers.get("user-agent"),
+          signal: args.req.signal,
+        });
+        const decline = res.headers.get(FLEET_DECLINE_HEADER);
+        if (decline !== null) {
+          try {
+            await res.body?.cancel();
+          } catch {
+            /* Already closed. */
+          }
+          if (args.req.signal.aborted)
+            return errorJson(499, "client aborted request");
+          recordFleetPeerOutcome(hop.provider, peerKeyId, false);
+          logWarn("fleet", "Another device declined this provider.", {
+            outcome: "peer_declined",
+            provider: hop.provider,
+            peer_key_id: peerKeyId,
+            cause: isFleetDeclineCause(decline) ? decline : "unknown",
+          });
+          continue;
+        }
+        recordFleetPeerOutcome(hop.provider, peerKeyId, true);
+        return res;
+      } catch (error) {
+        if (args.req.signal.aborted)
+          return errorJson(499, "client aborted request");
+        const preDispatch = isPreDispatchTunnelError(error);
+        recordFleetPeerOutcome(hop.provider, peerKeyId, false);
+        const cause =
+          typeof error === "object" &&
+          error !== null &&
+          "causeCode" in error &&
+          typeof error.causeCode === "string"
+            ? error.causeCode
+            : undefined;
+        logWarn("fleet", "Couldn't reach another device for this provider.", {
+          outcome: "tunnel_failed",
+          provider: hop.provider,
+          peer_key_id: peerKeyId,
+          pre_dispatch: preDispatch,
+          reason: fleetTunnelErrorReason(error),
+          ...(cause === undefined ? {} : { cause }),
+        });
+        // Availability over strict once-only: even after dispatch (the peer
+        // may have started the inference) a dropped tunnel moves on to the
+        // next peer, then the next hop, so the user never sees the drop.
+      }
     }
+    if (refreshedAfterExhaustion || !(await refreshFleetPeersAfterMiss(true)))
+      break;
+    refreshedAfterExhaustion = true;
+    peers = fleetSubscriptionServersFor(hop.provider);
   }
   return null;
 };
@@ -2824,9 +2928,28 @@ type THopServed = {
 
 const walkPlan = async (
   args: TWalkArgs,
-  hops: ReadonlyArray<THop>,
+  planHops: ReadonlyArray<THop>,
   contextOverflowStrategy: TContextOverflowStrategy,
 ): Promise<Response> => {
+  const fleetProvider =
+    args.req.headers.get(TUNNELED_REQUEST_HEADER) === TUNNELED_REQUEST_VALUE
+      ? args.req.headers.get(FLEET_PROVIDER_HEADER)
+      : null;
+  const fleetModel =
+    fleetProvider === null ? null : args.req.headers.get(FLEET_MODEL_HEADER);
+  const isFleetTarget = (hop: THop): boolean =>
+    hop.provider === fleetProvider && hop.modelId === fleetModel;
+  // This device's plan doesn't hold the hop the consumer asked for: serving
+  // any other hop would answer with a model it didn't ask for, so decline
+  // and let the consumer try its next peer.
+  if (fleetProvider !== null && !planHops.some(isFleetTarget)) {
+    return fleetDecline(fleetProvider, "unavailable");
+  }
+  // A fleet request walks only the hop the consumer asked for: an earlier
+  // hop's answer would be a model it didn't ask for, and running it only to
+  // discard it would spend that account's quota for nothing.
+  const hops =
+    fleetProvider === null ? planHops : planHops.filter(isFleetTarget);
   const limitedBody = clampHoldOutputLimit(
     args.rawBody,
     args.surface,
@@ -3049,6 +3172,16 @@ const walkPlan = async (
       // Every local account is exhausted or cooling. Another device of this
       // user may hold a different account with quota — ask it before dialling
       // a dead account here (or advancing the plan).
+      if (isFleetTarget(hop))
+        return {
+          response: fleetDecline(
+            hop.provider,
+            signedIn.every((account) => account.cooling)
+              ? "cooling"
+              : "no_quota",
+          ),
+          servedLocally: false,
+        };
       const tunneled = await tryFleetTunnel(hop, args);
       if (tunneled !== null) {
         return { response: tunneled, servedLocally: false };
@@ -3116,6 +3249,11 @@ const walkPlan = async (
     // that failed (or is cooling/exhausted) advances the plan instead.
     if (signedIn.length > 0) return HOP_CONTINUE;
     lastError = `${hop.provider} not signed in on this device`;
+    if (isFleetTarget(hop))
+      return {
+        response: fleetDecline(hop.provider, "not_signed_in"),
+        servedLocally: false,
+      };
     const tunneled = await tryFleetTunnel(hop, args);
     if (tunneled !== null) return { response: tunneled, servedLocally: false };
     addHopFailure(hop, lastError);
@@ -3195,9 +3333,15 @@ const walkPlan = async (
       accountHashByProvider,
     );
     if (!localAuth.connected) {
-      lastError =
-        localAuth.detail ?? `${hop.provider} not signed in on this device`;
+      lastError = localAuth.detail
+        ? `${localAuth.detail} (on this device)`
+        : `${hop.provider} not signed in on this device`;
       if (opts.fleetFallback === false) return HOP_CONTINUE;
+      if (isFleetTarget(hop))
+        return {
+          response: fleetDecline(hop.provider, "not_signed_in"),
+          servedLocally: false,
+        };
       const tunneled = await tryFleetTunnel(hop, args);
       if (tunneled !== null) {
         return { response: tunneled, servedLocally: false };
@@ -3228,6 +3372,16 @@ const walkPlan = async (
           now: gateNow,
         }).kind === "skip")
     ) {
+      if (isFleetTarget(hop))
+        return {
+          response: fleetDecline(
+            hop.provider,
+            isHopCoolingDown(hop.provider, hop.modelId, gateNow)
+              ? "cooling"
+              : "no_quota",
+          ),
+          servedLocally: false,
+        };
       const tunneled = await tryFleetTunnel(hop, args);
       if (tunneled !== null) {
         return { response: tunneled, servedLocally: false };
@@ -3665,7 +3819,10 @@ const walkPlan = async (
     // A skipped ordinary candidate means the physical queue still has a
     // forced-context epilogue. Its successor must remain walkable until that
     // retry receives the tokenizer's final verdict.
+    // A fleet request's hop is never final here: the consumer owns the final
+    // answer, so a failure declines and lets it try its next peer.
     const finalHop =
+      fleetProvider === null &&
       queueIndex === queue.length &&
       (requeuedSkipped || contextSkipped.length === 0);
     if (
@@ -3695,6 +3852,9 @@ const walkPlan = async (
         subscriptionAccounts(hop.provider),
       )
     ) {
+      if (isFleetTarget(hop) && isOAuthSlug(hop.provider)) {
+        return fleetDecline(hop.provider, "cooling");
+      }
       lastError = `hop ${hop.modelId} skipped: cooling down after a recent failure`;
       hopTrail.push({
         modelId: hop.modelId,
@@ -3797,7 +3957,13 @@ const walkPlan = async (
       const served = await serveSubscriptionAccounts(hop, finalHop, {
         forceContextAttempt,
       });
-      if (served === HOP_CONTINUE) continue;
+      if (served === HOP_CONTINUE) {
+        if (args.req.signal.aborted)
+          return errorJson(499, "client aborted request");
+        if (isFleetTarget(hop))
+          return fleetDecline(hop.provider, "unavailable");
+        continue;
+      }
       return commitSubscriptionServe(hop, served);
     }
     // Team hop: dial the supplier device directly. The cloud never tunnels a

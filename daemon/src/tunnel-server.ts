@@ -25,6 +25,8 @@ import type {
   TTunnelSurface,
 } from "@openllmsh/sdk/protocol";
 import {
+  FLEET_MODEL_HEADER,
+  FLEET_PROVIDER_HEADER,
   HOP_GRANT_HEADER,
   MEDIA_PERSISTENCE_BROWSER,
   MEDIA_PERSISTENCE_REQUEST_HEADER,
@@ -161,6 +163,10 @@ const forwardedHeaders = (open: {
   // device may still tryFleetTunnel once.
   if (open.consumer === "daemon") {
     headers.set(TUNNELED_REQUEST_HEADER, TUNNELED_REQUEST_VALUE);
+    if (open.headers?.fleet_provider !== undefined)
+      headers.set(FLEET_PROVIDER_HEADER, open.headers.fleet_provider);
+    if (open.headers?.fleet_model !== undefined)
+      headers.set(FLEET_MODEL_HEADER, open.headers.fleet_model);
   }
   return headers;
 };

@@ -102,6 +102,8 @@ const stableJson = (value: unknown): string => {
   if (Array.isArray(value)) return `[${value.map(stableJson).join(",")}]`;
   if (value !== null && typeof value === "object")
     return `{${Object.keys(value)
+      // A probe's time moves on every probe without anything changing.
+      .filter((key) => key !== "last_probed_at_ms")
       .sort()
       .map(
         (key) =>
