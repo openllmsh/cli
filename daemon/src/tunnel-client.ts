@@ -120,6 +120,7 @@ export type TTunnelToPeerArgs = {
   keyId: string;
   provider?: string;
   fleetProvider?: string;
+  fleetModel?: string;
   surface: TTunnelSurface;
   body: Uint8Array;
   accept: "application/json" | "text/event-stream";
@@ -154,6 +155,7 @@ const tunnelToPeerLive: TTunnelToPeer = async (args) => {
     ...(args.fleetProvider === undefined
       ? {}
       : { fleet_provider: args.fleetProvider }),
+    ...(args.fleetModel === undefined ? {} : { fleet_model: args.fleetModel }),
   };
 
   const peerCaps = getMuxPeerCaps(args.keyId);

@@ -57,6 +57,7 @@ import {
   cooldownPolicyFor,
   daemonPlanSigningPayload,
   FLEET_DECLINE_HEADER,
+  FLEET_MODEL_HEADER,
   FLEET_PROVIDER_HEADER,
   isFleetDeclineCause,
   isLocalKeyProviderSlug,
@@ -2562,6 +2563,7 @@ const tryFleetTunnel = async (
         const res = await tunnelToPeer({
           keyId: peerKeyId,
           fleetProvider: hop.provider,
+          fleetModel: hop.modelId,
           surface:
             args.surface === "messages"
               ? "messages"
@@ -2591,6 +2593,8 @@ const tryFleetTunnel = async (
           } catch {
             /* Already closed. */
           }
+          if (args.req.signal.aborted)
+            return errorJson(499, "client aborted request");
           recordFleetPeerOutcome(hop.provider, peerKeyId, false);
           logWarn("fleet", "Another device declined this provider.", {
             outcome: "peer_declined",
@@ -2882,6 +2886,10 @@ const walkPlan = async (
     args.req.headers.get(TUNNELED_REQUEST_HEADER) === TUNNELED_REQUEST_VALUE
       ? args.req.headers.get(FLEET_PROVIDER_HEADER)
       : null;
+  const fleetModel =
+    fleetProvider === null ? null : args.req.headers.get(FLEET_MODEL_HEADER);
+  const isFleetTarget = (hop: THop): boolean =>
+    hop.provider === fleetProvider && hop.modelId === fleetModel;
   const limitedBody = clampHoldOutputLimit(
     args.rawBody,
     args.surface,
@@ -3104,7 +3112,7 @@ const walkPlan = async (
       // Every local account is exhausted or cooling. Another device of this
       // user may hold a different account with quota — ask it before dialling
       // a dead account here (or advancing the plan).
-      if (hop.provider === fleetProvider)
+      if (isFleetTarget(hop))
         return {
           response: fleetDecline(
             hop.provider,
@@ -3181,7 +3189,7 @@ const walkPlan = async (
     // that failed (or is cooling/exhausted) advances the plan instead.
     if (signedIn.length > 0) return HOP_CONTINUE;
     lastError = `${hop.provider} not signed in on this device`;
-    if (hop.provider === fleetProvider)
+    if (isFleetTarget(hop))
       return {
         response: fleetDecline(hop.provider, "not_signed_in"),
         servedLocally: false,
@@ -3269,7 +3277,7 @@ const walkPlan = async (
         ? `${localAuth.detail} (on this device)`
         : `${hop.provider} not signed in on this device`;
       if (opts.fleetFallback === false) return HOP_CONTINUE;
-      if (hop.provider === fleetProvider)
+      if (isFleetTarget(hop))
         return {
           response: fleetDecline(hop.provider, "not_signed_in"),
           servedLocally: false,
@@ -3304,7 +3312,7 @@ const walkPlan = async (
           now: gateNow,
         }).kind === "skip")
     ) {
-      if (hop.provider === fleetProvider)
+      if (isFleetTarget(hop))
         return {
           response: fleetDecline(
             hop.provider,
@@ -3781,7 +3789,7 @@ const walkPlan = async (
         subscriptionAccounts(hop.provider),
       )
     ) {
-      if (hop.provider === fleetProvider && isOAuthSlug(hop.provider)) {
+      if (isFleetTarget(hop) && isOAuthSlug(hop.provider)) {
         return fleetDecline(hop.provider, "cooling");
       }
       lastError = `hop ${hop.modelId} skipped: cooling down after a recent failure`;
@@ -3886,7 +3894,13 @@ const walkPlan = async (
       const served = await serveSubscriptionAccounts(hop, finalHop, {
         forceContextAttempt,
       });
-      if (served === HOP_CONTINUE) continue;
+      if (served === HOP_CONTINUE) {
+        if (args.req.signal.aborted)
+          return errorJson(499, "client aborted request");
+        if (isFleetTarget(hop))
+          return fleetDecline(hop.provider, "unavailable");
+        continue;
+      }
       return commitSubscriptionServe(hop, served);
     }
     // Team hop: dial the supplier device directly. The cloud never tunnels a
