@@ -178,6 +178,7 @@ packages/sdk/wire/lib/streaming/finish-reason.ts
 packages/sdk/wire/lib/streaming/peek.ts
 packages/sdk/wire/lib/streaming/provider-decode.ts
 packages/sdk/wire/lib/streaming/response-stream.ts
+packages/sdk/wire/lib/streaming/silence.ts
 packages/sdk/wire/lib/streaming/sse.ts
 packages/sdk/wire/lib/streaming/strip-tool-calls.ts
 packages/sdk/wire/lib/streaming/upstream-error.ts

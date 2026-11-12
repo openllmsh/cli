@@ -36,8 +36,13 @@ import { lookupCatalogEntry } from "./config";
 import { getDelegate, isOAuthSlug } from "./delegation";
 import { isHopCoolingDown, markHopCooldown } from "./hop-cooldown";
 import { accountCoolReasonForHttp } from "./media-retry";
-import { runWithAccount } from "./op-context";
-import { peekUsageForQuotaGate, sampleUsageOnExhaustion } from "./usage-cache";
+import { runWithAccount, withUsageNativeRefresh } from "./op-context";
+import {
+  healUsage,
+  peekUsageForQuotaGate,
+  sampleUsageOnExhaustion,
+  usageCredentialStale,
+} from "./usage-cache";
 
 type THopRef = { readonly provider: string; readonly modelId: string };
 
@@ -127,8 +132,51 @@ export const usageForActiveAccount = async (
   if (accountHash === null) return null;
   const delegate = getDelegate(provider);
   if (delegate === null) return null;
-  // `usage()` is a stored-credential read — it must not native-refresh.
+  // `usage()` is a stored-credential read — it must not native-refresh. Only
+  // the explicit request-path heal below may renew a token.
   return peekUsageForQuotaGate(provider, accountHash, () => delegate.usage());
+};
+
+/** A credential-stale snapshot carries no routing verdict — treat as unknown. */
+export const unverifiedAsUnknown = (
+  snapshot: TProviderUsageSnapshot | null,
+): TProviderUsageSnapshot | null =>
+  usageCredentialStale(snapshot) ? null : snapshot;
+
+/** How long a request waits for a heal before routing on what it has. */
+const HEAL_WAIT_MS = 10_000;
+
+/**
+ * The cached usage for this account says nothing beyond "the token had
+ * expired at the last read" — heal it on the request's demand: renew the
+ * token and re-read, waiting at most {@link HEAL_WAIT_MS} (the read carries
+ * on detached past that, so the next request and the dashboard see it).
+ * Returns the healed snapshot, or null when there was nothing to heal or it
+ * did not finish in time.
+ */
+export const healUsageForActiveAccount = async (
+  provider: string,
+  accountHashByProvider: Map<string, string | null>,
+): Promise<TProviderUsageSnapshot | null> => {
+  const accountHash = accountHashByProvider.get(provider) ?? null;
+  const delegate = getDelegate(provider);
+  if (accountHash === null || delegate === null) return null;
+  const heal = healUsage(
+    provider,
+    () => withUsageNativeRefresh(() => delegate.usage(), accountHash),
+    accountHash,
+  );
+  if (heal === null) return null;
+  heal.catch(() => {});
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<null>((resolve) => {
+    timer = setTimeout(() => resolve(null), HEAL_WAIT_MS);
+  });
+  try {
+    return await Promise.race([heal.catch(() => null), timeout]);
+  } finally {
+    clearTimeout(timer);
+  }
 };
 
 export type TSubscriptionAccountPlan = {
@@ -163,10 +211,15 @@ export const planSubscriptionAccounts = async (
       if (!auth.connected) return null;
       return {
         index,
-        snapshot: await usageForActiveAccount(
-          hop.provider,
-          caches.accountHashByProvider,
-          caches.connectedByProvider,
+        // Figures an expired token left unverified are no evidence to drop
+        // the account before dial: rank it as unknown, and its dial path
+        // heals (or dials) instead of never being tried.
+        snapshot: unverifiedAsUnknown(
+          await usageForActiveAccount(
+            hop.provider,
+            caches.accountHashByProvider,
+            caches.connectedByProvider,
+          ),
         ),
         cooling: isHopCoolingDown(hop.provider, hop.modelId, now),
       };
