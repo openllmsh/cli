@@ -36,6 +36,10 @@ import {
   noteConnectionsForSessionLost,
 } from "./auth-session-lost";
 import {
+  markCliBinariesDirtyIfChanged,
+  resetCliBinaryFingerprint,
+} from "./cli-binary-dirty";
+import {
   DeviceLimitExceededError,
   fetchChannel,
   notifyQuotaStatus,
@@ -828,6 +832,9 @@ const startWatcher = (): void => {
     // would-be heartbeat-only tick into a full dirty probe when an external
     // credential file (or keychain db mtime) changed while we were idle.
     markCredentialStoresDirtyIfChanged();
+    // Same for a vendor CLI updated out of band: its version is keyed by the
+    // binary stamp, so a changed stamp is a full tick that reads the new one.
+    markCliBinariesDirtyIfChanged();
     const decision = statusWatcherGate.consumeWatcherCompute();
     if (!decision.run) return;
     // Idle ticks must not touch keychain / auth machinery (§6). Only a dirty
@@ -859,6 +866,7 @@ const stopWatcher = (): void => {
   }
   // A restarted watcher must re-baseline instead of diffing a stale snapshot.
   resetCredentialStoreFingerprint();
+  resetCliBinaryFingerprint();
 };
 
 const scheduleMigrationCheck = (): void => {

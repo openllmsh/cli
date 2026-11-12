@@ -17,6 +17,7 @@
 
 export type TStatusDirtyReason =
   | "auth"
+  | "cli-binary"
   | "local-servers"
   | "bootstrap"
   | "command"

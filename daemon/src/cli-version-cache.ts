@@ -298,6 +298,28 @@ const runProbe = async (
 };
 
 /**
+ * Every binary path a version was asked for, in first-asked order (bounded).
+ * The status watcher stats these on its cheap ticks so an out-of-band CLI
+ * update (`codex update`) marks status dirty on the next tick instead of
+ * waiting for the slow heartbeat's full probe.
+ */
+const probedBinaries = new Set<string>();
+
+const rememberProbedBinary = (bin: string): void => {
+  if (probedBinaries.has(bin)) return;
+  probedBinaries.add(bin);
+  if (probedBinaries.size > CLI_VERSION_CACHE_MAX_RECORDS) {
+    const first = probedBinaries.values().next().value;
+    if (first !== undefined) probedBinaries.delete(first);
+  }
+};
+
+/** Binary paths whose version this process has been asked for. */
+export const versionProbedBinaries = (): readonly string[] => [
+  ...probedBinaries,
+];
+
+/**
  * Stamp-keyed `--version`. Trimmed stdout on success; `null` on completed
  * failure/timeout, missing binary, or observer abort.
  */
@@ -308,6 +330,7 @@ const cachedCliVersionIn = (
   opts?: TCliVersionOpts,
 ): Promise<string | null> => {
   loadPersist(st);
+  rememberProbedBinary(bin);
   const resolved = resolveVersionBinary(bin);
   const baseStamp = versionBinaryStamp(bin);
   if (resolved === null || baseStamp === null) {
