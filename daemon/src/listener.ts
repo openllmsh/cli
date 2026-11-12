@@ -924,9 +924,12 @@ const handleInferenceIn = async (
         },
       );
       if (shared !== null) {
-        // A waiter that joined someone else's held flight reserves its own.
+        // Held plans and Fusion plans belong to the request that fetched them.
+        // A concurrent waiter needs its own reservation or token-based selection.
         const own =
-          !ledFlight && shared.kind === "tuple" && shared.holdNonce !== null
+          !ledFlight &&
+          shared.kind === "tuple" &&
+          (shared.holdNonce !== null || shared.fusion)
             ? await resolveFetched(req.signal)
             : shared;
         const applied = await applyPlanFetchOutcome(own);
