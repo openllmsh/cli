@@ -2413,12 +2413,18 @@ const bootstrapIsFresh = (): boolean => {
 const refreshFleetPeersAfterMiss = async (
   bypassFresh = false,
 ): Promise<boolean> => {
-  const now = performance.now();
+  const now = Date.now();
   if (fleetMissRefresh === null) {
     if (!bypassFresh && bootstrapIsFresh()) return false;
+    // A negative age means the wall clock moved back: don't stay throttled.
+    const sinceLastAttempt =
+      lastFleetMissRefreshAttemptAt === null
+        ? null
+        : now - lastFleetMissRefreshAttemptAt;
     if (
-      lastFleetMissRefreshAttemptAt !== null &&
-      now - lastFleetMissRefreshAttemptAt < FLEET_MISS_REFRESH_INTERVAL_MS
+      sinceLastAttempt !== null &&
+      sinceLastAttempt >= 0 &&
+      sinceLastAttempt < FLEET_MISS_REFRESH_INTERVAL_MS
     )
       return false;
     lastFleetMissRefreshAttemptAt = now;
@@ -2448,11 +2454,6 @@ const refreshFleetPeersAfterMiss = async (
 
 const FLEET_PEER_OUTCOME_TTL_MS = 120_000;
 const fleetPeerOutcomes = new Map<string, { ok: boolean; atMs: number }>();
-
-export const resetFleetPeerOutcomesForTest = (): void => {
-  fleetPeerOutcomes.clear();
-  lastFleetMissRefreshAttemptAt = null;
-};
 
 const recordFleetPeerOutcome = (
   provider: string,
