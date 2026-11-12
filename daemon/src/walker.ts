@@ -2890,6 +2890,12 @@ const walkPlan = async (
     fleetProvider === null ? null : args.req.headers.get(FLEET_MODEL_HEADER);
   const isFleetTarget = (hop: THop): boolean =>
     hop.provider === fleetProvider && hop.modelId === fleetModel;
+  // This device's plan doesn't hold the hop the consumer asked for: serving
+  // any other hop would answer with a model it didn't ask for, so decline
+  // and let the consumer try its next peer.
+  if (fleetProvider !== null && !hops.some(isFleetTarget)) {
+    return fleetDecline(fleetProvider, "unavailable");
+  }
   const limitedBody = clampHoldOutputLimit(
     args.rawBody,
     args.surface,
