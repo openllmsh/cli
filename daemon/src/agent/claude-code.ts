@@ -33,7 +33,9 @@
  */
 import {
   closeSync,
+  constants as fsConstants,
   existsSync,
+  fstatSync,
   lstatSync,
   mkdirSync,
   openSync,
@@ -41,6 +43,7 @@ import {
   readFileSync,
   readSync,
   realpathSync,
+  renameSync,
   rmSync,
   statSync,
   writeFileSync,
@@ -795,7 +798,14 @@ export const resolveLocalAttachmentPath = (
       };
     }
     // Prove readability without retaining the handle.
-    const fd = openSync(real, "r");
+    const fd = openRegularFile(real);
+    if (fd === null) {
+      return {
+        ok: false,
+        code: "invalid_path",
+        message: "attachment path is not a regular file",
+      };
+    }
     closeSync(fd);
     return {
       ok: true,
@@ -810,6 +820,23 @@ export const resolveLocalAttachmentPath = (
       message: "attachment path could not be read",
     };
   }
+};
+
+/**
+ * Open `path` for reading without blocking and confirm, on the opened
+ * descriptor, that it is a regular file. A pathname check followed by a plain
+ * open races a swap to a FIFO, whose blocking open would stall the daemon.
+ * Returns null (descriptor closed) when it is not a regular file.
+ */
+const openRegularFile = (path: string): number | null => {
+  const fd = openSync(path, fsConstants.O_RDONLY | fsConstants.O_NONBLOCK);
+  try {
+    if (fstatSync(fd).isFile()) return fd;
+  } catch {
+    /* fall through to close */
+  }
+  closeSync(fd);
+  return null;
 };
 
 /** Highest `<n>-` prefix among a list of attachment basenames. */
@@ -908,11 +935,19 @@ const persistPathIndex = (sessionId: string): void => {
   const byName = pathAttachmentIndex.get(sessionId);
   if (byName === undefined || byName.size === 0) return;
   mkdirSync(agentAttachmentsRoot(), { recursive: true, mode: 0o700 });
-  writeFileSync(
-    pathIndexFileOf(sessionId),
-    `${JSON.stringify(Object.fromEntries(byName))}\n`,
-    { mode: 0o600 },
-  );
+  // Write a temp file and rename it over the index, so a failed or
+  // interrupted write never leaves a truncated index behind.
+  const target = pathIndexFileOf(sessionId);
+  const temp = `${target}.${process.pid}.tmp`;
+  try {
+    writeFileSync(temp, `${JSON.stringify(Object.fromEntries(byName))}\n`, {
+      mode: 0o600,
+    });
+    renameSync(temp, target);
+  } catch (error) {
+    rmSync(temp, { force: true });
+    throw error;
+  }
 };
 
 const rememberPathAttachment = (
@@ -1107,7 +1142,14 @@ export const resolveAgentAttachment = (
         }
         // Cap the read so a file that grows after the size check cannot
         // allocate unbounded memory into the daemon.
-        const fd = openSync(resolved.path, "r");
+        const fd = openRegularFile(resolved.path);
+        if (fd === null) {
+          return {
+            ok: false,
+            code: "attachment_not_found",
+            message: "attachment not found",
+          };
+        }
         try {
           const buffer = Buffer.alloc(AGENT_MAX_ATTACHMENT_BYTES + 1);
           const read = readSync(fd, buffer, 0, buffer.length, 0);
