@@ -33,8 +33,8 @@
  */
 import {
   closeSync,
-  constants as fsConstants,
   existsSync,
+  constants as fsConstants,
   fstatSync,
   lstatSync,
   mkdirSync,
@@ -747,7 +747,10 @@ export const formatAgentAttachmentMention = (absolutePath: string): string =>
 export const resolveLocalAttachmentPath = (
   requested: string,
 ): TResolvedLocalAttachmentPath => {
-  if (requested.length === 0 || requested.length > AGENT_MAX_ATTACHMENT_PATH_LENGTH) {
+  if (
+    requested.length === 0 ||
+    requested.length > AGENT_MAX_ATTACHMENT_PATH_LENGTH
+  ) {
     return {
       ok: false,
       code: "invalid_path",
@@ -866,7 +869,9 @@ const attachmentCounterOf = (
     names = [];
   }
   const fromDir = maxAttachmentPrefix(names);
-  const fromIndex = maxAttachmentPrefix(pathAttachmentIndexOf(sessionId).keys());
+  const fromIndex = maxAttachmentPrefix(
+    pathAttachmentIndexOf(sessionId).keys(),
+  );
   return { value: Math.max(fromDir, fromIndex) };
 };
 
@@ -903,7 +908,11 @@ const loadPathIndexFromDisk = (
   try {
     const raw = readFileSync(pathIndexFileOf(sessionId), "utf8");
     const parsed: unknown = JSON.parse(raw);
-    if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+    if (
+      parsed === null ||
+      typeof parsed !== "object" ||
+      Array.isArray(parsed)
+    ) {
       return loaded;
     }
     for (const [name, entry] of Object.entries(
@@ -1003,9 +1012,7 @@ export const writeAgentAttachments = (
         throw new Error(`${resolved.code}: ${resolved.message}`);
       }
       if (resolved.size > AGENT_MAX_ATTACHMENT_BYTES) {
-        throw new Error(
-          "invalid_path: attachment exceeds the size cap",
-        );
+        throw new Error("invalid_path: attachment exceeds the size cap");
       }
       let name = sanitizeAttachmentName(attachment.name ?? resolved.name);
       if (!name.includes(".")) name += extensionOf(attachment.media_type);
@@ -1028,7 +1035,9 @@ export const writeAgentAttachments = (
     }
     const data = attachment.data;
     if (data === undefined) {
-      throw new Error("attachment_failed: attachment has neither data nor path");
+      throw new Error(
+        "attachment_failed: attachment has neither data nor path",
+      );
     }
     let name = sanitizeAttachmentName(attachment.name);
     if (!name.includes(".")) name += extensionOf(attachment.media_type);
@@ -2228,9 +2237,10 @@ export const createClaudeTuiSession = (
           : "an attachment could not be prepared on this device";
       return {
         ok: false,
-        code: err instanceof Error && err.message.startsWith("invalid_path:")
-          ? "invalid_path"
-          : "attachment_failed",
+        code:
+          err instanceof Error && err.message.startsWith("invalid_path:")
+            ? "invalid_path"
+            : "attachment_failed",
         message: detail,
       };
     }
