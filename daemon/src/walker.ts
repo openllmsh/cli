@@ -147,8 +147,19 @@ import {
 } from "@openllmsh/sdk/wire/lib/streaming/peek";
 import { decodeProviderEventStream } from "@openllmsh/sdk/wire/lib/streaming/provider-decode";
 import { responseToChunkStream } from "@openllmsh/sdk/wire/lib/streaming/response-stream";
+import {
+  firstByteDeadlineAt,
+  readResponseWithin,
+  remainingTimeoutMs,
+  streamFirstByteTimeoutMs,
+  streamingHopNeedsSilence,
+  streamSilenceTimeoutMs,
+  withByteSilenceGuard,
+  withStreamingHeadersTimeout,
+} from "@openllmsh/sdk/wire/lib/streaming/silence";
 import { withFrameAlignedHeartbeat } from "@openllmsh/sdk/wire/lib/streaming/sse";
 import {
+  isUpstreamStalledError,
   partialUsageFrom,
   streamFailureCause,
   UpstreamStreamError,
@@ -1571,13 +1582,28 @@ export const serveSubscription = async (
               };
         })()
       : null;
+  // chatgpt always streams upstream (even when the client wants JSON), so the
+  // headers first-byte budget must follow `upstreamStreams`, not only the
+  // client's stream flag. Non-streaming JSON responses get no short timeout.
+  const upstreamStreamsForSilence = streamingHopNeedsSilence({
+    upstreamAlwaysStreams: wire === "chatgpt",
+    clientWantsStream,
+  });
+  const firstByteMs = upstreamStreamsForSilence
+    ? streamFirstByteTimeoutMs()
+    : 0;
+  const firstByteDeadline = firstByteDeadlineAt(firstByteMs);
+  const headersGuard = withStreamingHeadersTimeout(
+    args.req.signal,
+    firstByteMs,
+  );
   const dispatch = (): Promise<Response | null> =>
     postWithReplayStripRetry(
       url,
       headers,
       body,
       wire,
-      args.req.signal,
+      headersGuard.signal,
       (failure) => {
         transport.failure = failure;
       },
@@ -1587,21 +1613,54 @@ export const serveSubscription = async (
     cacheProbe !== null
       ? await cacheProbeWrap(cacheProbe, dispatch)
       : await dispatch();
+  headersGuard.clear();
   if (resp === null) {
     // An inbound cancellation aborts the fetch by design. It is terminal but
     // not an upstream failure, so it must neither walk nor write a cooldown row.
     if (args.req.signal.aborted)
       return errorJson(499, "client aborted request");
+    if (headersGuard.didStall()) {
+      // Carry a 504 envelope so a FINAL-hop stall surfaces as upstream_stalled
+      // instead of falling through to the generic "all hops failed" 502.
+      return hopRetry("upstream stalled waiting for response headers", {
+        status: 504,
+        cooldownReason: "upstream_stalled",
+        upstreamResponse: errorJson(
+          504,
+          "upstream stalled waiting for response headers",
+          "upstream_stalled",
+          "upstream_stalled",
+        ),
+      });
+    }
     return hopRetry(transport.failure?.reason ?? "network error", {
       cooldownReason: "network",
     });
   }
   if (!resp.ok) {
     let readable = true;
-    const raw = await resp.text().catch(() => {
+    let errorBodyStalled = false;
+    const raw = await readResponseWithin(
+      resp,
+      remainingTimeoutMs(firstByteDeadline),
+      (body) => body.text(),
+    ).catch((err: unknown) => {
+      if (isUpstreamStalledError(err)) errorBodyStalled = true;
       readable = false;
       return "";
     });
+    if (errorBodyStalled) {
+      return hopRetry("upstream stalled reading error body", {
+        status: 504,
+        cooldownReason: "upstream_stalled",
+        upstreamResponse: errorJson(
+          504,
+          "upstream stalled reading error body",
+          "upstream_stalled",
+          "upstream_stalled",
+        ),
+      });
+    }
     let errorJsonBody: unknown;
     try {
       errorJsonBody = JSON.parse(raw);
@@ -1720,10 +1779,20 @@ export const serveSubscription = async (
     ...(accountHash !== null ? { account_hash: accountHash } : {}),
   } satisfies Partial<TDaemonRecordRequest>;
   const elapsed = (): number => Date.now() - args.startedAt;
-  const upstreamBody =
+  const rawUpstreamBody =
     wire === "chatgpt" && process.env.OPENLLM_DEBUG_CODEX_SSE === "1"
       ? tapCodexSseStream(resp.body, Date.now())
       : resp.body;
+  // Raw-byte silence before the first client-forwarded chunk. Keepalives
+  // reset the timer; release() after a successful peek disarms it. The
+  // first-byte budget is the REMAINDER of the shared headers+body window.
+  const silenceGuard = withByteSilenceGuard(rawUpstreamBody, {
+    firstByteTimeoutMs: upstreamStreams
+      ? remainingTimeoutMs(firstByteDeadline)
+      : 0,
+    gapTimeoutMs: upstreamStreams ? streamSilenceTimeoutMs() : 0,
+  });
+  const upstreamBody = silenceGuard.stream;
   const streamObserver = createUsageObserver(hopFormat(wire), "sse");
   const streamAttempt = (): TAttemptOutcome => ({
     sent: true,
@@ -1779,17 +1848,27 @@ export const serveSubscription = async (
   // recorded as an ERROR row.
   const peekedError = (error: unknown): THopServeOutcome => {
     const detail = streamFailureDetail(error);
-    const cls = classifyRawResponse(
-      502,
-      detail,
-      hopFormat(wire),
-      args.req.signal.aborted,
-      hop.provider,
-    );
-    const upstreamResponse = errorJson(
-      502,
-      `upstream stream ended before producing output: ${detail}`,
-    );
+    const stalled = isUpstreamStalledError(error);
+    const stallStatus = 504;
+    const cls = classifyHopError({
+      status: stalled ? stallStatus : 502,
+      envelope: {
+        error: {
+          message: detail,
+          type: stalled ? "upstream_stalled" : "stream_error",
+          ...(stalled ? { code: "upstream_stalled" as const } : {}),
+        },
+      },
+      providerFormat: hopFormat(wire),
+      aborted: args.req.signal.aborted,
+      provider: hop.provider,
+    });
+    const upstreamResponse = stalled
+      ? errorJson(stallStatus, detail, "upstream_stalled", "upstream_stalled")
+      : errorJson(
+          502,
+          `upstream stream ended before producing output: ${detail}`,
+        );
     if (!finalHop && !args.req.signal.aborted) {
       // Preserve the terminal response this pre-output error would have
       // produced on the final hop, so a forced-context epilogue that also
@@ -1798,7 +1877,7 @@ export const serveSubscription = async (
       // pre-commit branch above. Critically, classify the body before
       // returning: HTTP 200 stream failures can still be context overflow.
       return hopRetry(detail, {
-        status: 502,
+        status: stalled ? stallStatus : 502,
         bodySnippet: detail,
         ...(cls.kind === "transient" ? { cooldownReason: cls.reason } : {}),
         upstreamResponse,
@@ -1845,10 +1924,12 @@ export const serveSubscription = async (
       undefined,
       { sent: true, usage: null, definiteProviderError: false },
     );
-    return errorJson(
-      502,
-      `upstream stream ended before producing output: ${detail}`,
-    );
+    return stalled
+      ? errorJson(stallStatus, detail, "upstream_stalled", "upstream_stalled")
+      : errorJson(
+          502,
+          `upstream stream ended before producing output: ${detail}`,
+        );
   };
 
   // A STRUCTURED refusal (Anthropic policy/safety block, content filter)
@@ -1917,6 +1998,7 @@ export const serveSubscription = async (
         void peeked.chunks.cancel().catch(() => undefined);
         return hopRetry("content filter refusal");
       }
+      silenceGuard.release();
       meter(peeked.chunks);
       return new Response(heartbeat(toClient), {
         status: resp.status,
@@ -1946,6 +2028,7 @@ export const serveSubscription = async (
       void peeked.chunks.cancel().catch(() => undefined);
       return hopRetry("content filter refusal");
     }
+    silenceGuard.release();
     return deliverChunkStream(peeked.chunks, {
       surface: args.surface,
       clientWire,
@@ -1986,6 +2069,7 @@ export const serveSubscription = async (
       void peeked.chunks.cancel().catch(() => undefined);
       return hopRetry("content filter refusal");
     }
+    silenceGuard.release();
     let canonical: TChatCompletionResponse;
     try {
       canonical = await accumulateChunksToResponse(
