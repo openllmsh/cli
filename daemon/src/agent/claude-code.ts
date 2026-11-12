@@ -852,8 +852,8 @@ type TPathAttachmentIndexEntry = {
 /**
  * Per-session index of path-attachment meta names → realpath. Path attachments
  * are never copied into the attachments dir; `attachment_get` serves them from
- * here (loopback only). Mirrored to `path-index.json` under the session's
- * attachments dir so a daemon restart can still resolve replayed chips.
+ * here (loopback only). Mirrored beside the session's attachments directory
+ * so a daemon restart can still resolve replayed chips.
  * Cleared with {@link deleteAgentAttachments}.
  */
 const pathAttachmentIndex = new Map<
@@ -1290,13 +1290,19 @@ export const reapOrphanAgentAttachments = (
     return [];
   }
   const deleted: string[] = [];
-  for (const sessionId of entries) {
+  const suffix = ".path-index.json";
+  const sessionIds = new Set(
+    entries.map((entry) =>
+      entry.endsWith(suffix) ? entry.slice(0, -suffix.length) : entry,
+    ),
+  );
+  for (const sessionId of sessionIds) {
     if (live.has(sessionId) || !SESSION_ID_PATTERN.test(sessionId)) continue;
-    const attachments = join(root, sessionId);
-    if (!existsSync(attachments)) continue;
     if (transcriptExists(sessionId)) continue;
     try {
-      rmSync(attachments, { recursive: true, force: true });
+      rmSync(join(root, sessionId), { recursive: true, force: true });
+      rmSync(join(root, `${sessionId}${suffix}`), { force: true });
+      pathAttachmentIndex.delete(sessionId);
       deleted.push(sessionId);
     } catch {
       /* best-effort */
