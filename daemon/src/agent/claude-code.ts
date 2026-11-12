@@ -965,6 +965,11 @@ export const writeAgentAttachments = (
       if (!resolved.ok) {
         throw new Error(`${resolved.code}: ${resolved.message}`);
       }
+      if (resolved.size > AGENT_MAX_ATTACHMENT_BYTES) {
+        throw new Error(
+          "invalid_path: attachment exceeds the size cap",
+        );
+      }
       let name = sanitizeAttachmentName(attachment.name ?? resolved.name);
       if (!name.includes(".")) name += extensionOf(attachment.media_type);
       const storedName = `${counter.value}-${name}`;
