@@ -39,6 +39,7 @@ import {
   openSync,
   readdirSync,
   readFileSync,
+  readSync,
   realpathSync,
   rmSync,
   statSync,
@@ -1104,21 +1105,30 @@ export const resolveAgentAttachment = (
             message: "attachment exceeds the size cap",
           };
         }
-        const bytes = readFileSync(resolved.path);
-        if (bytes.byteLength > AGENT_MAX_ATTACHMENT_BYTES) {
+        // Cap the read so a file that grows after the size check cannot
+        // allocate unbounded memory into the daemon.
+        const fd = openSync(resolved.path, "r");
+        try {
+          const buffer = Buffer.alloc(AGENT_MAX_ATTACHMENT_BYTES + 1);
+          const read = readSync(fd, buffer, 0, buffer.length, 0);
+          if (read > AGENT_MAX_ATTACHMENT_BYTES) {
+            return {
+              ok: false,
+              code: "attachment_too_large",
+              message: "attachment exceeds the size cap",
+            };
+          }
+          const bytes = buffer.subarray(0, read);
           return {
-            ok: false,
-            code: "attachment_too_large",
-            message: "attachment exceeds the size cap",
+            ok: true,
+            path: resolved.path,
+            mime: indexed.mime,
+            size: bytes.byteLength,
+            bytes,
           };
+        } finally {
+          closeSync(fd);
         }
-        return {
-          ok: true,
-          path: resolved.path,
-          mime: indexed.mime,
-          size: bytes.byteLength,
-          bytes,
-        };
       } catch {
         return {
           ok: false,
