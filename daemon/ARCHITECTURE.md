@@ -973,10 +973,17 @@ by the client. The engine runs with its normal permission model (approvals
 surfaced as events; skip-permissions is a per-session opt-in), not an extra
 sandbox layer. Attach via `--resume <id>` where the engine supports resume;
 spawn and attach both go through the same engine adapter. Attachments a `send`
-carries are written to the session's own `~/.openllm/agent-attachments/<id>/`
-(0700, files 0600), never inside the host's `sessions/<id>/` registry dir (the
-host removes that on exit and refuses to start over an existing one);
-`delete_session` removes them with the transcript. See the
+carries are either base64 (`data`) written to the session's own
+`~/.openllm/agent-attachments/<id>/` (0700, files 0600), or — **loopback only** —
+an absolute local `path` that is realpath'd to a readable regular file and
+`@`-referenced in place with no copy. Path attachments are refused on mux/RTC
+(`local_path_forbidden`); the desktop app's `/local/agent` consumer sets
+`allowsLocalPaths`. Paths reach the page only from the native file dialog /
+OS drop (`pick_attachments`), never as page-supplied strings; residual risk is
+XSS in the desktop webview (same class as `local_agent_auth`). Attachment
+dirs are never inside the host's `sessions/<id>/` registry dir (the host
+removes that on exit and refuses to start over an existing one);
+`delete_session` removes copied attachments with the transcript. See the
 [agent sessions plan](../../docs/plan/2026-10-23-agent-sessions-replace-remote-pty.md).
 
 ## Localhost surfaces and provider auth

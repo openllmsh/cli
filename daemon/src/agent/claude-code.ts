@@ -32,13 +32,16 @@
  *     its native dialog in the terminal. A timeout never allows.
  */
 import {
+  closeSync,
   existsSync,
   lstatSync,
   mkdirSync,
+  openSync,
   readdirSync,
   readFileSync,
   realpathSync,
   rmSync,
+  statSync,
   writeFileSync,
 } from "node:fs";
 import { basename, isAbsolute, join, resolve, sep } from "node:path";
@@ -54,12 +57,14 @@ import {
   AGENT_DETAIL_TEXT_MAX_LENGTH,
   AGENT_MAX_ATTACHMENT_BASE64_LENGTH,
   AGENT_MAX_ATTACHMENT_BYTES,
+  AGENT_MAX_ATTACHMENT_PATH_LENGTH,
   AGENT_MAX_LINE_BYTES,
   AGENT_MAX_QUEUED_PROMPTS,
   AGENT_MODEL_SWITCH_DECLINED_CODE,
   AGENT_MODEL_SWITCH_FAILED_CODE,
   AGENT_SHORT_TEXT_MAX_LENGTH,
   AGENT_SWITCH_MODEL_PATTERN,
+  agentAttachmentHasPath,
   MEDIA_TYPES,
   MIME_BY_MEDIA_EXT,
   SESSION_ID_PATTERN,
@@ -701,6 +706,84 @@ export type TWrittenAgentAttachment = {
   readonly meta: TAgentAttachmentMeta;
 };
 
+export type TResolvedLocalAttachmentPath =
+  | {
+      readonly ok: true;
+      readonly path: string;
+      readonly size: number;
+      readonly name: string;
+    }
+  | { readonly ok: false; readonly code: string; readonly message: string };
+
+/**
+ * Validate a loopback `path` attachment: absolute, within the path-length cap,
+ * realpath'd to an existing readable regular file (symlinks resolved; the
+ * target must still be a regular file). No copy — the engine `@`-references
+ * the real path directly.
+ */
+export const resolveLocalAttachmentPath = (
+  requested: string,
+): TResolvedLocalAttachmentPath => {
+  if (requested.length === 0 || requested.length > AGENT_MAX_ATTACHMENT_PATH_LENGTH) {
+    return {
+      ok: false,
+      code: "invalid_path",
+      message: "attachment path is empty or too long",
+    };
+  }
+  if (!isAbsolute(requested) || requested.includes("\0")) {
+    return {
+      ok: false,
+      code: "invalid_path",
+      message: "attachment path must be an absolute file path",
+    };
+  }
+  try {
+    // lstat first so a dangling symlink is refused before realpath follows it.
+    const link = lstatSync(requested);
+    if (link.isSymbolicLink()) {
+      // Symlinks are fine when they resolve to a regular file — realpath below.
+    } else if (!link.isFile()) {
+      return {
+        ok: false,
+        code: "invalid_path",
+        message: "attachment path is not a regular file",
+      };
+    }
+    const real = realpathSync(requested);
+    if (real.length > AGENT_MAX_ATTACHMENT_PATH_LENGTH) {
+      return {
+        ok: false,
+        code: "invalid_path",
+        message: "attachment path is empty or too long",
+      };
+    }
+    const stat = statSync(real);
+    if (!stat.isFile()) {
+      return {
+        ok: false,
+        code: "invalid_path",
+        message: "attachment path is not a regular file",
+      };
+    }
+    // Prove readability without retaining the handle.
+    const fd = openSync(real, "r");
+    closeSync(fd);
+    return {
+      ok: true,
+      path: real,
+      size: stat.size,
+      name: basename(real),
+    };
+  } catch {
+    return {
+      ok: false,
+      code: "invalid_path",
+      message: "attachment path could not be read",
+    };
+  }
+};
+
 /** Continue attachment names after files retained by a resumed session. */
 const attachmentCounterOf = (dir: string): { value: number } => {
   let names: string[];
@@ -719,15 +802,36 @@ const attachmentCounterOf = (dir: string): { value: number } => {
   return { value };
 };
 
-/** Write attachments; return their absolute paths + metadata for turn events. */
+/**
+ * Materialise attachments for a turn. Base64 (`data`) entries are written under
+ * the session attachments dir; `path` entries are validated and referenced in
+ * place (no copy) — caller must already have refused them off loopback.
+ */
 export const writeAgentAttachments = (
   dir: string,
   attachments: TAgentSendInput["attachments"],
   counter: { value: number },
 ): TWrittenAgentAttachment[] => {
   if (attachments.length === 0) return [];
-  mkdirSync(dir, { recursive: true, mode: 0o700 });
+  const needsDir = attachments.some(
+    (attachment) => !agentAttachmentHasPath(attachment),
+  );
+  if (needsDir) mkdirSync(dir, { recursive: true, mode: 0o700 });
   return attachments.map((attachment) => {
+    if (agentAttachmentHasPath(attachment)) {
+      const resolved = resolveLocalAttachmentPath(attachment.path);
+      if (!resolved.ok) {
+        throw new Error(`${resolved.code}: ${resolved.message}`);
+      }
+      return {
+        path: resolved.path,
+        meta: {
+          name: sanitizeAttachmentName(attachment.name ?? resolved.name),
+          mime: attachment.media_type,
+          size: resolved.size,
+        },
+      };
+    }
     counter.value += 1;
     let name = sanitizeAttachmentName(attachment.name);
     if (!name.includes(".")) name += extensionOf(attachment.media_type);
@@ -1838,10 +1942,16 @@ export const createClaudeTuiSession = (
       );
     } catch (err) {
       logError("agent", err);
+      const detail =
+        err instanceof Error && err.message.startsWith("invalid_path:")
+          ? err.message.slice("invalid_path: ".length)
+          : "an attachment could not be prepared on this device";
       return {
         ok: false,
-        code: "attachment_failed",
-        message: "an attachment could not be saved on this device",
+        code: err instanceof Error && err.message.startsWith("invalid_path:")
+          ? "invalid_path"
+          : "attachment_failed",
+        message: detail,
       };
     }
     const text = pasteSafeText(
