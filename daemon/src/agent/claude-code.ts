@@ -69,6 +69,7 @@ import {
   AGENT_SHORT_TEXT_MAX_LENGTH,
   AGENT_SWITCH_MODEL_PATTERN,
   agentAttachmentHasPath,
+  isAgentAttachmentMentionPath,
   MEDIA_TYPES,
   MIME_BY_MEDIA_EXT,
   SESSION_ID_PATTERN,
@@ -720,23 +721,6 @@ export type TResolvedLocalAttachmentPath =
   | { readonly ok: false; readonly code: string; readonly message: string };
 
 /**
- * Validate a loopback `path` attachment: absolute, within the path-length cap,
- * realpath'd to an existing readable regular file (symlinks resolved; the
- * target must still be a regular file). No copy — the engine `@`-references
- * the real path directly.
- */
-/** Reject NULs and other C0/C1 controls (and bare DEL) in a path string. */
-const pathHasControlChars = (value: string): boolean => {
-  for (let i = 0; i < value.length; i += 1) {
-    const code = value.charCodeAt(i);
-    if (code === 0x7f || code < 0x20 || (code >= 0x80 && code <= 0x9f)) {
-      return true;
-    }
-  }
-  return false;
-};
-
-/**
  * Claude Code's @-mention form for a local path. Always quoted — unquoted
  * mentions truncate at the first space (`@"…"`, see Claude's
  * `extractAtMentionedFiles` / bridge inbound attachments).
@@ -744,6 +728,12 @@ const pathHasControlChars = (value: string): boolean => {
 export const formatAgentAttachmentMention = (absolutePath: string): string =>
   `@"${absolutePath}"`;
 
+/**
+ * Validate a loopback `path` attachment: absolute, within the path-length cap,
+ * realpath'd to an existing readable regular file (symlinks resolved; the
+ * target must still be a regular file). No copy — the engine `@`-references
+ * the real path directly.
+ */
 export const resolveLocalAttachmentPath = (
   requested: string,
 ): TResolvedLocalAttachmentPath => {
@@ -757,11 +747,7 @@ export const resolveLocalAttachmentPath = (
       message: "attachment path is empty or too long",
     };
   }
-  if (
-    !isAbsolute(requested) ||
-    pathHasControlChars(requested) ||
-    requested.includes('"')
-  ) {
+  if (!isAbsolute(requested) || !isAgentAttachmentMentionPath(requested)) {
     return {
       ok: false,
       code: "invalid_path",
@@ -781,11 +767,7 @@ export const resolveLocalAttachmentPath = (
       };
     }
     const real = realpathSync(requested);
-    if (
-      real.length > AGENT_MAX_ATTACHMENT_PATH_LENGTH ||
-      pathHasControlChars(real) ||
-      real.includes('"')
-    ) {
+    if (!isAgentAttachmentMentionPath(real)) {
       return {
         ok: false,
         code: "invalid_path",
