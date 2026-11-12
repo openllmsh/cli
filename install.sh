@@ -2635,7 +2635,8 @@ supervisor_usable() {
 
 print_start_hint() {
   if [ "$INSTALL_MODE" = install ] && [ "$INTERACTIVE" = 0 ] && ! supervisor_usable; then
-    echo "Next: for a cloud-only install (e.g. an agent sandbox), re-run the installer with --non-interactive --minimal"
+    echo "Next: openllm start (no service manager here: runs detached, no restart at boot)"
+    echo "Next: on an agent sandbox or ephemeral box, re-run the installer with --non-interactive --minimal instead (cloud-only)"
   else
     echo "Next: openllm start"
   fi
