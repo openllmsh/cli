@@ -2628,13 +2628,13 @@ path_hint_line() {
 supervisor_usable() {
   case "$(uname -s)" in
     Linux) command -v systemctl >/dev/null 2>&1 && systemctl --user show-environment >/dev/null 2>&1 ;;
-    Darwin) command -v launchctl >/dev/null 2>&1 ;;
+    Darwin) command -v launchctl >/dev/null 2>&1 && launchctl print "gui/$(id -u)" >/dev/null 2>&1 ;;
     *) return 1 ;;
   esac
 }
 
 print_start_hint() {
-  if [ "$INTERACTIVE" = 0 ] && ! supervisor_usable; then
+  if [ "$INSTALL_MODE" = install ] && [ "$INTERACTIVE" = 0 ] && ! supervisor_usable; then
     echo "Next: for a cloud-only install (e.g. an agent sandbox), re-run the installer with --non-interactive --minimal"
   else
     echo "Next: openllm start"
