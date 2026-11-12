@@ -148,6 +148,8 @@ import {
 import { decodeProviderEventStream } from "@openllmsh/sdk/wire/lib/streaming/provider-decode";
 import { responseToChunkStream } from "@openllmsh/sdk/wire/lib/streaming/response-stream";
 import {
+  firstByteDeadlineAt,
+  remainingTimeoutMs,
   streamFirstByteTimeoutMs,
   streamingHopNeedsSilence,
   streamSilenceTimeoutMs,
@@ -1576,6 +1578,7 @@ export const serveSubscription = async (
   const firstByteMs = upstreamStreamsForSilence
     ? streamFirstByteTimeoutMs()
     : 0;
+  const firstByteDeadline = firstByteDeadlineAt(firstByteMs);
   const headersGuard = withStreamingHeadersTimeout(
     args.req.signal,
     firstByteMs,
@@ -1603,8 +1606,17 @@ export const serveSubscription = async (
     if (args.req.signal.aborted)
       return errorJson(499, "client aborted request");
     if (headersGuard.didStall()) {
+      // Carry a 504 envelope so a FINAL-hop stall surfaces as upstream_stalled
+      // instead of falling through to the generic "all hops failed" 502.
       return hopRetry("upstream stalled waiting for response headers", {
+        status: 504,
         cooldownReason: "upstream_stalled",
+        upstreamResponse: errorJson(
+          504,
+          "upstream stalled waiting for response headers",
+          "upstream_stalled",
+          "upstream_stalled",
+        ),
       });
     }
     return hopRetry(transport.failure?.reason ?? "network error", {
@@ -1613,10 +1625,38 @@ export const serveSubscription = async (
   }
   if (!resp.ok) {
     let readable = true;
-    const raw = await resp.text().catch(() => {
-      readable = false;
-      return "";
-    });
+    let errorBodyStalled = false;
+    const remainingErrorBodyMs = remainingTimeoutMs(firstByteDeadline);
+    const raw = await Promise.race([
+      resp.text().catch(() => {
+        readable = false;
+        return "";
+      }),
+      ...(remainingErrorBodyMs > 0
+        ? [
+            new Promise<string>((resolve) => {
+              setTimeout(() => {
+                errorBodyStalled = true;
+                readable = false;
+                void resp.body?.cancel("openllm-upstream-stalled");
+                resolve("");
+              }, remainingErrorBodyMs);
+            }),
+          ]
+        : []),
+    ]);
+    if (errorBodyStalled) {
+      return hopRetry("upstream stalled reading error body", {
+        status: 504,
+        cooldownReason: "upstream_stalled",
+        upstreamResponse: errorJson(
+          504,
+          "upstream stalled reading error body",
+          "upstream_stalled",
+          "upstream_stalled",
+        ),
+      });
+    }
     let errorJsonBody: unknown;
     try {
       errorJsonBody = JSON.parse(raw);
@@ -1740,9 +1780,12 @@ export const serveSubscription = async (
       ? tapCodexSseStream(resp.body, Date.now())
       : resp.body;
   // Raw-byte silence before the first client-forwarded chunk. Keepalives
-  // reset the timer; release() after a successful peek disarms it.
+  // reset the timer; release() after a successful peek disarms it. The
+  // first-byte budget is the REMAINDER of the shared headers+body window.
   const silenceGuard = withByteSilenceGuard(rawUpstreamBody, {
-    firstByteTimeoutMs: upstreamStreams ? streamFirstByteTimeoutMs() : 0,
+    firstByteTimeoutMs: upstreamStreams
+      ? remainingTimeoutMs(firstByteDeadline)
+      : 0,
     gapTimeoutMs: upstreamStreams ? streamSilenceTimeoutMs() : 0,
   });
   const upstreamBody = silenceGuard.stream;
@@ -1816,12 +1859,12 @@ export const serveSubscription = async (
       aborted: args.req.signal.aborted,
       provider: hop.provider,
     });
-    const upstreamResponse = errorJson(
-      stalled ? stallStatus : 502,
-      stalled
-        ? detail
-        : `upstream stream ended before producing output: ${detail}`,
-    );
+    const upstreamResponse = stalled
+      ? errorJson(stallStatus, detail, "upstream_stalled", "upstream_stalled")
+      : errorJson(
+          502,
+          `upstream stream ended before producing output: ${detail}`,
+        );
     if (!finalHop && !args.req.signal.aborted) {
       // Preserve the terminal response this pre-output error would have
       // produced on the final hop, so a forced-context epilogue that also
@@ -1877,10 +1920,12 @@ export const serveSubscription = async (
       undefined,
       { sent: true, usage: null, definiteProviderError: false },
     );
-    return errorJson(
-      502,
-      `upstream stream ended before producing output: ${detail}`,
-    );
+    return stalled
+      ? errorJson(stallStatus, detail, "upstream_stalled", "upstream_stalled")
+      : errorJson(
+          502,
+          `upstream stream ended before producing output: ${detail}`,
+        );
   };
 
   // A STRUCTURED refusal (Anthropic policy/safety block, content filter)
