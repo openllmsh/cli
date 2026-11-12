@@ -22,17 +22,38 @@ import { RTC_CAP, SEEDGATE_CAP, TEAM_RTC_CAP } from "@openllmsh/sdk/protocol";
 import { fleetRequest } from "@openllmsh/sdk/tunnel/fleet";
 import {
   createPeerLink,
+  peerLinkFailureCache,
   peerLinkFailureReasonOf,
 } from "@openllmsh/sdk/tunnel/peer-link";
 import { fleetSubscriptionPubkeyFor } from "./config";
 import { logInfo, safeDiagnosticMessage } from "./logger";
-import { getMuxPeerCaps, muxChannelTo } from "./mux-host";
+import { dropMuxChannel, getMuxPeerCaps, muxChannelTo } from "./mux-host";
 import { ensureRtcTo, getRtcMuxChannel, markRtcFailure } from "./rtc-client";
+
+export {
+  FLEET_DECLINE_HEADER,
+  FLEET_PROVIDER_HEADER,
+} from "@openllmsh/sdk/protocol";
+
+export type TTunnelCauseCode =
+  | "presence"
+  | "relay_unavailable"
+  | "timeout"
+  | "nack"
+  | "channel_closed"
+  | "cached_failure"
+  | "unknown";
 
 /** A local transport failure that happened before a tunnel OPEN was sent. */
 export class PreDispatchTunnelError extends Error {
-  constructor(message: string, options?: ErrorOptions) {
+  readonly causeCode: TTunnelCauseCode;
+
+  constructor(
+    message: string,
+    options?: ErrorOptions & { causeCode?: TTunnelCauseCode },
+  ) {
     super(message, options);
+    this.causeCode = options?.causeCode ?? "unknown";
     this.name = "PreDispatchTunnelError";
   }
 }
@@ -48,12 +69,18 @@ const preDispatchError = (error: unknown): PreDispatchTunnelError | null => {
     (error.message === "channel is closed" ||
       error.message === "stream ids exhausted")
   ) {
-    return new PreDispatchTunnelError(error.message, { cause: error });
+    return new PreDispatchTunnelError(error.message, {
+      cause: error,
+      causeCode: "channel_closed",
+    });
   }
   return null;
 };
 
 const recordTunnelRequest = (input: {
+  readonly keyId: string;
+  readonly provider?: string;
+  readonly causeCode?: TTunnelCauseCode;
   readonly transport: "rtc" | "mux";
   readonly rungFallbackReason:
     | "none"
@@ -65,23 +92,34 @@ const recordTunnelRequest = (input: {
   readonly openMs: number;
   readonly resHeadMs: number;
 }): void => {
-  logInfo("tunnel_request", safeDiagnosticMessage`tunnel_request`, undefined, {
-    tunnel_path: "fleet",
-    tunnel_transport: input.transport,
-    rung_fallback_reason: input.rungFallbackReason,
-    channel_reused: input.channelReused,
-    plan_cache: "miss",
-    serving_inflight: 0,
-    timings: {
-      open_ms: input.openMs,
-      admission_ms: 0,
-      res_head_ms: input.resHeadMs,
+  logInfo(
+    "tunnel_request",
+    safeDiagnosticMessage`tunnel_request`,
+    {
+      peer_key_id: input.keyId,
+      ...(input.provider === undefined ? {} : { provider: input.provider }),
+      ...(input.causeCode === undefined ? {} : { cause_code: input.causeCode }),
     },
-  });
+    {
+      tunnel_path: "fleet",
+      tunnel_transport: input.transport,
+      rung_fallback_reason: input.rungFallbackReason,
+      channel_reused: input.channelReused,
+      plan_cache: "miss",
+      serving_inflight: 0,
+      timings: {
+        open_ms: input.openMs,
+        admission_ms: 0,
+        res_head_ms: input.resHeadMs,
+      },
+    },
+  );
 };
 
 export type TTunnelToPeerArgs = {
   keyId: string;
+  provider?: string;
+  fleetProvider?: string;
   surface: TTunnelSurface;
   body: Uint8Array;
   accept: "application/json" | "text/event-stream";
@@ -113,6 +151,9 @@ const tunnelToPeerLive: TTunnelToPeer = async (args) => {
       ? { user_agent: args.userAgent.slice(0, 512) }
       : {}),
     ...(args.teamGrant === undefined ? {} : { team_grant: args.teamGrant }),
+    ...(args.fleetProvider === undefined
+      ? {}
+      : { fleet_provider: args.fleetProvider }),
   };
 
   const peerCaps = getMuxPeerCaps(args.keyId);
@@ -124,6 +165,11 @@ const tunnelToPeerLive: TTunnelToPeer = async (args) => {
     signal: args.signal,
   };
 
+  const lookupKey =
+    args.teamId === undefined
+      ? args.keyId
+      : `${args.keyId}\u0000${args.teamId}`;
+  const wasCached = peerLinkFailureCache.has(lookupKey, "mux");
   const startedAt = Date.now();
   let rtcFailed = false;
   const link = createPeerLink({
@@ -155,6 +201,8 @@ const tunnelToPeerLive: TTunnelToPeer = async (args) => {
       // `muxChannelTo` owns its channel map and joins an in-flight open.
       // Its dial result therefore carries reuse semantics without a second lookup.
       open: () => null,
+      drop: (channel) =>
+        dropMuxChannel(args.keyId, channel, { teamId: args.teamId }),
       dial: async () =>
         muxChannelTo(args.keyId, {
           ...(args.teamId === undefined ? {} : { teamId: args.teamId }),
@@ -187,6 +235,8 @@ const tunnelToPeerLive: TTunnelToPeer = async (args) => {
       }
     });
     recordTunnelRequest({
+      keyId: args.keyId,
+      provider: args.provider,
       transport: selection.path,
       rungFallbackReason:
         selection.path === "rtc"
@@ -205,15 +255,35 @@ const tunnelToPeerLive: TTunnelToPeer = async (args) => {
         ? error
         : new DOMException("Aborted", "AbortError");
     }
-    const preDispatch = preDispatchError(error);
-    if (preDispatch !== null) throw preDispatch;
+    let failure = preDispatchError(error);
     if (error instanceof Error && error.message === "peer link unavailable") {
-      throw new PreDispatchTunnelError(
+      const reason = peerLinkFailureCache.reason(lookupKey, "mux");
+      const causeCode: TTunnelCauseCode = wasCached
+        ? "cached_failure"
+        : reason === "presence" ||
+            reason === "relay_unavailable" ||
+            reason === "timeout" ||
+            reason === "nack"
+          ? reason
+          : "unknown";
+      failure = new PreDispatchTunnelError(
         "Device transport unavailable. Peer has neither RTC nor mux — update OpenLLM on the peer.",
-        { cause: error },
+        { cause: error, causeCode },
       );
     }
-    throw error instanceof Error ? error : new Error(String(error));
+    recordTunnelRequest({
+      keyId: args.keyId,
+      provider: args.provider,
+      causeCode: failure?.causeCode ?? "unknown",
+      transport: selection.path,
+      rungFallbackReason: "channel_open_failed",
+      channelReused: selection.reused,
+      openMs: 0,
+      resHeadMs: Date.now() - startedAt,
+    });
+    throw (
+      failure ?? (error instanceof Error ? error : new Error(String(error)))
+    );
   }
 };
 
