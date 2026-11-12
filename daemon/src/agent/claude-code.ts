@@ -815,7 +815,6 @@ export const resolveLocalAttachmentPath = (
 const maxAttachmentPrefix = (names: Iterable<string>): number => {
   let value = 0;
   for (const name of names) {
-    if (name === PATH_INDEX_FILENAME) continue;
     const match = /^(\d+)-/.exec(name);
     if (match?.[1] === undefined) continue;
     const prefix = Number(match[1]);
@@ -861,10 +860,13 @@ const pathAttachmentIndex = new Map<
   Map<string, TPathAttachmentIndexEntry>
 >();
 
-const PATH_INDEX_FILENAME = "path-index.json";
-
+/**
+ * Durable path index lives BESIDE the session attachments dir (not inside
+ * it), so `attachment_get`'s ordinary file branch can never serve it to a
+ * remote consumer.
+ */
 const pathIndexFileOf = (sessionId: string): string =>
-  join(agentAttachmentsDir(sessionId), PATH_INDEX_FILENAME);
+  join(agentAttachmentsRoot(), `${sessionId}.path-index.json`);
 
 const loadPathIndexFromDisk = (
   sessionId: string,
@@ -904,8 +906,7 @@ const loadPathIndexFromDisk = (
 const persistPathIndex = (sessionId: string): void => {
   const byName = pathAttachmentIndex.get(sessionId);
   if (byName === undefined || byName.size === 0) return;
-  const dir = agentAttachmentsDir(sessionId);
-  mkdirSync(dir, { recursive: true, mode: 0o700 });
+  mkdirSync(agentAttachmentsRoot(), { recursive: true, mode: 0o700 });
   writeFileSync(
     pathIndexFileOf(sessionId),
     `${JSON.stringify(Object.fromEntries(byName))}\n`,
@@ -1014,6 +1015,11 @@ export const writeAgentAttachments = (
 export const deleteAgentAttachments = (sessionId: string): void => {
   if (!SESSION_ID_PATTERN.test(sessionId)) return;
   pathAttachmentIndex.delete(sessionId);
+  try {
+    rmSync(pathIndexFileOf(sessionId), { force: true });
+  } catch {
+    /* already gone */
+  }
   try {
     rmSync(agentAttachmentsDir(sessionId), { recursive: true, force: true });
   } catch {

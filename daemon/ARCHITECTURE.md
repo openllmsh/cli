@@ -977,9 +977,10 @@ carries are either base64 (`data`) written to the session's own
 `~/.openllm/agent-attachments/<id>/` (0700, files 0600), or — **loopback only** —
 an absolute local `path` that is realpath'd to a readable regular file and
 referenced in place as `@"<realpath>"` (Claude Code's quoted @-mention; no
-copy). A per-session index maps the turn's attachment meta name to that
-realpath so loopback `attachment_get` can still serve the bytes; mux/RTC never
-sees the index (`allowLocalPaths`). Path attachments are refused on mux/RTC
+copy). A per-session index (`agent-attachments/<id>.path-index.json`, beside the
+session dir so `attachment_get` cannot serve it) maps the turn's attachment
+meta name to that realpath so loopback `attachment_get` can still serve the
+bytes; mux/RTC never sees the index (`allowLocalPaths`). Path attachments are refused on mux/RTC
 (`local_path_forbidden`); the desktop app's `/local/agent` consumer sets
 `allowsLocalPaths`. Paths reach the page from the native file dialog
 (`pick_attachments`) or from a Rust drop queue claimed via
