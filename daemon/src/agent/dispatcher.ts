@@ -23,7 +23,6 @@ import type {
 import {
   AGENT_SESSION_ID_PATTERN,
   AGENT_SWITCH_MODEL_PATTERN,
-  agentAttachmentHasPath,
   encodeAgentLine,
   parseAgentEvent,
   SESSION_ID_PATTERN,
@@ -697,21 +696,14 @@ export const createAgentDispatcher = (
               return;
             }
             const attachments = command.attachments ?? [];
-            // Path attachments open arbitrary files on this Mac. Admit them
-            // only on the desktop loopback socket — never over mux/RTC.
-            if (
-              attachments.some(agentAttachmentHasPath) &&
-              state.consumer.allowsLocalPaths !== true
-            ) {
-              error(
-                state,
-                session,
-                "local_path_forbidden",
-                "Local file paths are only accepted on this Mac's loopback agent socket.",
-                commandId,
-              );
-              return;
-            }
+            // A path attachment is a mention in the prompt (`@"…"`), which
+            // any consumer can already type, so it is admitted on every
+            // transport. Its checks do answer whether a file exists and how
+            // big it is, but every agent consumer is the device's own
+            // account behind a seed-gated grant (team channels are tunnel
+            // only, mux-host.ts), already able to have the engine read it.
+            // Reading its bytes back (`attachment_get`) stays loopback-only:
+            // see `allowsLocalPaths`.
             const engineSession = session.engineSession;
             const result = withCommand(session, commandId, () =>
               engineSession.send({

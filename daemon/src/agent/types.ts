@@ -120,9 +120,10 @@ export type TAgentConsumer = {
   /** End the transport; a code means abnormal (reset / close code). */
   readonly end: (code?: "lagging" | "protocol_error") => void;
   /**
-   * Admit `path` attachments on `send`. Set only by the desktop loopback
-   * `/local/agent` socket — mux/RTC never set this, so a remote peer cannot
-   * make the daemon open an arbitrary local file.
+   * Serve a sent `path` attachment's bytes back (`attachment_get`). Set only
+   * by the desktop loopback `/local/agent` socket — mux/RTC never set this,
+   * so a remote peer cannot read an arbitrary local file through the daemon.
+   * Sending a path is admitted everywhere: it is only a prompt mention.
    */
   readonly allowsLocalPaths?: boolean;
 };
