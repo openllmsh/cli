@@ -762,6 +762,9 @@ export const handleChannelOpenAck = (frame: {
   }
   opening.delete(keyId);
   clearTimeout(pending.timer);
+  // A late ACK can land after the open budget cached a timeout: the channel
+  // is live now, so the cached failure must not refuse it.
+  peerLinkFailureCache.clear(keyId, "mux");
   const record = registerChannel(pending.channelId, keyId, "consumer");
   pending.resolve(record.channel);
 };

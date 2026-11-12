@@ -175,7 +175,9 @@ const tunnelToPeerLive: TTunnelToPeer = async (args) => {
   const startedAt = Date.now();
   let rtcFailed = false;
   const link = createPeerLink({
-    target: args.keyId,
+    // Same scope as `muxChannelTo`'s cache: a team's failure never hides
+    // this peer's same-user (or another team's) channel.
+    target: lookupKey,
     rtc: {
       open: () => getRtcMuxChannel(args.keyId, args.teamId),
       warm: () => {

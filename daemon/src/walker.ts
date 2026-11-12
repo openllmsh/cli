@@ -2879,7 +2879,7 @@ type THopServed = {
 
 const walkPlan = async (
   args: TWalkArgs,
-  hops: ReadonlyArray<THop>,
+  planHops: ReadonlyArray<THop>,
   contextOverflowStrategy: TContextOverflowStrategy,
 ): Promise<Response> => {
   const fleetProvider =
@@ -2893,9 +2893,14 @@ const walkPlan = async (
   // This device's plan doesn't hold the hop the consumer asked for: serving
   // any other hop would answer with a model it didn't ask for, so decline
   // and let the consumer try its next peer.
-  if (fleetProvider !== null && !hops.some(isFleetTarget)) {
+  if (fleetProvider !== null && !planHops.some(isFleetTarget)) {
     return fleetDecline(fleetProvider, "unavailable");
   }
+  // A fleet request walks only the hop the consumer asked for: an earlier
+  // hop's answer would be a model it didn't ask for, and running it only to
+  // discard it would spend that account's quota for nothing.
+  const hops =
+    fleetProvider === null ? planHops : planHops.filter(isFleetTarget);
   const limitedBody = clampHoldOutputLimit(
     args.rawBody,
     args.surface,
@@ -3765,7 +3770,10 @@ const walkPlan = async (
     // A skipped ordinary candidate means the physical queue still has a
     // forced-context epilogue. Its successor must remain walkable until that
     // retry receives the tokenizer's final verdict.
+    // A fleet request's hop is never final here: the consumer owns the final
+    // answer, so a failure declines and lets it try its next peer.
     const finalHop =
+      fleetProvider === null &&
       queueIndex === queue.length &&
       (requeuedSkipped || contextSkipped.length === 0);
     if (
