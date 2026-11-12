@@ -143,6 +143,8 @@ import {
 import { decodeProviderEventStream } from "@openllmsh/sdk/wire/lib/streaming/provider-decode";
 import { responseToChunkStream } from "@openllmsh/sdk/wire/lib/streaming/response-stream";
 import {
+  streamFirstByteTimeoutMs,
+  streamingHopNeedsSilence,
   streamSilenceTimeoutMs,
   withByteSilenceGuard,
   withStreamingHeadersTimeout,
@@ -1559,10 +1561,20 @@ export const serveSubscription = async (
               };
         })()
       : null;
-  // Streaming hops only: short silence budget on headers wait. Non-streaming
-  // JSON responses legitimately take as long as the model needs with no bytes.
-  const silenceMs = clientWantsStream ? streamSilenceTimeoutMs() : 0;
-  const headersGuard = withStreamingHeadersTimeout(args.req.signal, silenceMs);
+  // chatgpt always streams upstream (even when the client wants JSON), so the
+  // headers first-byte budget must follow `upstreamStreams`, not only the
+  // client's stream flag. Non-streaming JSON responses get no short timeout.
+  const upstreamStreamsForSilence = streamingHopNeedsSilence({
+    upstreamAlwaysStreams: wire === "chatgpt",
+    clientWantsStream,
+  });
+  const firstByteMs = upstreamStreamsForSilence
+    ? streamFirstByteTimeoutMs()
+    : 0;
+  const headersGuard = withStreamingHeadersTimeout(
+    args.req.signal,
+    firstByteMs,
+  );
   const dispatch = (): Promise<Response | null> =>
     postWithReplayStripRetry(
       url,
@@ -1725,7 +1737,8 @@ export const serveSubscription = async (
   // Raw-byte silence before the first client-forwarded chunk. Keepalives
   // reset the timer; release() after a successful peek disarms it.
   const silenceGuard = withByteSilenceGuard(rawUpstreamBody, {
-    silenceTimeoutMs: upstreamStreams ? streamSilenceTimeoutMs() : 0,
+    firstByteTimeoutMs: upstreamStreams ? streamFirstByteTimeoutMs() : 0,
+    gapTimeoutMs: upstreamStreams ? streamSilenceTimeoutMs() : 0,
   });
   const upstreamBody = silenceGuard.stream;
   const streamObserver = createUsageObserver(hopFormat(wire), "sse");
@@ -1784,8 +1797,9 @@ export const serveSubscription = async (
   const peekedError = (error: unknown): THopServeOutcome => {
     const detail = streamFailureDetail(error);
     const stalled = isUpstreamStalledError(error);
+    const stallStatus = 504;
     const cls = classifyHopError({
-      status: stalled ? 0 : 502,
+      status: stalled ? stallStatus : 502,
       envelope: {
         error: {
           message: detail,
@@ -1798,7 +1812,7 @@ export const serveSubscription = async (
       provider: hop.provider,
     });
     const upstreamResponse = errorJson(
-      stalled ? 504 : 502,
+      stalled ? stallStatus : 502,
       stalled
         ? detail
         : `upstream stream ended before producing output: ${detail}`,
@@ -1811,7 +1825,7 @@ export const serveSubscription = async (
       // pre-commit branch above. Critically, classify the body before
       // returning: HTTP 200 stream failures can still be context overflow.
       return hopRetry(detail, {
-        status: stalled ? 504 : 502,
+        status: stalled ? stallStatus : 502,
         bodySnippet: detail,
         ...(cls.kind === "transient" ? { cooldownReason: cls.reason } : {}),
         upstreamResponse,
