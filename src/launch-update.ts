@@ -19,7 +19,10 @@ import { join } from "node:path";
 import { CLI_VERSION } from "./cli-version";
 import { openllmDir, sharedFileConfig } from "./env";
 
-export const CHECK_INTERVAL_MS = 6 * 60 * 60 * 1000;
+/** Short on purpose: releases ship often and the cloud moves on with them, so
+ *  a headless sandbox with no daemon must not sit hours behind. One check is
+ *  a single small version GET, made by a detached child. */
+export const CHECK_INTERVAL_MS = 5 * 60 * 1000;
 
 /** The hidden subcommand the detached child runs. */
 export const SELF_UPDATE_CHILD = "__self-update";

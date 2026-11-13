@@ -454,7 +454,7 @@ See [`packages/release/commands/cli.ts`](../release/commands/cli.ts):
 - `GET /api/cli/version` → `{ latest_version }` from the committed pin; the
   daemon bootstrap carries the same tag (`latest_cli_version`, and
   `latest_version` for pre-merge daemons).
-- **At CLI launch** (`src/launch-update.ts`): at most once per 6 h, an
+- **At CLI launch** (`src/launch-update.ts`): at most once per 5 min, an
   invocation (TTY or not) spawns a DETACHED `openllm __self-update`. The child
   probes this machine's daemon first: a running daemon owns updates, so the
   child exits. With no daemon (minimal installs, agent sandboxes, a stopped
