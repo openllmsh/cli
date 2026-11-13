@@ -157,6 +157,8 @@ const SUBMIT_RETRY_DELAYS_MS = [1_500, 3_000, 6_000] as const;
 const REPLAY_MAX_EVENTS = 1_500;
 /** Transcript chunks one drain reads at most (1 MiB each). */
 const DRAIN_MAX_CHUNKS = 512;
+/** Resume drains gathered at most before the replay window is chosen. */
+const RESUME_MAX_DRAINS = 64;
 const TRANSCRIPT_POLL_MS = 250;
 
 const DETAIL_MAX = AGENT_DETAIL_TEXT_MAX_LENGTH;
@@ -1803,26 +1805,39 @@ export const createClaudeTuiSession = (
     return out;
   };
 
+  let atEof = false;
+  let resumeBacklog: TAgentEvent[] = [];
+  let resumeDrains = 0;
   /** Read everything the transcript has now (history on attach, then appends). */
   const pump = (): void => {
     drained = [];
     try {
-      // The resume drain reads to EOF: the latest window must be chosen from
-      // the whole transcript, or a long one would pick a window from its
-      // prefix and stream every later chunk to the browser as replay.
-      // Appends after that stay capped per tick.
-      const limit = replayed
-        ? (deps.drainMaxChunks ?? DRAIN_MAX_CHUNKS)
-        : Number.POSITIVE_INFINITY;
+      const limit = deps.drainMaxChunks ?? DRAIN_MAX_CHUNKS;
+      atEof = false;
       for (let chunk = 0; chunk < limit; chunk += 1) {
         const text = tail.read();
-        if (text === null || text.length === 0) break;
+        if (text === null || text.length === 0) {
+          atEof = true;
+          break;
+        }
         parser.push(text);
       }
       subagents.pump();
     } finally {
-      const events = drained;
+      let events = drained;
       drained = null;
+      // A resume longer than one drain is gathered over several ticks (each
+      // capped, so the event loop keeps turning) and its window chosen once
+      // EOF is reached — or a long one would pick its window from the prefix
+      // and stream every later chunk to the browser as replay. A file that
+      // grows as fast as it is read is settled after RESUME_MAX_DRAINS.
+      if (!replayed) {
+        resumeBacklog.push(...events);
+        resumeDrains += 1;
+        events =
+          atEof || resumeDrains >= RESUME_MAX_DRAINS ? resumeBacklog : [];
+        if (events === resumeBacklog) resumeBacklog = [];
+      }
       if (!replayed && events.length > 0) {
         // Attach / resume: only the latest window, then the cursor before it
         // (`history_get` pages the rest from the transcript index).
