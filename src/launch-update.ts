@@ -111,7 +111,7 @@ const sameFile = (a: string, b: string): boolean => {
   }
 };
 
-/** A real OpenLLM daemon on this machine's port, not just anything that
+/** A real OpenLLM daemon that is updating itself, not just anything that
  *  answers 200: its `/status` carries the daemon's `version`. */
 const openllmDaemonAnswers = async (): Promise<boolean> => {
   const { daemonPort } = await import("./clients/gateway");
@@ -121,10 +121,13 @@ const openllmDaemonAnswers = async (): Promise<boolean> => {
     });
     if (!res.ok) return false;
     const body: unknown = await res.json();
+    // The daemon converges only while its cloud state is `ok` (revoked key,
+    // unreachable cloud → no updater), so defer only to one that will.
     return (
       typeof body === "object" &&
       body !== null &&
-      typeof (body as { version?: unknown }).version === "string"
+      typeof (body as { version?: unknown }).version === "string" &&
+      (body as { cloudState?: unknown }).cloudState === "ok"
     );
   } catch {
     return false;
