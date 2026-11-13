@@ -35,7 +35,7 @@ import {
 import type { TRosterAccount } from "./account-roster";
 import { readRoster } from "./account-roster";
 import { AccountKeyedMap, AccountKeyedSet } from "./account-scope";
-import { setVerifiedLoginAdmitter } from "./auth-events";
+import { addAuthObserver, setVerifiedLoginAdmitter } from "./auth-events";
 import { authGeneration, notifyAuthStatus, onAuthChange } from "./auth-watch";
 import { autoUpdateEnabled } from "./auto-update-pref";
 import type { TCliProvider } from "./cli-paths";
@@ -47,6 +47,7 @@ import {
   timeoutCallbackLatenessMs,
   waitUntilExpired,
 } from "./deadline-budget";
+import type { TProviderDelegate } from "./delegation";
 import { DELEGATES, getDelegate, isOAuthSlug } from "./delegation";
 import { accountHash } from "./delegation/account-id";
 import {
@@ -71,6 +72,7 @@ import { currentLocalServerStates } from "./local-servers";
 import { logWarn, safeDiagnosticMessage } from "./logger";
 import { currentDaemonCaps } from "./mux-host";
 import {
+  currentAccountIndex,
   currentTickId,
   nextStatusTickId,
   opTickContext,
@@ -91,7 +93,12 @@ import { teamServeEnabled } from "./team-grant-admit";
 import { teamKeyEpochs } from "./team-keys";
 import { servedTunnelCapacity, servedTunnelLoad } from "./tunnel-capacity";
 import { currentUpdate } from "./updater";
-import { cachedUsage, peekUsage } from "./usage-cache";
+import {
+  cachedUsage,
+  noteUsageReadFailed,
+  peekUsage,
+  usageReadDue,
+} from "./usage-cache";
 import { attachVendorCliInstall } from "./vendor-cli-install";
 import { DAEMON_VERSION } from "./version";
 
@@ -794,6 +801,7 @@ const probeProviderAccount = async (
         if (
           normalizeProviderConnection(published).observation === "connected"
         ) {
+          readUsageIfDue(d, published.account_hash);
           const usage = peekUsage(d.slug, published.account_hash);
           if (usage !== null) published = { ...published, usage };
         }
@@ -839,7 +847,10 @@ const probeProviderAccount = async (
     // right now") on a daemon nobody was even looking at. Usage is read ONLY
     // on demand — the `refresh` command → `refreshUsage` (the manual button
     // or the providers page mounting). Here we just attach whatever that last
-    // on-demand read cached. See `usage-cache.ts`.
+    // on-demand read cached. See `usage-cache.ts`. The one exception is
+    // figures a passed reset has proven out of date: those get ONE automatic,
+    // TTL-respecting read, detached (`readUsageIfDue`).
+    readUsageIfDue(d, published.account_hash);
     const usage = peekUsage(d.slug, published.account_hash);
     if (usage !== null) published = { ...published, usage };
     return publishConnection(published);
@@ -1058,23 +1069,42 @@ export const usageRefreshCacheOpts = (options: {
  * best-effort: a failed read preserves its last-good figures plus failure
  * metadata without blocking other providers.
  */
+/** One provider account whose usage read could not run (no vendor call). */
+export type TUsageReadFailure = {
+  readonly slug: string;
+  readonly account_index: number;
+  readonly reason: string;
+};
+
+export type TRefreshUsageReturnType = {
+  readonly deferred: readonly string[];
+  /**
+   * Accounts whose status probe was not conclusive (e.g. `probe_timeout`), so
+   * no usage was read. Their cached figures are stamped as a failed read and
+   * served stale; the command result carries this so a Refresh can say so.
+   */
+  readonly failed: readonly TUsageReadFailure[];
+};
+
 export const refreshUsage = async (
   slug?: string,
   options?: { readonly manual?: boolean; readonly allAccounts?: boolean },
-): Promise<{ readonly deferred: readonly string[] }> => {
+): Promise<TRefreshUsageReturnType> => {
   // A provider-scoped refresh with no explicit account reads EVERY account
   // slot, so extra accounts get usage too.
   if (slug !== undefined && options?.allAccounts === true) {
     const deferred: string[] = [];
+    const failed: TUsageReadFailure[] = [];
     await Promise.allSettled(
       readRoster(slug as TCliProvider).accounts.map((account) =>
         runWithAccount(account.index, async () => {
           const one = await refreshUsage(slug, { manual: options.manual });
           deferred.push(...one.deferred);
+          failed.push(...one.failed);
         }),
       ),
     );
-    return { deferred: [...new Set(deferred)] };
+    return { deferred: [...new Set(deferred)], failed };
   }
   // Join the canonical snapshot — never a raw `d.status()` bypass that would
   // start a second producer beside `computeStatus`. `allSettled`, NOT `all`:
@@ -1087,6 +1117,7 @@ export const refreshUsage = async (
   const manual = options?.manual === true;
   if (slug === undefined) {
     const deferred: string[] = [];
+    const failed: TUsageReadFailure[] = [];
     // Every account slot of every provider, each in its own account context.
     await Promise.allSettled(
       Object.values(DELEGATES).flatMap((d) =>
@@ -1094,24 +1125,38 @@ export const refreshUsage = async (
           runWithAccount(account.index, async () => {
             const one = await refreshUsage(d.slug, options);
             deferred.push(...one.deferred);
+            failed.push(...one.failed);
           }),
         ),
       ),
     );
-    return { deferred };
+    return { deferred, failed };
   }
   if (providerAuthOperationActive(slug) || loginSlot(slug).inFlight()) {
-    return { deferred: [slug] };
+    return { deferred: [slug], failed: [] };
   }
   const d = DELEGATES[slug];
-  if (d === undefined) return { deferred: [] };
+  if (d === undefined) return { deferred: [], failed: [] };
   const raw = await boundedDelegateStatus(slug, (signal) => d.status(signal), {
     force: manual,
   });
   const conn = applyAuthLiteral(slug, raw);
   rememberConnection(slug, raw, conn);
-  if (!normalizeProviderConnection(conn).serviceable) {
-    return { deferred: [] };
+  const normalized = normalizeProviderConnection(conn);
+  if (!normalized.serviceable) {
+    // A definite "not signed in" has nothing to read. An INCONCLUSIVE probe
+    // (timeout, unreadable store) is a failed read, not a skip: stamp it so
+    // the cached figures are served stale instead of looking current, and
+    // report it so the Refresh does not ack as if it worked.
+    if (normalized.observation !== "unknown" || normalized.pending) {
+      return { deferred: [], failed: [] };
+    }
+    const reason = conn.reason_code ?? "probe_failed";
+    noteUsageReadFailed(slug, reason, conn.account_hash);
+    return {
+      deferred: [],
+      failed: [{ slug, account_index: currentAccountIndex(), reason }],
+    };
   }
   const fetchUsage = (): Promise<TProviderUsageSnapshot> =>
     manual
@@ -1125,5 +1170,83 @@ export const refreshUsage = async (
       accountHash: conn.account_hash,
     }),
   );
-  return { deferred: [] };
+  return { deferred: [], failed: [] };
+};
+
+/**
+ * Automatic read for figures a passed reset has proven out of date
+ * ({@link usageReadDue}). Called from the status push for a connected account;
+ * detached, never renews tokens, and goes through the same TTL / back-off /
+ * single-flight as the mount refresh. Publishes the result when it lands.
+ */
+const readUsageIfDue = (
+  d: TProviderDelegate,
+  accountHashOf: string | undefined,
+): void => {
+  if (!usageReadDue(d.slug, accountHashOf)) return;
+  if (providerAuthOperationActive(d.slug) || loginSlot(d.slug).inFlight()) {
+    return;
+  }
+  void withoutCommandReplayContext(() =>
+    cachedUsage(
+      d.slug,
+      () => d.usage(),
+      usageRefreshCacheOpts({ manual: false, accountHash: accountHashOf }),
+    ),
+  )
+    .then(() => requestLateProbePush())
+    .catch(() => {});
+};
+
+/** Retry cadence while a just-finished sign-in still holds its login slot. */
+const LOGIN_USAGE_READ_DELAY_MS = 3_000;
+const LOGIN_USAGE_READ_ATTEMPTS = 10;
+
+/**
+ * Read usage for the account a sign-in just landed on, daemon-side. The first
+ * read used to wait for a browser on Providers, whose bookkeeping is keyed by
+ * provider — so a second account looked "already fetched" and showed nothing.
+ * Runs after a short delay (the connect command's own `invalidateUsage` /
+ * account reconcile land first) and retries while the login slot is still
+ * held. Exported for tests.
+ */
+export const readUsageAfterLogin = (
+  slug: string,
+  accountIndex: number,
+  delayMs: number = LOGIN_USAGE_READ_DELAY_MS,
+): void => {
+  let attempts = 0;
+  const attempt = (): void => {
+    attempts += 1;
+    void withoutCommandReplayContext(() =>
+      runWithAccount(accountIndex, () => refreshUsage(slug)),
+    )
+      .then((result) => {
+        if (
+          result.deferred.length > 0 &&
+          attempts < LOGIN_USAGE_READ_ATTEMPTS
+        ) {
+          setTimeout(attempt, delayMs).unref?.();
+          return;
+        }
+        requestLateProbePush();
+      })
+      .catch(() => {});
+  };
+  setTimeout(attempt, delayMs).unref?.();
+};
+
+let loginUsageObserverInstalled = false;
+
+/** Subscribe once: every admitted sign-in reads that account's usage. */
+export const observeLoginUsageReads = (): void => {
+  if (loginUsageObserverInstalled) return;
+  loginUsageObserverInstalled = true;
+  addAuthObserver((event) => {
+    if (event.event !== "auth.login.succeeded") return;
+    if (DELEGATES[event.slug] === undefined) return;
+    // Observers run synchronously inside the login flow, which carries the
+    // addressed account slot.
+    readUsageAfterLogin(event.slug, currentAccountIndex());
+  });
 };

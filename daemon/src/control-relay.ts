@@ -54,6 +54,7 @@ import { runWithAccount, withoutCommandReplayContext } from "./op-context";
 import { clearPendingAuth } from "./pending-auth";
 import { clearPlanCache } from "./plan-cache";
 import { deviceSessionsForList } from "./session-host";
+import type { TUsageReadFailure } from "./status";
 import {
   clearProviderSignedOut,
   loginAdmittedForCommand,
@@ -436,6 +437,10 @@ const runCommandInAccount = async (
       case "refresh": {
         const manual = cmd.payload?.manual === true;
         const slug = cmd.payload?.slug;
+        // Accounts whose read could not run (inconclusive status probe):
+        // their figures are now served stale, and the ack says so instead
+        // of a plain `done` that looks like a successful refresh.
+        const failed: TUsageReadFailure[] = [];
         if (slug === undefined) {
           const usage = await daemonCommandScheduler.schedulePerProviderUsage(
             async (one) => {
@@ -443,6 +448,7 @@ const runCommandInAccount = async (
                 manual,
                 allAccounts: true,
               });
+              failed.push(...result.failed);
               if (result.deferred.length > 0) return { deferred: true };
               return undefined;
             },
@@ -461,8 +467,15 @@ const runCommandInAccount = async (
           return {
             id: cmd.id,
             status: "done",
-            ...(usage.deferred.length > 0
-              ? { result: { deferred: usage.deferred } }
+            ...(usage.deferred.length > 0 || failed.length > 0
+              ? {
+                  result: {
+                    ...(usage.deferred.length > 0
+                      ? { deferred: usage.deferred }
+                      : {}),
+                    ...(failed.length > 0 ? { usage_failed: failed } : {}),
+                  },
+                }
               : {}),
           };
         }
@@ -481,7 +494,13 @@ const runCommandInAccount = async (
             },
           };
         }
-        return { id: cmd.id, status: "done" };
+        return {
+          id: cmd.id,
+          status: "done",
+          ...(one.failed.length > 0
+            ? { result: { usage_failed: one.failed } }
+            : {}),
+        };
       }
       case "status":
         return { id: cmd.id, status: "done" };

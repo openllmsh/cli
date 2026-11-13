@@ -5,9 +5,11 @@
  * usage endpoint (e.g. Claude's `api/oauth/usage`) has its OWN low rate limit,
  * separate from inference — reading it on the status-push cadence 429'd it
  * after ~5 min ("Claude usage is rate-limited right now") on a daemon nobody
- * was even looking at. `cachedUsage` is reached only by a manual `refresh`
- * command or by {@link sampleUsageAfterRequest}, which coalesces successful
- * real user request bursts and runs detached. The background status push reads
+ * was even looking at. `cachedUsage` is reached only by a `refresh`
+ * command, by {@link sampleUsageAfterRequest} (which coalesces successful
+ * real user request bursts and runs detached), by a finished sign-in, or —
+ * once per passed reset, see {@link usageReadDue} — by the status push for
+ * figures a reset has proven out of date. The background status push reads
  * the cache PASSIVELY via {@link peekUsage}, which NEVER calls the vendor — it
  * just attaches whatever was last fetched. See `status.ts` / `control-relay.ts`.
  *
@@ -95,6 +97,10 @@ const REQUEST_SAMPLE_DEBOUNCE_MS = 60_000;
 // The vendor usage endpoint has a separate, tight rate limit. Request-driven
 // samples therefore remain capped even during a long coding session.
 const REQUEST_SAMPLE_MIN_INTERVAL_MS = 2 * 60_000;
+// After an automatic due read (a passed reset) failed, wait this long before
+// the status push tries that account again — a vendor endpoint that keeps
+// failing is not hammered on the push cadence.
+const AUTO_DUE_FAILURE_RETRY_MS = 30 * 60_000;
 
 type TUsageEntry = {
   // The last USABLE snapshot + when we obtained it (drives the "last known
@@ -268,6 +274,12 @@ export type TUsageCache = {
   ) => void;
   readonly clearRequestUsageSamples: () => void;
   readonly invalidateUsage: (slug?: string, accountHash?: string) => void;
+  readonly noteUsageReadFailed: (
+    slug: string,
+    reason: string,
+    accountHash?: string,
+  ) => boolean;
+  readonly usageReadDue: (slug: string, accountHash?: string) => boolean;
   readonly healUsage: (
     slug: string,
     fetcher: () => Promise<TProviderUsageSnapshot>,
@@ -694,6 +706,57 @@ export const createUsageCache = (deps: TUsageCacheDeps = {}): TUsageCache => {
     );
   };
 
+  /**
+   * Record a usage read that could not reach the vendor at all (the status
+   * probe before it timed out or was indeterminate). Without this the cached
+   * figures kept being served as current: no attempt time, no failure, no
+   * `stale` — so a reading from weeks ago looked live. Stamps the attempt and
+   * the failure so {@link peekUsage} serves the last good figures as stale with
+   * a `refresh_failure`. Only applies when there ARE figures to mark — with
+   * nothing cached the card already shows no quota. A read in flight owns the
+   * entry and wins. Returns whether a failure was recorded.
+   */
+  const noteUsageReadFailed = (
+    slug: string,
+    reason: string,
+    accountHash?: string,
+  ): boolean => {
+    const key = usageCacheKey(slug, accountHash);
+    const entry = cache.get(key);
+    if (entry === undefined || entry.good === null) return false;
+    if (entry.inFlight !== null) return false;
+    cache.set(key, {
+      good: entry.good,
+      failure: { kind: "unavailable", reason },
+      lastAttemptAtMs: Date.now(),
+      inFlight: null,
+    });
+    persist();
+    return true;
+  };
+
+  /**
+   * Whether cached figures are due for an automatic (TTL-respecting) read:
+   * a quota window's reset has passed since they were observed, so they are
+   * known to be out of date. Nothing else re-reads figures that already
+   * exist (the status push only peeks), which is how a reading from one
+   * reset survived for weeks. Rate-limited per account: once a due read has
+   * failed, the next one waits {@link AUTO_DUE_FAILURE_RETRY_MS}.
+   */
+  const usageReadDue = (slug: string, accountHash?: string): boolean => {
+    const entry = cache.get(usageCacheKey(slug, accountHash));
+    if (entry === undefined || entry.good === null) return false;
+    if (entry.inFlight !== null) return false;
+    const now = Date.now();
+    if (!hasUnobservedPassedReset(entry.good.snapshot, entry.good.atMs, now)) {
+      return false;
+    }
+    return (
+      entry.failure === null ||
+      now - entry.lastAttemptAtMs >= AUTO_DUE_FAILURE_RETRY_MS
+    );
+  };
+
   /** Cancel pending request-usage sample timers and drop in-memory samples. */
   const clearRequestUsageSamples = (): void => {
     for (const sample of requestSamples.values()) {
@@ -766,6 +829,8 @@ export const createUsageCache = (deps: TUsageCacheDeps = {}): TUsageCache => {
     sampleUsageOnExhaustion,
     clearRequestUsageSamples,
     invalidateUsage,
+    noteUsageReadFailed,
+    usageReadDue,
   };
 };
 
@@ -797,5 +862,10 @@ export const clearRequestUsageSamples: TUsageCache["clearRequestUsageSamples"] =
   () => active.clearRequestUsageSamples();
 export const invalidateUsage: TUsageCache["invalidateUsage"] = (...args) =>
   active.invalidateUsage(...args);
+export const noteUsageReadFailed: TUsageCache["noteUsageReadFailed"] = (
+  ...args
+) => active.noteUsageReadFailed(...args);
+export const usageReadDue: TUsageCache["usageReadDue"] = (...args) =>
+  active.usageReadDue(...args);
 export const healUsage: TUsageCache["healUsage"] = (...args) =>
   active.healUsage(...args);

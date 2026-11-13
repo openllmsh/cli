@@ -1245,8 +1245,19 @@ good observation predates that deadline; failure retry still applies) or an
 exhausted snapshot beyond the freshness TTL, even if its reset is still
 ahead: an external tier upgrade may have restored capacity. The current
 request keeps its cached routing decision; subsequent demand sees the
-refreshed tier and quota. Passive status and `peekUsage` never schedule
-these reads, and mere age-out while idle is not a demand signal.
+refreshed tier and quota. Mere age-out while idle is not a demand signal.
+
+Three daemon-side reads fill the gaps a browser used to cover (#901). A
+**passed reset** on cached figures is proof they are out of date: the status
+push (`readUsageIfDue`) starts ONE detached, TTL-respecting automatic read for
+that account (`usageReadDue`; after a failed one it waits 30 min). A **finished
+sign-in** (`auth.login.succeeded`, `observeLoginUsageReads`) reads that
+account's usage, so a second account never depends on the dashboard's
+per-provider bookkeeping. And a `refresh` whose status probe was
+**inconclusive** (`probe_timeout`, unreadable store) is a failed read, not a
+skip: `noteUsageReadFailed` stamps the cached figures stale with a
+`refresh_failure`, and the ack carries `usage_failed: [{ slug,
+account_index, reason }]` instead of a bare `done`.
 
 `cachedUsage(slug, () => delegate.usage())` wraps demand reads in TTL,
 back-off and shared in-flight work; forced request samples use their existing
