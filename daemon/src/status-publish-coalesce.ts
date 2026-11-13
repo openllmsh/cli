@@ -12,7 +12,9 @@ export type TStatusPublishTrigger =
   | "auth-sink"
   | "presence"
   | "bootstrap"
-  | "late-probe";
+  | "late-probe"
+  /** This daemon's own binary update moved (`updater.ts`). */
+  | "update";
 
 export type TStatusPublishQueueSnapshot = {
   readonly queued_publish_depth: number;

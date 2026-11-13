@@ -111,7 +111,7 @@ import { recordSandboxState, sandboxState } from "./sandbox/landlock";
 import { beginRequest, endRequest, trackBodyDone } from "./self-update";
 import { migrateLegacyInstall } from "./service";
 import { reconcileSessionHostsAtBoot } from "./session-host";
-import { convergeBinary, currentUpdate } from "./updater";
+import { convergeBinary, currentUpdate, watchUpdateLease } from "./updater";
 import { enableUsagePersistence } from "./usage-cache";
 import { DAEMON_VERSION } from "./version";
 
@@ -405,6 +405,7 @@ export const main = async (): Promise<void> => {
     timer.unref?.();
   };
   const startBootstrapLoop = (): void => {
+    watchUpdateLease();
     void refreshBootstrap()
       .then(async () => {
         if (hasIdentityConflict()) {

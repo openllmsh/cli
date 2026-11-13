@@ -229,6 +229,17 @@ export const statusChangeKey = (status: TDaemonStatus): string => {
       (status.control_caps ?? []).join(","),
     ),
     status.pty_supported === undefined ? "" : String(status.pty_supported),
+    // The update in progress (whoever runs it): each step and download tick
+    // is a change, so a dashboard sees the same steps the desktop app does.
+    status.update == null
+      ? ""
+      : joinChangeKeyParts([
+          status.update.source,
+          status.update.version ?? "",
+          status.update.phase,
+          String(status.update.received ?? ""),
+          String(status.update.total ?? ""),
+        ]),
     connections,
     sessions,
   ].join("\n");
@@ -423,7 +434,11 @@ const statusPublishCoalescer = createStatusPublishCoalescer({
     const fresh = await computeStatusFresh({
       trigger,
       ...(trigger === "late-probe" ? { reuseSettledSlugProbes: true } : {}),
-      ...(skipProviderProbes ? { skipProviderProbes: true } : {}),
+      // An update step re-publishes the lease, not the providers: it never
+      // starts a provider probe.
+      ...(skipProviderProbes || trigger === "update"
+        ? { skipProviderProbes: true }
+        : {}),
     });
     // Overlay latest listModels/discoverModels outcomes (omit when unknown).
     const status = {
@@ -792,7 +807,9 @@ export const pushStatusIfChanged = async (
           ? "presence"
           : trigger === "command" || trigger === "auth-sink"
             ? "command"
-            : "manual",
+            : trigger === "update"
+              ? "update"
+              : "manual",
     );
   }
   // Clear dirty at compute start so mark+push paths do not leave work queued

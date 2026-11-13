@@ -36,6 +36,8 @@ import {
 } from "node:fs";
 import { homedir } from "node:os";
 import { isAbsolute, join } from "node:path";
+import type { TUpdateLease } from "../../src/update-lease";
+import { describeUpdateLease, readUpdateLease } from "../../src/update-lease";
 import { setAutoUpdate } from "./auto-update-pref";
 import type { TCredentialGateResult } from "./credential-gate";
 import { hasCredentialProof, requireServiceApiKey } from "./credential-gate";
@@ -1018,6 +1020,13 @@ export type TStatusFields = {
   readonly supervisor: string;
   readonly health: TDaemonHealth | null;
   readonly identityConflictStopped?: boolean;
+  /**
+   * The update replacing the binary right now, whoever runs it (the daemon's
+   * auto-update, the desktop app, the CLI, an installer) — the same update
+   * lease every updater takes and every surface reads. Read from the lease
+   * file, so it shows while the daemon is down mid-restart too.
+   */
+  readonly update?: TUpdateLease | null;
   readonly port: number;
   readonly binary: string;
   readonly stateDir: string;
@@ -1037,7 +1046,11 @@ const padStatusLabel = (label: string, width: number): string => {
  * Keep labels aligned so the values scan quickly and the output can evolve safely.
  */
 export const formatStatus = (fields: TStatusFields): string => {
-  const unknown = "unknown (daemon not responding)";
+  const update = fields.update ?? fields.health?.update ?? null;
+  const unknown =
+    update !== null
+      ? "unknown (daemon not responding — updating)"
+      : "unknown (daemon not responding)";
   const rows: ReadonlyArray<{
     readonly label: string;
     readonly value: string;
@@ -1053,6 +1066,9 @@ export const formatStatus = (fields: TStatusFields): string => {
             value: "identity conflict — this key is now used by another device",
           },
         ]
+      : []),
+    ...(update !== null
+      ? [{ label: "updating", value: describeUpdateLease(update) }]
       : []),
     {
       label: "installed",
@@ -1114,7 +1130,9 @@ export const formatStatus = (fields: TStatusFields): string => {
   const installed = fields.health?.installed_version ?? fields.version;
   const header =
     running === undefined
-      ? `openllm v${fields.version} (installed; daemon not responding)`
+      ? update !== null
+        ? `openllm v${fields.version} (installed; updating — daemon not responding yet)`
+        : `openllm v${fields.version} (installed; daemon not responding)`
       : running === installed
         ? `openllm v${running}`
         : `openllm v${running} running · v${installed} installed (daemon code unchanged — applies on next restart)`;
@@ -1145,6 +1163,7 @@ export const serviceStatus = async (): Promise<void> => {
       supervisor,
       health,
       identityConflictStopped: hasRecordedIdentityConflict(apiKey, cloudOrigin),
+      update: readUpdateLease(serviceBinPath()) ?? health?.update ?? null,
       port,
       binary: process.execPath,
       stateDir: stateDir(),

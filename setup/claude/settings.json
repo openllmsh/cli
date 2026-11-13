@@ -16,6 +16,12 @@
             "type": "command",
             "command": "\"$OPENLLM_BIN\" exec memory recall",
             "timeout": 3
+          },
+          {
+            "type": "command",
+            "command": "\"$OPENLLM_BIN\" exec agent hook UserPromptSubmit",
+            "timeout": 5,
+            "async": true
           }
         ]
       }

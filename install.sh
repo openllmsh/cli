@@ -908,8 +908,8 @@ CLI_VERSION="$(json_field cli_version)"
 # --- the update lease -------------------------------------------------------
 # One process at a time may replace the `openllm` binary: the daemon's
 # auto-update, the CLI's self-update, this installer (also what `openllm update`
-# and the desktop app run). `$BIN_DIR/.update.lock` is created with O_EXCL
-# (`set -C`, like the env-file lock — no flock on fresh installs) and its JSON
+# and the desktop app run). `$BIN_DIR/.update.lock` is created exclusively
+# (a hard link of its finished body — no flock on fresh installs) and its JSON
 # body is the progress the daemon's /status and the desktop app show. Format
 # and staleness rules: packages/cli/src/update-lease.ts — keep in step.
 UPDATE_LOCK="$BIN_DIR/.update.lock"
@@ -950,12 +950,49 @@ update_lock_live() {
   kill -0 "$pid" 2>/dev/null
 }
 
+# create_update_lock <phase> <version>: create the lock with its whole body,
+# or fail when it exists. Written to a temp file, then hard-linked into place
+# (`ln` refuses an existing target), so a reader never sees an empty lock and
+# mistakes it for a stale one.
+#
+# A filesystem without hard links (some FUSE / network mounts, exFAT) can't
+# do that: there it falls back to an O_EXCL create (`set -C`), whose empty-
+# until-written window is the price of still being able to install at all.
+create_update_lock() {
+  local tmp="$UPDATE_LOCK.$$.new" rc=1
+  update_lease_body "$1" "$2" > "$tmp" 2>/dev/null || { rm -f "$tmp"; return 1; }
+  if ln "$tmp" "$UPDATE_LOCK" 2>/dev/null; then
+    rc=0
+  elif [ ! -e "$UPDATE_LOCK" ]; then
+    # `ln` failed with no lock in the way: no hard links here.
+    (set -C; cat "$tmp" > "$UPDATE_LOCK") 2>/dev/null && rc=0
+  fi
+  rm -f "$tmp"
+  return "$rc"
+}
+
+# remove_stale_lock: take a stale lock out of the way without ever deleting a
+# live one. Another installer may have replaced the stale body we judged with
+# its own fresh lease in the meantime, so the lock is renamed aside (atomic)
+# and only discarded if it is still the body we judged stale; otherwise it is
+# put back (`ln` never overwrites a newer lock).
+remove_stale_lock() {
+  local judged aside="$UPDATE_LOCK.$$.stale"
+  judged="$(cat "$UPDATE_LOCK" 2>/dev/null)" || return 0
+  mv -f "$UPDATE_LOCK" "$aside" 2>/dev/null || return 0
+  if [ "$(cat "$aside" 2>/dev/null)" != "$judged" ]; then
+    ln "$aside" "$UPDATE_LOCK" 2>/dev/null ||
+      { [ -e "$UPDATE_LOCK" ] || mv -f "$aside" "$UPDATE_LOCK" 2>/dev/null; } || true
+  fi
+  rm -f "$aside"
+}
+
 # acquire_update_lease <version>: take the lease or die naming who holds it.
 acquire_update_lease() {
   local attempt
   UPDATE_STARTED_MS="$(now_ms)"
   for attempt in 1 2; do
-    if (set -C; update_lease_body download "$1" > "$UPDATE_LOCK") 2>/dev/null; then
+    if create_update_lock download "$1"; then
       UPDATE_LEASE_HELD=1
       trap release_update_lease EXIT
       return 0
@@ -971,7 +1008,7 @@ acquire_update_lease() {
       die "openllm is already being updated by $holder — try again when it finishes"
     fi
     # Stale (holder gone or silent): take it over.
-    rm -f "$UPDATE_LOCK"
+    remove_stale_lock
   done
   die "could not take the update lock: $UPDATE_LOCK"
 }
@@ -2387,11 +2424,78 @@ daemon_is_running() {
 
 # Restart a daemon so it runs the binary this update just installed. Only when
 # the binary actually changed; credentials are already persisted.
+# hold_restart_lease <version>: take the update lease again for the restart
+# step, so every surface (Manage device, the desktop app, `openllm status`)
+# shows "Restarting" until the daemon is back — the same step the daemon's own
+# auto-update reports. Best-effort: a live holder is left alone (never die
+# here, the binary is already installed); a stale one is taken over once.
+hold_restart_lease() {
+  local attempt
+  UPDATE_STARTED_MS="$(now_ms)"
+  for attempt in 1 2; do
+    if create_update_lock restart "$1"; then
+      UPDATE_LEASE_HELD=1
+      trap release_update_lease EXIT
+      return 0
+    fi
+    update_lock_live && return 1
+    remove_stale_lock
+  done
+  return 1
+}
+
+# How long the restart waits out another update's lease (see below).
+RESTART_LEASE_WAIT_SEC=180
+
+# Wait (bounded) for the restarted daemon to answer, so the restart step lasts
+# until it is back rather than ending at the kickstart.
+wait_for_daemon_back() {
+  local i
+  for i in $(seq 1 30); do
+    daemon_is_running && return 0
+    sleep 1
+  done
+  return 1
+}
+
+# The version the running daemon reports on its loopback /status, or empty.
+running_daemon_version() {
+  curl -fsS --noproxy '*' --max-time 2 "http://127.0.0.1:$DAEMON_PORT/status" 2>/dev/null |
+    grep -o '"version"[[:space:]]*:[[:space:]]*"[^"]*"' | head -n 1 | sed 's/.*"\([^"]*\)"$/\1/'
+}
+
 restart_for_new_binary() {
   echo "Restarting the daemon to pick up the new binary..."
+  # Another update took the lease since our swap: restarting now would kill
+  # it mid-update, and it may still fail without restarting. Wait for it to
+  # finish — bounded well inside the desktop app's 10-minute install timeout,
+  # so a long competing update never fails the app's Update — then restart
+  # only if the daemon still isn't on what we installed.
+  local waited=0
+  while ! hold_restart_lease "$CLI_VERSION"; do
+    if [ "$waited" = 0 ]; then
+      echo "  another update is in progress — waiting for it to finish"
+    fi
+    if [ "$waited" -ge "$RESTART_LEASE_WAIT_SEC" ]; then
+      echo "Warning: another update is still running — run '$BIN_DIR/openllm daemon restart' once it finishes" >&2
+      DAEMON_STARTED=1
+      return 0
+    fi
+    sleep 2
+    waited=$((waited + 2))
+  done
+  if [ "$waited" -gt 0 ] && [ -n "$CLI_VERSION" ] &&
+    [ "$(running_daemon_version)" = "$CLI_VERSION" ]; then
+    release_update_lease
+    DAEMON_STARTED=1
+    return 0
+  fi
   if "$BIN_DIR/openllm" daemon restart; then
     DAEMON_STARTED=1
+    wait_for_daemon_back || true
+    release_update_lease
   else
+    release_update_lease
     DAEMON_START_FAILED=1
     echo "Warning: daemon restart failed — run '$BIN_DIR/openllm daemon status' to diagnose" >&2
   fi

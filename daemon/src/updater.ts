@@ -29,11 +29,16 @@ import {
   existsSync,
   renameSync,
   rmSync,
+  watch,
   writeFileSync,
 } from "node:fs";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import type { TUpdateLease, TUpdateLeaseHandle } from "../../src/update-lease";
-import { readUpdateLease, tryAcquireUpdateLease } from "../../src/update-lease";
+import {
+  readUpdateLease,
+  tryAcquireUpdateLease,
+  updateLockPath,
+} from "../../src/update-lease";
 import { autoUpdateEnabled } from "./auto-update-pref";
 import { binarySignature } from "./bin-signature";
 import { drainDisposableChildren } from "./child-supervisor";
@@ -81,20 +86,75 @@ const updateTarget = (): string =>
 export const currentUpdate = (): TUpdateLease | null =>
   readUpdateLease(updateTarget());
 
-/** Push the status again whenever this daemon's own update moves. */
+/**
+ * Download progress is re-published at most this often, so a dashboard
+ * watching another device sees the bar move like the desktop app's does.
+ */
+const UPDATE_PUSH_INTERVAL_MS = 2_000;
+
+/**
+ * Publish the status now — not on the 30 s watcher tick — so every surface
+ * (Manage device on any browser, the desktop app) shows this update's steps as
+ * they happen, the same steps a manual update shows. Best-effort.
+ */
+const pushUpdateStatus = (): void => {
+  markStatusDirty("update");
+  void import("./control-channel")
+    .then((mod) => mod.pushStatusIfChanged("update"))
+    .catch(() => {});
+};
+
+/** Coalesce a burst of lease writes (tmp + rename) into one push. */
+const LEASE_WATCH_DEBOUNCE_MS = 500;
+let leaseWatchStarted = false;
+
+/**
+ * Publish another updater's steps too — the installer (which the desktop
+ * app's Update and `openllm update` run), the CLI's self-update — by watching
+ * the lease file next to the binary. Event-driven (no polling) and touches no
+ * provider: only the lease is re-read. Idempotent; best-effort.
+ */
+export const watchUpdateLease = (): void => {
+  if (leaseWatchStarted || DAEMON_VERSION === "0.0.0-dev") return;
+  leaseWatchStarted = true;
+  const dest = updateTarget();
+  const lockName = basename(updateLockPath(dest));
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  try {
+    const watcher = watch(dirname(dest), (_event, file) => {
+      if (file !== null && file !== lockName) return;
+      if (timer !== null) return;
+      timer = setTimeout(() => {
+        timer = null;
+        pushUpdateStatus();
+      }, LEASE_WATCH_DEBOUNCE_MS);
+      timer.unref?.();
+    });
+    watcher.unref?.();
+    watcher.on("error", () => {});
+  } catch {
+    // No watch (unsupported fs): the bootstrap tick still re-publishes.
+    logWarn("update", "Watching the update lease failed.");
+  }
+};
+
+/** Push the status whenever this daemon's own update moves. */
 const reportingLease = (lease: TUpdateLeaseHandle): TUpdateLeaseHandle => {
   let phase: string | null = null;
+  let lastPush = Number.NEGATIVE_INFINITY;
   return {
     progress: (next, bytes) => {
       lease.progress(next, bytes);
-      if (next !== phase) {
+      const now = Date.now();
+      if (next !== phase || now - lastPush >= UPDATE_PUSH_INTERVAL_MS) {
         phase = next;
-        markStatusDirty("update");
+        lastPush = now;
+        pushUpdateStatus();
       }
     },
     release: () => {
       lease.release();
-      markStatusDirty("update");
+      pushUpdateStatus();
     },
   };
 };

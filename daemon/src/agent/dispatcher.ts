@@ -23,12 +23,12 @@ import type {
 import {
   AGENT_SESSION_ID_PATTERN,
   AGENT_SWITCH_MODEL_PATTERN,
-  agentAttachmentHasPath,
   encodeAgentLine,
   parseAgentEvent,
   SESSION_ID_PATTERN,
 } from "@openllmsh/sdk/protocol";
 import { logError, logInfo } from "../logger";
+import { createAttachmentUploads } from "./attachment-cache";
 import {
   AGENT_TOOL_OUTPUT_MAX_CHARS,
   chunkAgentAttachment,
@@ -510,9 +510,12 @@ export const createAgentDispatcher = (
       };
       let bound: TSession | null = null;
       let closing = false;
+      // This consumer's attachment uploads in flight (`attachment_put`).
+      const uploads = createAttachmentUploads();
 
       const endAfterDrain = (): void => {
         closing = true;
+        uploads.abort();
         void state.chain.then(() => {
           if (!state.gone) {
             state.gone = true;
@@ -697,26 +700,19 @@ export const createAgentDispatcher = (
               return;
             }
             const attachments = command.attachments ?? [];
-            // Path attachments open arbitrary files on this Mac. Admit them
-            // only on the desktop loopback socket — never over mux/RTC.
-            if (
-              attachments.some(agentAttachmentHasPath) &&
-              state.consumer.allowsLocalPaths !== true
-            ) {
-              error(
-                state,
-                session,
-                "local_path_forbidden",
-                "Local file paths are only accepted on this Mac's loopback agent socket.",
-                commandId,
-              );
-              return;
-            }
+            // An agent consumer admitted by the loopback control capability
+            // or the remote seed grant may submit any absolute device path;
+            // there is deliberately no directory allowlist. A path is a prompt
+            // mention the owner can already type, though validation reveals
+            // file existence and size. Team channels are tunnel-only.
+            // Reading its bytes back (`attachment_get`) stays loopback-only:
+            // see `allowsLocalPaths`.
             const engineSession = session.engineSession;
             const result = withCommand(session, commandId, () =>
               engineSession.send({
                 prompt: command.prompt,
                 attachments,
+                ...(command.send_now === true ? { sendNow: true } : {}),
               }),
             );
             if (!result.ok)
@@ -1031,6 +1027,27 @@ export const createAgentDispatcher = (
             reply(state, session, pageEvent, commandId);
             return;
           }
+          case "attachment_put": {
+            // No session needed: the bytes go into the device's cache, and a
+            // later `send` names them by hash.
+            const result = uploads.put(command);
+            if (!result.ok) {
+              error(state, bound, result.code, result.message, commandId);
+              return;
+            }
+            reply(
+              state,
+              bound,
+              {
+                type: "attachment.status",
+                sha256: result.sha256,
+                stored: result.stored,
+                received: result.received,
+              },
+              commandId,
+            );
+            return;
+          }
           case "attachment_get": {
             const session = bound;
             if (session === null) {
@@ -1108,6 +1125,8 @@ export const createAgentDispatcher = (
           if (bound !== null) reconcileFocus(bound);
         },
         detach: () => {
+          // Every way out drops this consumer's unfinished uploads.
+          uploads.abort();
           if (state.gone) return;
           state.gone = true;
           if (bound !== null) {
