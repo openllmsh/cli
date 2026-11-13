@@ -700,8 +700,8 @@ export const createAgentDispatcher = (
               return;
             }
             const attachments = command.attachments ?? [];
-            // An authenticated, seed-granted agent consumer is the device
-            // owner, so may submit any absolute device path on any transport;
+            // An agent consumer admitted by the loopback control capability
+            // or the remote seed grant may submit any absolute device path;
             // there is deliberately no directory allowlist. A path is a prompt
             // mention the owner can already type, though validation reveals
             // file existence and size. Team channels are tunnel-only.

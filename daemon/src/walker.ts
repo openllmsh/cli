@@ -62,9 +62,9 @@ import {
   isFleetDeclineCause,
   isLocalKeyProviderSlug,
   OPENLLM_CHAIN_HEADER,
-  SERVED_BY_DEVICE_HEADER,
   resolveDefaultModelCaps,
   resolveModelSettings,
+  SERVED_BY_DEVICE_HEADER,
   TOOL_SESSION_HEADER,
   TUNNELED_REQUEST_HEADER,
   TUNNELED_REQUEST_VALUE,
@@ -2497,7 +2497,10 @@ export const rankFleetPeers = (
   peers: readonly string[],
 ): string[] => {
   const now = Date.now();
-  const outcomeFor = (peer: string, scope: string | null): boolean | undefined => {
+  const outcomeFor = (
+    peer: string,
+    scope: string | null,
+  ): boolean | undefined => {
     const key = JSON.stringify([provider, peer, scope]);
     const outcome = fleetPeerOutcomes.get(key);
     if (outcome === undefined) return undefined;
@@ -3081,7 +3084,13 @@ const walkPlan = async (
       );
     }
     if (hopTrail.length > 0) {
-      headers.set("x-openllm-hop-failures", formatHopFailuresHeader(hopTrail));
+      const remoteFailures = headers.get("x-openllm-hop-failures");
+      headers.set(
+        "x-openllm-hop-failures",
+        [formatHopFailuresHeader(hopTrail), remoteFailures]
+          .filter(Boolean)
+          .join(";"),
+      );
     }
     if (won) {
       if (conversation !== null) {
