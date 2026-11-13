@@ -3587,6 +3587,24 @@ const walkPlan = async (
           servedLocally: true,
         };
       }
+      // An upstream auth or rate refusal applies to this account, not just
+      // the native transport. Manual uses the same CLI credential and upstream,
+      // so cool and advance rather than immediately sending it again.
+      if (
+        captureOwnership === "none" &&
+        (nativeCooldownReason === "auth" ||
+          nativeCooldownReason === "rate_limit")
+      ) {
+        if (args.req.signal.aborted) {
+          return {
+            response: errorJson(499, "client aborted request"),
+            servedLocally: true,
+          };
+        }
+        lastError = nativeDecline;
+        addHopFailure(hop, nativeDecline, undefined, nativeCooldownReason);
+        return HOP_CONTINUE;
+      }
       if (hasHandrolledFallback) {
         nativeDecline += " — served by the manual transport";
       }
