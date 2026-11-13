@@ -23,6 +23,7 @@ type TDevice = {
   readonly online: boolean;
   readonly last_seen: string | null;
   readonly providers: ReadonlyArray<string>;
+  readonly local_models: ReadonlyArray<string>;
   readonly this_key: boolean;
 };
 
@@ -50,7 +51,7 @@ export const renderDevices = (body: TDevicesBody): string => {
   });
   const hint = body.any_online
     ? "\nOnline devices serve their providers to `openllm <client>` here; no local login needed.\n"
-    : "\nNo device is online and serving. Ask the user to start OpenLLM on their own computer.\n";
+    : "\nNo device is online and serving. Subscription and local models need the user to start OpenLLM on their own computer; included and API-key models still work through the cloud.\n";
   return `${lines.join("\n")}\n${hint}`;
 };
 
