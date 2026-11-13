@@ -677,18 +677,11 @@ export const muxChannelTo = async (
   options?: TMuxChannelOptions,
 ): Promise<TMuxChannel | null> => {
   if (process.env.OPENLLM_MUX_DISABLE === "1") return null;
-  // Welcome snapshots name only the current user's daemons. A cross-user team
-  // target is authorized by its signed grant and therefore cannot be rejected
-  // by same-user capability discovery; the relay/supplier remains authoritative.
-  const caps = peerCaps.get(keyId);
+  // The local caps view (welcome snapshot + presence frames) is a hint, never
+  // a gate: a missed presence frame would otherwise strand a live peer as
+  // "offline" until this daemon reconnects. The relay is authoritative — it
+  // nacks an offline or incapable peer at once — so always ask it.
   const lookupKey = channelLookupKey(keyId, options?.teamId);
-  if (
-    options?.teamGrant === undefined &&
-    (caps === undefined || !caps.has(MUX_CAP))
-  ) {
-    peerLinkFailureCache.set(lookupKey, "mux", "presence");
-    return null;
-  }
   if (peerLinkFailureCache.has(lookupKey, "mux")) return null;
   const existing = consumerChannelFor(keyId, options?.teamId);
   if (existing !== undefined) {
@@ -742,6 +735,7 @@ export const muxChannelTo = async (
 export const handleChannelOpenAck = (frame: {
   readonly channel_id: string;
   readonly ok: boolean;
+  readonly error?: string;
 }): void => {
   const entry = [...opening.entries()].find(
     ([, pending]) => pending.channelId === frame.channel_id,
@@ -749,7 +743,13 @@ export const handleChannelOpenAck = (frame: {
   if (entry === undefined) return;
   const [keyId] = entry;
   if (!frame.ok) {
-    failOpen(keyId);
+    failOpen(
+      keyId,
+      undefined,
+      frame.error === "daemon_offline" || frame.error === "not_capable"
+        ? "presence"
+        : "nack",
+    );
     return;
   }
   const pending = opening.get(keyId);
