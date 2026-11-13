@@ -101,7 +101,7 @@ export const bearerApiKeyOf = (raw: string): string | null => {
 };
 
 /** Parse a daemon port from an env-file compatible scalar. */
-export { DEFAULT_DAEMON_PORT } from "@openllmsh/sdk/protocol/daemon";
+export { DEFAULT_DAEMON_PORT } from "@openllmsh/sdk/protocol/daemon-port";
 
 /** Dev-mode default port — distinct from prod so a source-run dev daemon can
  *  coexist with the installed daemon on `8787`. */
