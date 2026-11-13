@@ -14,10 +14,10 @@
  * the daemon half), the auto-update opt-out, and an explicit
  * `OPENLLM_NO_UPDATE_CHECK=1`.
  */
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { CLI_VERSION } from "./cli-version";
-import { openllmDir, sharedFileConfig } from "./env";
+import { daemonStateDir, openllmDir, sharedFileConfig } from "./env";
 
 /** Short on purpose: releases ship often and the cloud moves on with them, so
  *  a headless sandbox with no daemon must not sit hours behind. One check is
@@ -99,21 +99,54 @@ export const maybeLaunchUpdateCheck = (command: string | undefined): void => {
   }
 };
 
-/** The detached child: converge only when no daemon owns updates here.
- *  `daemonRunning` / `converge` are injectable for tests. */
+/** The file the daemon's updater converges (`~/.openllm/bin/openllm`). */
+const managedBinaryPath = (): string =>
+  join(daemonStateDir(), "bin", "openllm");
+
+const sameFile = (a: string, b: string): boolean => {
+  try {
+    return realpathSync(a) === realpathSync(b);
+  } catch {
+    return false;
+  }
+};
+
+/** A real OpenLLM daemon on this machine's port, not just anything that
+ *  answers 200: its `/status` carries the daemon's `version`. */
+const openllmDaemonAnswers = async (): Promise<boolean> => {
+  const { daemonPort } = await import("./clients/gateway");
+  try {
+    const res = await fetch(`http://127.0.0.1:${daemonPort()}/status`, {
+      signal: AbortSignal.timeout(2_000),
+    });
+    if (!res.ok) return false;
+    const body: unknown = await res.json();
+    return (
+      typeof body === "object" &&
+      body !== null &&
+      typeof (body as { version?: unknown }).version === "string"
+    );
+  } catch {
+    return false;
+  }
+};
+
+/** The detached child: converge unless a running daemon owns updates for
+ *  THIS file. The daemon converges only the managed install, so a separate
+ *  copy on PATH updates itself even while a daemon runs (the shared update
+ *  lease still serialises swaps of one file). Deps are injectable for tests. */
 export const runLaunchUpdateChild = async (
   deps: {
     readonly daemonRunning?: () => Promise<boolean>;
+    readonly isManagedBinary?: () => boolean;
     readonly converge?: () => Promise<unknown>;
   } = {},
 ): Promise<"daemon" | "converged"> => {
-  const daemonRunning =
-    deps.daemonRunning ??
-    (async (): Promise<boolean> => {
-      const { daemonPort, daemonReachable } = await import("./clients/gateway");
-      return daemonReachable(daemonPort());
-    });
-  if (await daemonRunning()) return "daemon";
+  const isManagedBinary =
+    deps.isManagedBinary ??
+    ((): boolean => sameFile(process.execPath, managedBinaryPath()));
+  const daemonRunning = deps.daemonRunning ?? openllmDaemonAnswers;
+  if (isManagedBinary() && (await daemonRunning())) return "daemon";
   const converge =
     deps.converge ??
     (async (): Promise<unknown> => {

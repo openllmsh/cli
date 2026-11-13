@@ -84,10 +84,20 @@ export const runDevicesCommand = async (
   }
   const body: unknown = await res.json().catch(() => null);
   if (!res.ok || !isDevicesBody(body)) {
-    const message =
+    const error =
       typeof body === "object" && body !== null && "error" in body
-        ? String((body as { error: unknown }).error)
-        : `HTTP ${res.status}`;
+        ? (body as { error: unknown }).error
+        : undefined;
+    const nested =
+      typeof error === "object" && error !== null && "message" in error
+        ? (error as { message: unknown }).message
+        : undefined;
+    const message =
+      typeof nested === "string"
+        ? nested
+        : typeof error === "string"
+          ? error
+          : `HTTP ${res.status}`;
     process.stderr.write(`Couldn't list devices: ${message}\n`);
     return 1;
   }
