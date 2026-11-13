@@ -1604,11 +1604,18 @@ export const runMuseNativeCapture = async (
     } finally {
       void abortCaptureOnEarlyTurnEnd;
     }
-    captureOwnership = dispatched.response.ok ? "accepted" : "uncertain";
+    const status = dispatched.response.status;
+    const refused =
+      status === 400 || status === 401 || status === 403 || status === 429;
+    captureOwnership = dispatched.response.ok
+      ? "accepted"
+      : refused
+        ? "none"
+        : "uncertain";
 
-    // The upstream response is already owned. Builder settlement must not
-    // delay its delivery or turn cleanup errors into a second-send opportunity.
-    // Teardown still waits for settlement before closing the host.
+    // The daemon has the upstream response. Builder settlement must not delay
+    // delivery or turn cleanup errors into a second-send opportunity for an
+    // accepted or uncertain send. Teardown waits before closing the host.
     turnSettled = settleMuseCaptureTurn({
       cancel: () => turn.cancel(),
       completed: turn.completed,
@@ -1619,8 +1626,13 @@ export const runMuseNativeCapture = async (
       await disposeAll();
       return {
         kind: "declined",
-        reason: `muse capture upstream HTTP ${dispatched.response.status}`,
+        reason: `muse capture upstream HTTP ${status}`,
         captureOwnership,
+        ...(status === 429
+          ? { cooldownReason: "rate_limit" as const }
+          : status === 401 || status === 403
+            ? { cooldownReason: "auth" as const }
+            : {}),
       };
     }
 

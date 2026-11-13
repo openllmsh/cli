@@ -700,12 +700,11 @@ export const createAgentDispatcher = (
               return;
             }
             const attachments = command.attachments ?? [];
-            // A path attachment is a mention in the prompt (`@"…"`), which
-            // any consumer can already type, so it is admitted on every
-            // transport. Its checks do answer whether a file exists and how
-            // big it is, but every agent consumer is the device's own
-            // account behind a seed-gated grant (team channels are tunnel
-            // only, mux-host.ts), already able to have the engine read it.
+            // An authenticated, seed-granted agent consumer is the device
+            // owner, so may submit any absolute device path on any transport;
+            // there is deliberately no directory allowlist. A path is a prompt
+            // mention the owner can already type, though validation reveals
+            // file existence and size. Team channels are tunnel-only.
             // Reading its bytes back (`attachment_get`) stays loopback-only:
             // see `allowsLocalPaths`.
             const engineSession = session.engineSession;

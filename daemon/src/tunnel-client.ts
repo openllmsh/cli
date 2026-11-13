@@ -18,7 +18,12 @@
  */
 
 import type { TTunnelSurface } from "@openllmsh/sdk/protocol";
-import { RTC_CAP, SEEDGATE_CAP, TEAM_RTC_CAP } from "@openllmsh/sdk/protocol";
+import {
+  RTC_CAP,
+  SEEDGATE_CAP,
+  TEAM_RTC_CAP,
+  TRANSPORT_HEADER,
+} from "@openllmsh/sdk/protocol";
 import { fleetRequest } from "@openllmsh/sdk/tunnel/fleet";
 import {
   createPeerLink,
@@ -174,6 +179,7 @@ const tunnelToPeerLive: TTunnelToPeer = async (args) => {
   const wasCached = peerLinkFailureCache.has(lookupKey, "mux");
   const startedAt = Date.now();
   let rtcFailed = false;
+  let muxReused = false;
   const link = createPeerLink({
     // Same scope as `muxChannelTo`'s cache: a team's failure never hides
     // this peer's same-user (or another team's) channel.
@@ -207,13 +213,18 @@ const tunnelToPeerLive: TTunnelToPeer = async (args) => {
       open: () => null,
       drop: (channel) =>
         dropMuxChannel(args.keyId, channel, { teamId: args.teamId }),
-      dial: async () =>
-        muxChannelTo(args.keyId, {
+      dial: async () => {
+        muxReused = false;
+        return muxChannelTo(args.keyId, {
+          onReuse: () => {
+            muxReused = true;
+          },
           ...(args.teamId === undefined ? {} : { teamId: args.teamId }),
           ...(args.teamGrant === undefined
             ? {}
             : { teamGrant: args.teamGrant }),
-        }),
+        });
+      },
     },
     policy: {
       retrySafe: (error) =>
@@ -231,7 +242,8 @@ const tunnelToPeerLive: TTunnelToPeer = async (args) => {
   try {
     const response = await link.attempt(async (selected) => {
       selection.path = selected.path;
-      selection.reused = selected.reused;
+      selection.reused =
+        selected.reused || (selected.path === "mux" && muxReused);
       try {
         return await fleetRequest(selected.channel, request);
       } finally {
@@ -252,7 +264,12 @@ const tunnelToPeerLive: TTunnelToPeer = async (args) => {
       openMs: 0,
       resHeadMs: Date.now() - startedAt,
     });
-    return response;
+    const responseHeaders = new Headers(response.headers);
+    responseHeaders.set(TRANSPORT_HEADER, selection.path);
+    return new Response(response.body, {
+      status: response.status,
+      headers: responseHeaders,
+    });
   } catch (error) {
     if (args.signal.aborted) {
       throw error instanceof Error
@@ -281,7 +298,8 @@ const tunnelToPeerLive: TTunnelToPeer = async (args) => {
       causeCode: failure?.causeCode ?? "unknown",
       transport: selection.path,
       rungFallbackReason: "channel_open_failed",
-      channelReused: selection.reused,
+      channelReused:
+        selection.reused || (selection.path === "mux" && muxReused),
       openMs: 0,
       resHeadMs: Date.now() - startedAt,
     });

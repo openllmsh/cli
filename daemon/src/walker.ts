@@ -61,6 +61,8 @@ import {
   FLEET_PROVIDER_HEADER,
   isFleetDeclineCause,
   isLocalKeyProviderSlug,
+  OPENLLM_CHAIN_HEADER,
+  SERVED_BY_DEVICE_HEADER,
   resolveDefaultModelCaps,
   resolveModelSettings,
   TOOL_SESSION_HEADER,
@@ -270,7 +272,11 @@ import {
 import { observeTeamResponseStream } from "./team-leg-body";
 import { isTeamHop, tryDirectTeamLeg } from "./team-leg-client";
 import type { TTunnelToPeer } from "./tunnel-client";
-import { isPreDispatchTunnelError, tunnelToPeer } from "./tunnel-client";
+import {
+  isPreDispatchTunnelError,
+  PreDispatchTunnelError,
+  tunnelToPeer,
+} from "./tunnel-client";
 import {
   healUsage,
   sampleUsageAfterRequest,
@@ -2468,12 +2474,15 @@ const refreshFleetPeersAfterMiss = async (
 const FLEET_PEER_OUTCOME_TTL_MS = 120_000;
 const fleetPeerOutcomes = new Map<string, { ok: boolean; atMs: number }>();
 
-const recordFleetPeerOutcome = (
+export const recordFleetPeerOutcome = (
   provider: string,
   peer: string,
   ok: boolean,
+  model?: string,
 ): void => {
-  const key = `${provider}|${peer}`;
+  // A successful model request also proves the provider transport is healthy.
+  if (ok && model !== undefined) recordFleetPeerOutcome(provider, peer, true);
+  const key = JSON.stringify([provider, peer, model ?? null]);
   fleetPeerOutcomes.delete(key);
   fleetPeerOutcomes.set(key, { ok, atMs: Date.now() });
   if (fleetPeerOutcomes.size > 256) {
@@ -2482,23 +2491,30 @@ const recordFleetPeerOutcome = (
   }
 };
 
-const rankFleetPeers = (
+export const rankFleetPeers = (
   provider: string,
+  model: string,
   peers: readonly string[],
 ): string[] => {
   const now = Date.now();
-  const rank = (peer: string): number => {
-    const key = `${provider}|${peer}`;
+  const outcomeFor = (peer: string, scope: string | null): boolean | undefined => {
+    const key = JSON.stringify([provider, peer, scope]);
     const outcome = fleetPeerOutcomes.get(key);
-    if (outcome === undefined) return 1;
+    if (outcome === undefined) return undefined;
     if (
       now - outcome.atMs < 0 ||
       now - outcome.atMs >= FLEET_PEER_OUTCOME_TTL_MS
     ) {
       fleetPeerOutcomes.delete(key);
-      return 1;
+      return undefined;
     }
-    return outcome.ok ? 0 : 2;
+    return outcome.ok;
+  };
+  const rank = (peer: string): number => {
+    const providerOutcome = outcomeFor(peer, null);
+    const modelOutcome = outcomeFor(peer, model);
+    if (providerOutcome === false || modelOutcome === false) return 2;
+    return providerOutcome === true || modelOutcome === true ? 0 : 1;
   };
   return [...peers].sort((a, b) => rank(a) - rank(b));
 };
@@ -2550,6 +2566,7 @@ const fleetTunnelErrorReason = (error: unknown): string =>
 const tryFleetTunnel = async (
   hop: THop,
   args: TWalkArgs,
+  hopTrail: THopTrailEntry[],
 ): Promise<Response | null> => {
   if (args.req.headers.get(TUNNELED_REQUEST_HEADER) === TUNNELED_REQUEST_VALUE)
     return null;
@@ -2570,7 +2587,7 @@ const tryFleetTunnel = async (
   const attempted = new Set<string>();
   let refreshedAfterExhaustion = false;
   while (true) {
-    for (const peerKeyId of rankFleetPeers(hop.provider, peers)) {
+    for (const peerKeyId of rankFleetPeers(hop.provider, hop.modelId, peers)) {
       if (attempted.has(peerKeyId)) continue;
       attempted.add(peerKeyId);
       try {
@@ -2609,7 +2626,7 @@ const tryFleetTunnel = async (
           }
           if (args.req.signal.aborted)
             return errorJson(499, "client aborted request");
-          recordFleetPeerOutcome(hop.provider, peerKeyId, false);
+          recordFleetPeerOutcome(hop.provider, peerKeyId, false, hop.modelId);
           logWarn("fleet", "Another device declined this provider.", {
             outcome: "peer_declined",
             provider: hop.provider,
@@ -2618,31 +2635,30 @@ const tryFleetTunnel = async (
           });
           continue;
         }
-        recordFleetPeerOutcome(hop.provider, peerKeyId, true);
-        return res;
+        recordFleetPeerOutcome(hop.provider, peerKeyId, true, hop.modelId);
+        const headers = new Headers(res.headers);
+        headers.set(SERVED_BY_DEVICE_HEADER, peerKeyId);
+        return new Response(res.body, { status: res.status, headers });
       } catch (error) {
         if (args.req.signal.aborted)
           return errorJson(499, "client aborted request");
         const preDispatch = isPreDispatchTunnelError(error);
         recordFleetPeerOutcome(hop.provider, peerKeyId, false);
         const cause =
-          typeof error === "object" &&
-          error !== null &&
-          "causeCode" in error &&
-          typeof error.causeCode === "string"
-            ? error.causeCode
-            : undefined;
+          error instanceof PreDispatchTunnelError ? error.causeCode : undefined;
+        const reason = `${fleetTunnelErrorReason(error)}${cause === undefined ? "" : ` (${cause})`}`;
+        hopTrail.push({ modelId: hop.modelId, provider: hop.provider, reason });
         logWarn("fleet", "Couldn't reach another device for this provider.", {
           outcome: "tunnel_failed",
           provider: hop.provider,
           peer_key_id: peerKeyId,
           pre_dispatch: preDispatch,
-          reason: fleetTunnelErrorReason(error),
+          reason,
           ...(cause === undefined ? {} : { cause }),
         });
-        // Availability over strict once-only: even after dispatch (the peer
-        // may have started the inference) a dropped tunnel moves on to the
-        // next peer, then the next hop, so the user never sees the drop.
+        // Explicit fleet exception to native capture's uncertain-send rule:
+        // availability wins over once-only here. Even after dispatch, a dropped
+        // tunnel moves to the next peer or hop, at the risk of duplicate work.
       }
     }
     if (refreshedAfterExhaustion || !(await refreshFleetPeersAfterMiss(true)))
@@ -3058,7 +3074,11 @@ const walkPlan = async (
     if (attempted.length === 0 && hopTrail.length === 0 && !won) return resp;
     const headers = passthroughHeaders(resp);
     if (attempted.length > 0) {
-      headers.set("x-openllm-chain", attempted.join(","));
+      const remoteChain = headers.get(OPENLLM_CHAIN_HEADER);
+      headers.set(
+        OPENLLM_CHAIN_HEADER,
+        [attempted.join(","), remoteChain].filter(Boolean).join(","),
+      );
     }
     if (hopTrail.length > 0) {
       headers.set("x-openllm-hop-failures", formatHopFailuresHeader(hopTrail));
@@ -3147,7 +3167,7 @@ const walkPlan = async (
           ),
           servedLocally: false,
         };
-      const tunneled = await tryFleetTunnel(hop, args);
+      const tunneled = await tryFleetTunnel(hop, args, hopTrail);
       if (tunneled !== null) {
         return { response: tunneled, servedLocally: false };
       }
@@ -3219,7 +3239,7 @@ const walkPlan = async (
         response: fleetDecline(hop.provider, "not_signed_in"),
         servedLocally: false,
       };
-    const tunneled = await tryFleetTunnel(hop, args);
+    const tunneled = await tryFleetTunnel(hop, args, hopTrail);
     if (tunneled !== null) return { response: tunneled, servedLocally: false };
     addHopFailure(hop, lastError);
     return HOP_CONTINUE;
@@ -3307,7 +3327,7 @@ const walkPlan = async (
           response: fleetDecline(hop.provider, "not_signed_in"),
           servedLocally: false,
         };
-      const tunneled = await tryFleetTunnel(hop, args);
+      const tunneled = await tryFleetTunnel(hop, args, hopTrail);
       if (tunneled !== null) {
         return { response: tunneled, servedLocally: false };
       }
@@ -3369,7 +3389,7 @@ const walkPlan = async (
           ),
           servedLocally: false,
         };
-      const tunneled = await tryFleetTunnel(hop, args);
+      const tunneled = await tryFleetTunnel(hop, args, hopTrail);
       if (tunneled !== null) {
         return { response: tunneled, servedLocally: false };
       }

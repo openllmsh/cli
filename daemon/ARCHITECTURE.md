@@ -717,7 +717,12 @@ default following that proof). Neither Claude's nor Codex's continuation
 carries a warm-session or cache-ID stability claim, and no number in the live
 report is a statistical or speedup claim — every measurement is a single
 observation. Accepted/uncertain capture ownership terminates the entire walk
-(no second send).
+(no second send). Muse's definitive HTTP 400/401/403/429 refusals are not
+accepted work: the walk advances, cooling rate-limited or unauthorized accounts
+according to the shared policy (400 is request-specific and is not cooled).
+Dropped connections, post-send timeouts and 5xx responses remain uncertain.
+Fleet tunnels are an explicit exception: a drop even after dispatch advances to
+another peer or hop, favoring availability despite possible duplicate work.
 
 **Execution-selection diagnostics and phase timing (plan phase 8,
 09-implementation-plan.md §8.3).** Every concrete selection (configured or default)
@@ -989,7 +994,9 @@ the prompt (no `@`), up to `AGENT_MAX_ATTACHMENT_BYTES` (64 MiB):
 - **`path`** — a file already on the device (this Mac's desktop app picks
   them), realpath'd to a readable regular file and named in place (no copy),
   on any transport: it is only a prompt mention, which the device's own
-  account can type anyway. A per-session index
+  account can type anyway. Any authenticated, seed-granted agent consumer may
+  submit absolute device paths without a directory allowlist: the seed grant
+  represents the device owner. A per-session index
   (`agent-attachments/<id>.path-index.json`, beside the session dir) maps the
   turn's attachment meta name to that realpath so **loopback** `attachment_get`
   can serve the bytes; mux/RTC never reads it (`allowsLocalPaths`).

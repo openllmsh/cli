@@ -658,6 +658,8 @@ export type TMuxChannelOptions = {
   readonly teamId?: string;
   /** Admission-only grant; every tunnel OPEN carries a fresh grant separately. */
   readonly teamGrant?: string;
+  /** Called when an existing or in-flight channel is shared. */
+  readonly onReuse?: () => void;
 };
 
 const channelLookupKey = (keyId: string, teamId?: string): string =>
@@ -689,9 +691,13 @@ export const muxChannelTo = async (
   }
   if (peerLinkFailureCache.has(lookupKey, "mux")) return null;
   const existing = consumerChannelFor(keyId, options?.teamId);
-  if (existing !== undefined) return existing.channel;
+  if (existing !== undefined) {
+    options?.onReuse?.();
+    return existing.channel;
+  }
   const pending = opening.get(lookupKey);
-  if (pending !== undefined)
+  if (pending !== undefined) {
+    options?.onReuse?.();
     return new Promise((resolve) => {
       const previousResolve = pending.resolve;
       pending.resolve = (channel) => {
@@ -699,6 +705,7 @@ export const muxChannelTo = async (
         resolve(channel);
       };
     });
+  }
   const send = sendFrame;
   const binary = sendBinary;
   if (send === null || binary === null) {
