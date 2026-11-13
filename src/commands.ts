@@ -127,6 +127,12 @@ export const COMMANDS = [
     description: "Show the local daemon status",
   },
   {
+    name: "devices",
+    args: "[--json]",
+    description:
+      "List this account's devices and the providers each online one serves",
+  },
+  {
     name: "auto-update",
     args: "<on|off|status>",
     description: "Read or change daemon automatic updates",

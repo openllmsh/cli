@@ -39,10 +39,11 @@ const run = async (): Promise<void> => {
   if (first === "--version" || first === "-v" || first === "version") {
     printSelfVersion();
   }
-  // The detached launch-check child: converge quietly, then exit.
+  // The detached launch-check child: converge quietly unless a running
+  // daemon owns updates on this machine, then exit.
   if (first === "__self-update") {
-    const { convergeSelf } = await import("./self-update");
-    await convergeSelf({ quiet: true });
+    const { runLaunchUpdateChild } = await import("./launch-update");
+    await runLaunchUpdateChild();
     process.exit(0);
   }
   // Per-prompt hooks should not initialize the vendor clients or MCP server.

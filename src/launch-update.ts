@@ -1,20 +1,28 @@
 /**
  * The CLI-launch update check. At most once per {@link CHECK_INTERVAL_MS}, an
- * interactive `openllm` invocation spawns a DETACHED copy of itself running
- * `__self-update` (the quiet {@link convergeSelf}), so the user's command never
- * waits on the network. The swap lands next run; a running daemon notices the
- * new file and restarts only if its own half changed.
+ * `openllm` invocation spawns a DETACHED copy of itself running
+ * `__self-update`, so the user's command never waits on the network. The
+ * child first asks whether this machine's daemon answers: a running daemon
+ * owns updates (its bootstrap tick converges the same file under the same
+ * update lease), so the child leaves it alone. Only with no daemon running —
+ * a minimal install, a sandbox, a stopped daemon — does the child run the
+ * quiet {@link convergeSelf}. The swap lands next run.
  *
- * Skipped for: dev builds, non-TTY / machine invocations (hooks, MCP stdio,
- * `exec`, the daemon half), the auto-update opt-out, and an explicit
+ * Runs with or without a TTY, so headless sandboxes (which never run a
+ * daemon) don't drift behind the cloud. Skipped for: dev builds, machine
+ * invocations that run per prompt or own stdio (hooks, MCP stdio, `exec`,
+ * the daemon half), the auto-update opt-out, and an explicit
  * `OPENLLM_NO_UPDATE_CHECK=1`.
  */
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { CLI_VERSION } from "./cli-version";
-import { openllmDir, sharedFileConfig } from "./env";
+import { daemonStateDir, openllmDir, sharedFileConfig } from "./env";
 
-export const CHECK_INTERVAL_MS = 6 * 60 * 60 * 1000;
+/** Short on purpose: releases ship often and the cloud moves on with them, so
+ *  a headless sandbox with no daemon must not sit hours behind. One check is
+ *  a single small version GET, made by a detached child. */
+export const CHECK_INTERVAL_MS = 5 * 60 * 1000;
 
 /** The hidden subcommand the detached child runs. */
 export const SELF_UPDATE_CHILD = "__self-update";
@@ -56,12 +64,10 @@ export const shouldCheck = (args: {
   readonly command: string | undefined;
   readonly now: number;
   readonly last: number;
-  readonly interactive: boolean;
   readonly version: string;
   readonly disabled: boolean;
 }): boolean =>
   args.version !== "0.0.0-dev" &&
-  args.interactive &&
   !args.disabled &&
   !(args.command !== undefined && SKIP_COMMANDS.has(args.command)) &&
   args.now - args.last >= CHECK_INTERVAL_MS;
@@ -75,7 +81,6 @@ export const maybeLaunchUpdateCheck = (command: string | undefined): void => {
         command,
         now,
         last: lastCheck(),
-        interactive: process.stdout.isTTY === true,
         version: CLI_VERSION,
         disabled:
           process.env.OPENLLM_NO_UPDATE_CHECK === "1" || autoUpdateOff(),
@@ -92,4 +97,67 @@ export const maybeLaunchUpdateCheck = (command: string | undefined): void => {
   } catch {
     // Never let an update check break the user's command.
   }
+};
+
+/** The file the daemon's updater converges (`~/.openllm/bin/openllm`). */
+const managedBinaryPath = (): string =>
+  join(daemonStateDir(), "bin", "openllm");
+
+const sameFile = (a: string, b: string): boolean => {
+  try {
+    return realpathSync(a) === realpathSync(b);
+  } catch {
+    return false;
+  }
+};
+
+/** A real OpenLLM daemon that is updating itself, not just anything that
+ *  answers 200: its `/status` carries the daemon's `version`. */
+const openllmDaemonAnswers = async (): Promise<boolean> => {
+  const { daemonPort } = await import("./clients/gateway");
+  try {
+    const res = await fetch(`http://127.0.0.1:${daemonPort()}/status`, {
+      signal: AbortSignal.timeout(2_000),
+    });
+    if (!res.ok) return false;
+    return daemonHealthOwnsUpdates(await res.json());
+  } catch {
+    return false;
+  }
+};
+
+/** Whether a daemon `/status` body (`buildHealth` in the daemon half) says it
+ *  is an OpenLLM daemon that will update itself. It converges only while its
+ *  `cloud_state` is `ok` (revoked key, unreachable cloud → no updater), so we
+ *  defer only to one that will. */
+export const daemonHealthOwnsUpdates = (body: unknown): boolean =>
+  typeof body === "object" &&
+  body !== null &&
+  typeof (body as { version?: unknown }).version === "string" &&
+  (body as { cloud_state?: unknown }).cloud_state === "ok";
+
+/** The detached child: converge unless a running daemon owns updates for
+ *  THIS file. The daemon converges only the managed install, so a separate
+ *  copy on PATH updates itself even while a daemon runs (the shared update
+ *  lease still serialises swaps of one file). Deps are injectable for tests. */
+export const runLaunchUpdateChild = async (
+  deps: {
+    readonly daemonRunning?: () => Promise<boolean>;
+    readonly isManagedBinary?: () => boolean;
+    readonly converge?: () => Promise<unknown>;
+  } = {},
+): Promise<"daemon" | "converged"> => {
+  const isManagedBinary =
+    deps.isManagedBinary ??
+    ((): boolean => sameFile(process.execPath, managedBinaryPath()));
+  const daemonRunning = deps.daemonRunning ?? openllmDaemonAnswers;
+  if (isManagedBinary() && (await daemonRunning())) return "daemon";
+  const converge =
+    deps.converge ??
+    (async (): Promise<unknown> => {
+      const { convergeSelf } = await import("./self-update");
+      return convergeSelf({ quiet: true });
+    });
+  await converge();
+  return "converged";
 };
