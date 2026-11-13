@@ -1493,6 +1493,8 @@ export type TClaudeTuiDeps = {
   readonly localCommandSettleMs?: number;
   readonly trustAnswerDelayMs?: number;
   readonly attachmentsDir?: (sessionId: string) => string;
+  /** Transcript chunks one live drain reads at most (tests shrink it). */
+  readonly drainMaxChunks?: number;
 };
 
 const permissionReply = (decision: TJson): TJson => ({
@@ -1805,7 +1807,14 @@ export const createClaudeTuiSession = (
   const pump = (): void => {
     drained = [];
     try {
-      for (let chunk = 0; chunk < DRAIN_MAX_CHUNKS; chunk += 1) {
+      // The resume drain reads to EOF: the latest window must be chosen from
+      // the whole transcript, or a long one would pick a window from its
+      // prefix and stream every later chunk to the browser as replay.
+      // Appends after that stay capped per tick.
+      const limit = replayed
+        ? (deps.drainMaxChunks ?? DRAIN_MAX_CHUNKS)
+        : Number.POSITIVE_INFINITY;
+      for (let chunk = 0; chunk < limit; chunk += 1) {
         const text = tail.read();
         if (text === null || text.length === 0) break;
         parser.push(text);
