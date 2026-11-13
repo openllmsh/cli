@@ -12,9 +12,9 @@
  *
  * Everything else is exactly as on any machine.
  *
- * `OPENLLM_ROUTING_BOX_MARKER` overrides the path for tests only. Pointing it
- * elsewhere on a real box only turns these locks off for that process, which
- * the box's owner (root on their own machine) can do anyway.
+ * `OPENLLM_ROUTING_BOX_MARKER` moves the marker. Pointing it elsewhere on a
+ * real box only turns these locks off for that process, which the box's
+ * owner (root on their own machine) can do anyway.
  */
 import { existsSync } from "node:fs";
 import { ROUTING_BOX_MARKER_PATH } from "@openllmsh/sdk/protocol";
