@@ -81,20 +81,41 @@ const updateTarget = (): string =>
 export const currentUpdate = (): TUpdateLease | null =>
   readUpdateLease(updateTarget());
 
-/** Push the status again whenever this daemon's own update moves. */
+/**
+ * Download progress is re-published at most this often, so a dashboard
+ * watching another device sees the bar move like the desktop app's does.
+ */
+const UPDATE_PUSH_INTERVAL_MS = 2_000;
+
+/**
+ * Publish the status now — not on the 30 s watcher tick — so every surface
+ * (Manage device on any browser, the desktop app) shows this update's steps as
+ * they happen, the same steps a manual update shows. Best-effort.
+ */
+const pushUpdateStatus = (): void => {
+  markStatusDirty("update");
+  void import("./control-channel")
+    .then((mod) => mod.pushStatusIfChanged("update"))
+    .catch(() => {});
+};
+
+/** Push the status whenever this daemon's own update moves. */
 const reportingLease = (lease: TUpdateLeaseHandle): TUpdateLeaseHandle => {
   let phase: string | null = null;
+  let lastPush = Number.NEGATIVE_INFINITY;
   return {
     progress: (next, bytes) => {
       lease.progress(next, bytes);
-      if (next !== phase) {
+      const now = Date.now();
+      if (next !== phase || now - lastPush >= UPDATE_PUSH_INTERVAL_MS) {
         phase = next;
-        markStatusDirty("update");
+        lastPush = now;
+        pushUpdateStatus();
       }
     },
     release: () => {
       lease.release();
-      markStatusDirty("update");
+      pushUpdateStatus();
     },
   };
 };

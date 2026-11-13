@@ -422,7 +422,11 @@ const statusPublishCoalescer = createStatusPublishCoalescer({
     watcherSkipProviderProbes = false;
     const fresh = await computeStatusFresh({
       trigger,
-      ...(trigger === "late-probe" ? { reuseSettledSlugProbes: true } : {}),
+      // An update step re-publishes the lease, not the providers: reuse the
+      // settled probes so a step costs no provider work.
+      ...(trigger === "late-probe" || trigger === "update"
+        ? { reuseSettledSlugProbes: true }
+        : {}),
       ...(skipProviderProbes ? { skipProviderProbes: true } : {}),
     });
     // Overlay latest listModels/discoverModels outcomes (omit when unknown).
@@ -792,7 +796,9 @@ export const pushStatusIfChanged = async (
           ? "presence"
           : trigger === "command" || trigger === "auth-sink"
             ? "command"
-            : "manual",
+            : trigger === "update"
+              ? "update"
+              : "manual",
     );
   }
   // Clear dirty at compute start so mark+push paths do not leave work queued

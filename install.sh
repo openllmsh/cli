@@ -2387,11 +2387,46 @@ daemon_is_running() {
 
 # Restart a daemon so it runs the binary this update just installed. Only when
 # the binary actually changed; credentials are already persisted.
+# hold_restart_lease <version>: take the update lease again for the restart
+# step, so every surface (Manage device, the desktop app, `openllm status`)
+# shows "Restarting" until the daemon is back — the same step the daemon's own
+# auto-update reports. Best-effort: a live holder is left alone (never die
+# here, the binary is already installed); a stale one is taken over once.
+hold_restart_lease() {
+  local attempt
+  UPDATE_STARTED_MS="$(now_ms)"
+  for attempt in 1 2; do
+    if (set -C; update_lease_body restart "$1" > "$UPDATE_LOCK") 2>/dev/null; then
+      UPDATE_LEASE_HELD=1
+      trap release_update_lease EXIT
+      return 0
+    fi
+    update_lock_live && return 1
+    rm -f "$UPDATE_LOCK"
+  done
+  return 1
+}
+
+# Wait (bounded) for the restarted daemon to answer, so the restart step lasts
+# until it is back rather than ending at the kickstart.
+wait_for_daemon_back() {
+  local i
+  for i in $(seq 1 30); do
+    daemon_is_running && return 0
+    sleep 1
+  done
+  return 1
+}
+
 restart_for_new_binary() {
   echo "Restarting the daemon to pick up the new binary..."
+  hold_restart_lease "$CLI_VERSION" || true
   if "$BIN_DIR/openllm" daemon restart; then
     DAEMON_STARTED=1
+    wait_for_daemon_back || true
+    release_update_lease
   else
+    release_update_lease
     DAEMON_START_FAILED=1
     echo "Warning: daemon restart failed — run '$BIN_DIR/openllm daemon status' to diagnose" >&2
   fi
