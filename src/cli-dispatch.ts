@@ -357,6 +357,13 @@ export const runCli = async (argv: readonly string[]): Promise<void> => {
       if (wantsHelp(rest)) return usage(STATUS_USAGE, 0);
       if (rest.length > 0) return usage(STATUS_USAGE, 2);
       return process.exit(await runManagedDaemonCommand("status"));
+    case "devices": {
+      const { DEVICES_USAGE, runDevicesCommand } = await import(
+        "./devices-cmd"
+      );
+      if (wantsHelp(rest)) return usage(DEVICES_USAGE, 0);
+      return process.exit(await runDevicesCommand(rest));
+    }
     case "auto-update": {
       if (wantsHelp(rest)) return usage(AUTO_UPDATE_USAGE, 0);
       const action = rest[0] ?? "";

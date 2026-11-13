@@ -455,12 +455,14 @@ See [`packages/release/commands/cli.ts`](../release/commands/cli.ts):
   daemon bootstrap carries the same tag (`latest_cli_version`, and
   `latest_version` for pre-merge daemons).
 - **At CLI launch** (`src/launch-update.ts`): at most once per 6 h, an
-  interactive invocation spawns a DETACHED `openllm __self-update` that runs
-  the quiet converge (`convergeSelf` in `src/self-update.ts`): version check,
-  download, gunzip, verify the decompressed sha256, atomic same-directory
-  rename. The user's command never waits. Skipped for dev builds, non-TTY /
-  machine commands (`mcp`, `exec`, …), the auto-update opt-out, and
-  `OPENLLM_NO_UPDATE_CHECK=1`. `openllm self-update` is the explicit,
+  invocation (TTY or not) spawns a DETACHED `openllm __self-update`. The child
+  probes this machine's daemon first: a running daemon owns updates, so the
+  child exits. With no daemon (minimal installs, agent sandboxes, a stopped
+  daemon) it runs the quiet converge (`convergeSelf` in `src/self-update.ts`):
+  version check, download, gunzip, verify the decompressed sha256, atomic
+  same-directory rename, under the shared update lease. The user's command
+  never waits. Skipped for dev builds, machine commands (`mcp`, `exec`, …),
+  the auto-update opt-out, and `OPENLLM_NO_UPDATE_CHECK=1`. `openllm self-update` is the explicit,
   reporting form.
 - **In the daemon** (`daemon/src/updater.ts`): the bootstrap tick converges the
   same file (so a machine whose CLI is never run still updates), and a 30 s
