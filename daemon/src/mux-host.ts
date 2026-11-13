@@ -677,11 +677,20 @@ export const muxChannelTo = async (
   options?: TMuxChannelOptions,
 ): Promise<TMuxChannel | null> => {
   if (process.env.OPENLLM_MUX_DISABLE === "1") return null;
-  // The local caps view (welcome snapshot + presence frames) is a hint, never
-  // a gate: a missed presence frame would otherwise strand a live peer as
-  // "offline" until this daemon reconnects. The relay is authoritative — it
-  // nacks an offline or incapable peer at once — so always ask it.
+  // The caps view is the welcome snapshot plus every presence delta — the
+  // relay fans each presence change out to the user's daemons too
+  // (`broadcastPresence`), so it is current and an absent peer is skipped
+  // without a round-trip. A cross-user team target is authorized by its
+  // signed grant instead; the relay/supplier remains authoritative there.
+  const caps = peerCaps.get(keyId);
   const lookupKey = channelLookupKey(keyId, options?.teamId);
+  if (
+    options?.teamGrant === undefined &&
+    (caps === undefined || !caps.has(MUX_CAP))
+  ) {
+    peerLinkFailureCache.set(lookupKey, "mux", "presence");
+    return null;
+  }
   if (peerLinkFailureCache.has(lookupKey, "mux")) return null;
   const existing = consumerChannelFor(keyId, options?.teamId);
   if (existing !== undefined) {
