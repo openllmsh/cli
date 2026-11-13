@@ -908,8 +908,8 @@ CLI_VERSION="$(json_field cli_version)"
 # --- the update lease -------------------------------------------------------
 # One process at a time may replace the `openllm` binary: the daemon's
 # auto-update, the CLI's self-update, this installer (also what `openllm update`
-# and the desktop app run). `$BIN_DIR/.update.lock` is created with O_EXCL
-# (`set -C`, like the env-file lock — no flock on fresh installs) and its JSON
+# and the desktop app run). `$BIN_DIR/.update.lock` is created exclusively
+# (a hard link of its finished body — no flock on fresh installs) and its JSON
 # body is the progress the daemon's /status and the desktop app show. Format
 # and staleness rules: packages/cli/src/update-lease.ts — keep in step.
 UPDATE_LOCK="$BIN_DIR/.update.lock"
@@ -950,12 +950,24 @@ update_lock_live() {
   kill -0 "$pid" 2>/dev/null
 }
 
+# create_update_lock <phase> <version>: create the lock with its whole body,
+# or fail when it exists. Written to a temp file, then hard-linked into place
+# (`ln` refuses an existing target), so a reader never sees an empty lock and
+# mistakes it for a stale one.
+create_update_lock() {
+  local tmp="$UPDATE_LOCK.$$.new" rc=1
+  update_lease_body "$1" "$2" > "$tmp" 2>/dev/null || { rm -f "$tmp"; return 1; }
+  ln "$tmp" "$UPDATE_LOCK" 2>/dev/null && rc=0
+  rm -f "$tmp"
+  return "$rc"
+}
+
 # acquire_update_lease <version>: take the lease or die naming who holds it.
 acquire_update_lease() {
   local attempt
   UPDATE_STARTED_MS="$(now_ms)"
   for attempt in 1 2; do
-    if (set -C; update_lease_body download "$1" > "$UPDATE_LOCK") 2>/dev/null; then
+    if create_update_lock download "$1"; then
       UPDATE_LEASE_HELD=1
       trap release_update_lease EXIT
       return 0
@@ -2396,7 +2408,7 @@ hold_restart_lease() {
   local attempt
   UPDATE_STARTED_MS="$(now_ms)"
   for attempt in 1 2; do
-    if (set -C; update_lease_body restart "$1" > "$UPDATE_LOCK") 2>/dev/null; then
+    if create_update_lock restart "$1"; then
       UPDATE_LEASE_HELD=1
       trap release_update_lease EXIT
       return 0
