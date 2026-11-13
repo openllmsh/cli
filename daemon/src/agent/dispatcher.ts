@@ -712,6 +712,7 @@ export const createAgentDispatcher = (
               engineSession.send({
                 prompt: command.prompt,
                 attachments,
+                ...(command.send_now === true ? { sendNow: true } : {}),
               }),
             );
             if (!result.ok)

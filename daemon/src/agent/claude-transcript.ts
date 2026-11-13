@@ -432,6 +432,13 @@ export type TTranscriptParserOptions = {
    * with an error, `/cost`'s table), its wrapper tags stripped.
    */
   readonly onLocalCommandOutput?: (text: string) => void;
+  /**
+   * Claude's own record of its input queue (`queue-operation` rows):
+   * `enqueue` (with the full text), `dequeue` (taken off to start a turn,
+   * no text — also what Esc does with queued messages), and `remove` with a
+   * reason such as `absorbed_mid_turn` (folded into the running turn).
+   */
+  readonly onQueueOperation?: (op: TQueueOperation) => void;
   /** The turn id a subagent parser stamps on its items. */
   readonly turnId?: () => string | undefined;
   /** Every tool_use seen (the subagent follower tracks Task / Agent calls). */
@@ -450,6 +457,12 @@ export type TTranscriptParserOptions = {
     /** The call's own parent (a subagent nested in a subagent). */
     readonly parentItemId?: string;
   };
+};
+
+export type TQueueOperation = {
+  readonly operation: string;
+  readonly reason?: string;
+  readonly content?: string;
 };
 
 export const createTranscriptParser = (
@@ -1011,6 +1024,16 @@ export const createTranscriptParser = (
       return;
     }
     if (!isRecord(row)) return;
+    if (row.type === "queue-operation") {
+      const operation = str(row.operation);
+      if (operation !== undefined)
+        args.onQueueOperation?.({
+          operation,
+          ...(str(row.reason) === undefined ? {} : { reason: str(row.reason) }),
+          ...(typeof row.content === "string" ? { content: row.content } : {}),
+        });
+      return;
+    }
     if (row.isMeta === true) {
       // A prompt-type slash command (`/init`, a skill) expands into a meta
       // prompt row: the model runs for it, and its Stop ends the turn.

@@ -85,7 +85,10 @@ import {
   subagentDirOf,
   subagentEvents,
 } from "./claude-subagents";
-import type { TClaudeTranscriptTail } from "./claude-transcript";
+import type {
+  TClaudeTranscriptTail,
+  TQueueOperation,
+} from "./claude-transcript";
 import {
   createClaudeTranscriptTail,
   createTranscriptParser,
@@ -1562,6 +1565,9 @@ export const createClaudeTuiSession = (
     onLocalCommandOutput: (text) => {
       if (modelInFlight) failModelSwitch(text);
     },
+    // Claude's own queue record replaces guessing from hook text: a held
+    // prompt is confirmed by its `enqueue` and leaves on `remove`/`dequeue`.
+    onQueueOperation: (op) => onQueueOperation(op),
     emit: (event) => {
       // The transcript supplies the full input for a live hook row. Preserve
       // its id but make it an update, so raw event consumers do not receive a
@@ -1618,6 +1624,10 @@ export const createClaudeTuiSession = (
       // row from the new transcript is delivered.
       onSwitch: () => {
         parser.completeTurn();
+        // Claude's queue is the old conversation's: neither its mirror nor
+        // what we showed as held carries over to the new transcript.
+        claudeQueue.length = 0;
+        claudeHeld.length = 0;
         const reset: TAgentEvent = { type: "session.reset" };
         if (drained !== null) drained.push(reset);
         else emit(reset);
@@ -1650,6 +1660,53 @@ export const createClaudeTuiSession = (
   let sendNowPending = false;
   /** A pending send-now the user agreed may stop running tools. */
   let sendNowInterrupt = false;
+  /**
+   * Prompts handed to Claude's own queue that Claude has not taken in yet
+   * (no UserPromptSubmit for them). Shown as queued, cancel-less, so Send now
+   * stays on offer; cleared when Claude takes each, or the turn stops.
+   */
+  const claudeHeld: {
+    id: string;
+    prompt: string;
+    attachmentCount: number;
+    text: string;
+    /** Claude wrote its `enqueue` row: it really holds this one. */
+    confirmed: boolean;
+  }[] = [];
+  /**
+   * Mirror of Claude's whole input queue (texts, oldest first) from its
+   * `enqueue` rows: a `dequeue` names no text, and the queue also holds
+   * things that aren't ours (task notifications, terminal typing).
+   */
+  const claudeQueue: { text: string; heldId?: string }[] = [];
+  /** Drop the held prompt this mirrored entry confirmed (by id, not text). */
+  const dropHeld = (heldId: string | undefined): boolean => {
+    if (heldId === undefined) return false;
+    const at = claudeHeld.findIndex((e) => e.id === heldId);
+    if (at < 0) return false;
+    claudeHeld.splice(at, 1);
+    return true;
+  };
+  const onQueueOperation = (op: TQueueOperation): void => {
+    const text =
+      op.content === undefined ? undefined : normalizePrompt(op.content);
+    let changed = false;
+    if (op.operation === "enqueue") {
+      if (text === undefined) return;
+      const entry = claudeHeld.find((e) => !e.confirmed && e.text === text);
+      if (entry !== undefined) entry.confirmed = true;
+      claudeQueue.push(
+        entry === undefined ? { text } : { text, heldId: entry.id },
+      );
+    } else if (op.operation === "remove") {
+      if (text === undefined) return;
+      const at = claudeQueue.findIndex((q) => q.text === text);
+      if (at >= 0) changed = dropHeld(claudeQueue.splice(at, 1)[0]?.heldId);
+    } else if (op.operation === "dequeue") {
+      changed = dropHeld(claudeQueue.shift()?.heldId);
+    }
+    if (changed) emitQueue();
+  };
   /** The turn this daemon opened last (its prompt was typed by `send`). */
   let sentTurnId: string | null = null;
   /**
@@ -1943,6 +2000,10 @@ export const createClaudeTuiSession = (
   const submissions: { text: string; turnId: string; acknowledged: boolean }[] =
     [];
   let latestSubmission: (typeof submissions)[number] | null = null;
+  /** A terminal-typed prompt opened the running turn (its hook fired). */
+  let externalTurnSubmitted = false;
+  /** The prompt that opened the running turn (typed, then Enter). */
+  let turnSubmission: (typeof submissions)[number] | null = null;
   const submitPrompt = (
     text: string,
     turnId: string,
@@ -1966,6 +2027,10 @@ export const createClaudeTuiSession = (
     };
     const isSlashCommand = slashCommand;
     latestSubmission = submission;
+    if (!queuedSubmit) {
+      turnSubmission = submission;
+      externalTurnSubmitted = false;
+    }
     if (!isSlashCommand) submissions.push(submission);
     const valid = (): boolean =>
       !ended && parser.turnActive() && parser.turnField().turn_id === turnId;
@@ -1987,7 +2052,12 @@ export const createClaudeTuiSession = (
     const first = (): void => {
       if (!valid() || latestSubmission !== submission) return;
       writeText(queuedSubmit ? QUEUE_SUBMIT : "\r");
-      if (!isSlashCommand && !submission.acknowledged) retry(0);
+      // Never for one handed to Claude's queue: its UserPromptSubmit waits
+      // until Claude takes it, and a bare Enter meanwhile would submit
+      // whatever someone is typing in the shared terminal. Its `enqueue`
+      // row (or the lack of one by Stop) says whether it landed.
+      if (!queuedSubmit && !isSlashCommand && !submission.acknowledged)
+        retry(0);
     };
     if (queuedSubmit) first();
     else setTimeout(first, submitDelayMs);
@@ -2124,6 +2194,11 @@ export const createClaudeTuiSession = (
             ? candidates[0]
             : undefined;
       if (match !== undefined) match.acknowledged = true;
+      // None of ours: a prompt typed in the terminal opened this turn. Its
+      // input is submitted, so handing ours to Claude's queue is safe.
+      else if (candidates.length === 0) externalTurnSubmitted = true;
+      // Prompts that arrived while this turn's own was still being typed.
+      if (promptQueue.length > 0 && canHandOver()) deliverQueuedNow();
       return null;
     }
     if (event === "PreToolUse") {
@@ -2148,10 +2223,18 @@ export const createClaudeTuiSession = (
       return null;
     }
     if (event === "Stop") {
+      // The next turn must confirm its own prompt before anything is handed.
+      turnSubmission = null;
+      externalTurnSubmitted = false;
+      if (!sendNowPending) sendNowInterrupt = false;
       // Claude's prompt takes input again only after ALL Stop hooks finish
       // (measured: keys typed ~130 ms after ours returned were dropped).
       setTimeout(() => {
         awaitingStop = false;
+        // Claude flushes its transcript after the hook returns: read it
+        // before deciding a held prompt was never queued.
+        if (!ended) pump();
+        clearUnconfirmedHeld();
         applyModel();
         flushQueue();
       }, deps.stopSettleMs ?? STOP_SETTLE_MS);
@@ -2395,13 +2478,41 @@ export const createClaudeTuiSession = (
       type: "queue.updated",
       // Clipped: the strip shows one line each, and the whole queue rides
       // every event (and the replay log), so full prompts would not fit.
-      prompts: promptQueue.map(({ id, input }) => ({
-        id,
-        prompt: input.prompt.slice(0, AGENT_SHORT_TEXT_MAX_LENGTH),
-        attachment_count: input.attachments.length,
-      })),
+      prompts: [
+        ...claudeHeld.map((entry) => ({
+          id: entry.id,
+          prompt: entry.prompt,
+          attachment_count: entry.attachmentCount,
+          in_engine: true,
+        })),
+        ...promptQueue.map(({ id, input }) => ({
+          id,
+          prompt: input.prompt.slice(0, AGENT_SHORT_TEXT_MAX_LENGTH),
+          attachment_count: input.attachments.length,
+        })),
+      ],
       held: queueHeld,
     });
+  };
+  /**
+   * Safety net at Stop: drop what Claude never confirmed holding (no
+   * `enqueue` row — the paste was lost). What it confirmed leaves on its own
+   * `dequeue` / `remove` row.
+   */
+  const clearUnconfirmedHeld = (): void => {
+    const kept = claudeHeld.filter((entry) => entry.confirmed);
+    if (kept.length === claudeHeld.length) return;
+    // Say so rather than drop it silently. Not resent: a Claude that writes
+    // no queue rows would then run every handed-over prompt twice.
+    for (const entry of claudeHeld) {
+      if (entry.confirmed) continue;
+      emit({
+        type: "runtime.warning",
+        message: `A queued message may not have reached Claude: "${entry.prompt.slice(0, 80)}". Send it again if it doesn't show up.`,
+      });
+    }
+    claudeHeld.splice(0, claudeHeld.length, ...kept);
+    emitQueue();
   };
   /** The next queued prompt opens its turn once the session is idle again. */
   const flushQueue = (): void => {
@@ -2435,6 +2546,103 @@ export const createClaudeTuiSession = (
     }
   };
 
+  /**
+   * A mid-turn prompt may go to Claude's queue only once the turn's own
+   * prompt is submitted (UserPromptSubmit): pasting earlier would merge into
+   * the input it is still typing and cut off its Enter retries. Prompts
+   * already handed over were submitted at once (queueSubmit), so they never
+   * hold the next one back. A turn the daemon didn't type (a slash command,
+   * or one started in the terminal) has no confirmation and keeps our queue.
+   */
+  const canHandOver = (): boolean =>
+    parser.turnActive() &&
+    !queueHeld &&
+    (turnSubmission?.acknowledged === true || externalTurnSubmitted);
+
+  const deliverQueuedNow = (options?: {
+    readonly interrupt?: boolean;
+  }): boolean => {
+    if (ended) return false;
+    // Already in Claude's own queue (Enter mid-turn hands it over at once):
+    // send-now is just Claude's key, which interrupts for what it holds.
+    if (
+      promptQueue.length === 0 &&
+      options?.interrupt === true &&
+      parser.turnActive() &&
+      claudeHeld.length > 0
+    ) {
+      whenReady(() => {
+        if (!ended) writeText(SEND_NOW);
+      });
+      return true;
+    }
+    if (promptQueue.length === 0) return false;
+    // No turn running: the normal flush, which waits out the Stop settle
+    // (keys typed while Stop hooks run are dropped).
+    if (!parser.turnActive()) {
+      flushQueue();
+      return true;
+    }
+    // Into Claude's own queue: it joins the running turn at the next tool
+    // boundary, and running tools finish undisturbed — unless the user
+    // agreed to stop them, then Claude's send-now. Keep entries durable until
+    // their paste is committed: an interrupt before readiness must not lose
+    // them.
+    if (options?.interrupt === true) sendNowInterrupt = true;
+    if (sendNowPending) return true;
+    sendNowPending = true;
+    whenReady(() => {
+      sendNowPending = false;
+      let interrupt = sendNowInterrupt;
+      sendNowInterrupt = false;
+      if (ended || queueHeld) return;
+      const delivered: string[] = [];
+      for (const entry of promptQueue) {
+        const prepared = preparePrompt(entry.input);
+        if (!prepared.ok) {
+          emit({
+            type: "runtime.warning",
+            message: `A queued message wasn't sent: ${prepared.message}`,
+          });
+          delivered.push(entry.id);
+          continue;
+        }
+        const turnId = parser.turnField().turn_id;
+        if (turnId === undefined) return;
+        claudeHeld.push({
+          id: entry.id,
+          prompt: entry.input.prompt.slice(0, AGENT_SHORT_TEXT_MAX_LENGTH),
+          attachmentCount: entry.input.attachments.length,
+          text: normalizePrompt(prepared.text),
+          confirmed: false,
+        });
+        submitPrompt(
+          prepared.text,
+          turnId,
+          true,
+          isSlashPrompt(entry.input.prompt),
+        );
+        // Sent with "send now" (Ctrl/Cmd+Enter): only once it is actually
+        // handed over — one that failed above never interrupts.
+        if (entry.input.sendNow === true) interrupt = true;
+        delivered.push(entry.id);
+      }
+      if (delivered.length === 0) return;
+      const deliveredIds = new Set(delivered);
+      promptQueue.splice(
+        0,
+        promptQueue.length,
+        ...promptQueue.filter((entry) => !deliveredIds.has(entry.id)),
+      );
+      emitQueue();
+      if (!interrupt) return;
+      setTimeout(() => {
+        if (!ended) writeText(SEND_NOW);
+      }, submitDelayMs);
+    });
+    return true;
+  };
+
   return {
     send: (input): TAgentSendResult => {
       if (ended)
@@ -2461,7 +2669,7 @@ export const createClaudeTuiSession = (
             code: "empty_prompt",
             message: "nothing to send",
           };
-        if (promptQueue.length >= AGENT_MAX_QUEUED_PROMPTS)
+        if (promptQueue.length + claudeHeld.length >= AGENT_MAX_QUEUED_PROMPTS)
           return {
             ok: false,
             code: "queue_full",
@@ -2470,66 +2678,31 @@ export const createClaudeTuiSession = (
         queueCounter += 1;
         promptQueue.push({ id: `q${queueCounter}`, input });
         emitQueue();
+        // Like Enter in Claude Code mid-turn: straight into Claude's own queue
+        // (queueSubmit), so it joins the running turn at the next tool
+        // boundary without stopping anything. Held after an interrupt, or
+        // once the turn has ended (Stop hooks settling), it waits here for
+        // the normal flush instead — the same gate Send now uses.
+        if (canHandOver()) deliverQueuedNow();
         return { ok: true, queued: true };
       }
       return startTurn(input);
     },
     sendNow: (options): boolean => {
-      if (ended || promptQueue.length === 0) return false;
-      // No turn running: the normal flush, which waits out the Stop settle
-      // (keys typed while Stop hooks run are dropped).
-      if (!parser.turnActive()) {
-        flushQueue();
+      // The turn's own prompt isn't confirmed yet: pasting now would merge
+      // into it. Keep the request (and whether it may interrupt) for the
+      // UserPromptSubmit that confirms it, which hands the queue over.
+      if (
+        !ended &&
+        promptQueue.length > 0 &&
+        parser.turnActive() &&
+        turnSubmission?.acknowledged !== true &&
+        !externalTurnSubmitted
+      ) {
+        if (options?.interrupt === true) sendNowInterrupt = true;
         return true;
       }
-      // Into Claude's own queue: it joins the running turn at the next tool
-      // boundary, and running tools finish undisturbed — unless the user
-      // agreed to stop them, then Claude's send-now. Keep entries durable until
-      // their paste is committed: an interrupt before readiness must not lose
-      // them.
-      if (options?.interrupt === true) sendNowInterrupt = true;
-      if (sendNowPending) return true;
-      sendNowPending = true;
-      whenReady(() => {
-        sendNowPending = false;
-        const interrupt = sendNowInterrupt;
-        sendNowInterrupt = false;
-        if (ended || queueHeld) return;
-        const delivered: string[] = [];
-        for (const entry of promptQueue) {
-          const prepared = preparePrompt(entry.input);
-          if (!prepared.ok) {
-            emit({
-              type: "runtime.warning",
-              message: `A queued message wasn't sent: ${prepared.message}`,
-            });
-            delivered.push(entry.id);
-            continue;
-          }
-          const turnId = parser.turnField().turn_id;
-          if (turnId === undefined) return;
-          submitPrompt(
-            prepared.text,
-            turnId,
-            true,
-            isSlashPrompt(entry.input.prompt),
-          );
-          delivered.push(entry.id);
-        }
-        if (delivered.length === 0) return;
-        const deliveredIds = new Set(delivered);
-        promptQueue.splice(
-          0,
-          promptQueue.length,
-          ...promptQueue.filter((entry) => !deliveredIds.has(entry.id)),
-        );
-        emitQueue();
-        if (!interrupt) return;
-        setTimeout(() => {
-          if (!ended) writeText(SEND_NOW);
-        }, submitDelayMs);
-      });
-      return true;
+      return deliverQueuedNow(options);
     },
     resumeQueue: (): boolean => {
       if (ended || !queueHeld) return false;
@@ -2542,7 +2715,11 @@ export const createClaudeTuiSession = (
       const index = promptQueue.findIndex((entry) => entry.id === queueId);
       if (index < 0) return false;
       promptQueue.splice(index, 1);
-      if (promptQueue.length === 0) queueHeld = false;
+      if (promptQueue.length === 0) {
+        queueHeld = false;
+        // A Send now waiting on the turn's prompt was for what's now gone.
+        if (!sendNowPending) sendNowInterrupt = false;
+      }
       emitQueue();
       return true;
     },
@@ -2552,6 +2729,11 @@ export const createClaudeTuiSession = (
       // queued callbacks and prompts; the queue is explicitly held instead.
       // Hold only real entries; an empty hold would strand later prompts.
       queueHeld = promptQueue.length > 0;
+      // Esc doesn't drop Claude's queued prompts: it runs them next (a
+      // `dequeue` row each, which takes them off the strip).
+      turnSubmission = null;
+      externalTurnSubmitted = false;
+      if (!sendNowPending) sendNowInterrupt = false;
       emitQueue();
       if (ready) writeText(ESC);
       parser.abortTurn("interrupted");
