@@ -962,6 +962,21 @@ create_update_lock() {
   return "$rc"
 }
 
+# remove_stale_lock: take a stale lock out of the way without ever deleting a
+# live one. Another installer may have replaced the stale body we judged with
+# its own fresh lease in the meantime, so the lock is renamed aside (atomic)
+# and only discarded if it is still the body we judged stale; otherwise it is
+# put back (`ln` never overwrites a newer lock).
+remove_stale_lock() {
+  local judged aside="$UPDATE_LOCK.$$.stale"
+  judged="$(cat "$UPDATE_LOCK" 2>/dev/null)" || return 0
+  mv -f "$UPDATE_LOCK" "$aside" 2>/dev/null || return 0
+  if [ "$(cat "$aside" 2>/dev/null)" != "$judged" ]; then
+    ln "$aside" "$UPDATE_LOCK" 2>/dev/null || true
+  fi
+  rm -f "$aside"
+}
+
 # acquire_update_lease <version>: take the lease or die naming who holds it.
 acquire_update_lease() {
   local attempt
@@ -983,7 +998,7 @@ acquire_update_lease() {
       die "openllm is already being updated by $holder — try again when it finishes"
     fi
     # Stale (holder gone or silent): take it over.
-    rm -f "$UPDATE_LOCK"
+    remove_stale_lock
   done
   die "could not take the update lock: $UPDATE_LOCK"
 }
@@ -2414,7 +2429,7 @@ hold_restart_lease() {
       return 0
     fi
     update_lock_live && return 1
-    rm -f "$UPDATE_LOCK"
+    remove_stale_lock
   done
   return 1
 }
@@ -2430,12 +2445,34 @@ wait_for_daemon_back() {
   return 1
 }
 
+# The version the running daemon reports on its loopback /status, or empty.
+running_daemon_version() {
+  curl -fsS --noproxy '*' --max-time 2 "http://127.0.0.1:$DAEMON_PORT/status" 2>/dev/null |
+    grep -o '"version"[[:space:]]*:[[:space:]]*"[^"]*"' | head -n 1 | sed 's/.*"\([^"]*\)"$/\1/'
+}
+
 restart_for_new_binary() {
   echo "Restarting the daemon to pick up the new binary..."
-  # Another update took the lease since our swap: it restarts the daemon
-  # itself, and restarting here would kill it mid-update.
-  if ! hold_restart_lease "$CLI_VERSION"; then
-    echo "  another update is in progress — it restarts the daemon when it finishes"
+  # Another update took the lease since our swap: restarting now would kill
+  # it mid-update, and it may still fail without restarting. Wait for it to
+  # finish (bounded by the lease's own staleness), then restart only if the
+  # daemon still isn't on what we installed.
+  local waited=0
+  while ! hold_restart_lease "$CLI_VERSION"; do
+    if [ "$waited" = 0 ]; then
+      echo "  another update is in progress — waiting for it to finish"
+    fi
+    if [ "$waited" -ge "$UPDATE_LEASE_STALE_SEC" ]; then
+      echo "Warning: another update is still running — run '$BIN_DIR/openllm daemon restart' once it finishes" >&2
+      DAEMON_STARTED=1
+      return 0
+    fi
+    sleep 2
+    waited=$((waited + 2))
+  done
+  if [ "$waited" -gt 0 ] && [ -n "$CLI_VERSION" ] &&
+    [ "$(running_daemon_version)" = "$CLI_VERSION" ]; then
+    release_update_lease
     DAEMON_STARTED=1
     return 0
   fi

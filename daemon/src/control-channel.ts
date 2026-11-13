@@ -229,6 +229,17 @@ export const statusChangeKey = (status: TDaemonStatus): string => {
       (status.control_caps ?? []).join(","),
     ),
     status.pty_supported === undefined ? "" : String(status.pty_supported),
+    // The update in progress (whoever runs it): each step and download tick
+    // is a change, so a dashboard sees the same steps the desktop app does.
+    status.update == null
+      ? ""
+      : joinChangeKeyParts([
+          status.update.source,
+          status.update.version ?? "",
+          status.update.phase,
+          String(status.update.received ?? ""),
+          String(status.update.total ?? ""),
+        ]),
     connections,
     sessions,
   ].join("\n");
