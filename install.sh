@@ -954,10 +954,19 @@ update_lock_live() {
 # or fail when it exists. Written to a temp file, then hard-linked into place
 # (`ln` refuses an existing target), so a reader never sees an empty lock and
 # mistakes it for a stale one.
+#
+# A filesystem without hard links (some FUSE / network mounts, exFAT) can't
+# do that: there it falls back to an O_EXCL create (`set -C`), whose empty-
+# until-written window is the price of still being able to install at all.
 create_update_lock() {
   local tmp="$UPDATE_LOCK.$$.new" rc=1
   update_lease_body "$1" "$2" > "$tmp" 2>/dev/null || { rm -f "$tmp"; return 1; }
-  ln "$tmp" "$UPDATE_LOCK" 2>/dev/null && rc=0
+  if ln "$tmp" "$UPDATE_LOCK" 2>/dev/null; then
+    rc=0
+  elif [ ! -e "$UPDATE_LOCK" ]; then
+    # `ln` failed with no lock in the way: no hard links here.
+    (set -C; cat "$tmp" > "$UPDATE_LOCK") 2>/dev/null && rc=0
+  fi
   rm -f "$tmp"
   return "$rc"
 }
@@ -972,7 +981,8 @@ remove_stale_lock() {
   judged="$(cat "$UPDATE_LOCK" 2>/dev/null)" || return 0
   mv -f "$UPDATE_LOCK" "$aside" 2>/dev/null || return 0
   if [ "$(cat "$aside" 2>/dev/null)" != "$judged" ]; then
-    ln "$aside" "$UPDATE_LOCK" 2>/dev/null || true
+    ln "$aside" "$UPDATE_LOCK" 2>/dev/null ||
+      { [ -e "$UPDATE_LOCK" ] || mv -f "$aside" "$UPDATE_LOCK" 2>/dev/null; } || true
   fi
   rm -f "$aside"
 }
@@ -2434,6 +2444,9 @@ hold_restart_lease() {
   return 1
 }
 
+# How long the restart waits out another update's lease (see below).
+RESTART_LEASE_WAIT_SEC=180
+
 # Wait (bounded) for the restarted daemon to answer, so the restart step lasts
 # until it is back rather than ending at the kickstart.
 wait_for_daemon_back() {
@@ -2455,14 +2468,15 @@ restart_for_new_binary() {
   echo "Restarting the daemon to pick up the new binary..."
   # Another update took the lease since our swap: restarting now would kill
   # it mid-update, and it may still fail without restarting. Wait for it to
-  # finish (bounded by the lease's own staleness), then restart only if the
-  # daemon still isn't on what we installed.
+  # finish — bounded well inside the desktop app's 10-minute install timeout,
+  # so a long competing update never fails the app's Update — then restart
+  # only if the daemon still isn't on what we installed.
   local waited=0
   while ! hold_restart_lease "$CLI_VERSION"; do
     if [ "$waited" = 0 ]; then
       echo "  another update is in progress — waiting for it to finish"
     fi
-    if [ "$waited" -ge "$UPDATE_LEASE_STALE_SEC" ]; then
+    if [ "$waited" -ge "$RESTART_LEASE_WAIT_SEC" ]; then
       echo "Warning: another update is still running — run '$BIN_DIR/openllm daemon restart' once it finishes" >&2
       DAEMON_STARTED=1
       return 0
