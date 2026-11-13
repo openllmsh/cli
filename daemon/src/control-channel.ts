@@ -422,12 +422,12 @@ const statusPublishCoalescer = createStatusPublishCoalescer({
     watcherSkipProviderProbes = false;
     const fresh = await computeStatusFresh({
       trigger,
-      // An update step re-publishes the lease, not the providers: reuse the
-      // settled probes so a step costs no provider work.
-      ...(trigger === "late-probe" || trigger === "update"
-        ? { reuseSettledSlugProbes: true }
+      ...(trigger === "late-probe" ? { reuseSettledSlugProbes: true } : {}),
+      // An update step re-publishes the lease, not the providers: it never
+      // starts a provider probe.
+      ...(skipProviderProbes || trigger === "update"
+        ? { skipProviderProbes: true }
         : {}),
-      ...(skipProviderProbes ? { skipProviderProbes: true } : {}),
     });
     // Overlay latest listModels/discoverModels outcomes (omit when unknown).
     const status = {

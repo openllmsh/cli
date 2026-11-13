@@ -2420,7 +2420,13 @@ wait_for_daemon_back() {
 
 restart_for_new_binary() {
   echo "Restarting the daemon to pick up the new binary..."
-  hold_restart_lease "$CLI_VERSION" || true
+  # Another update took the lease since our swap: it restarts the daemon
+  # itself, and restarting here would kill it mid-update.
+  if ! hold_restart_lease "$CLI_VERSION"; then
+    echo "  another update is in progress — it restarts the daemon when it finishes"
+    DAEMON_STARTED=1
+    return 0
+  fi
   if "$BIN_DIR/openllm" daemon restart; then
     DAEMON_STARTED=1
     wait_for_daemon_back || true
