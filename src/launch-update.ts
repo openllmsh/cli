@@ -120,19 +120,21 @@ const openllmDaemonAnswers = async (): Promise<boolean> => {
       signal: AbortSignal.timeout(2_000),
     });
     if (!res.ok) return false;
-    const body: unknown = await res.json();
-    // The daemon converges only while its cloud state is `ok` (revoked key,
-    // unreachable cloud → no updater), so defer only to one that will.
-    return (
-      typeof body === "object" &&
-      body !== null &&
-      typeof (body as { version?: unknown }).version === "string" &&
-      (body as { cloudState?: unknown }).cloudState === "ok"
-    );
+    return daemonHealthOwnsUpdates(await res.json());
   } catch {
     return false;
   }
 };
+
+/** Whether a daemon `/status` body (`buildHealth` in the daemon half) says it
+ *  is an OpenLLM daemon that will update itself. It converges only while its
+ *  `cloud_state` is `ok` (revoked key, unreachable cloud → no updater), so we
+ *  defer only to one that will. */
+export const daemonHealthOwnsUpdates = (body: unknown): boolean =>
+  typeof body === "object" &&
+  body !== null &&
+  typeof (body as { version?: unknown }).version === "string" &&
+  (body as { cloud_state?: unknown }).cloud_state === "ok";
 
 /** The detached child: converge unless a running daemon owns updates for
  *  THIS file. The daemon converges only the managed install, so a separate
