@@ -6,7 +6,8 @@
  *
  * Verified upstream shapes (foundation research, ac06f4cb):
  *   - chatgpt (Codex `gpt-image-2` edit): the Responses-adjacent images edit
- *     body — `{model,prompt,images:[{image_url:<data-url>}],n,quality,size}`.
+ *     body — `{model,prompt,images:[{image_url:<data-url>},…],n,quality,size}`,
+ *     one entry per reference image, in the caller's order.
  *   - grok (xAI `grok-imagine-image-2.0` generation+edit model):
  *     `{model,prompt,image:{url:<data-url>},n,
  *     response_format:"b64_json",quality}`.
@@ -47,7 +48,7 @@ export const buildImageEditUpstreamBody = (
     return {
       model: providerModelId,
       prompt: req.prompt,
-      images: [{ image_url: req.image.url }],
+      images: req.images.map((image) => ({ image_url: image.url })),
       n: req.n ?? 1,
       ...(req.quality !== undefined ? { quality: req.quality } : {}),
       ...(req.size !== undefined ? { size: req.size } : {}),
@@ -59,10 +60,16 @@ export const buildImageEditUpstreamBody = (
       throw new Error(
         "Grok image-edit size is not supported by this transport",
       );
+    // xAI's edit body carries one `image`; a second reference has no field.
+    const [first, ...rest] = req.images;
+    if (rest.length > 0)
+      throw new Error(
+        "Grok image edits accept one reference image; this request has several",
+      );
     return {
       model: providerModelId,
       prompt: req.prompt,
-      image: { url: req.image.url },
+      image: { url: first.url },
       n: req.n ?? 1,
       response_format: "b64_json",
       ...(req.quality !== undefined ? { quality: req.quality } : {}),
