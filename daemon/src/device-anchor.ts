@@ -53,6 +53,7 @@ import {
   writeEnvFileVars,
 } from "./env";
 import { daemonPublicKey } from "./keypair";
+import { isRoutingBox } from "./routing-box";
 
 export type TInstallDeviceAnchorResult =
   | {
@@ -65,7 +66,11 @@ export type TInstallDeviceAnchorResult =
     }
   | {
       readonly ok: false;
-      readonly reason: "malformed" | "no_anchor" | "persist_failed";
+      readonly reason:
+        | "malformed"
+        | "no_anchor"
+        | "persist_failed"
+        | "routing_box";
     };
 
 /**
@@ -76,6 +81,8 @@ export type TInstallDeviceAnchorResult =
 export const installDeviceAnchor = (
   anchoredKey: string,
 ): TInstallDeviceAnchorResult => {
+  // A routing box is too small for device sessions; it never takes an anchor.
+  if (isRoutingBox()) return { ok: false, reason: "routing_box" };
   const split = splitAnchoredApiKey(anchoredKey);
   if (split === null) return { ok: false, reason: "malformed" };
   if (split.anchor === null) return { ok: false, reason: "no_anchor" };

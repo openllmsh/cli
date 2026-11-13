@@ -22,7 +22,11 @@ import {
   removeAccountSlot,
 } from "./account-commands";
 import { wasUserCancelledFlow } from "./auth-events";
-import { autoUpdateEnabled, setAutoUpdate } from "./auto-update-pref";
+import {
+  AUTO_UPDATE_LOCKED_MESSAGE,
+  autoUpdateEnabled,
+  setAutoUpdate,
+} from "./auto-update-pref";
 import {
   commandAccountIndexOf,
   daemonCommandScheduler,
@@ -633,7 +637,13 @@ const runCommandInAccount = async (
       // without waiting for the next bootstrap tick.
       case "set_auto_update": {
         const enabled = cmd.payload.enabled;
-        setAutoUpdate(enabled);
+        if (!setAutoUpdate(enabled)) {
+          return {
+            id: cmd.id,
+            status: "error",
+            result: { error: AUTO_UPDATE_LOCKED_MESSAGE, auto_update: true },
+          };
+        }
         // Confirm the write actually took before acking success — the persist
         // can fail silently (read-only state dir / full disk; setAutoUpdate logs
         // + swallows it). `autoUpdateEnabled` reads the flag back fresh, so a

@@ -23,7 +23,11 @@
  *   openllmd -v | --version       show version
  */
 import { isAbsolute } from "node:path";
-import { autoUpdateEnabled, setAutoUpdate } from "./auto-update-pref";
+import {
+  AUTO_UPDATE_LOCKED_MESSAGE,
+  autoUpdateEnabled,
+  setAutoUpdate,
+} from "./auto-update-pref";
 import { runLinuxPdeathsigWrapper } from "./child-supervisor";
 import { COMMANDS, FLAGS, formatHelpRows } from "./commands";
 import { runCompletion } from "./completion";
@@ -91,9 +95,11 @@ const runAnchor = async (args: readonly string[]): Promise<number> => {
   const result = installDeviceAnchor(input);
   if (!result.ok) {
     process.stderr.write(
-      result.reason === "persist_failed"
-        ? "could not save the device trust anchor\n"
-        : "expected an anchored key (sk-llm-KEY.ANCHOR) on stdin\n",
+      result.reason === "routing_box"
+        ? "device sessions are off on a routing box\n"
+        : result.reason === "persist_failed"
+          ? "could not save the device trust anchor\n"
+          : "expected an anchored key (sk-llm-KEY.ANCHOR) on stdin\n",
     );
     return result.reason === "persist_failed" ? 1 : 2;
   }
@@ -173,7 +179,10 @@ const runAutoUpdate = (args: readonly string[]): never => {
   // (`auto-update on typo`) instead of silently ignoring it.
   if (args.length <= 1) {
     if (sub === "on" || sub === "off") {
-      setAutoUpdate(sub === "on");
+      if (!setAutoUpdate(sub === "on")) {
+        process.stderr.write(`${AUTO_UPDATE_LOCKED_MESSAGE}\n`);
+        process.exit(1);
+      }
       process.stdout.write(
         `auto-update ${sub === "on" ? "enabled" : "disabled"}\n`,
       );
