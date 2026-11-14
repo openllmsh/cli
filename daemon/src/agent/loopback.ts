@@ -29,6 +29,7 @@ import {
   parseStreamCtrlPayload,
 } from "@openllmsh/sdk/protocol";
 import { isTrustedDeploymentOrigin } from "../cors";
+import { deviceSessionsPrefEnabled } from "../device-sessions-pref";
 import { capabilityMatches } from "../doctor-report/capability";
 import { daemonEnv } from "../env";
 import { isLoopbackLocalHost } from "../local-http";
@@ -57,7 +58,8 @@ export const TAURI_ORIGINS: ReadonlySet<string> = new Set([
 export type TLocalAgentRefusal =
   | "not_loopback"
   | "forbidden_origin"
-  | "capability_missing";
+  | "capability_missing"
+  | "device_sessions_disabled";
 
 const isLoopbackAddress = (address: string | null | undefined): boolean => {
   if (address === null || address === undefined) return false;
@@ -119,8 +121,20 @@ export const localPreflightRefusal = (
 };
 
 /**
+ * Sessions-flag gate for `/local/agent` only. Independent of the trust anchor
+ * and pin — loopback needs no anchor; the flag alone turns agent sessions off.
+ * Not folded into {@link localAgentRefusal}: identity / device-control /
+ * anchor routes share that helper and must keep working while sessions are off.
+ */
+export const localAgentSessionsFlagRefusal = ():
+  | "device_sessions_disabled"
+  | null => (deviceSessionsPrefEnabled() ? null : "device_sessions_disabled");
+
+/**
  * Admission for a loopback agent upgrade. `remoteAddress` is the TCP peer
- * (`server.requestIP(req)?.address`). Null = admitted.
+ * (`server.requestIP(req)?.address`). Null = admitted. Does not check the
+ * sessions flag — call {@link localAgentSessionsFlagRefusal} at the
+ * `/local/agent` site.
  */
 export const localAgentRefusal = (
   req: Request,

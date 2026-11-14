@@ -40,7 +40,8 @@
  * runtime's env file (the daemon derives its pin from that line, never
  * trust-on-first-use). ONLY the bare `sk-llm-<key>` is exported or ever used
  * as a bearer; the anchor never enters process.env. Sessions on == the
- * anchor is present; disable blanks that line.
+ * anchor is present AND `OPENLLM_DEVICE_SESSIONS` is not off; disable sets
+ * the flag off and keeps the anchor.
  */
 
 import { readFileSync } from "node:fs";
@@ -107,7 +108,8 @@ provisioning).
 A key copied with Device sessions on ends in a device trust anchor
 (sk-llm-KEY.ANCHOR). It is kept on this machine only, as a separate
 line of the env file; the bare key is the bearer. Sessions on == the
-anchor is present; disable blanks it (Manage device, or
+anchor is present and OPENLLM_DEVICE_SESSIONS is not off; disable
+sets the flag off and keeps the anchor (Manage device, or
 openllm daemon device disable).
 
   --api-key            paste an API key (hidden prompt) instead of browser login

@@ -47,6 +47,7 @@ import {
   createLocalAgentWebSocket,
   localAgentRefusal,
   localAgentRefusalResponse,
+  localAgentSessionsFlagRefusal,
   localAgentSocketData,
   selectedLocalAgentProtocol,
 } from "./agent/loopback";
@@ -619,6 +620,10 @@ export const main = async (): Promise<void> => {
           return handleLocalAgentHook(req, server.requestIP(req)?.address);
         }
         if (url.pathname === AGENT_LOCAL_PATH) {
+          const sessionsRefusal = localAgentSessionsFlagRefusal();
+          if (sessionsRefusal !== null) {
+            return localAgentRefusalResponse(sessionsRefusal);
+          }
           const refusal = localAgentRefusal(
             req,
             server.requestIP(req)?.address,
