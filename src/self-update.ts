@@ -16,7 +16,11 @@ import * as fs from "node:fs";
 import { dirname, join } from "node:path";
 import { gunzipSync } from "node:zlib";
 import { CLI_RELEASE } from "../manifest";
-import { CLI_TARGETS } from "../release-types";
+import {
+  CLI_TARGETS,
+  isNoBinaryForTargetMessage,
+  pinOmitsHostTarget,
+} from "../release-types";
 import { downloadWithStallTimeout } from "./binary-download";
 import { CLI_VERSION, cliConfig } from "./env";
 import type { TUpdateLeaseHandle } from "./update-lease";
@@ -31,7 +35,7 @@ const FETCH_TIMEOUT_MS = 30_000;
  *  returns null too — matching `hostTarget()` in `scripts/verify.ts` and the
  *  daemon's `currentTarget()` — letting the caller fail with a clear message
  *  instead of 404ing on a bogus target. */
-const targetSuffix = (): string | null => {
+export const cliHostTarget = (): string | null => {
   const os = process.platform === "darwin" ? "darwin" : "linux";
   const arch =
     process.arch === "x64"
@@ -82,8 +86,9 @@ const hasDaemonHalf = (path: string): boolean => {
 };
 
 /** Outcome of one convergence: `updated`/`current` succeed; `skipped` is a
- *  benign no-op (dev build, nothing published); `busy` means another process
- *  is already updating the binary (`update-lease.ts`); `failed` is an error. */
+ *  benign no-op (dev build, nothing published, or this pin omitted the host
+ *  arch); `busy` means another process is already updating the binary
+ *  (`update-lease.ts`); `failed` is an error. */
 export type TSelfUpdateResult =
   | "updated"
   | "current"
@@ -91,7 +96,47 @@ export type TSelfUpdateResult =
   | "busy"
   | "failed";
 
-/** Read a download body, reporting bytes as they arrive. */
+/**
+ * Pure decision from `/api/cli/version` + this host's target. Production
+ * {@link convergeSelf} calls this; tests drive it directly (no version bake
+ * required). Omit check beats version-equality — never "current" for a pin
+ * that skipped this arch.
+ */
+export const decideConvergeFromVersionPayload = (args: {
+  readonly currentVersion: string;
+  readonly latestVersion: string;
+  readonly targets: unknown;
+  readonly hostTarget: string | null;
+}):
+  | { readonly kind: "skipped"; readonly reason: "empty" | "omitted" }
+  | { readonly kind: "failed"; readonly reason: "unsupported-host" }
+  | { readonly kind: "current" }
+  | {
+      readonly kind: "continue";
+      readonly latest: string;
+      readonly target: string;
+    } => {
+  const latest = args.latestVersion.replace(/^v/, "");
+  if (latest.length === 0) return { kind: "skipped", reason: "empty" };
+  if (args.hostTarget === null) {
+    // Unsupported arch already on the pin: nothing to do, not a failure on
+    // every launch. Only a real version difference needs a prebuilt binary.
+    return latest === args.currentVersion
+      ? { kind: "current" }
+      : { kind: "failed", reason: "unsupported-host" };
+  }
+  if (pinOmitsHostTarget(args.targets, args.hostTarget)) {
+    return { kind: "skipped", reason: "omitted" };
+  }
+  if (latest === args.currentVersion) return { kind: "current" };
+  return { kind: "continue", latest, target: args.hostTarget };
+};
+
+/** Soft-skip only on the API's explicit skipped-arch 404 body. */
+export const decideChecksumFetch404 = (
+  errorMessage: string,
+): "skipped" | "failed" =>
+  isNoBinaryForTargetMessage(errorMessage) ? "skipped" : "failed";
 
 /**
  * Converge the running binary to the gateway's pinned release. `quiet` (the
@@ -126,6 +171,7 @@ export const convergeSelf = async (
     }
     const payload = (await vRes.json().catch(() => null)) as {
       latest_version?: unknown;
+      targets?: unknown;
     } | null;
     if (payload === null || typeof payload.latest_version !== "string") {
       say(
@@ -133,23 +179,32 @@ export const convergeSelf = async (
       );
       return "failed";
     }
-    const latest = payload.latest_version.replace(/^v/, "");
-    if (latest.length === 0) {
-      say("[self-update] no CLI release published yet");
+    const decision = decideConvergeFromVersionPayload({
+      currentVersion: CLI_VERSION,
+      latestVersion: payload.latest_version,
+      targets: payload.targets,
+      hostTarget: cliHostTarget(),
+    });
+    if (decision.kind === "skipped") {
+      if (decision.reason === "empty") {
+        say("[self-update] no CLI release published yet");
+      } else {
+        const latest = payload.latest_version.replace(/^v/, "");
+        say(
+          `[self-update] pinned v${latest} has no binary for ${cliHostTarget()} — staying on v${CLI_VERSION}`,
+        );
+      }
       return "skipped";
     }
-    if (latest === CLI_VERSION) return "current";
-
-    const target = targetSuffix();
-    if (target === null) {
-      // No prebuilt binary for this arch — point at the source repo, whose
-      // README documents building the host binary (`bun run compile:host`).
+    if (decision.kind === "failed") {
       say(
         `[self-update] unsupported host ${process.platform}/${process.arch} — no prebuilt openllm for this arch.\n` +
           `  Build from source: https://github.com/${CLI_RELEASE.repo}#build-from-source`,
       );
       return "failed";
     }
+    if (decision.kind === "current") return "current";
+    const { latest, target } = decision;
     // One update at a time across the daemon, the installer, the desktop app
     // and other CLI runs — see `update-lease.ts`.
     const self = process.execPath;
@@ -174,6 +229,26 @@ export const convergeSelf = async (
         signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
       },
     );
+    if (shaRes.status === 404) {
+      // Soft-skip only on the API's explicit "no binary for" body (old cloud
+      // with no `targets` in /version). A 404 for a target the pin lists is a
+      // real failure (mis-publish / transport) — not "up to date".
+      const body = (await shaRes.json().catch(() => null)) as {
+        error?: { message?: unknown };
+      } | null;
+      const message =
+        body !== null && typeof body.error?.message === "string"
+          ? body.error.message
+          : "";
+      if (decideChecksumFetch404(message) === "skipped") {
+        say(
+          `[self-update] pinned v${latest} has no binary for ${target} — staying on v${CLI_VERSION}`,
+        );
+        return "skipped";
+      }
+      say(`[self-update] checksum fetch failed: ${shaRes.status}`);
+      return "failed";
+    }
     if (!shaRes.ok) {
       say(`[self-update] checksum fetch failed: ${shaRes.status}`);
       return "failed";

@@ -421,6 +421,14 @@ export const latestCliVersion = (): string | null =>
   snapshot.latest_cli_version ?? null;
 
 /**
+ * Targets the pinned `openllm` release carries, from the last bootstrap.
+ * Null when the cloud is too old to advertise them (try the download; the
+ * binary route answers clearly). An empty array is representable but unused.
+ */
+export const latestCliTargets = (): readonly string[] | null =>
+  snapshot.cli_targets ?? null;
+
+/**
  * Look up a model id in the cached catalog → its `{ provider,
  * provider_model_id }` row. The walker uses this to resolve each plan
  * hop to its concrete upstream model id (falling back to splitting the

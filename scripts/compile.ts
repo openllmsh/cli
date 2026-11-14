@@ -13,17 +13,21 @@
  *
  * Targets (no Windows): darwin-{arm64,x64-baseline}, linux-{x64-baseline,arm64}.
  * x64 uses the `baseline` (Nehalem) tier — no AVX/AVX2/FMA required.
+ * Prereleases omit `darwin-x64-baseline` (see `cliTargetsForRelease`).
  *
  * Usage:
  *   bun run packages/cli/scripts/compile.ts            # all targets
  *   bun run packages/cli/scripts/compile.ts --host     # current host only
  *   bun run packages/cli/scripts/compile.ts --version 1.2.3
+ *   bun run packages/cli/scripts/compile.ts --targets darwin-arm64,linux-arm64
  */
 import { readFileSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { gzipSync } from "node:zlib";
 import { $ } from "bun";
+import type { TCliTarget } from "../release-types";
+import { CLI_TARGETS, isCliTargetName } from "../release-types";
 import { daemonFingerprint } from "./daemon-fingerprint";
 
 // Resolve paths from THIS script's location, not the cwd — works identically
@@ -84,8 +88,7 @@ export const COMPILE_BUN_FLAGS = [
 // `packages/cli/daemon/src/cors.ts` (keep the two in sync). A bare
 // `.endsWith(".vercel.app")` would let a poisoned build env bake ANY stranger's
 // `*.vercel.app` origin into shipped binaries.
-export const OPENLLM_PREVIEW_HOST =
-  /^openllm-[a-z0-9-]+-openllm\.vercel\.app$/;
+export const OPENLLM_PREVIEW_HOST = /^openllm-[a-z0-9-]+-openllm\.vercel\.app$/;
 
 export const isAllowedCloudHost = (host: string): boolean =>
   host === "localhost" ||
@@ -142,16 +145,13 @@ const resolveCloudOrigin = (): string => {
   return raw;
 };
 
-const TARGETS = [
-  "bun-darwin-arm64",
-  "bun-darwin-x64-baseline",
-  "bun-linux-x64-baseline",
-  "bun-linux-arm64",
-] as const;
+/** Bun `--target` for a published CLI target suffix. */
+export const bunCompileTarget = (target: TCliTarget): string => `bun-${target}`;
 
 const argv = process.argv.slice(2);
 const hostOnly = argv.includes("--host");
 const versionIdx = argv.indexOf("--version");
+const targetsIdx = argv.indexOf("--targets");
 // The CLI has ONE version identity: the manifest tag the release CLI passes
 // via `--version`. A source build with no `--version` bakes the `"0.0.0-dev"`
 // sentinel, which the runtime's dev guards (self-update) key on to skip
@@ -161,18 +161,52 @@ const version =
     ? (argv[versionIdx + 1] ?? DEV_VERSION_SENTINEL)
     : DEV_VERSION_SENTINEL;
 
-const outfileFor = (target: string): string => {
-  const suffix = target.replace(/^bun-/, "");
-  return `${OUT_DIR}/openllm-${suffix}`;
+/**
+ * Resolve which published targets to compile. `--targets a,b` selects a
+ * subset; otherwise every {@link CLI_TARGETS} entry. Unknown names throw
+ * before any compile starts. (Channel selection lives in
+ * `cliTargetsForRelease` — callers pass the resolved list via `--targets`.)
+ */
+export const resolveCompileTargets = (
+  args: readonly string[],
+): readonly TCliTarget[] => {
+  const idx = args.indexOf("--targets");
+  if (idx >= 0) {
+    const raw = args[idx + 1] ?? "";
+    if (raw.length === 0) {
+      throw new Error(
+        `--targets requires a comma-separated list (one of: ${CLI_TARGETS.join(", ")})`,
+      );
+    }
+    const parts = raw.split(",").map((p) => p.trim());
+    const out: TCliTarget[] = [];
+    for (const part of parts) {
+      if (!isCliTargetName(part)) {
+        throw new Error(
+          `unknown compile target "${part}" — expected one of: ${CLI_TARGETS.join(", ")}`,
+        );
+      }
+      if (!out.includes(part)) out.push(part);
+    }
+    if (out.length === 0) {
+      throw new Error("--targets resolved to an empty list");
+    }
+    return out;
+  }
+  return CLI_TARGETS;
 };
 
+const outfileFor = (target: TCliTarget): string =>
+  `${OUT_DIR}/openllm-${target}`;
+
 const buildOne = async (
-  target: string | null,
+  target: TCliTarget | null,
   cloudOrigin: string,
   fingerprint: string,
 ): Promise<string> => {
   const outfile = target === null ? `${OUT_DIR}/openllm` : outfileFor(target);
-  const targetArgs = target === null ? [] : ["--target", target];
+  const targetArgs =
+    target === null ? [] : ["--target", bunCompileTarget(target)];
   const defines = compileDefineArgs(cloudOrigin, version, fingerprint);
   await $`bun build ${ENTRY} \
     ${COMPILE_BUN_FLAGS} \
@@ -188,6 +222,9 @@ const buildOne = async (
 };
 
 const main = async (): Promise<void> => {
+  if (hostOnly && targetsIdx >= 0) {
+    throw new Error("--host cannot be combined with --targets");
+  }
   const cloudOrigin = resolveCloudOrigin();
   const fingerprint = await daemonFingerprint();
   await $`mkdir -p ${OUT_DIR}`;
@@ -196,15 +233,16 @@ const main = async (): Promise<void> => {
     console.log(`built host binary → ${out}`);
     return;
   }
-  // All four targets in parallel — independent cross-compiles, no shared state.
+  const targets = resolveCompileTargets(argv);
+  // Selected targets in parallel — independent cross-compiles, no shared state.
   const t0 = Date.now();
   await Promise.all(
-    TARGETS.map(async (target) => {
+    targets.map(async (target) => {
       const out = await buildOne(target, cloudOrigin, fingerprint);
-      console.log(`built ${target} → ${out}`);
+      console.log(`built ${bunCompileTarget(target)} → ${out}`);
     }),
   );
-  console.log(`compiled ${TARGETS.length} targets in ${Date.now() - t0}ms`);
+  console.log(`compiled ${targets.length} targets in ${Date.now() - t0}ms`);
 };
 
 // Import-safe for unit tests of the pure host allow-list above.

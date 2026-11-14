@@ -158,7 +158,10 @@ import {
 } from "@openllmsh/sdk/wire/lib/streaming/upstream-error";
 import {
   isThinkingSignatureError,
+  messagesBodyHasAnyThinking,
   messagesBodyHasStrippableThinking,
+  sanitizeAnthropicReplay,
+  stripAllThinkingAndDisable,
   stripMessagesThinkingBlocks,
 } from "@openllmsh/sdk/wire/lib/thinking-signature";
 import {
@@ -686,13 +689,10 @@ export const postUpstream = async (
  *
  * 1. **Responses (`chatgpt` wire, + grok):** strip `reasoning.encrypted_content`
  *    the hop can't decrypt (audit 2026-07-14-codex-upstream-wire §F2).
- * 2. **Anthropic (`anthropic` wire, claude_code):** strip historical
- *    `thinking`/`redacted_thinking` blocks whose `signature` the hop model
- *    rejects (issue #420). Active tool-use continuation thinking is preserved
- *    by {@link stripMessagesThinkingBlocks} — see that helper's header for the
- *    tool_use limitation. Origin model is not knowable from the wire, so there
- *    is no proactive strip (over-stripping would bust prompt cache on healthy
- *    same-model multi-turn); this reactive path is the correctness backstop.
+ * 2. **Anthropic (`anthropic` wire, claude_code):** see
+ *    {@link postAnthropicWithThinkingRecovery} — OpenLLM-minted thinking is
+ *    dropped up front; Anthropic-signed blocks another model rejects go
+ *    through a staged reactive strip (issue #420).
  *
  * Non-matching wires / statuses / bodies fall straight through to
  * {@link postUpstream}. Exported for the daemon-level strip-retry unit test.
@@ -700,7 +700,7 @@ export const postUpstream = async (
 export const postWithReplayStripRetry = async (
   url: string,
   headers: Record<string, string>,
-  body: unknown,
+  inputBody: unknown,
   wire: TUpstreamWire,
   signal: AbortSignal,
   onTransportFailure?: (failure: TTransportFailure) => void,
@@ -726,6 +726,10 @@ export const postWithReplayStripRetry = async (
       { method: "POST", headers, body: JSON.stringify(b), signal },
       onTransportFailure,
     );
+  if (wire === "anthropic") {
+    return postAnthropicWithThinkingRecovery(inputBody, send, accountFirst);
+  }
+  const body = inputBody;
   const first = await send(body);
   // Anything other than a pre-stream 400 → nothing to recover from.
   if (first === null || first.ok || first.status !== 400) {
@@ -749,23 +753,82 @@ export const postWithReplayStripRetry = async (
     return first;
   }
 
-  // ── Anthropic: invalid thinking.signature on a model hop ────────────────
-  // Only attempt when the body has thinking the strip would actually remove
-  // (historical turns). Active tool-use-continuation thinking is preserved,
-  // so a body whose only thinking is that turn is not strippable.
-  if (wire === "anthropic" && messagesBodyHasStrippableThinking(body)) {
-    const raw = await first
+  return first;
+};
+
+/** Response header set when this request ran with extended thinking turned
+ *  off because replayed thinking couldn't be verified by the hop model. */
+export const THINKING_DOWNGRADED_HEADER = "x-openllm-thinking-downgraded";
+
+const markThinkingDowngraded = (
+  resp: Response | null,
+  reason: "foreign_provider" | "signature_rejected",
+): Response | null => {
+  // A failed request is reported as that failure; the downgrade only means
+  // something on a response the client actually receives.
+  if (resp === null || !resp.ok) return resp;
+  logWarn("walker", "Extended thinking turned off for this request.", {
+    reason,
+  });
+  const headers = new Headers(resp.headers);
+  headers.set(THINKING_DOWNGRADED_HEADER, reason);
+  return new Response(resp.body, {
+    status: resp.status,
+    statusText: resp.statusText,
+    headers,
+  });
+};
+
+/**
+ * Anthropic-wire send with thinking-signature recovery, cheapest first:
+ *
+ * 0. **Proactive (certain, free):** thinking an OpenLLM adapter minted
+ *    (Muse / Codex / Grok turns) is dropped before sending — Anthropic can
+ *    never verify it. Thinking goes off only when the active tool-use turn
+ *    itself is foreign ({@link sanitizeAnthropicReplay}).
+ * 1. **Reactive, historical strip:** an Anthropic-signed block from another
+ *    model/account is rejected → strip historical thinking, keep this turn's.
+ * 2. **Reactive, last resort:** still rejected (the active turn's own block)
+ *    → strip all thinking and turn it off for this request (litellm's
+ *    recovery). Always marked with {@link THINKING_DOWNGRADED_HEADER}.
+ */
+const postAnthropicWithThinkingRecovery = async (
+  inputBody: unknown,
+  send: (b: unknown) => Promise<Response | null>,
+  accountFailed: (raw: string) => void,
+): Promise<Response | null> => {
+  const sanitized = sanitizeAnthropicReplay(inputBody);
+  const body = sanitized.body;
+  const first = await send(body);
+  const finish = (resp: Response | null): Response | null =>
+    sanitized.thinkingDisabled
+      ? markThinkingDowngraded(resp, "foreign_provider")
+      : resp;
+  if (first === null || sanitized.thinkingDisabled) return finish(first);
+  if (!messagesBodyHasAnyThinking(body)) return first;
+
+  const signatureFailure = async (r: Response): Promise<string | null> => {
+    if (r.status !== 400) return null;
+    const raw = await r
       .clone()
       .text()
       .catch(() => "");
-    if (isThinkingSignatureError(raw)) {
-      accountFirst(raw);
-      return send(stripMessagesThinkingBlocks(body));
-    }
-    return first;
+    return isThinkingSignatureError(raw) ? raw : null;
+  };
+  const raw = await signatureFailure(first);
+  if (raw === null) return first;
+  accountFailed(raw);
+  if (messagesBodyHasStrippableThinking(body)) {
+    const second = await send(stripMessagesThinkingBlocks(body));
+    if (second === null) return second;
+    const raw2 = await signatureFailure(second);
+    if (raw2 === null) return second;
+    accountFailed(raw2);
   }
-
-  return first;
+  return markThinkingDowngraded(
+    await send(stripAllThinkingAndDisable(body)),
+    "signature_rejected",
+  );
 };
 
 /** Map the daemon's upstream wire to the classifier's provider format

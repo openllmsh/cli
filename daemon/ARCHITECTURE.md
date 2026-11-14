@@ -1615,7 +1615,9 @@ shell completion for every subcommand. The CLI surface is defined once in
 [`daemon-self-managing-cli.md`](../../docs/proposals/daemon-self-managing-cli.md).
 
 **Local install without a release.** `packages/cli/scripts/dist.ts` (`bun run
-daemon:dist`) compiles all four targets and emits a self-contained installer
+daemon:dist`) compiles the release channel's targets (all four for a stable
+version; a prerelease version omits `darwin-x64-baseline`) and emits a
+self-contained installer
 per target — the real `packages/cli/install.sh` embedded verbatim with the
 locally-built binary appended, so the produced `openllm-<target>.install.sh`
 replicates the exact production install flow offline.

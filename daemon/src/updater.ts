@@ -33,6 +33,10 @@ import {
   writeFileSync,
 } from "node:fs";
 import { basename, dirname, join } from "node:path";
+import {
+  isNoBinaryForTargetError,
+  pinOmitsHostTarget,
+} from "../../release-types";
 import type { TUpdateLease, TUpdateLeaseHandle } from "../../src/update-lease";
 import {
   readUpdateLease,
@@ -42,6 +46,7 @@ import {
 import { autoUpdateEnabled } from "./auto-update-pref";
 import { binarySignature } from "./bin-signature";
 import { drainDisposableChildren } from "./child-supervisor";
+import { latestCliTargets } from "./config";
 import { readOpenllmVersion } from "./device-state";
 import type { TSafeDiagnosticMessage } from "./doctor-report/message";
 import { daemonEnv, stateDir } from "./env";
@@ -291,12 +296,13 @@ const swapBinary = async (
   let stage: TSwapStage = "download";
   try {
     const base = `${daemonEnv().cloudOrigin}/api/cli/binary/${target}`;
-    const [bytes, expected] = await Promise.all([
-      fetchBinary(base, (received, total) =>
-        deps.lease.progress("download", { received, total }),
-      ),
-      fetchDigest(`${base}.sha256`),
-    ]);
+    // Digest first (same order as CLI self-update): an explicit skipped-arch
+    // 404 must soft-skip before we start the ~120 MB download, and must not
+    // race a parallel binary 404 into recordUpdateFailure.
+    const expected = await fetchDigest(`${base}.sha256`);
+    const bytes = await fetchBinary(base, (received, total) =>
+      deps.lease.progress("download", { received, total }),
+    );
     deps.lease.progress("verify");
     const actual = createHash("sha256").update(bytes).digest("hex");
     if (actual !== expected) {
@@ -341,9 +347,26 @@ const swapBinary = async (
     logInfo("update", `updated openllm ${from} → ${version}`);
     return true;
   } catch (err) {
+    // Deploy skew: bootstrap still listed this target, but the sha256 route's
+    // newer pin omits it. Soft-skip — no recordAttempt, no failure backoff.
+    if (isNoBinaryForTargetError(err)) {
+      logInfo(
+        "update",
+        `Pinned release has no binary for ${target}; staying on current.`,
+        { target, version },
+      );
+      try {
+        rmSync(tmp, { force: true });
+      } catch {
+        // best-effort temp cleanup
+      }
+      return false;
+    }
     // Every failure backs off: a permanent one (the user must fix the install)
     // waits a day, a transient one doubles its wait per repeat. Without this
-    // a failing device re-downloaded the whole binary on every tick.
+    // a failing device re-downloaded the whole binary on every tick. Soft-skip
+    // for a pin that omitted this arch is also handled ABOVE via `cli_targets`
+    // before any download — a plain 404 here stays a transient failure.
     const code = errorCode(err);
     const permanent =
       stage !== "download" && PERMANENT_FS_CODES.has(code ?? "");
@@ -474,6 +497,9 @@ export const createBinaryUpdater = (): TBinaryUpdater => {
   // The binary's identity when the daemon last decided "no restart needed",
   // so a tick only re-probes the fingerprint after the file actually changed.
   let settledSignature: string | null = null;
+  // The pinned version whose "no binary for this host" skip was last logged,
+  // so a prerelease that omits this arch logs once, not every bootstrap tick.
+  let omitLoggedFor: string | null = null;
 
   const convergeBinary = async (
     latest: string | null,
@@ -512,7 +538,26 @@ export const createBinaryUpdater = (): TBinaryUpdater => {
         }
         return lease;
       };
+      // A prerelease may omit this host's target (Intel Mac). Free local check
+      // against cli_targets BEFORE any lease: no lease churn, no
+      // recordAttempt (that would block a forced update for an hour). Logged
+      // at most once per pinned version. Same helper as CLI self-update.
+      const hostTarget = currentTarget();
+      const pinnedTargets = latestCliTargets();
+      const pinOmitsHost =
+        hostTarget !== null &&
+        pinnedTargets !== null &&
+        pinOmitsHostTarget(pinnedTargets, hostTarget);
+      if (pinOmitsHost && latest !== null && latest !== omitLoggedFor) {
+        omitLoggedFor = latest;
+        logInfo(
+          "update",
+          `Pinned release has no binary for ${hostTarget}; staying on current.`,
+          { target: hostTarget, version: latest },
+        );
+      }
       const wantSwap =
+        !pinOmitsHost &&
         (opts.force === true || autoUpdateEnabled()) &&
         latest !== null &&
         latest.length > 0 &&

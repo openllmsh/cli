@@ -128,6 +128,36 @@ export const holdJournalLockIsHeld = (
   return !acquired;
 };
 
+/** LOCK_EX without LOCK_NB: blocks until the holder releases. */
+const HOLD_JOURNAL_LOCK_EX = 2;
+
+/**
+ * Block until no process holds the hold-journal flock. Event-driven: the
+ * kernel releases the flock the moment its holder exits, so this returns
+ * exactly when a stopped daemon is gone, however long its drain takes on a
+ * slow machine. Takes and drops the lock without writing a PID. Without FFI
+ * locking it returns at once (the same posture as {@link holdJournalLockIsHeld}).
+ */
+export const waitForHoldJournalRelease = (
+  libraryNames?: readonly string[],
+): void => {
+  const path = holdJournalLockPath();
+  mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+  const library = openHoldJournalFlockLibrary(libraryNames);
+  if (library === null) return;
+  const fd = openSync(path, "a+", 0o600);
+  try {
+    // A signal interrupts the wait (EINTR) without the holder exiting: wait
+    // again while it still holds the lock. Once it is free, stop.
+    while (library.symbols.flock(fd, HOLD_JOURNAL_LOCK_EX) !== 0) {
+      if (!holdJournalLockIsHeld(libraryNames)) break;
+    }
+  } finally {
+    closeSync(fd);
+    library.close();
+  }
+};
+
 /**
  * Run `fn` while holding an exclusive flock on `lockPath`. Serializes short
  * critical sections across processes (detached daemon start). Uses

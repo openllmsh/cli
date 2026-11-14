@@ -3,6 +3,11 @@
  * binary is ~120 MB, and a fixed deadline cut off every connection slower than
  * size/deadline, forever. Give up only when bytes stop arriving. Shared by the
  * CLI's `openllm self-update` and the daemon updater; dependency-free.
+ *
+ * A plain HTTP 404 (including after the API's 302 to a missing GitHub asset)
+ * stays a normal download failure — soft-skip for a pin that omitted this
+ * host's arch comes from the pin's `targets` / bootstrap `cli_targets` (or
+ * the API's explicit "no binary for" JSON), never from a generic 404 here.
  */
 export const BINARY_STALL_TIMEOUT_MS = 30_000;
 
