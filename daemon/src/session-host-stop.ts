@@ -23,6 +23,7 @@ import {
 import {
   detachedCommandLineLooksOwned,
   readDetachedProcessCommandLine,
+  sessionHostCommandLine,
 } from "./detached-daemon";
 
 export type TSessionHostStopTarget = {
@@ -418,7 +419,12 @@ export const listSurvivingSessionChildrenIn = (
 export const sessionChildCommandLineLooksOwned = (
   commandLine: string,
 ): boolean => {
-  if (detachedCommandLineLooksOwned(commandLine)) return true;
+  if (
+    detachedCommandLineLooksOwned(commandLine) ||
+    sessionHostCommandLine(commandLine)
+  ) {
+    return true;
+  }
   // Match vendor names only as the executable basename of argv0 (first
   // NUL-separated field, then first whitespace token). Later argument tokens
   // like `grep claude` or `/usr/bin/vim notes/claude` must not count as ours.
