@@ -62,6 +62,7 @@ import {
 } from "./env";
 import { hardenMacBinary } from "./harden-binary";
 import type { TDaemonHealth } from "./health";
+import { waitForHoldJournalRelease } from "./hold-outbox";
 import { hasRecordedIdentityConflict } from "./identity-state";
 import { DAEMON_VERSION } from "./version";
 
@@ -820,15 +821,66 @@ export const serviceStart = (): boolean => {
   return startServiceAfterCredentialGate(gate);
 };
 
+export type TAwaitDaemonExitDeps = {
+  /** Pid the stop just signalled (launchd's), or null. */
+  readonly stoppedPid: number | null;
+  /** Pid holding the hold-journal flock now, or null when free. */
+  readonly journalHolder?: () => number | null;
+  /** Blocks until the hold-journal flock is released. */
+  readonly waitForRelease?: () => void;
+};
+
+/**
+ * Wait for the daemon the stop just signalled to actually exit. Event-driven,
+ * no deadline: it blocks on the hold-journal flock, which the kernel releases
+ * the moment that process dies — after its drain, however slow the machine,
+ * or launchd's own SIGKILL. Anything else holding the state dir is left to
+ * the survivor checks. Returns whether it waited.
+ */
+export const awaitDaemonExit = (deps: TAwaitDaemonExitDeps): boolean => {
+  if (deps.stoppedPid === null) return false;
+  const holder = (deps.journalHolder ?? holdJournalSurvivorPid)();
+  // 0: the flock is held but its pid is unreadable. Right after a bootout
+  // that is the daemon just signalled; any other holder is left to the
+  // survivor checks.
+  if (holder !== deps.stoppedPid && holder !== 0) return false;
+  (deps.waitForRelease ?? waitForHoldJournalRelease)();
+  return true;
+};
+
 /**
  * Stop the service and disable all self-restore. Idempotent.
  * @returns false when a detached daemon survived the stop.
  */
-export const serviceStop = (): boolean => {
-  if (isMac) stopMac();
-  else stopLinux();
+/** launchd's pid for the daemon label, read directly (not detached-first). */
+const launchdDaemonPid = (): number | null => {
+  const out = capture("launchctl", ["print", guiTarget()]);
+  return out.length > 0 ? parseLaunchctlPrint(out).pid : null;
+};
+
+/**
+ * Stop the platform service and wait for the daemon it signalled to exit.
+ * `launchctl bootout` returns while the daemon is still draining, holding the
+ * hold-journal lock; judging survivors at once read that exiting daemon as
+ * one, failed every `openllm daemon restart` (the installer's, so the app's
+ * Update) and left the service booted out and disabled until a manual start.
+ * The update lease stays in its `restart` phase meanwhile, so status reads
+ * "restarting".
+ */
+const stopPlatformService = (): void => {
+  if (!isMac) {
+    stopLinux();
+    return;
+  }
+  const launchdPid = launchdDaemonPid();
+  stopMac();
   // Mac path has no detached fallback today, but clear a stale pidfile anyway.
-  if (isMac) stopDetachedDaemon();
+  stopDetachedDaemon();
+  awaitDaemonExit({ stoppedPid: launchdPid });
+};
+
+export const serviceStop = (): boolean => {
+  stopPlatformService();
   const survivor = readLiveDetachedDaemon();
   if (survivor !== null) {
     process.stderr.write(
@@ -981,8 +1033,7 @@ export const serviceUninstall = (): TServiceUninstallResult => {
   // distinguish "stopped a detached daemon" from "nothing was running".
   const detachedBefore = readLiveDetachedDaemon();
   // 1. Stop + disable self-restore so nothing respawns while we tear down.
-  if (isMac) stopMac();
-  else stopLinux();
+  stopPlatformService();
   // Always reap a detached daemon (Linux fallback, or a stale pidfile on macOS).
   stopDetachedDaemon();
   // Keep the record of a daemon that survived the stop, so it can still be
