@@ -265,6 +265,9 @@ export const applyDeviceSessionsDisable = async (
   const until = command.ts + DEVICE_SESSIONS_DISABLE_TS_WINDOW_MS;
   // Burn only after the flag write stuck — same rule as the in-memory map.
   if (!burnDisableNonce(command.nonce, until, now)) {
+    // The flag is off but the nonce isn't durably burned: undo the disable so
+    // a reported failure never leaves a replayable statement in effect.
+    if (set.changed) setDeviceSessionsEnabled(true);
     return { ok: false, reason: "persist_failed" };
   }
   return { ok: true, changed: set.changed };

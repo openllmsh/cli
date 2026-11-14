@@ -57,6 +57,7 @@ import { maybeReportModels, resetModelReportThrottle } from "./model-report";
 import { runWithAccount, withoutCommandReplayContext } from "./op-context";
 import { clearPendingAuth } from "./pending-auth";
 import { clearPlanCache } from "./plan-cache";
+import { isRoutingBox } from "./routing-box";
 import { deviceSessionsForList } from "./session-host";
 import type { TUsageReadFailure } from "./status";
 import {
@@ -638,10 +639,18 @@ const runCommandInAccount = async (
       case "set_auto_update": {
         const enabled = cmd.payload.enabled;
         if (!setAutoUpdate(enabled)) {
+          // Only turning it OFF on a routing box is a lock; anything else is
+          // a failed persist, reported with the value actually in effect.
+          const locked = !enabled && isRoutingBox();
           return {
             id: cmd.id,
             status: "error",
-            result: { error: AUTO_UPDATE_LOCKED_MESSAGE, auto_update: true },
+            result: {
+              error: locked
+                ? AUTO_UPDATE_LOCKED_MESSAGE
+                : "failed to persist auto-update preference",
+              auto_update: locked ? true : autoUpdateEnabled(),
+            },
           };
         }
         // Confirm the write actually took before acking success — a rare race
