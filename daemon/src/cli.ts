@@ -95,11 +95,9 @@ const runAnchor = async (args: readonly string[]): Promise<number> => {
   const result = installDeviceAnchor(input);
   if (!result.ok) {
     process.stderr.write(
-      result.reason === "routing_box"
-        ? "device sessions are off on a routing box\n"
-        : result.reason === "persist_failed"
-          ? "could not save the device trust anchor\n"
-          : "expected an anchored key (sk-llm-KEY.ANCHOR) on stdin\n",
+      result.reason === "persist_failed"
+        ? "could not save the device trust anchor\n"
+        : "expected an anchored key (sk-llm-KEY.ANCHOR) on stdin\n",
     );
     return result.reason === "persist_failed" ? 1 : 2;
   }

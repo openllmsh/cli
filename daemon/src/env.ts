@@ -83,7 +83,6 @@ import {
   isOpenllmDevMode,
   parseApiKeyId,
 } from "../../src/runtime-contracts";
-import { isRoutingBox } from "./routing-box";
 
 export type TDaemonEnv = {
   /** The user's `sk-llm-...` key, or null until the dashboard sets it. */
@@ -710,9 +709,6 @@ export const envFileValue = (
  * the caller (`decodeDeviceAnchor`).
  */
 export const deviceAnchorFromEnvFile = (): string | null => {
-  // A routing box never runs device sessions: whatever the file holds, it has
-  // no anchor, so no anchored pin, dpk proof or session admission exists.
-  if (isRoutingBox()) return null;
   const value = envFileValue(envFilePath(), DEVICE_ANCHOR_ENV)?.trim() ?? "";
   return value.length > 0 ? value : null;
 };

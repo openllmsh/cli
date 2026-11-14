@@ -33,6 +33,7 @@
  * never upgraded by the cloud, and an established pin never moves except
  * along a signed rotation chain or a local root.
  */
+
 import { createHash, createPublicKey } from "node:crypto";
 import type { TDeviceGrantUse } from "@openllmsh/sdk/tunnel";
 import {
@@ -49,6 +50,7 @@ import { verifyDeviceGrant } from "@openllmsh/sdk/vault";
 import { deviceAnchorFromEnvFile } from "./env";
 import { daemonPublicKey } from "./keypair";
 import { logWarn, safeDiagnosticMessage } from "./logger";
+import { isRoutingBox } from "./routing-box";
 import type { TDeviceAccessPinVia } from "./state-file";
 import { mutateState, readState } from "./state-file";
 
@@ -821,7 +823,10 @@ export const setDeviceAccessPubkey = (
 /** Null when agent sessions may run now, else the refusal reason. */
 export const agentSessionRefusal = ():
   | (typeof AGENT_PIN_REFUSALS)[number]
-  | null => active.agentRefusal();
+  | null =>
+  // A routing box keeps its anchor for WebRTC but never runs device sessions:
+  // refused here, at every seed-gated stream open (relay mux and RTC).
+  isRoutingBox() ? "device_sessions_disabled" : active.agentRefusal();
 
 /** Re-read the pin from disk on next use (after another process wrote it). */
 export const invalidateDeviceAccessPin = (): void => active.invalidatePin();

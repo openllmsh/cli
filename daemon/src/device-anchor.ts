@@ -66,11 +66,7 @@ export type TInstallDeviceAnchorResult =
     }
   | {
       readonly ok: false;
-      readonly reason:
-        | "malformed"
-        | "no_anchor"
-        | "persist_failed"
-        | "routing_box";
+      readonly reason: "malformed" | "no_anchor" | "persist_failed";
     };
 
 /**
@@ -81,8 +77,6 @@ export type TInstallDeviceAnchorResult =
 export const installDeviceAnchor = (
   anchoredKey: string,
 ): TInstallDeviceAnchorResult => {
-  // A routing box is too small for device sessions; it never takes an anchor.
-  if (isRoutingBox()) return { ok: false, reason: "routing_box" };
   const split = splitAnchoredApiKey(anchoredKey);
   if (split === null) return { ok: false, reason: "malformed" };
   if (split.anchor === null) return { ok: false, reason: "no_anchor" };
@@ -168,7 +162,11 @@ export const deviceSessionsReport =
   async (): Promise<TDeviceSessionsReport> => {
     const proof = await deviceDpkProof();
     return {
+      // A routing box keeps its anchor (its control pin is what lets a
+      // browser open a direct WebRTC tunnel to it) but never runs sessions:
+      // `agentSessionRefusal` refuses them, and this says so.
       anchored:
+        !isRoutingBox() &&
         deviceAnchorFromEnvFile() !== null &&
         isAgentEligiblePin(getDeviceAccessPin()),
       ...(proof === null ? {} : { dpk_proof: proof }),

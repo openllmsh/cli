@@ -7,8 +7,10 @@
  *
  *   - keeps auto-update always on: the box can't be pinned to an old binary
  *     (`auto-update-pref.ts`);
- *   - refuses device sessions: the box is too small to run agents, so no
- *     install anchor is accepted or read (`device-anchor.ts`, `env.ts`).
+ *   - refuses device sessions: the box is too small to run agents. It keeps
+ *     its install anchor (the control pin is what lets a browser open a
+ *     direct WebRTC tunnel to it), and `agentSessionRefusal` refuses every
+ *     seed-gated stream open instead (`device-access-verify.ts`).
  *
  * Everything else is exactly as on any machine.
  *

@@ -183,8 +183,6 @@ const anchorResponse = async (req: Request): Promise<Response> => {
   }
   const result = installDeviceAnchor(`${key}.${input.anchor}`);
   if (!result.ok) {
-    if (result.reason === "routing_box")
-      return anchorRefusal(409, "routing_box");
     return anchorRefusal(
       result.reason === "persist_failed" ? 500 : 400,
       result.reason === "persist_failed"
