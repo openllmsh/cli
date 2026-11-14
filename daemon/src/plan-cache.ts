@@ -159,6 +159,11 @@ export const storePlan = (alias: string, tuple: TPlanTuple): void => {
   }
 };
 
+/** Forget a plan that is no longer safe to reuse. */
+export const evictPlan = (alias: string): void => {
+  cache.delete(alias);
+};
+
 /** The fresh cached tuple for `alias`, or null (absent / TTL-expired —
  *  expired entries are dropped eagerly so the map can't grow stale). */
 export const lookupPlan = (alias: string): TCachedPlan | null => {

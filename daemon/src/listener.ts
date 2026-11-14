@@ -91,6 +91,7 @@ import type { TPlanTuple } from "./plan-cache";
 import {
   currentPolicyEpoch,
   currentPolicyRevision,
+  evictPlan,
   loadPlanWithShared,
   lookupPlan,
   noteTeamPlanServed,
@@ -667,6 +668,7 @@ const handleInferenceIn = async (
           readonly holdNonce: string | null;
           readonly maxOutputTokens: number | null;
           readonly singleCloudHop: boolean;
+          readonly fusion: boolean;
         }
       | { readonly kind: "passthrough" }
       | { readonly kind: "response"; readonly response: Response }
@@ -773,6 +775,9 @@ const handleInferenceIn = async (
         fetchedMaxOutputTokens,
       );
       if (verified) observePolicyRevision(fetched.policy_rev, callerIdentity);
+      if (verified && fetched.fusion === true && planCacheKey !== null) {
+        evictPlan(planCacheKey);
+      }
       const hasDaemonOnlyHop =
         verified &&
         parsePlan(fetched.plan).some((entry) => {
@@ -826,6 +831,7 @@ const handleInferenceIn = async (
         holdNonce: fetchedHoldNonce,
         maxOutputTokens: fetchedMaxOutputTokens,
         singleCloudHop: singleCloud,
+        fusion: fetched.fusion === true,
       };
     };
 
@@ -902,6 +908,10 @@ const handleInferenceIn = async (
             inferenceAdmission.signal,
             background,
           );
+          // Fusion depends on this request's token estimate, including on refresh.
+          if (outcome.kind === "tuple" && outcome.fusion) {
+            return { store: null, shared: outcome };
+          }
           // A held plan is bound to one reservation: never cache it.
           if (
             outcome.kind === "tuple" &&
@@ -914,9 +924,12 @@ const handleInferenceIn = async (
         },
       );
       if (shared !== null) {
-        // A waiter that joined someone else's held flight reserves its own.
+        // Held plans and Fusion plans belong to the request that fetched them.
+        // A concurrent waiter needs its own reservation or token-based selection.
         const own =
-          !ledFlight && shared.kind === "tuple" && shared.holdNonce !== null
+          !ledFlight &&
+          shared.kind === "tuple" &&
+          (shared.holdNonce !== null || shared.fusion)
             ? await resolveFetched(req.signal)
             : shared;
         const applied = await applyPlanFetchOutcome(own);
@@ -1322,6 +1335,10 @@ const handleInferenceIn = async (
         refreshed.sig,
       );
       if (verified) observePolicyRevision(refreshed.policy_rev, callerIdentity);
+      if (verified && refreshed.fusion === true) {
+        evictPlan(planCacheKey);
+        return null;
+      }
       const hasDaemonOnlyHop =
         verified &&
         parsePlan(refreshed.plan).some((entry) => {
