@@ -310,6 +310,12 @@ export const main = async (): Promise<void> => {
       m.observeLoginModelReports();
     })
     .catch((err) => logError("main", err));
+  // A sign-in reads its account's usage daemon-side (no browser needed).
+  void import("./status")
+    .then((m) => {
+      m.observeLoginUsageReads();
+    })
+    .catch((err) => logError("main", err));
   startPlanCacheSweeper();
 
   // Control channel (status watcher, relay) stays off the module-eval graph so

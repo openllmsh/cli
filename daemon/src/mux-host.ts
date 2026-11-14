@@ -677,9 +677,11 @@ export const muxChannelTo = async (
   options?: TMuxChannelOptions,
 ): Promise<TMuxChannel | null> => {
   if (process.env.OPENLLM_MUX_DISABLE === "1") return null;
-  // Welcome snapshots name only the current user's daemons. A cross-user team
-  // target is authorized by its signed grant and therefore cannot be rejected
-  // by same-user capability discovery; the relay/supplier remains authoritative.
+  // The caps view is the welcome snapshot plus every presence delta — the
+  // relay fans each presence change out to the user's daemons too
+  // (`broadcastPresence`), so it is current and an absent peer is skipped
+  // without a round-trip. A cross-user team target is authorized by its
+  // signed grant instead; the relay/supplier remains authoritative there.
   const caps = peerCaps.get(keyId);
   const lookupKey = channelLookupKey(keyId, options?.teamId);
   if (
@@ -742,6 +744,7 @@ export const muxChannelTo = async (
 export const handleChannelOpenAck = (frame: {
   readonly channel_id: string;
   readonly ok: boolean;
+  readonly error?: string;
 }): void => {
   const entry = [...opening.entries()].find(
     ([, pending]) => pending.channelId === frame.channel_id,
@@ -749,7 +752,13 @@ export const handleChannelOpenAck = (frame: {
   if (entry === undefined) return;
   const [keyId] = entry;
   if (!frame.ok) {
-    failOpen(keyId);
+    failOpen(
+      keyId,
+      undefined,
+      frame.error === "daemon_offline" || frame.error === "not_capable"
+        ? "presence"
+        : "nack",
+    );
     return;
   }
   const pending = opening.get(keyId);

@@ -962,7 +962,11 @@ export const runImageEditWalker = async (
   }
   const editRequest: TImageEditRequest = parsed.request;
 
-  if (!isSupportedImageEditReference(editRequest.image.url)) {
+  if (
+    !editRequest.images.every((image) =>
+      isSupportedImageEditReference(image.url),
+    )
+  ) {
     return errorJson(
       400,
       "Image edits accept only an inline (data:) image upload in this release — remote image URLs are not supported.",
