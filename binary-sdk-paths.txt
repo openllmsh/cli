@@ -133,6 +133,7 @@ packages/sdk/vault/team.ts
 packages/sdk/vault/vault-item.ts
 packages/sdk/vault/vault-migrate-digest.ts
 packages/sdk/vault/wrapped.ts
+packages/sdk/vault/x25519-seal.ts
 packages/sdk/wire/adapters/messages/anthropic-map.ts
 packages/sdk/wire/adapters/messages/reasoning-from-items.ts
 packages/sdk/wire/adapters/messages/reasoning-signature.ts

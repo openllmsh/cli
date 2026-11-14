@@ -40,11 +40,11 @@
  *                            no separate control token at this stage.
  * - `OPENLLM_DAEMON_STATE_DIR` — where .env + state live
  *                            (default `~/.openllm`).
- * - `OPENLLM_DAEMON_AUTO_UPDATE` — self-update opt-out flag (`1`/`0`,
+ * - `OPENLLM_DAEMON_AUTO_UPDATE` — self-update opt-out flag (`1`/`0`, `true`/`false`, `on`/`off`,
  *                            default ON). Read/written by
  *                            `auto-update-pref.ts`; lives here so ALL daemon
  *                            config is in the one file.
- * - `OPENLLM_DEVICE_SESSIONS` — device-sessions opt-out flag (`1`/`0`,
+ * - `OPENLLM_DEVICE_SESSIONS` — device-sessions opt-out flag (`1`/`0`, `true`/`false`, `on`/`off`,
  *                            default ON). Read/written by
  *                            `device-sessions-pref.ts`. Sessions also need
  *                            the trust anchor; a Routebox is always off.

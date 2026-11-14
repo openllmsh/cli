@@ -110,7 +110,7 @@ daemon/
   src/
     main.ts                 runDaemon(args): runCli() dispatch, else migrate a legacy install → refresh bootstrap → Bun.serve(127.0.0.1)
     cli.ts                  `openllm daemon <cmd>` dispatch (also reached as `openllmd <cmd>`) (start/stop/status/restart/skill/plugin/setup/auto-update/uninstall/set-token/completion/help)
-    auto-update-pref.ts     auto-update opt-out flag in the shared .env (`OPENLLM_DAEMON_AUTO_UPDATE`, default ON; legacy `~/.openllm/auto-update` file migrated in); gates updater.ts AND the CLI's launch check; reported on DaemonStatus.auto_update
+    auto-update-pref.ts     auto-update opt-out flag in the shared .env (`OPENLLM_DAEMON_AUTO_UPDATE`, default ON; `1`/`0`, `true`/`false`, `on`/`off`, case-insensitive; legacy `~/.openllm/auto-update` file migrated in); gates updater.ts AND the CLI's launch check; reported on DaemonStatus.auto_update
     cli-version-cache.ts    stamp-keyed `--version` cache: durable successes (schema v2), process-local misses, optional `reprobe` (not `force`); v1 persisted nulls dropped on load
     updater.ts              the single-binary updater: converge ~/.openllm/bin/openllm, then restart ONLY if the new file's daemon fingerprint differs, and only once idle
     self-update.ts          shared plumbing: in-flight /v1 tracking + waitUntilIdle, host target, verified fetches, the apply lease
