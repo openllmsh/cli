@@ -79,7 +79,7 @@ packages/sdk/protocol/registry-pointer.ts
 packages/sdk/protocol/relay.ts
 packages/sdk/protocol/replay-session.ts
 packages/sdk/protocol/responses.ts
-packages/sdk/protocol/routing-box.ts
+packages/sdk/protocol/routebox.ts
 packages/sdk/protocol/semver.ts
 packages/sdk/protocol/setup-mode.ts
 packages/sdk/protocol/sha256-hex.ts

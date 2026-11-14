@@ -1,7 +1,7 @@
 /**
  * Device-sessions on/off preference — stored in the shared env file
  * (`~/.openllm/.env`) as `OPENLLM_DEVICE_SESSIONS` (`1`/`0`), beside the
- * trust anchor. Default ON (absent = on). A routing box is always off,
+ * trust anchor. Default ON (absent = on). A Routebox is always off,
  * whatever the file says — same lock shape as {@link autoUpdateEnabled}
  * (always on there).
  *
@@ -10,7 +10,7 @@
  * sessions turn off — WebRTC still needs the anchored control pin.
  */
 import { envFilePath, envFileValue, writeEnvFileVars } from "./env";
-import { isRoutingBox } from "./routing-box";
+import { isRoutebox } from "./routebox";
 
 /** The env-file key the preference lives under. */
 export const DEVICE_SESSIONS_ENV = "OPENLLM_DEVICE_SESSIONS";
@@ -29,24 +29,24 @@ const fileFlag = (): boolean => {
   return true;
 };
 
-/** Whether sessions are on. Always FALSE on a routing box. */
+/** Whether sessions are on. Always FALSE on a Routebox. */
 export const deviceSessionsPrefEnabled = (): boolean =>
-  !isRoutingBox() && fileFlag();
+  !isRoutebox() && fileFlag();
 
 export type TSetDeviceSessionsResult =
   | { readonly ok: true; readonly changed: boolean }
-  | { readonly ok: false; readonly reason: "persist_failed" | "routing_box" };
+  | { readonly ok: false; readonly reason: "persist_failed" | "routebox" };
 
 /**
- * Persist the device-sessions flag. Enable is refused on a routing box
- * (sessions stay locked off there). Disable on a routing box is a true no-op
+ * Persist the device-sessions flag. Enable is refused on a Routebox
+ * (sessions stay locked off there). Disable on a Routebox is a true no-op
  * — no env-file write — because sessions are already locked off there.
  */
 export const setDeviceSessionsEnabled = (
   enabled: boolean,
 ): TSetDeviceSessionsResult => {
-  if (isRoutingBox()) {
-    if (enabled) return { ok: false, reason: "routing_box" };
+  if (isRoutebox()) {
+    if (enabled) return { ok: false, reason: "routebox" };
     return { ok: true, changed: false };
   }
   if (fileFlag() === enabled) return { ok: true, changed: false };

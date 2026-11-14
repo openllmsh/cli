@@ -16,7 +16,7 @@
  */
 import { loadEnvFile, writeEnvFileVars } from "./env";
 import { logWarn, safeDiagnosticMessage } from "./logger";
-import { isRoutingBox } from "./routing-box";
+import { isRoutebox } from "./routebox";
 
 /** The env-file key the preference lives under. */
 const AUTO_UPDATE_KEY = "OPENLLM_DAEMON_AUTO_UPDATE";
@@ -31,10 +31,10 @@ const parseFlag = (raw: string | undefined): boolean | null => {
 
 /**
  * Whether automatic daemon self-update is enabled. Default TRUE (opt-out).
- * Always TRUE on a routing box, whatever the env file says.
+ * Always TRUE on a Routebox, whatever the env file says.
  */
 export const autoUpdateEnabled = (): boolean => {
-  if (isRoutingBox()) return true;
+  if (isRoutebox()) return true;
   // In dev, `.dev.env` overrides non-selector process env defaults; in prod, an
   // explicitly-set env value remains authoritative.
   loadEnvFile();
@@ -45,17 +45,17 @@ export const autoUpdateEnabled = (): boolean => {
 
 /** Why turning auto-update off was refused. */
 export const AUTO_UPDATE_LOCKED_MESSAGE =
-  "auto-update is always on for a routing box";
+  "auto-update is always on for a Routebox";
 
 /**
  * Persist the auto-update opt-in into the env file (`0600`, merge) and update
  * the in-process env so the next check sees it immediately. Returns false —
  * and leaves `process.env` alone — when the request is to turn it off on a
- * routing box, or when the env-file write fails (same posture as
+ * Routebox, or when the env-file write fails (same posture as
  * {@link setDeviceSessionsEnabled}).
  */
 export const setAutoUpdate = (enabled: boolean): boolean => {
-  if (!enabled && isRoutingBox()) return false;
+  if (!enabled && isRoutebox()) return false;
   const value = enabled ? "1" : "0";
   if (!writeEnvFileVars({ [AUTO_UPDATE_KEY]: value })) {
     logWarn(

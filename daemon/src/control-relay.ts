@@ -57,7 +57,7 @@ import { maybeReportModels, resetModelReportThrottle } from "./model-report";
 import { runWithAccount, withoutCommandReplayContext } from "./op-context";
 import { clearPendingAuth } from "./pending-auth";
 import { clearPlanCache } from "./plan-cache";
-import { isRoutingBox } from "./routing-box";
+import { isRoutebox } from "./routebox";
 import { deviceSessionsForList } from "./session-host";
 import type { TUsageReadFailure } from "./status";
 import {
@@ -639,9 +639,9 @@ const runCommandInAccount = async (
       case "set_auto_update": {
         const enabled = cmd.payload.enabled;
         if (!setAutoUpdate(enabled)) {
-          // Only turning it OFF on a routing box is a lock; anything else is
+          // Only turning it OFF on a Routebox is a lock; anything else is
           // a failed persist, reported with the value actually in effect.
-          const locked = !enabled && isRoutingBox();
+          const locked = !enabled && isRoutebox();
           return {
             id: cmd.id,
             status: "error",

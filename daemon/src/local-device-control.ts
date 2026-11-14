@@ -173,8 +173,8 @@ const anchorResponse = async (req: Request): Promise<Response> => {
   if ("sessions" in input) {
     const set = setDeviceSessionsEnabled(input.sessions);
     if (!set.ok) {
-      return set.reason === "routing_box"
-        ? anchorRefusal(409, "routing_box")
+      return set.reason === "routebox"
+        ? anchorRefusal(409, "routebox")
         : anchorRefusal(500, "persist_failed");
     }
     const body: TLocalDeviceAnchorResponse = {

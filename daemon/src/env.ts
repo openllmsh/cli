@@ -47,7 +47,7 @@
  * - `OPENLLM_DEVICE_SESSIONS` — device-sessions opt-out flag (`1`/`0`,
  *                            default ON). Read/written by
  *                            `device-sessions-pref.ts`. Sessions also need
- *                            the trust anchor; a routing box is always off.
+ *                            the trust anchor; a Routebox is always off.
  * - `OPENLLM_SESSION_IDLE_TIMEOUT_MIN` — detached PTY idle-reap window in
  *                            minutes (default `60`; `0` disables). Read by
  *                            `session-host.ts` from this same env file.

@@ -869,7 +869,7 @@ silent signaling timeouts. Detail lives in
   clears a pin. Agent streams (`requireDpk`) refuse when the env-file
   trust anchor is absent or the pin is unanchored/legacy, with
   `device_not_anchored`, and when `OPENLLM_DEVICE_SESSIONS` is off (or
-  this is a routing box) with `device_sessions_disabled` (re-checked on
+  this is a Routebox) with `device_sessions_disabled` (re-checked on
   every agent OPEN); RTC degrades such an offer, or a dpk-less grant, to
   a tunnel-only session. WebRTC/pin eligibility follows the anchor alone
   and is unaffected by the sessions flag.
@@ -885,7 +885,7 @@ silent signaling timeouts. Detail lives in
   sessions flag is not off (default on when absent); there is no remote
   enable. `openllm daemon device enable|disable|status` is the local
   switch; the desktop app toggles over loopback (`POST /local/device-anchor`
-  install or `{ sessions: true|false }`). A routing box always reports
+  install or `{ sessions: true|false }`). A Routebox always reports
   sessions off and refuses enable (like auto-update stays on there).
   `openllm daemon identity` and `DaemonStatus.device_access_pin` show the
   pin's fingerprint and `via` (agent eligibility is reported once, as

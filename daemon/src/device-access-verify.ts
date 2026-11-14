@@ -29,7 +29,7 @@
  * tunnel and realtime (RTC grant checks) and nothing else. Agent streams
  * (`requireDpk`) refuse an unanchored or legacy pin with
  * `device_not_anchored`, and refuse when `OPENLLM_DEVICE_SESSIONS` is off
- * (or this is a routing box) with `device_sessions_disabled`. Sessions on ==
+ * (or this is a Routebox) with `device_sessions_disabled`. Sessions on ==
  * the install/loopback anchor is present AND the sessions flag is not off.
  * A legacy (DEK-derived) pin is never upgraded by the cloud, and an
  * established pin never moves except along a signed rotation chain or a
@@ -53,7 +53,7 @@ import { deviceSessionsPrefEnabled } from "./device-sessions-pref";
 import { deviceAnchorFromEnvFile } from "./env";
 import { daemonPublicKey } from "./keypair";
 import { logWarn, safeDiagnosticMessage } from "./logger";
-import { isRoutingBox } from "./routing-box";
+import { isRoutebox } from "./routebox";
 import type { TDeviceAccessPinVia } from "./state-file";
 import { mutateState, readState } from "./state-file";
 
@@ -826,10 +826,10 @@ export const setDeviceAccessPubkey = (
 export const agentSessionRefusal = ():
   | (typeof AGENT_PIN_REFUSALS)[number]
   | null =>
-  // Routing-box lock is inside deviceSessionsPrefEnabled / agentRefusal
+  // Routebox lock is inside deviceSessionsPrefEnabled / agentRefusal
   // (`device_sessions_disabled`); keep the early check so a box refuses
   // before any pin hydrate.
-  isRoutingBox() ? "device_sessions_disabled" : active.agentRefusal();
+  isRoutebox() ? "device_sessions_disabled" : active.agentRefusal();
 
 /** Re-read the pin from disk on next use (after another process wrote it). */
 export const invalidateDeviceAccessPin = (): void => active.invalidatePin();

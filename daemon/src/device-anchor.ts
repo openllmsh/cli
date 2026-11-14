@@ -16,7 +16,7 @@
  *   (`1`/`0`) next to the anchor (see `device-sessions-pref.ts`). Disable is
  *   reachable from the CLI, the desktop loopback control, and the
  *   control-signed remote disable; enable is local/install only (no remote
- *   enable). A routing box always refuses enable — sessions stay off there,
+ *   enable). A Routebox always refuses enable — sessions stay off there,
  *   like auto-update stays on.
  * - {@link deviceDpkProof} — `HMAC-SHA256(pair_secret, label || key_id ||
  *   dpk)`, published in `DaemonStatus.device_sessions.dpk_proof` so any
@@ -63,7 +63,7 @@ import {
   writeEnvFileVars,
 } from "./env";
 import { daemonPublicKey } from "./keypair";
-import { isRoutingBox } from "./routing-box";
+import { isRoutebox } from "./routebox";
 import { mutateState, pruneDisableNonces, readState } from "./state-file";
 
 export type { TSetDeviceSessionsResult } from "./device-sessions-pref";
@@ -111,10 +111,10 @@ export const installDeviceAnchor = (
   // device already holds (it is derived from the seed and key id, so a
   // re-pair of the same key repeats it exactly) keeps the user's choice, so a
   // deliberate Turn off is never undone by a re-pair. Install turns sessions
-  // on explicitly (`device enable`). A routing box takes the anchor (WebRTC
+  // on explicitly (`device enable`). A Routebox takes the anchor (WebRTC
   // needs the pin) but keeps sessions locked off.
   const sessionsOn =
-    !isRoutingBox() && deviceAnchorFromEnvFile() !== split.anchor;
+    !isRoutebox() && deviceAnchorFromEnvFile() !== split.anchor;
   if (
     !writeEnvFileVars(
       {
@@ -167,14 +167,14 @@ export const deviceDpkProof = async (
 
 /**
  * `DaemonStatus.device_sessions` — sessions on == env-file anchor present,
- * agent-eligible pin, sessions flag not off, and not a routing box.
+ * agent-eligible pin, sessions flag not off, and not a Routebox.
  */
 export const deviceSessionsReport =
   async (): Promise<TDeviceSessionsReport> => {
     const proof = await deviceDpkProof();
     return {
       enabled:
-        !isRoutingBox() &&
+        !isRoutebox() &&
         deviceSessionsPrefEnabled() &&
         deviceAnchorFromEnvFile() !== null &&
         isAgentEligiblePin(getDeviceAccessPin()),
@@ -272,7 +272,7 @@ export const applyDeviceSessionsDisable = async (
     return { ok: false, reason: "persist_failed" };
   }
   const set = setDeviceSessionsEnabled(false);
-  // Disable never returns `routing_box` (only enable does). A failed flag
+  // Disable never returns `routebox` (only enable does). A failed flag
   // persist keeps the nonce burned — retry signs a fresh statement.
   if (!set.ok) return { ok: false, reason: "persist_failed" };
   return { ok: true, changed: set.changed };

@@ -43,7 +43,7 @@ import {
 import { loadIdentityKey } from "./keypair";
 import { logError } from "./logger";
 import { runLogs } from "./logs";
-import { isRoutingBox } from "./routing-box";
+import { isRoutebox } from "./routebox";
 import { runSandboxExec } from "./sandbox/exec";
 import {
   serviceRestart,
@@ -112,7 +112,7 @@ const runAnchor = async (args: readonly string[]): Promise<number> => {
 /**
  * `openllm daemon device <enable|disable|status>`. Flips
  * `OPENLLM_DEVICE_SESSIONS`; the trust anchor is never removed. Enable is
- * local-only (and refused on a routing box).
+ * local-only (and refused on a Routebox).
  */
 const runDevice = async (args: readonly string[]): Promise<number> => {
   const action = args[0];
@@ -124,8 +124,8 @@ const runDevice = async (args: readonly string[]): Promise<number> => {
     const set = setDeviceSessionsEnabled(action === "enable");
     if (!set.ok) {
       process.stderr.write(
-        set.reason === "routing_box"
-          ? "device sessions are always off on a routing box; its anchor stays\n"
+        set.reason === "routebox"
+          ? "device sessions are always off on a Routebox; its anchor stays\n"
           : "could not update device sessions\n",
       );
       return 1;
@@ -191,7 +191,7 @@ const runAutoUpdate = (args: readonly string[]): never => {
       const wanted = sub === "on";
       if (!setAutoUpdate(wanted)) {
         process.stderr.write(
-          !wanted && isRoutingBox()
+          !wanted && isRoutebox()
             ? `${AUTO_UPDATE_LOCKED_MESSAGE}\n`
             : "could not update auto-update preference\n",
         );
