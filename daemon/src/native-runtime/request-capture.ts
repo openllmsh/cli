@@ -163,6 +163,7 @@ export const captureOwnershipFromTerminal = (
 export type TRequestCaptureErrorCode =
   | "duplicate_capture"
   | "invalid_destination"
+  | "invalid_envelope"
   | "body_too_large"
   | "aborted"
   | "already_dispatched"
@@ -853,6 +854,14 @@ export const runCapturedDispatch = async (args: {
   readonly signal?: AbortSignal;
   /** Local settlement reason surfaced to the builder after capture. */
   readonly suppressReason?: string;
+  /**
+   * Provider check of the captured envelope, run BEFORE anything is sent: a
+   * non-null reason fails the exchange pre-dispatch (no upstream ownership),
+   * so the caller may fall back instead of sending a request it knows is wrong.
+   */
+  readonly validateEnvelope?: (
+    envelope: TCapturedRequestEnvelope,
+  ) => string | null;
 }): Promise<TRunCapturedDispatchResult> => {
   const { session, sender } = args;
   const envelope = await session.takeCaptured();
@@ -876,6 +885,15 @@ export const runCapturedDispatch = async (args: {
       usage: { kind: "none" },
     });
     throw new RequestCaptureError("invalid_destination", dest.reason);
+  }
+  const invalid = args.validateEnvelope?.(envelope) ?? null;
+  if (invalid !== null) {
+    session.complete({
+      kind: "failed",
+      reason: invalid,
+      usage: { kind: "none" },
+    });
+    throw new RequestCaptureError("invalid_envelope", invalid);
   }
 
   const dispatchSignal =

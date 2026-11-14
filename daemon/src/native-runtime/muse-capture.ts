@@ -63,6 +63,7 @@ import {
 import type { TMuseToolNameMap } from "./muse-mcp-server";
 import {
   isMuseNativeToolName,
+  MUSE_MCP_WIRE_PREFIX,
   MUSE_NATIVE_TOOL_NAMESPACE,
   mapMuseCapturedToolName,
 } from "./muse-mcp-server";
@@ -1187,6 +1188,52 @@ const inputWithoutSpawnPolicy = (input: unknown): unknown[] | null => {
   return changed ? next : null;
 };
 
+/** The namespace muse-bin files our per-turn MCP server's tools under. */
+const MUSE_CALLER_TOOL_NAMESPACE = MUSE_MCP_WIRE_PREFIX.slice(0, -1);
+
+/** A captured tool entry that carries at least one of the caller's tools. */
+const carriesCallerTools = (tool: unknown): boolean => {
+  if (!isRecord(tool) || typeof tool.name !== "string") return false;
+  if (tool.type === "namespace") {
+    return (
+      tool.name === MUSE_CALLER_TOOL_NAMESPACE &&
+      Array.isArray(tool.tools) &&
+      tool.tools.length > 0
+    );
+  }
+  return tool.name.startsWith(MUSE_MCP_WIRE_PREFIX);
+};
+
+/**
+ * Why a captured primary body cannot serve a turn that registered caller
+ * tools, or null when it can. muse-bin builds the body from what its MCP
+ * `tools/list` returned; when that came back empty (the per-turn server
+ * unreachable, a discovery race), the body offers only Muse's own namespace,
+ * which {@link withoutMuseNativeTools} removes — Meta would then answer a
+ * request with no tools at all, the hop would "succeed", and the caller (a
+ * Claude Code subagent) would conclude it has no tools. Declining instead
+ * lets the walker try the next hop.
+ */
+export const museCapturedCallerToolsMissing = (
+  body: Uint8Array | null,
+  expectedCallerTools: number,
+): string | null => {
+  if (expectedCallerTools === 0) return null;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(new TextDecoder().decode(body ?? new Uint8Array()));
+  } catch {
+    return "muse captured body is not JSON; cannot confirm caller tools";
+  }
+  if (
+    isRecord(parsed) &&
+    Array.isArray(parsed.tools) &&
+    parsed.tools.some(carriesCallerTools)
+  )
+    return null;
+  return `muse captured request lost the caller's ${expectedCallerTools} tool(s)`;
+};
+
 /**
  * The captured `/responses` body without Muse's built-in tools. The captured
  * response goes to the caller, never back to muse-bin, so a `muse.*` call
@@ -1209,7 +1256,19 @@ export const withoutMuseNativeTools = (
   if (!isRecord(parsed) || !Array.isArray(parsed.tools)) return null;
   const tools = parsed.tools.filter((tool) => !isMuseNativeTool(tool));
   const input = inputWithoutSpawnPolicy(parsed.input);
-  if (tools.length === parsed.tools.length && input === null) return null;
+  const instructions =
+    typeof parsed.instructions === "string"
+      ? withoutSpawnPolicy(parsed.instructions)
+      : "";
+  const instructionsChanged =
+    typeof parsed.instructions === "string" &&
+    instructions !== parsed.instructions;
+  if (
+    tools.length === parsed.tools.length &&
+    input === null &&
+    !instructionsChanged
+  )
+    return null;
   const notice = retry
     ? `${MUSE_TOOLS_NOTICE} ${MUSE_TOOLS_RETRY_NOTICE}`
     : MUSE_TOOLS_NOTICE;
@@ -1217,10 +1276,7 @@ export const withoutMuseNativeTools = (
     ...parsed,
     ...(input === null ? {} : { input }),
     tools,
-    instructions:
-      typeof parsed.instructions === "string" && parsed.instructions !== ""
-        ? `${parsed.instructions}\n\n${notice}`
-        : notice,
+    instructions: instructions !== "" ? `${instructions}\n\n${notice}` : notice,
   };
   // A forced choice of a removed tool would name a tool that is gone.
   const choice = parsed.tool_choice;
@@ -1593,6 +1649,11 @@ export const runMuseNativeCapture = async (
         session: handle.session,
         sender,
         signal: params.signal,
+        validateEnvelope: (envelope) =>
+          museCapturedCallerToolsMissing(
+            envelope.body,
+            callerToolNameMap.wireToCaller.size,
+          ),
         suppressReason:
           "muse original external send suppressed; daemon owns the exchange",
       });
