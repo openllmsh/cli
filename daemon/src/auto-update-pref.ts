@@ -14,20 +14,12 @@
  * Precedence: an explicit `OPENLLM_DAEMON_AUTO_UPDATE` (set in the environment,
  * or loaded from the env file by `loadEnvFile`) decides; absent it, ON.
  */
-import { loadEnvFile, writeEnvFileVars } from "./env";
+import { loadEnvFile, parseFlag, writeEnvFileVars } from "./env";
 import { logWarn, safeDiagnosticMessage } from "./logger";
 import { isRoutebox } from "./routebox";
 
 /** The env-file key the preference lives under. */
 const AUTO_UPDATE_KEY = "OPENLLM_DAEMON_AUTO_UPDATE";
-
-/** Parse a flag value to bool; null when unrecognized/absent. */
-const parseFlag = (raw: string | undefined): boolean | null => {
-  const v = raw?.trim();
-  if (v === "1" || v === "true") return true;
-  if (v === "0" || v === "false") return false;
-  return null;
-};
 
 /**
  * Whether automatic daemon self-update is enabled. Default TRUE (opt-out).

@@ -1342,20 +1342,17 @@ fi
 # Installing with the anchor is the sessions opt-in, so turn them on here
 # (a re-install after a Turn off included); disable writes 0 and keeps the
 # anchor. A Routebox refuses the enable and keeps them off — that refusal
-  # alone is soft; any other enable failure (disk / permissions) fails install.
+# alone (exit code 3) is soft; any other enable failure (disk / permissions)
+# fails install.
 if [ -n "$SUPPLIED_ANCHOR" ]; then
   printf '%s.%s' "$SUPPLIED_KEY" "$SUPPLIED_ANCHOR" \
     | "$BIN_DIR/openllm" daemon anchor >/dev/null \
     || die "the device trust anchor was rejected — copy the install command from the dashboard again"
   enable_out="$("$BIN_DIR/openllm" daemon device enable 2>&1)" && enable_rc=0 || enable_rc=$?
-  if [ "$enable_rc" -ne 0 ]; then
-    case "$enable_out" in
-      *"always off on a Routebox"*) ;;
-      *)
-        printf '%s\n' "$enable_out" >&2
-        die "could not enable device sessions"
-        ;;
-    esac
+  # 3 = the Routebox refusal (soft).
+  if [ "$enable_rc" -ne 0 ] && [ "$enable_rc" -ne 3 ]; then
+    printf '%s\n' "$enable_out" >&2
+    die "could not enable device sessions"
   fi
 fi
 SUPPLIED_ANCHOR=""

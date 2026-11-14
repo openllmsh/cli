@@ -9,7 +9,7 @@
  * disable; enable is local/install only. The anchor is never removed when
  * sessions turn off — WebRTC still needs the anchored control pin.
  */
-import { envFilePath, envFileValue, writeEnvFileVars } from "./env";
+import { envFilePath, envFileValue, parseFlag, writeEnvFileVars } from "./env";
 import { isRoutebox } from "./routebox";
 
 /** The env-file key the preference lives under. */
@@ -21,13 +21,13 @@ export const DEVICE_SESSIONS_ENV = "OPENLLM_DEVICE_SESSIONS";
  * the file, so a value cached in this process's env would leave the running
  * daemon on the old setting. Default on when absent or unrecognized.
  */
-const fileFlag = (): boolean => {
-  const v = envFileValue(envFilePath(), DEVICE_SESSIONS_ENV)
-    ?.trim()
-    .toLowerCase();
-  if (v === "0" || v === "false" || v === "off") return false;
-  return true;
-};
+const fileFlag = (): boolean =>
+  parseFlag(envFileValue(envFilePath(), DEVICE_SESSIONS_ENV) ?? undefined) ??
+  true;
+
+/** The env-file value for an on/off flag — the one serializer for writers. */
+export const deviceSessionsFlagValue = (enabled: boolean): "1" | "0" =>
+  enabled ? "1" : "0";
 
 /** Whether sessions are on. Always FALSE on a Routebox. */
 export const deviceSessionsPrefEnabled = (): boolean =>
@@ -51,7 +51,7 @@ export const setDeviceSessionsEnabled = (
   }
   if (fileFlag() === enabled) return { ok: true, changed: false };
   const written = writeEnvFileVars(
-    { [DEVICE_SESSIONS_ENV]: enabled ? "1" : "0" },
+    { [DEVICE_SESSIONS_ENV]: deviceSessionsFlagValue(enabled) },
     envFilePath(),
   );
   if (!written || fileFlag() !== enabled) {

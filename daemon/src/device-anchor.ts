@@ -49,6 +49,7 @@ import {
 } from "./device-access-verify";
 import {
   DEVICE_SESSIONS_ENV,
+  deviceSessionsFlagValue,
   deviceSessionsPrefEnabled,
   setDeviceSessionsEnabled,
 } from "./device-sessions-pref";
@@ -69,6 +70,7 @@ import { mutateState, pruneDisableNonces, readState } from "./state-file";
 export type { TSetDeviceSessionsResult } from "./device-sessions-pref";
 export {
   DEVICE_SESSIONS_ENV,
+  deviceSessionsFlagValue,
   deviceSessionsPrefEnabled,
   setDeviceSessionsEnabled,
 } from "./device-sessions-pref";
@@ -120,7 +122,9 @@ export const installDeviceAnchor = (
       {
         OPENLLM_API_KEY: split.key,
         [DEVICE_ANCHOR_ENV]: split.anchor,
-        ...(sessionsOn ? { [DEVICE_SESSIONS_ENV]: "1" } : {}),
+        ...(sessionsOn
+          ? { [DEVICE_SESSIONS_ENV]: deviceSessionsFlagValue(true) }
+          : {}),
       },
       envFilePath(),
     )
@@ -174,7 +178,6 @@ export const deviceSessionsReport =
     const proof = await deviceDpkProof();
     return {
       enabled:
-        !isRoutebox() &&
         deviceSessionsPrefEnabled() &&
         deviceAnchorFromEnvFile() !== null &&
         isAgentEligiblePin(getDeviceAccessPin()),
@@ -196,19 +199,6 @@ export type TApplyDeviceSessionsDisableResult =
   | { readonly ok: false; readonly reason: TDeviceSessionsDisableRefusal };
 
 /**
- * Verify one signed `{ v, key_id, ts, nonce }` disable and turn sessions off.
- * Requires an ANCHORED control pin (a cloud-chosen pin could be the cloud's
- * own key), this daemon's key id, a fresh `ts`, and a signature by the pinned
- * key, used once (`replayed_nonce` after). The anchor is kept; unanchored
- * is `device_not_anchored`.
- *
- * Order: verify → durably burn the nonce → set the flag off. A later local
- * enable is a legitimate later user action, not a race to defend against. If
- * the flag write fails after a successful burn, the nonce stays burned and the
- * caller must sign a fresh statement to retry (the browser/cloud path always
- * does — `signDeviceSessionsDisable` mints a new nonce per attempt).
- */
-/**
  * Burn a disable nonce into `state.json` (0600), pruned of expired entries
  * with the caller's `now`. Confirms from the {@link mutateState} result
  * itself (no second `readState` with a different clock). Returns false when
@@ -227,6 +217,19 @@ const burnDisableNonce = (
   return next?.deviceSessionsDisableNonces?.[nonce] === until;
 };
 
+/**
+ * Verify one signed `{ v, key_id, ts, nonce }` disable and turn sessions off.
+ * Requires an ANCHORED control pin (a cloud-chosen pin could be the cloud's
+ * own key), this daemon's key id, a fresh `ts`, and a signature by the pinned
+ * key, used once (`replayed_nonce` after). The anchor is kept; unanchored
+ * is `device_not_anchored`.
+ *
+ * Order: verify → durably burn the nonce → set the flag off. A later local
+ * enable is a legitimate later user action, not a race to defend against. If
+ * the flag write fails after a successful burn, the nonce stays burned and the
+ * caller must sign a fresh statement to retry (the browser/cloud path always
+ * does — `signDeviceSessionsDisable` mints a new nonce per attempt).
+ */
 export const applyDeviceSessionsDisable = async (
   encoded: string,
   now: number = Date.now(),

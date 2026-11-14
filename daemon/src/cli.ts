@@ -35,6 +35,7 @@ import {
   deviceKeyFingerprint,
   getDeviceAccessPin,
 } from "./device-access-verify";
+import { deviceSessionsPrefEnabled } from "./device-sessions-pref";
 import {
   deviceSessionsReport,
   installDeviceAnchor,
@@ -78,6 +79,8 @@ ${formatHelpRows(FLAGS.map((f) => ({ left: f.name, right: f.description })))}
 State lives under ~/.openllm (override with OPENLLM_DAEMON_STATE_DIR).
 `;
 
+/** Exit code for enabling device sessions on a Routebox (install.sh matches it). */
+export const DEVICE_ROUTEBOX_EXIT = 3;
 const DEVICE_USAGE = "usage: openllm daemon device <enable|disable|status>\n";
 
 /**
@@ -123,11 +126,13 @@ const runDevice = async (args: readonly string[]): Promise<number> => {
   if (action === "disable" || action === "enable") {
     const set = setDeviceSessionsEnabled(action === "enable");
     if (!set.ok) {
-      process.stderr.write(
-        set.reason === "routebox"
-          ? "device sessions are always off on a Routebox; its anchor stays\n"
-          : "could not update device sessions\n",
-      );
+      if (set.reason === "routebox") {
+        process.stderr.write(
+          "device sessions are always off on a Routebox; its anchor stays\n",
+        );
+        return DEVICE_ROUTEBOX_EXIT;
+      }
+      process.stderr.write("could not update device sessions\n");
       return 1;
     }
   } else if (action !== "status") {
@@ -135,13 +140,17 @@ const runDevice = async (args: readonly string[]): Promise<number> => {
     return 2;
   }
   const report = await deviceSessionsReport();
-  process.stdout.write(
-    report.enabled
-      ? "device sessions enabled\n"
-      : report.dpk_proof === undefined
-        ? "device sessions not set up — this device has no trust anchor; run `openllm login` from the app (or re-install) to add it\n"
-        : "device sessions disabled — run `openllm daemon device enable`\n",
-  );
+  const status = ((): string => {
+    if (report.enabled) return "device sessions enabled";
+    if (isRoutebox()) {
+      return "device sessions are always off on a Routebox";
+    }
+    if (!deviceSessionsPrefEnabled()) {
+      return "device sessions disabled — run `openllm daemon device enable`";
+    }
+    return "device sessions not set up — this device has no usable trust anchor; run `openllm login` from the app (or re-install) to re-pair";
+  })();
+  process.stdout.write(`${status}\n`);
   return 0;
 };
 

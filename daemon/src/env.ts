@@ -718,3 +718,11 @@ export const deviceAnchorFromEnvFile = (): string | null => {
 };
 
 export const hasApiKey = (): boolean => daemonEnv().apiKey !== null;
+
+/** Parse a boolean flag value (`1`/`true`/`on`, `0`/`false`/`off`); null when unrecognized/absent. */
+export const parseFlag = (raw: string | undefined): boolean | null => {
+  const v = raw?.trim().toLowerCase();
+  if (v === "1" || v === "true" || v === "on") return true;
+  if (v === "0" || v === "false" || v === "off") return false;
+  return null;
+};

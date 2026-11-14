@@ -161,7 +161,6 @@ const isRtcRun = (v: unknown): v is TRtcRun =>
   Number.isFinite((v as TRtcRun).startedAt) &&
   typeof (v as TRtcRun).rtcEnabled === "boolean";
 
-/** Coerce parsed-unknown JSON into a valid state, field by field. */
 /** Keep only nonce→expiry entries whose expiry is still in the future. */
 export const pruneDisableNonces = (
   raw: unknown,
@@ -171,7 +170,6 @@ export const pruneDisableNonces = (
   const out: Record<string, number> = {};
   for (const [nonce, until] of Object.entries(raw)) {
     if (
-      typeof nonce === "string" &&
       nonce.length > 0 &&
       typeof until === "number" &&
       Number.isFinite(until) &&
@@ -183,6 +181,7 @@ export const pruneDisableNonces = (
   return out;
 };
 
+/** Coerce parsed-unknown JSON into a valid state, field by field. */
 const coerceState = (v: unknown): TDaemonState => {
   if (typeof v !== "object" || v === null) return DEFAULT_STATE;
   const raw = v as {
@@ -278,6 +277,17 @@ const writeStateAtomic = (state: TDaemonState): boolean => {
     closeSync(fd);
     fd = null;
     renameSync(tmp, stateFilePath());
+    // Best-effort: fsync the directory so the rename (a nonce burn) is durable.
+    try {
+      const dirFd = openSync(stateDir(), "r");
+      try {
+        fsyncSync(dirFd);
+      } finally {
+        closeSync(dirFd);
+      }
+    } catch {
+      // directory fsync is unsupported on some platforms
+    }
     return true;
   } catch {
     if (fd !== null) {

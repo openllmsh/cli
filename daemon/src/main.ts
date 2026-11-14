@@ -620,15 +620,15 @@ export const main = async (): Promise<void> => {
           return handleLocalAgentHook(req, server.requestIP(req)?.address);
         }
         if (url.pathname === AGENT_LOCAL_PATH) {
-          const sessionsRefusal = localAgentSessionsFlagRefusal();
-          if (sessionsRefusal !== null) {
-            return localAgentRefusalResponse(sessionsRefusal);
-          }
           const refusal = localAgentRefusal(
             req,
             server.requestIP(req)?.address,
           );
           if (refusal !== null) return localAgentRefusalResponse(refusal);
+          const sessionsRefusal = localAgentSessionsFlagRefusal();
+          if (sessionsRefusal !== null) {
+            return localAgentRefusalResponse(sessionsRefusal);
+          }
           if (agentRuntime?.activeAgentDispatcher() == null) {
             return new Response(
               JSON.stringify({ error: "agent_unavailable" }),

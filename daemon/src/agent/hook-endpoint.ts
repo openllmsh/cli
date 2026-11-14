@@ -37,12 +37,12 @@ export const handleLocalAgentHook = async (
   req: Request,
   remoteAddress: string | null | undefined,
 ): Promise<Response> => {
+  const refusal = localAgentRefusal(req, remoteAddress);
+  if (refusal !== null) return localAgentRefusalResponse(refusal);
   const sessionsRefusal = localAgentSessionsFlagRefusal();
   if (sessionsRefusal !== null) {
     return localAgentRefusalResponse(sessionsRefusal);
   }
-  const refusal = localAgentRefusal(req, remoteAddress);
-  if (refusal !== null) return localAgentRefusalResponse(refusal);
   if (req.method !== "POST") return json(405, { error: "method_not_allowed" });
   const text = await req.text();
   if (text.length > HOOK_BODY_MAX_BYTES)
