@@ -244,12 +244,13 @@ export const applyDeviceSessionsDisable = async (
   if (disableNoncesSeen.has(command.nonce)) {
     return { ok: false, reason: "replayed_nonce" };
   }
+  const set = setDeviceSessionsEnabled(false);
+  // Disable never returns `routing_box` (only enable does). A failed persist
+  // leaves the nonce unburned so the same statement can be retried.
+  if (!set.ok) return { ok: false, reason: "persist_failed" };
   disableNoncesSeen.set(
     command.nonce,
     command.ts + DEVICE_SESSIONS_DISABLE_TS_WINDOW_MS,
   );
-  const set = setDeviceSessionsEnabled(false);
-  // Disable never returns `routing_box` (only enable does).
-  if (!set.ok) return { ok: false, reason: "persist_failed" };
   return { ok: true, changed: set.changed };
 };
