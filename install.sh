@@ -1321,11 +1321,14 @@ fi
 # already stored it as OPENLLM_DEVICE_ANCHOR (never exported); `daemon anchor`
 # validates it, re-writes the same two lines and pins. The anchored key goes
 # over stdin (never argv); the daemon prints only the bare key, discarded.
-# Sessions default on when the anchor is present (OPENLLM_DEVICE_SESSIONS defaults on; disable writes 0).
+# Installing with the anchor is the sessions opt-in, so turn them on here
+# (a re-install after a Turn off included); disable writes 0 and keeps the
+# anchor. A routing box refuses the enable and keeps them off.
 if [ -n "$SUPPLIED_ANCHOR" ]; then
   printf '%s.%s' "$SUPPLIED_KEY" "$SUPPLIED_ANCHOR" \
     | "$BIN_DIR/openllm" daemon anchor >/dev/null \
     || die "the device trust anchor was rejected — copy the install command from the dashboard again"
+  "$BIN_DIR/openllm" daemon device enable >/dev/null 2>&1 || true
 fi
 SUPPLIED_ANCHOR=""
 

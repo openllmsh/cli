@@ -186,7 +186,7 @@ const anchorResponse = async (req: Request): Promise<Response> => {
   if (!isOpenllmDeviceAnchorSyntax(input.anchor)) {
     return anchorRefusal(400, "malformed_anchor");
   }
-  const result = installDeviceAnchor(`${key}.${input.anchor}`, "keep");
+  const result = installDeviceAnchor(`${key}.${input.anchor}`);
   if (!result.ok) {
     return anchorRefusal(
       result.reason === "persist_failed" ? 500 : 400,

@@ -94,13 +94,6 @@ export type TInstallDeviceAnchorResult =
  */
 export const installDeviceAnchor = (
   anchoredKey: string,
-  /**
-   * `on` (the default: install and `openllm login`, a person at this
-   * machine) turns sessions on. `keep` (the desktop app's automatic hand-over
-   * after pairing) turns them on only with a first anchor, so a deliberate
-   * disable is never undone by a re-pair.
-   */
-  sessions: "on" | "keep" = "on",
 ): TInstallDeviceAnchorResult => {
   const split = splitAnchoredApiKey(anchoredKey);
   if (split === null) return { ok: false, reason: "malformed" };
@@ -112,11 +105,15 @@ export const installDeviceAnchor = (
   }
   const controlPubkey = anchor.controlPubkey;
   anchor.pairSecret.fill(0);
-  // A routing box takes the anchor (WebRTC needs the pin) but keeps
-  // sessions locked off.
+  // A NEW anchor (a first pairing, a new key, a vault rotation) turns
+  // sessions on: pairing with one is the opt-in. Handing over the anchor this
+  // device already holds (it is derived from the seed and key id, so a
+  // re-pair of the same key repeats it exactly) keeps the user's choice, so a
+  // deliberate Turn off is never undone by a re-pair. Install turns sessions
+  // on explicitly (`device enable`). A routing box takes the anchor (WebRTC
+  // needs the pin) but keeps sessions locked off.
   const sessionsOn =
-    !isRoutingBox() &&
-    (sessions === "on" || deviceAnchorFromEnvFile() === null);
+    !isRoutingBox() && deviceAnchorFromEnvFile() !== split.anchor;
   if (
     !writeEnvFileVars(
       {
