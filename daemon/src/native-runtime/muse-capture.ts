@@ -1191,15 +1191,19 @@ const inputWithoutSpawnPolicy = (input: unknown): unknown[] | null => {
 /** The namespace muse-bin files our per-turn MCP server's tools under. */
 const MUSE_CALLER_TOOL_NAMESPACE = MUSE_MCP_WIRE_PREFIX.slice(0, -1);
 
-/** How many of the caller's tools one captured tool entry carries. */
-const callerToolsIn = (tool: unknown): number => {
-  if (!isRecord(tool) || typeof tool.name !== "string") return 0;
+/** The caller tool names one captured tool entry carries. */
+const callerToolNamesIn = (tool: unknown): readonly string[] => {
+  if (!isRecord(tool) || typeof tool.name !== "string") return [];
   if (tool.type === "namespace") {
-    return tool.name === MUSE_CALLER_TOOL_NAMESPACE && Array.isArray(tool.tools)
-      ? tool.tools.length
-      : 0;
+    if (tool.name !== MUSE_CALLER_TOOL_NAMESPACE || !Array.isArray(tool.tools))
+      return [];
+    return tool.tools.flatMap((leaf) =>
+      isRecord(leaf) && typeof leaf.name === "string" ? [leaf.name] : [],
+    );
   }
-  return tool.name.startsWith(MUSE_MCP_WIRE_PREFIX) ? 1 : 0;
+  return tool.name.startsWith(MUSE_MCP_WIRE_PREFIX)
+    ? [tool.name.slice(MUSE_MCP_WIRE_PREFIX.length)]
+    : [];
 };
 
 /**
@@ -1215,21 +1219,23 @@ const callerToolsIn = (tool: unknown): number => {
  */
 export const museCapturedCallerToolsMissing = (
   body: Uint8Array | null,
-  expectedCallerTools: number,
+  expectedCallerTools: ReadonlySet<string>,
 ): string | null => {
-  if (expectedCallerTools === 0) return null;
+  if (expectedCallerTools.size === 0) return null;
   let parsed: unknown;
   try {
     parsed = JSON.parse(new TextDecoder().decode(body ?? new Uint8Array()));
   } catch {
     return "muse captured body is not JSON; cannot confirm caller tools";
   }
-  const carried =
+  const carried = new Set(
     isRecord(parsed) && Array.isArray(parsed.tools)
-      ? parsed.tools.reduce((n: number, tool) => n + callerToolsIn(tool), 0)
-      : 0;
-  if (carried >= expectedCallerTools) return null;
-  return `muse captured request lost the caller's tools (${carried} of ${expectedCallerTools})`;
+      ? parsed.tools.flatMap(callerToolNamesIn)
+      : [],
+  );
+  const missing = [...expectedCallerTools].filter((name) => !carried.has(name));
+  if (missing.length === 0) return null;
+  return `muse captured request lost ${missing.length} of the caller's ${expectedCallerTools.size} tool(s)`;
 };
 
 /**
@@ -1650,7 +1656,7 @@ export const runMuseNativeCapture = async (
         validateEnvelope: (envelope) =>
           museCapturedCallerToolsMissing(
             envelope.body,
-            callerToolNameMap.callerNames.size,
+            callerToolNameMap.callerNames,
           ),
         suppressReason:
           "muse original external send suppressed; daemon owns the exchange",
