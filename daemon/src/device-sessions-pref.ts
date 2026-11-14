@@ -39,13 +39,15 @@ export type TSetDeviceSessionsResult =
 
 /**
  * Persist the device-sessions flag. Enable is refused on a routing box
- * (sessions stay locked off there); a disable there is a harmless no-op.
+ * (sessions stay locked off there). Disable on a routing box is a true no-op
+ * — no env-file write — because sessions are already locked off there.
  */
 export const setDeviceSessionsEnabled = (
   enabled: boolean,
 ): TSetDeviceSessionsResult => {
-  if (enabled && isRoutingBox()) {
-    return { ok: false, reason: "routing_box" };
+  if (isRoutingBox()) {
+    if (enabled) return { ok: false, reason: "routing_box" };
+    return { ok: true, changed: false };
   }
   if (fileFlag() === enabled) return { ok: true, changed: false };
   const written = writeEnvFileVars(

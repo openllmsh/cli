@@ -114,6 +114,12 @@ export type TDaemonState = {
   readonly rtcCrashes?: readonly number[];
   /** The daemon version {@link rtcCrashes} belongs to — a version change discards it. */
   readonly rtcCrashesVersion?: string | null;
+  /**
+   * Nonces of control-signed device-sessions disables already applied, keyed to
+   * the ms when their `ts` window closes. Survives restarts so a replay after a
+   * local re-enable (or a daemon restart inside the window) is still refused.
+   */
+  readonly deviceSessionsDisableNonces?: Readonly<Record<string, number>>;
 };
 
 /**
@@ -153,6 +159,27 @@ const isRtcRun = (v: unknown): v is TRtcRun =>
   typeof (v as TRtcRun).rtcEnabled === "boolean";
 
 /** Coerce parsed-unknown JSON into a valid state, field by field. */
+/** Keep only nonce→expiry entries whose expiry is still in the future. */
+export const pruneDisableNonces = (
+  raw: unknown,
+  now: number = Date.now(),
+): Record<string, number> => {
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return {};
+  const out: Record<string, number> = {};
+  for (const [nonce, until] of Object.entries(raw)) {
+    if (
+      typeof nonce === "string" &&
+      nonce.length > 0 &&
+      typeof until === "number" &&
+      Number.isFinite(until) &&
+      until >= now
+    ) {
+      out[nonce] = until;
+    }
+  }
+  return out;
+};
+
 const coerceState = (v: unknown): TDaemonState => {
   if (typeof v !== "object" || v === null) return DEFAULT_STATE;
   const raw = v as {
@@ -167,6 +194,7 @@ const coerceState = (v: unknown): TDaemonState => {
     rtcRun?: unknown;
     rtcCrashes?: unknown;
     rtcCrashesVersion?: unknown;
+    deviceSessionsDisableNonces?: unknown;
   };
   const attempts =
     typeof raw.updateAttempts === "object" && raw.updateAttempts !== null
@@ -213,6 +241,7 @@ const coerceState = (v: unknown): TDaemonState => {
     raw.rtcCrashesVersion.length > 0
       ? raw.rtcCrashesVersion
       : undefined;
+  const disableNonces = pruneDisableNonces(raw.deviceSessionsDisableNonces);
   return {
     updateAttempts: {
       ...(isAttempt(attempts.daemon) ? { daemon: attempts.daemon } : {}),
@@ -225,6 +254,9 @@ const coerceState = (v: unknown): TDaemonState => {
     ...(isRtcRun(raw.rtcRun) ? { rtcRun: raw.rtcRun } : {}),
     ...(rtcCrashes.length > 0 ? { rtcCrashes } : {}),
     ...(rtcCrashesVersion !== undefined ? { rtcCrashesVersion } : {}),
+    ...(Object.keys(disableNonces).length > 0
+      ? { deviceSessionsDisableNonces: disableNonces }
+      : {}),
   };
 };
 

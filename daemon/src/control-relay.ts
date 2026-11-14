@@ -644,10 +644,11 @@ const runCommandInAccount = async (
             result: { error: AUTO_UPDATE_LOCKED_MESSAGE, auto_update: true },
           };
         }
-        // Confirm the write actually took before acking success — the persist
-        // can fail silently (read-only state dir / full disk; setAutoUpdate logs
-        // + swallows it). `autoUpdateEnabled` reads the flag back fresh, so a
-        // mismatch means the effective state isn't what was requested → error.
+        // Confirm the write actually took before acking success — a rare race
+        // (another writer) could still leave the effective value mismatched
+        // even though setAutoUpdate now returns false on a failed persist.
+        // `autoUpdateEnabled` reads the flag back fresh, so a mismatch means
+        // the effective state isn't what was requested → error.
         const persisted = autoUpdateEnabled();
         if (persisted !== enabled) {
           return {

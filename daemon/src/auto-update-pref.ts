@@ -49,8 +49,10 @@ export const AUTO_UPDATE_LOCKED_MESSAGE =
 
 /**
  * Persist the auto-update opt-in into the env file (`0600`, merge) and update
- * the in-process env so the next check sees it immediately. Returns false,
- * writing nothing, when the request is to turn it off on a routing box.
+ * the in-process env so the next check sees it immediately. Returns false —
+ * and leaves `process.env` alone — when the request is to turn it off on a
+ * routing box, or when the env-file write fails (same posture as
+ * {@link setDeviceSessionsEnabled}).
  */
 export const setAutoUpdate = (enabled: boolean): boolean => {
   if (!enabled && isRoutingBox()) return false;
@@ -60,6 +62,7 @@ export const setAutoUpdate = (enabled: boolean): boolean => {
       "auto-update",
       safeDiagnosticMessage`failed to persist preference to the env file`,
     );
+    return false;
   }
   process.env[AUTO_UPDATE_KEY] = value;
   return true;

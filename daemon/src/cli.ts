@@ -43,6 +43,7 @@ import {
 import { loadIdentityKey } from "./keypair";
 import { logError } from "./logger";
 import { runLogs } from "./logs";
+import { isRoutingBox } from "./routing-box";
 import { runSandboxExec } from "./sandbox/exec";
 import {
   serviceRestart,
@@ -187,13 +188,16 @@ const runAutoUpdate = (args: readonly string[]): never => {
   // (`auto-update on typo`) instead of silently ignoring it.
   if (args.length <= 1) {
     if (sub === "on" || sub === "off") {
-      if (!setAutoUpdate(sub === "on")) {
-        process.stderr.write(`${AUTO_UPDATE_LOCKED_MESSAGE}\n`);
+      const wanted = sub === "on";
+      if (!setAutoUpdate(wanted)) {
+        process.stderr.write(
+          !wanted && isRoutingBox()
+            ? `${AUTO_UPDATE_LOCKED_MESSAGE}\n`
+            : "could not update auto-update preference\n",
+        );
         process.exit(1);
       }
-      process.stdout.write(
-        `auto-update ${sub === "on" ? "enabled" : "disabled"}\n`,
-      );
+      process.stdout.write(`auto-update ${wanted ? "enabled" : "disabled"}\n`);
       process.exit(0);
     }
     if (sub === undefined || sub === "status") {

@@ -64,6 +64,7 @@ import {
 } from "./env";
 import { daemonPublicKey } from "./keypair";
 import { isRoutingBox } from "./routing-box";
+import { mutateState, pruneDisableNonces, readState } from "./state-file";
 
 export type { TSetDeviceSessionsResult } from "./device-sessions-pref";
 export {
@@ -202,12 +203,22 @@ export type TApplyDeviceSessionsDisableResult =
  * is `device_not_anchored`.
  */
 /**
- * Nonces of disables already applied, until their `ts` window closes. A
- * statement the cloud relayed once must not be re-sent after the user turns
- * sessions back on locally: the cloud can't forge a disable, and it can't
- * replay one either.
+ * Burn a successfully applied disable nonce into `state.json` (0600), pruned
+ * of expired entries. Returns false when the write did not stick — the flag
+ * may already be off, but the nonce stays unburned so the statement can retry.
  */
-const disableNoncesSeen = new Map<string, number>();
+const burnDisableNonce = (
+  nonce: string,
+  until: number,
+  now: number,
+): boolean => {
+  mutateState((s) => {
+    const kept = pruneDisableNonces(s.deviceSessionsDisableNonces, now);
+    kept[nonce] = until;
+    return { ...s, deviceSessionsDisableNonces: kept };
+  });
+  return readState().deviceSessionsDisableNonces?.[nonce] === until;
+};
 
 export const applyDeviceSessionsDisable = async (
   encoded: string,
@@ -238,19 +249,23 @@ export const applyDeviceSessionsDisable = async (
   ) {
     return { ok: false, reason: "bad_sig" };
   }
-  for (const [n, until] of disableNoncesSeen) {
-    if (until < now) disableNoncesSeen.delete(n);
-  }
-  if (disableNoncesSeen.has(command.nonce)) {
+  // Durable set: survives a restart inside the ts window so a replay after a
+  // local re-enable is still refused. Prune expired entries on every check.
+  const burned = pruneDisableNonces(
+    readState().deviceSessionsDisableNonces,
+    now,
+  );
+  if (burned[command.nonce] !== undefined) {
     return { ok: false, reason: "replayed_nonce" };
   }
   const set = setDeviceSessionsEnabled(false);
   // Disable never returns `routing_box` (only enable does). A failed persist
   // leaves the nonce unburned so the same statement can be retried.
   if (!set.ok) return { ok: false, reason: "persist_failed" };
-  disableNoncesSeen.set(
-    command.nonce,
-    command.ts + DEVICE_SESSIONS_DISABLE_TS_WINDOW_MS,
-  );
+  const until = command.ts + DEVICE_SESSIONS_DISABLE_TS_WINDOW_MS;
+  // Burn only after the flag write stuck — same rule as the in-memory map.
+  if (!burnDisableNonce(command.nonce, until, now)) {
+    return { ok: false, reason: "persist_failed" };
+  }
   return { ok: true, changed: set.changed };
 };
