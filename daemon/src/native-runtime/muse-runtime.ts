@@ -102,6 +102,21 @@ export const MUSE_SERVE_SAFETY_ARGS = [
   "--disable-shell",
 ] as const;
 
+/**
+ * muse-bin 1.4.20 withholds every MCP server — our per-turn caller-tool
+ * server included — from an untrusted workspace, so the captured body
+ * carried none of the caller's tools. Every serve host runs in a fresh,
+ * empty `mkdtemp` workspace ({@link allocateMuseTurnDirs}), so trusting it
+ * loads no skills, rules or hooks of the user's.
+ */
+export const MUSE_SERVE_TRUST_ARGS = ["--trust-workspace"] as const;
+
+/** Every `muse serve` flag after the subcommand. */
+export const MUSE_SERVE_ARGS = [
+  ...MUSE_SERVE_SAFETY_ARGS,
+  ...MUSE_SERVE_TRUST_ARGS,
+] as const;
+
 export const MUSE_RPC_TIMEOUT_MS = 30_000;
 
 /**
@@ -191,10 +206,9 @@ export const wrapMuseServeSpawn = (
   museBin: string,
   opts?: TWrapMuseServeSpawnOpts,
 ): TMuseSpawnTarget => {
-  const wrapped = sandboxSpawnArgs(
-    [museBin, "serve", ...MUSE_SERVE_SAFETY_ARGS],
-    { probe: unwrapMuseServeSpawn(opts?.platform) },
-  );
+  const wrapped = sandboxSpawnArgs([museBin, "serve", ...MUSE_SERVE_ARGS], {
+    probe: unwrapMuseServeSpawn(opts?.platform),
+  });
   const command = wrapped[0];
   if (command === undefined) {
     throw new Error("sandboxSpawnArgs returned an empty argv");

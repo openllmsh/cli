@@ -74,7 +74,7 @@ import type {
   TMuseTurnSessionResult,
 } from "./muse-runtime";
 import {
-  MUSE_SERVE_SAFETY_ARGS,
+  MUSE_SERVE_ARGS,
   museTurnDeclineReason,
   openMuseTurnSession,
   wrapMuseServeSpawn,
@@ -217,7 +217,7 @@ export const museServeAcceptsBaseUrlFlag = (): boolean => false;
  */
 export const museServeCaptureArgv = (
   museBin: string,
-): ReadonlyArray<string> => [museBin, "serve", ...MUSE_SERVE_SAFETY_ARGS];
+): ReadonlyArray<string> => [museBin, "serve", ...MUSE_SERVE_ARGS];
 
 /**
  * Actual daemon spawn target for Muse MSP hosts (includes sandbox wrap).
