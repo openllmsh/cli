@@ -1191,22 +1191,21 @@ const inputWithoutSpawnPolicy = (input: unknown): unknown[] | null => {
 /** The namespace muse-bin files our per-turn MCP server's tools under. */
 const MUSE_CALLER_TOOL_NAMESPACE = MUSE_MCP_WIRE_PREFIX.slice(0, -1);
 
-/** A captured tool entry that carries at least one of the caller's tools. */
-const carriesCallerTools = (tool: unknown): boolean => {
-  if (!isRecord(tool) || typeof tool.name !== "string") return false;
+/** How many of the caller's tools one captured tool entry carries. */
+const callerToolsIn = (tool: unknown): number => {
+  if (!isRecord(tool) || typeof tool.name !== "string") return 0;
   if (tool.type === "namespace") {
-    return (
-      tool.name === MUSE_CALLER_TOOL_NAMESPACE &&
-      Array.isArray(tool.tools) &&
-      tool.tools.length > 0
-    );
+    return tool.name === MUSE_CALLER_TOOL_NAMESPACE && Array.isArray(tool.tools)
+      ? tool.tools.length
+      : 0;
   }
-  return tool.name.startsWith(MUSE_MCP_WIRE_PREFIX);
+  return tool.name.startsWith(MUSE_MCP_WIRE_PREFIX) ? 1 : 0;
 };
 
 /**
  * Why a captured primary body cannot serve a turn that registered caller
- * tools, or null when it can. muse-bin builds the body from what its MCP
+ * tools, or null when it can. Every registered tool must be there — a
+ * partial `tools/list` would leave the caller a truncated set. muse-bin builds the body from what its MCP
  * `tools/list` returned; when that came back empty (the per-turn server
  * unreachable, a discovery race), the body offers only Muse's own namespace,
  * which {@link withoutMuseNativeTools} removes — Meta would then answer a
@@ -1225,13 +1224,12 @@ export const museCapturedCallerToolsMissing = (
   } catch {
     return "muse captured body is not JSON; cannot confirm caller tools";
   }
-  if (
-    isRecord(parsed) &&
-    Array.isArray(parsed.tools) &&
-    parsed.tools.some(carriesCallerTools)
-  )
-    return null;
-  return `muse captured request lost the caller's ${expectedCallerTools} tool(s)`;
+  const carried =
+    isRecord(parsed) && Array.isArray(parsed.tools)
+      ? parsed.tools.reduce((n: number, tool) => n + callerToolsIn(tool), 0)
+      : 0;
+  if (carried >= expectedCallerTools) return null;
+  return `muse captured request lost the caller's tools (${carried} of ${expectedCallerTools})`;
 };
 
 /**
@@ -1652,7 +1650,7 @@ export const runMuseNativeCapture = async (
         validateEnvelope: (envelope) =>
           museCapturedCallerToolsMissing(
             envelope.body,
-            callerToolNameMap.wireToCaller.size,
+            callerToolNameMap.callerNames.size,
           ),
         suppressReason:
           "muse original external send suppressed; daemon owns the exchange",
