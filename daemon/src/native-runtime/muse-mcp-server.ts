@@ -13,7 +13,7 @@
  * after handoff or `stop()` cannot re-emit or continue the native turn.
  */
 
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import type { TMuseCallerTool } from "./muse-request";
 
 /**
@@ -80,6 +80,37 @@ export const MUSE_NATIVE_TOOL_PREFIX = `${MUSE_NATIVE_TOOL_NAMESPACE}.`;
 export const isMuseNativeToolName = (name: string): boolean =>
   name.startsWith(MUSE_NATIVE_TOOL_PREFIX);
 
+/** Longest function name the `/responses` wire takes, namespace included. */
+export const MUSE_WIRE_TOOL_NAME_MAX = 64;
+
+/** The namespace caller tools ride under on the `/responses` wire. */
+export const MUSE_CALLER_TOOL_NAMESPACE = MUSE_MCP_WIRE_PREFIX.slice(0, -1);
+
+const MUSE_LEAF_MAX = MUSE_WIRE_TOOL_NAME_MAX - MUSE_MCP_WIRE_PREFIX.length;
+const MUSE_LEAF_HASH_CHARS = 12;
+
+/**
+ * The leaf a caller tool is sent as under {@link MUSE_CALLER_TOOL_NAMESPACE}.
+ * A name that fits the wire's 64-character, `[A-Za-z0-9_-]` limit is kept;
+ * any other gets a stable `<head>__<hash>` alias, mapped back on return.
+ * (muse-bin shortens such names itself, under a hash we cannot reproduce.)
+ */
+export const museCallerToolLeaf = (callerToolName: string): string => {
+  if (
+    callerToolName.length <= MUSE_LEAF_MAX &&
+    /^[A-Za-z0-9_-]+$/.test(callerToolName)
+  )
+    return callerToolName;
+  const hash = createHash("sha256")
+    .update(callerToolName)
+    .digest("hex")
+    .slice(0, MUSE_LEAF_HASH_CHARS);
+  const head = callerToolName
+    .replace(/[^A-Za-z0-9_-]/g, "_")
+    .slice(0, MUSE_LEAF_MAX - MUSE_LEAF_HASH_CHARS - 2);
+  return `${head}__${hash}`;
+};
+
 export type TMuseToolNameMap = {
   /** Full Meta wire name → original caller name. Contains BOTH the
    *  dot-form ({@link museMcpWireToolName}, capture/`/responses` transport)
@@ -100,6 +131,7 @@ export const buildMuseToolNameMap = (
   for (const t of tools) {
     callerNames.add(t.name);
     wireToCaller.set(museMcpWireToolName(t.name), t.name);
+    wireToCaller.set(museMcpWireToolName(museCallerToolLeaf(t.name)), t.name);
     wireToCaller.set(museMcpApprovalWireToolName(t.name), t.name);
   }
   return { wireToCaller, callerNames };

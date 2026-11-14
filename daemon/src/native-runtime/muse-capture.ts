@@ -63,9 +63,11 @@ import {
 import type { TMuseToolNameMap } from "./muse-mcp-server";
 import {
   isMuseNativeToolName,
+  MUSE_CALLER_TOOL_NAMESPACE,
   MUSE_MCP_WIRE_PREFIX,
   MUSE_NATIVE_TOOL_NAMESPACE,
   mapMuseCapturedToolName,
+  museCallerToolLeaf,
 } from "./muse-mcp-server";
 import type { TMuseCallerTool, TMuseInputPart } from "./muse-request";
 import type {
@@ -1188,54 +1190,124 @@ const inputWithoutSpawnPolicy = (input: unknown): unknown[] | null => {
   return changed ? next : null;
 };
 
-/** The namespace muse-bin files our per-turn MCP server's tools under. */
-const MUSE_CALLER_TOOL_NAMESPACE = MUSE_MCP_WIRE_PREFIX.slice(0, -1);
+/** A tool entry carrying caller tools: our namespace, or one of its leaves. */
+const isCallerToolEntry = (tool: unknown): boolean =>
+  isRecord(tool) &&
+  typeof tool.name === "string" &&
+  (tool.type === "namespace"
+    ? tool.name === MUSE_CALLER_TOOL_NAMESPACE
+    : tool.name.startsWith(MUSE_MCP_WIRE_PREFIX));
 
-/** The caller tool names one captured tool entry carries. */
-const callerToolNamesIn = (tool: unknown): readonly string[] => {
-  if (!isRecord(tool) || typeof tool.name !== "string") return [];
-  if (tool.type === "namespace") {
-    if (tool.name !== MUSE_CALLER_TOOL_NAMESPACE || !Array.isArray(tool.tools))
-      return [];
-    return tool.tools.flatMap((leaf) =>
-      isRecord(leaf) && typeof leaf.name === "string" ? [leaf.name] : [],
-    );
+const SCHEMA_MAP_KEYS = new Set([
+  "properties",
+  "$defs",
+  "definitions",
+  "dependentSchemas",
+]);
+const SCHEMA_KEYS = new Set([
+  "items",
+  "additionalProperties",
+  "not",
+  "contains",
+  "if",
+  "then",
+  "else",
+  "propertyNames",
+  "unevaluatedProperties",
+  "unevaluatedItems",
+  "additionalItems",
+]);
+const SCHEMA_LIST_KEYS = new Set(["anyOf", "oneOf", "allOf", "prefixItems"]);
+
+/**
+ * Deepest JSON object nesting a tool schema keeps. Meta refuses a schema past
+ * 10 levels (live: HTTP 400 "exceeds the maximum nesting depth of 10
+ * levels"); counting every object and array level keeps well inside it.
+ */
+const MUSE_SCHEMA_MAX_DEPTH = 8;
+
+/**
+ * A tool's JSON schema as Meta's `/responses` accepts it, which is stricter
+ * than the caller that sent it:
+ * - regex keywords (`pattern`, `patternProperties`) are dropped. Meta checks
+ *   every pattern under its own regex engine and refuses the whole request
+ *   over one it cannot parse (live: an email regex in a Claude Code MCP tool
+ *   → HTTP 400 "is not a regex").
+ * - a sub-schema past {@link MUSE_SCHEMA_MAX_DEPTH} becomes `{}` (any value).
+ * Both only loosen what the model may send; the caller still validates the
+ * call it runs. Walks schema positions only, so a property NAMED `pattern`
+ * (Grep's) is kept.
+ */
+export const museWireSchema = (schema: unknown, depth = 0): unknown => {
+  if (Array.isArray(schema))
+    return schema.map((item) => museWireSchema(item, depth + 1));
+  if (!isRecord(schema)) return schema;
+  if (depth >= MUSE_SCHEMA_MAX_DEPTH) return {};
+  const out: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(schema)) {
+    if (key === "patternProperties") continue;
+    if (key === "pattern" && typeof value === "string") continue;
+    if (SCHEMA_MAP_KEYS.has(key) && isRecord(value)) {
+      out[key] = Object.fromEntries(
+        Object.entries(value).map(([name, sub]) => [
+          name,
+          museWireSchema(sub, depth + 2),
+        ]),
+      );
+    } else if (SCHEMA_KEYS.has(key) || SCHEMA_LIST_KEYS.has(key)) {
+      out[key] = museWireSchema(value, depth + 1);
+    } else {
+      out[key] = value;
+    }
   }
-  return tool.name.startsWith(MUSE_MCP_WIRE_PREFIX)
-    ? [tool.name.slice(MUSE_MCP_WIRE_PREFIX.length)]
-    : [];
+  return out;
 };
 
 /**
- * Why a captured primary body cannot serve a turn that registered caller
- * tools, or null when it can. Every registered tool must be there — a
- * partial `tools/list` would leave the caller a truncated set. muse-bin builds the body from what its MCP
- * `tools/list` returned; when that came back empty (the per-turn server
- * unreachable, a discovery race), the body offers only Muse's own namespace,
- * which {@link withoutMuseNativeTools} removes — Meta would then answer a
- * request with no tools at all, the hop would "succeed", and the caller (a
- * Claude Code subagent) would conclude it has no tools. Declining instead
- * lets the walker try the next hop.
+ * The caller's tools as one `/responses` namespace, built from the caller's
+ * own list rather than from what muse-bin carried. muse-bin defers MCP tools
+ * behind its own `muse.tool_search` once they pass its prompt budget (a
+ * Claude Code session's ~100+ tools: every one gone from the body), renames
+ * long or dotted names under a hash, and drops a tool whose schema is not an
+ * object — and `muse.tool_search` is a built-in nobody here can run.
  */
-export const museCapturedCallerToolsMissing = (
+export const museCallerToolNamespace = (
+  tools: ReadonlyArray<TMuseCallerTool>,
+): Record<string, unknown> => ({
+  type: "namespace",
+  name: MUSE_CALLER_TOOL_NAMESPACE,
+  description: "Tools provided by an MCP server.",
+  tools: tools.map((tool) => ({
+    type: "function",
+    name: museCallerToolLeaf(tool.name),
+    description: tool.description ?? "",
+    parameters:
+      isRecord(tool.parameters) && tool.parameters.type === "object"
+        ? museWireSchema(tool.parameters)
+        : { type: "object", properties: {} },
+    strict: false,
+  })),
+});
+
+/**
+ * Why a captured primary body cannot carry a turn that registered caller
+ * tools, or null when it can: the tools are put back into it on send
+ * ({@link withoutMuseNativeTools}), which needs a JSON object.
+ */
+export const museCapturedBodyUnusable = (
   body: Uint8Array | null,
-  expectedCallerTools: ReadonlySet<string>,
+  callerToolCount: number,
 ): string | null => {
-  if (expectedCallerTools.size === 0) return null;
-  let parsed: unknown;
+  if (callerToolCount === 0) return null;
   try {
-    parsed = JSON.parse(new TextDecoder().decode(body ?? new Uint8Array()));
+    const parsed: unknown = JSON.parse(
+      new TextDecoder().decode(body ?? new Uint8Array()),
+    );
+    if (isRecord(parsed)) return null;
   } catch {
-    return "muse captured body is not JSON; cannot confirm caller tools";
+    // Not JSON: falls through to the refusal.
   }
-  const carried = new Set(
-    isRecord(parsed) && Array.isArray(parsed.tools)
-      ? parsed.tools.flatMap(callerToolNamesIn)
-      : [],
-  );
-  const missing = [...expectedCallerTools].filter((name) => !carried.has(name));
-  if (missing.length === 0) return null;
-  return `muse captured request lost ${missing.length} of the caller's ${expectedCallerTools.size} tool(s)`;
+  return "muse captured body is not a JSON object; cannot add the caller's tools";
 };
 
 /**
@@ -1244,12 +1316,14 @@ export const museCapturedCallerToolsMissing = (
  * could not run anywhere: offering them only made the model pick a tool
  * nobody executes. The caller's own tools (our MCP server's) and hosted
  * tools (`web_search`) stay, so the model calls those instead, and the
- * instructions say so. Anything that is not a JSON body with a `tools` array
- * passes through untouched.
+ * instructions say so. With `callerTools`, whatever muse-bin carried of them
+ * is replaced by {@link museCallerToolNamespace}. Anything that is not a JSON
+ * body with a `tools` array (or caller tools to add) passes through untouched.
  */
 export const withoutMuseNativeTools = (
   body: string,
   retry = false,
+  callerTools: ReadonlyArray<TMuseCallerTool> = [],
 ): string | null => {
   let parsed: unknown;
   try {
@@ -1257,8 +1331,19 @@ export const withoutMuseNativeTools = (
   } catch {
     return null;
   }
-  if (!isRecord(parsed) || !Array.isArray(parsed.tools)) return null;
-  const tools = parsed.tools.filter((tool) => !isMuseNativeTool(tool));
+  if (!isRecord(parsed)) return null;
+  const addCallerTools = callerTools.length > 0;
+  if (!Array.isArray(parsed.tools) && !addCallerTools) return null;
+  const carried: readonly unknown[] = Array.isArray(parsed.tools)
+    ? parsed.tools
+    : [];
+  const kept = carried.filter(
+    (tool) =>
+      !isMuseNativeTool(tool) && !(addCallerTools && isCallerToolEntry(tool)),
+  );
+  const tools = addCallerTools
+    ? [museCallerToolNamespace(callerTools), ...kept]
+    : kept;
   const input = inputWithoutSpawnPolicy(parsed.input);
   const instructions =
     typeof parsed.instructions === "string"
@@ -1268,7 +1353,8 @@ export const withoutMuseNativeTools = (
     typeof parsed.instructions === "string" &&
     instructions !== parsed.instructions;
   if (
-    tools.length === parsed.tools.length &&
+    !addCallerTools &&
+    tools.length === carried.length &&
     input === null &&
     !instructionsChanged
   )
@@ -1306,9 +1392,14 @@ const MUSE_PEEK_MAX_BYTES = 256 * 1024;
 const strippedRequest = async (
   request: Request,
   retry: boolean,
+  callerTools: ReadonlyArray<TMuseCallerTool>,
 ): Promise<Request> => {
   if (request.body === null) return request;
-  const body = withoutMuseNativeTools(await request.clone().text(), retry);
+  const body = withoutMuseNativeTools(
+    await request.clone().text(),
+    retry,
+    callerTools,
+  );
   if (body === null) return request;
   const headers = new Headers(request.headers);
   headers.delete("content-length");
@@ -1409,12 +1500,18 @@ const forwardUnlessStray = async (
 export const createMuseCapturedDispatchSender = (args: {
   readonly session: TRequestCaptureSession;
   readonly fetchImpl?: TMuseCaptureFetch;
+  /** The caller's tools, sent in place of whatever muse-bin carried. */
+  readonly callerTools?: ReadonlyArray<TMuseCallerTool>;
 }): TCapturedDispatchSender => {
   const fetchImpl = args.fetchImpl ?? fetch;
+  const callerTools = args.callerTools ?? [];
   return async (request, _envelope, signal): Promise<Response> => {
-    const first = await fetchImpl(await strippedRequest(request, false), {
-      signal,
-    });
+    const first = await fetchImpl(
+      await strippedRequest(request, false, callerTools),
+      {
+        signal,
+      },
+    );
     if (first.ok) args.session.markUpstreamAccepted();
     const init = {
       status: first.status,
@@ -1433,7 +1530,7 @@ export const createMuseCapturedDispatchSender = (args: {
             )
               break;
             const again = await fetchImpl(
-              await strippedRequest(request, true),
+              await strippedRequest(request, true, callerTools),
               {
                 signal,
               },
@@ -1646,6 +1743,7 @@ export const runMuseNativeCapture = async (
     const sender = createMuseCapturedDispatchSender({
       session: handle.session,
       fetchImpl: params.fetchImpl,
+      callerTools: params.tools ?? [],
     });
     let dispatched: Awaited<ReturnType<typeof runCapturedDispatch>>;
     try {
@@ -1654,10 +1752,7 @@ export const runMuseNativeCapture = async (
         sender,
         signal: params.signal,
         validateEnvelope: (envelope) =>
-          museCapturedCallerToolsMissing(
-            envelope.body,
-            callerToolNameMap.callerNames,
-          ),
+          museCapturedBodyUnusable(envelope.body, params.tools?.length ?? 0),
         suppressReason:
           "muse original external send suppressed; daemon owns the exchange",
       });
