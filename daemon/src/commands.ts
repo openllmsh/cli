@@ -46,9 +46,9 @@ export const COMMANDS: readonly TCommand[] = [
   },
   {
     name: "device",
-    args: "<disable|status>",
+    args: "<enable|disable|status>",
     description:
-      "Disable device sessions on this machine (removes the trust anchor) or show status",
+      "Enable or disable device sessions on this machine (the trust anchor stays) or show status",
   },
   {
     name: "identity",
@@ -104,7 +104,7 @@ export const COMMAND_ARGS: Readonly<Record<string, readonly string[]>> = {
   "auto-update": [...AUTO_UPDATE_ACTIONS],
   logs: ["-f", "--follow", "-n", "--lines"],
   uninstall: ["--yes", "-y", "--keep-logins", "--remove-logins"],
-  device: ["disable", "status"],
+  device: ["enable", "disable", "status"],
 };
 
 const padRight = (value: string, width: number): string =>

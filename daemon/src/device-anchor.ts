@@ -10,19 +10,24 @@
  *   (`via: "anchor"`) is DERIVED from the env file at every hydrate — see
  *   `device-access-verify.ts`. The anchor never enters `process.env`, a child
  *   env, a vendor config, a log, or the network. Re-running install/update
- *   with a new anchor is the rotation path.
- * - {@link removeDeviceAnchor} — blank `OPENLLM_DEVICE_ANCHOR` (sessions off).
- *   Used by `openllm daemon device disable`, the desktop loopback remove, and
- *   the control-signed remote disable.
+ *   with a new anchor is the rotation path. Installing also turns device
+ *   sessions on ({@link setDeviceSessionsEnabled}).
+ * - {@link setDeviceSessionsEnabled} — write `OPENLLM_DEVICE_SESSIONS`
+ *   (`1`/`0`) next to the anchor (see `device-sessions-pref.ts`). Disable is
+ *   reachable from the CLI, the desktop loopback control, and the
+ *   control-signed remote disable; enable is local/install only (no remote
+ *   enable). A routing box always refuses enable — sessions stay off there,
+ *   like auto-update stays on.
  * - {@link deviceDpkProof} — `HMAC-SHA256(pair_secret, label || key_id ||
  *   dpk)`, published in `DaemonStatus.device_sessions.dpk_proof` so any
  *   browser holding the control seed can trust this daemon's X25519 key.
  * - {@link applyDeviceSessionsDisable} — the control-signed remote disable
  *   (`set_device_sessions`), verified against the anchored pin, then
- *   {@link removeDeviceAnchor}.
+ *   {@link setDeviceSessionsEnabled}(false). The anchor is never removed.
  *
- * Sessions on == the anchor is present. There is no separate enabled flag and
- * no remote enable — re-enable writes the anchor again.
+ * Sessions on == the anchor is present (agent-eligible pin) AND the sessions
+ * flag is not off. The flag defaults ON when absent. WebRTC/pin eligibility
+ * follows the anchor alone and is unaffected by the flag.
  *
  * Dpk proof + grant verify thin-wrap `@openllmsh/sdk/vault`; pin/env I/O stay here.
  */
@@ -43,6 +48,11 @@ import {
   verifyDeviceGrantNode,
 } from "./device-access-verify";
 import {
+  DEVICE_SESSIONS_ENV,
+  deviceSessionsPrefEnabled,
+  setDeviceSessionsEnabled,
+} from "./device-sessions-pref";
+import {
   applyPersistedApiKey,
   DEVICE_ANCHOR_ENV,
   daemonApiKeyId,
@@ -54,6 +64,13 @@ import {
 } from "./env";
 import { daemonPublicKey } from "./keypair";
 import { isRoutingBox } from "./routing-box";
+
+export type { TSetDeviceSessionsResult } from "./device-sessions-pref";
+export {
+  DEVICE_SESSIONS_ENV,
+  deviceSessionsPrefEnabled,
+  setDeviceSessionsEnabled,
+} from "./device-sessions-pref";
 
 export type TInstallDeviceAnchorResult =
   | {
@@ -71,8 +88,9 @@ export type TInstallDeviceAnchorResult =
 
 /**
  * Accept an anchored key: write the bare key and the anchor as two lines of
- * the runtime env file, then re-read the pin (derived from that file) to
- * confirm it is the anchor's control key. Returns the bare key.
+ * the runtime env file, turn device sessions on, then re-read the pin
+ * (derived from that file) to confirm it is the anchor's control key.
+ * Returns the bare key.
  */
 export const installDeviceAnchor = (
   anchoredKey: string,
@@ -87,14 +105,22 @@ export const installDeviceAnchor = (
   }
   const controlPubkey = anchor.controlPubkey;
   anchor.pairSecret.fill(0);
+  // A routing box still takes the anchor (WebRTC needs the pin) but keeps
+  // sessions locked off — don't write OPENLLM_DEVICE_SESSIONS=1 there.
+  const sessionsOn = !isRoutingBox();
   if (
     !writeEnvFileVars(
-      { OPENLLM_API_KEY: split.key, [DEVICE_ANCHOR_ENV]: split.anchor },
+      {
+        OPENLLM_API_KEY: split.key,
+        [DEVICE_ANCHOR_ENV]: split.anchor,
+        ...(sessionsOn ? { [DEVICE_SESSIONS_ENV]: "1" } : {}),
+      },
       envFilePath(),
     )
   ) {
     return { ok: false, reason: "persist_failed" };
   }
+  if (sessionsOn) process.env[DEVICE_SESSIONS_ENV] = "1";
   applyPersistedApiKey(split.key);
   invalidateDeviceAccessPin();
   const pin = getDeviceAccessPin();
@@ -107,33 +133,6 @@ export const installDeviceAnchor = (
     keyId,
     controlFingerprint: deviceKeyFingerprint(controlPubkey) ?? "",
   };
-};
-
-export type TRemoveDeviceAnchorResult =
-  | { readonly ok: true; readonly changed: boolean }
-  | { readonly ok: false; readonly reason: "persist_failed" | "routing_box" };
-
-/**
- * Blank `OPENLLM_DEVICE_ANCHOR` in the runtime env file and drop the derived
- * pin. Idempotent when already absent. Sessions off == no anchor.
- */
-export const removeDeviceAnchor = (): TRemoveDeviceAnchorResult => {
-  // A routing box's anchor is what lets a browser reach it over WebRTC, and
-  // its sessions are already off (locked, like auto-update): never blank it.
-  if (isRoutingBox()) return { ok: false, reason: "routing_box" };
-  const had = deviceAnchorFromEnvFile() !== null;
-  if (!had) {
-    invalidateDeviceAccessPin();
-    return { ok: true, changed: false };
-  }
-  if (!writeEnvFileVars({ [DEVICE_ANCHOR_ENV]: "" }, envFilePath())) {
-    return { ok: false, reason: "persist_failed" };
-  }
-  invalidateDeviceAccessPin();
-  if (deviceAnchorFromEnvFile() !== null) {
-    return { ok: false, reason: "persist_failed" };
-  }
-  return { ok: true, changed: true };
 };
 
 /**
@@ -160,16 +159,17 @@ export const deviceDpkProof = async (
   }
 };
 
-/** `DaemonStatus.device_sessions` — sessions on == env-file anchor present. */
+/**
+ * `DaemonStatus.device_sessions` — sessions on == env-file anchor present,
+ * agent-eligible pin, sessions flag not off, and not a routing box.
+ */
 export const deviceSessionsReport =
   async (): Promise<TDeviceSessionsReport> => {
     const proof = await deviceDpkProof();
     return {
-      // A routing box keeps its anchor (its control pin is what lets a
-      // browser open a direct WebRTC tunnel to it) but never runs sessions:
-      // `agentSessionRefusal` refuses them, and this says so.
-      anchored:
+      enabled:
         !isRoutingBox() &&
+        deviceSessionsPrefEnabled() &&
         deviceAnchorFromEnvFile() !== null &&
         isAgentEligiblePin(getDeviceAccessPin()),
       ...(proof === null ? {} : { dpk_proof: proof }),
@@ -182,25 +182,23 @@ export type TDeviceSessionsDisableRefusal =
   | "device_not_anchored"
   | "stale_ts"
   | "bad_sig"
-  | "persist_failed"
-  | "routing_box";
+  | "persist_failed";
 
 export type TApplyDeviceSessionsDisableResult =
   | { readonly ok: true; readonly changed: boolean }
   | { readonly ok: false; readonly reason: TDeviceSessionsDisableRefusal };
 
 /**
- * Verify one signed `{ v, key_id, ts, nonce }` disable and blank the anchor.
+ * Verify one signed `{ v, key_id, ts, nonce }` disable and turn sessions off.
  * Requires an ANCHORED control pin (a cloud-chosen pin could be the cloud's
  * own key), this daemon's key id, a fresh `ts`, and a signature by the pinned
- * key. Idempotent when already unanchored after a successful verify would have
- * applied — unanchored without a valid statement is `device_not_anchored`.
+ * key. The anchor is kept. Idempotent when already off after a successful
+ * verify — unanchored without a valid statement is `device_not_anchored`.
  */
 export const applyDeviceSessionsDisable = async (
   encoded: string,
   now: number = Date.now(),
 ): Promise<TApplyDeviceSessionsDisableResult> => {
-  if (isRoutingBox()) return { ok: false, reason: "routing_box" };
   const command = decodeDeviceSessionsDisable(encoded);
   if (command === null) return { ok: false, reason: "malformed" };
   const keyId = daemonApiKeyId();
@@ -226,7 +224,8 @@ export const applyDeviceSessionsDisable = async (
   ) {
     return { ok: false, reason: "bad_sig" };
   }
-  const removed = removeDeviceAnchor();
-  if (!removed.ok) return { ok: false, reason: removed.reason };
-  return { ok: true, changed: removed.changed };
+  const set = setDeviceSessionsEnabled(false);
+  // Disable never returns `routing_box` (only enable does).
+  if (!set.ok) return { ok: false, reason: "persist_failed" };
+  return { ok: true, changed: set.changed };
 };

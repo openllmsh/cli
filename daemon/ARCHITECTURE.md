@@ -868,26 +868,29 @@ silent signaling timeouts. Detail lives in
   cloud-driven legacy→control upgrade; a cloud-sent null never
   clears a pin. Agent streams (`requireDpk`) refuse when the env-file
   trust anchor is absent or the pin is unanchored/legacy, with
-  `device_not_anchored` (re-checked on every agent OPEN; the retired
-  `device_sessions_disabled` code stays in the closed vocabulary for older
-  peers but is never emitted); RTC degrades such an offer, or a dpk-less
-  grant, to a tunnel-only session.
+  `device_not_anchored`, and when `OPENLLM_DEVICE_SESSIONS` is off (or
+  this is a routing box) with `device_sessions_disabled` (re-checked on
+  every agent OPEN); RTC degrades such an offer, or a dpk-less grant, to
+  a tunnel-only session. WebRTC/pin eligibility follows the anchor alone
+  and is unaffected by the sessions flag.
   `device-anchor.ts` owns the anchor: it lives only in the env file (0600;
   never in `state.json`, never in `process.env` or a child env, never logged
   or sent), publishes `DaemonStatus.device_sessions`
-  (`anchored`, `dpk_proof = HMAC(pair_secret, "openllm-dpk-proof-v1" ||
+  (`enabled`, `dpk_proof = HMAC(pair_secret, "openllm-dpk-proof-v1" ||
   key_id || pubkey)`) so a browser holding the control seed trusts this
   daemon's X25519 key without a first-use window, and applies the
   control-signed `set_device_sessions` **disable** (anchored pin, this key
-  id, fresh `ts`) which blanks `OPENLLM_DEVICE_ANCHOR`. Sessions on == the
-  env-file anchor is present — there is no separate enabled flag and no
-  remote enable. `openllm daemon device disable|status` is the local
+  id, fresh `ts`) which sets `OPENLLM_DEVICE_SESSIONS=0` — the anchor is
+  never removed. Sessions on == the env-file anchor is present AND the
+  sessions flag is not off (default on when absent); there is no remote
+  enable. `openllm daemon device enable|disable|status` is the local
   switch; the desktop app toggles over loopback (`POST /local/device-anchor`
-  install or `{ remove: true }`). `openllm daemon identity` and
-  `DaemonStatus.device_access_pin` show the pin's fingerprint and `via`
-  (agent eligibility is reported once, as `device_sessions.anchored`);
-  loopback `GET /local/identity` returns the same plus `device_sessions`
-  (`local-device-control.ts`).
+  install or `{ sessions: true|false }`). A routing box always reports
+  sessions off and refuses enable (like auto-update stays on there).
+  `openllm daemon identity` and `DaemonStatus.device_access_pin` show the
+  pin's fingerprint and `via` (agent eligibility is reported once, as
+  `device_sessions.enabled`); loopback `GET /local/identity` returns the
+  same plus `device_sessions` (`local-device-control.ts`).
 
 **Kill-switches.** `OPENLLM_MUX_DISABLE=1` withdraws the mux transport
 wholesale — including the terminal sessions that ride it. `OPENLLM_RTC_DISABLE=1`

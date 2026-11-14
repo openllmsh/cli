@@ -28,10 +28,12 @@
  * trust-on-first-use pins bootstrap's key (`via: "tofu"`), which serves `/v1`,
  * tunnel and realtime (RTC grant checks) and nothing else. Agent streams
  * (`requireDpk`) refuse an unanchored or legacy pin with
- * `device_not_anchored`. Sessions on == the install/loopback anchor is
- * present; there is no separate enabled flag. A legacy (DEK-derived) pin is
- * never upgraded by the cloud, and an established pin never moves except
- * along a signed rotation chain or a local root.
+ * `device_not_anchored`, and refuse when `OPENLLM_DEVICE_SESSIONS` is off
+ * (or this is a routing box) with `device_sessions_disabled`. Sessions on ==
+ * the install/loopback anchor is present AND the sessions flag is not off.
+ * A legacy (DEK-derived) pin is never upgraded by the cloud, and an
+ * established pin never moves except along a signed rotation chain or a
+ * local root. WebRTC/pin eligibility follows the anchor alone.
  */
 
 import { createHash, createPublicKey } from "node:crypto";
@@ -47,6 +49,7 @@ import {
   formatKeyFingerprint,
 } from "@openllmsh/sdk/tunnel";
 import { verifyDeviceGrant } from "@openllmsh/sdk/vault";
+import { deviceSessionsPrefEnabled } from "./device-sessions-pref";
 import { deviceAnchorFromEnvFile } from "./env";
 import { daemonPublicKey } from "./keypair";
 import { logWarn, safeDiagnosticMessage } from "./logger";
@@ -567,16 +570,15 @@ export const createDeviceAccessVerify = (
   };
 
   const agentRefusal = (): (typeof AGENT_PIN_REFUSALS)[number] | null => {
-    // Sessions on == OPENLLM_DEVICE_ANCHOR present. A via:local state pin
-    // alone is not enough (desktop disable blanks the env line). The retired
-    // `device_sessions_disabled` code stays in the closed vocabulary for older
-    // peers decoding a nack, but this daemon never emits it.
+    // Sessions on == OPENLLM_DEVICE_ANCHOR present AND the sessions flag is
+    // not off. A via:local state pin alone is not enough.
     const anchored = anchorPubkey();
     if (anchored === null) return "device_not_anchored";
     const pin = hydrate();
     if (!isAgentEligiblePin(pin)) return "device_not_anchored";
     // Grants verify against the live pin, so it must BE the anchor's key.
     if (pin?.pubkey !== anchored) return "device_not_anchored";
+    if (!deviceSessionsPrefEnabled()) return "device_sessions_disabled";
     return null;
   };
 
@@ -824,8 +826,9 @@ export const setDeviceAccessPubkey = (
 export const agentSessionRefusal = ():
   | (typeof AGENT_PIN_REFUSALS)[number]
   | null =>
-  // A routing box keeps its anchor for WebRTC but never runs device sessions:
-  // refused here, at every seed-gated stream open (relay mux and RTC).
+  // Routing-box lock is inside deviceSessionsPrefEnabled / agentRefusal
+  // (`device_sessions_disabled`); keep the early check so a box refuses
+  // before any pin hydrate.
   isRoutingBox() ? "device_sessions_disabled" : active.agentRefusal();
 
 /** Re-read the pin from disk on next use (after another process wrote it). */

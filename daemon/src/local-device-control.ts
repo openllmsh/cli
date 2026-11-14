@@ -6,12 +6,12 @@
  *   key without trusting the cloud's copy.
  * - `POST /local/device-control` — pin the account device-control public key
  *   as a LOCAL confirmation (`via: "local"`, an anchored pin, never TOFU).
- * - `POST /local/device-anchor` — install (`{ key_id, anchor }`) or remove
- *   (`{ key_id, remove: true }`) the install-time trust anchor for the key
- *   this daemon runs on (the desktop app's Device sessions toggle). Written
- *   by the same writer as `openllm daemon anchor` /
- *   {@link removeDeviceAnchor}. Sessions on == anchor present. The anchor is
- *   never logged.
+ * - `POST /local/device-anchor` — install (`{ key_id, anchor }`) the
+ *   install-time trust anchor for the key this daemon runs on, or flip the
+ *   device-sessions flag (`{ key_id, sessions: true|false }`). The desktop
+ *   app's Device sessions toggle uses the sessions arm; the anchor is never
+ *   removed. Written by the same writers as `openllm daemon anchor` /
+ *   {@link setDeviceSessionsEnabled}.
  *
  * All use the `/local/agent` admission: loopback peer + loopback Host, an
  * allowed Origin (Tauri / OpenLLM deployment / none), and this boot's local
@@ -52,7 +52,7 @@ import {
 import {
   deviceSessionsReport,
   installDeviceAnchor,
-  removeDeviceAnchor,
+  setDeviceSessionsEnabled,
 } from "./device-anchor";
 import { daemonEnv, parseApiKeyId } from "./env";
 import { daemonPublicKey } from "./keypair";
@@ -144,8 +144,9 @@ const anchorRefusal = (
 
 /**
  * `POST /local/device-anchor`. Install binds the anchor to the key this daemon
- * runs on; remove blanks `OPENLLM_DEVICE_ANCHOR`. Nothing here logs — the
- * install body holds the pair secret.
+ * runs on (and turns sessions on). `{ sessions }` flips the sessions flag —
+ * the anchor is never removed. Nothing here logs — the install body holds
+ * the pair secret.
  */
 const anchorResponse = async (req: Request): Promise<Response> => {
   const declared = Number(req.headers.get("content-length") ?? "0");
@@ -169,10 +170,10 @@ const anchorResponse = async (req: Request): Promise<Response> => {
   if (key === null || parseApiKeyId(key) !== input.key_id) {
     return anchorRefusal(409, "key_id_mismatch");
   }
-  if ("remove" in input) {
-    const removed = removeDeviceAnchor();
-    if (!removed.ok) {
-      return removed.reason === "routing_box"
+  if ("sessions" in input) {
+    const set = setDeviceSessionsEnabled(input.sessions);
+    if (!set.ok) {
+      return set.reason === "routing_box"
         ? anchorRefusal(409, "routing_box")
         : anchorRefusal(500, "persist_failed");
     }

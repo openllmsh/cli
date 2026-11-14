@@ -799,7 +799,8 @@ const runCommandInAccount = async (
       }
       // Control-key-signed device-sessions DISABLE. The cloud only relays the
       // statement; it is verified against this daemon's ANCHORED pin (a
-      // cloud-chosen pin never authorises it) and blanks OPENLLM_DEVICE_ANCHOR.
+      // cloud-chosen pin never authorises it) and sets OPENLLM_DEVICE_SESSIONS=0
+      // (the trust anchor stays — WebRTC still needs the pin).
       // There is no remote enable. The post-command status push carries the
       // new state.
       case "set_device_sessions": {

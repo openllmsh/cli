@@ -15,7 +15,7 @@
  *   openllmd logs [-f] [-n N]     show or follow daemon logs
  *   openllmd auto-update <on|off|status>  opt in/out of self-update (default on)
  *   openllmd anchor < key         accept sk-llm-KEY.ANCHOR (prints the bare key)
- *   openllmd device <disable|status>  device sessions (disable removes the anchor)
+ *   openllmd device <enable|disable|status>  device sessions (flag; anchor stays)
  *   openllmd uninstall [--yes] [--keep-logins|--remove-logins]  remove the daemon
  *                                 (--keep-logins preserves ~/.openllm/cli logins)
  *   openllmd completion <shell>   emit / install shell completion
@@ -38,7 +38,7 @@ import {
 import {
   deviceSessionsReport,
   installDeviceAnchor,
-  removeDeviceAnchor,
+  setDeviceSessionsEnabled,
 } from "./device-anchor";
 import { loadIdentityKey } from "./keypair";
 import { logError } from "./logger";
@@ -77,7 +77,7 @@ ${formatHelpRows(FLAGS.map((f) => ({ left: f.name, right: f.description })))}
 State lives under ~/.openllm (override with OPENLLM_DAEMON_STATE_DIR).
 `;
 
-const DEVICE_USAGE = "usage: openllm daemon device <disable|status>\n";
+const DEVICE_USAGE = "usage: openllm daemon device <enable|disable|status>\n";
 
 /**
  * `openllm daemon anchor` — read `sk-llm-<id>.<secret>.<anchor>` from stdin
@@ -108,20 +108,24 @@ const runAnchor = async (args: readonly string[]): Promise<number> => {
   return 0;
 };
 
-/** `openllm daemon device <disable|status>`. Disable blanks the anchor. */
+/**
+ * `openllm daemon device <enable|disable|status>`. Flips
+ * `OPENLLM_DEVICE_SESSIONS`; the trust anchor is never removed. Enable is
+ * local-only (and refused on a routing box).
+ */
 const runDevice = async (args: readonly string[]): Promise<number> => {
   const action = args[0];
   if (args.length !== 1 || action === undefined) {
     process.stderr.write(DEVICE_USAGE);
     return 2;
   }
-  if (action === "disable") {
-    const removed = removeDeviceAnchor();
-    if (!removed.ok) {
+  if (action === "disable" || action === "enable") {
+    const set = setDeviceSessionsEnabled(action === "enable");
+    if (!set.ok) {
       process.stderr.write(
-        removed.reason === "routing_box"
+        set.reason === "routing_box"
           ? "device sessions are always off on a routing box; its anchor stays\n"
-          : "could not remove the device trust anchor\n",
+          : "could not update device sessions\n",
       );
       return 1;
     }
@@ -131,9 +135,9 @@ const runDevice = async (args: readonly string[]): Promise<number> => {
   }
   const report = await deviceSessionsReport();
   process.stdout.write(
-    report.anchored
-      ? "device sessions enabled (anchor present)\n"
-      : "device sessions disabled (no anchor) — re-run install/update/login with Device sessions on\n",
+    report.enabled
+      ? "device sessions enabled\n"
+      : "device sessions disabled — run `openllm daemon device enable` (or re-install with Device sessions on)\n",
   );
   return 0;
 };

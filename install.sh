@@ -39,8 +39,9 @@
 #                          to the BARE key. It is never exported, logged, or
 #                          sent — only the bare `sk-llm-<key>` is the bearer.
 #                          Re-running install with a new anchor rotates it.
-#                          The anchor is the sessions opt-in — an anchored
-#                          device serves agent sessions by default.
+#                          The trust anchor pins device-control. Sessions default
+#                          on when it is present (`OPENLLM_DEVICE_SESSIONS`
+#                          defaults on; disable writes 0 — the anchor stays).
 #   OPENLLM_DAEMON_PORT    local daemon port (default 8787).
 #   OPENLLM_SKIP_SHELL_SETUP     skip `openllm setup` + completion install
 #   OPENLLM_SKIP_VENDOR_CLIS     skip vendor CLI provisioning
@@ -1320,7 +1321,7 @@ fi
 # already stored it as OPENLLM_DEVICE_ANCHOR (never exported); `daemon anchor`
 # validates it, re-writes the same two lines and pins. The anchored key goes
 # over stdin (never argv); the daemon prints only the bare key, discarded.
-# The anchor is the sessions opt-in (absent switch = on). No separate enable.
+# Sessions default on when the anchor is present (OPENLLM_DEVICE_SESSIONS defaults on; disable writes 0).
 if [ -n "$SUPPLIED_ANCHOR" ]; then
   printf '%s.%s' "$SUPPLIED_KEY" "$SUPPLIED_ANCHOR" \
     | "$BIN_DIR/openllm" daemon anchor >/dev/null \
