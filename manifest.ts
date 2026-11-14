@@ -13,14 +13,14 @@ import type { TCliRelease } from "./release-types";
 
 export const CLI_RELEASE: TCliRelease = {
   repo: "openllmsh/cli",
-  tag: "v2.10.18-alpha.4",
+  tag: "v2.10.18-alpha.5",
   targets: ["darwin-arm64", "linux-x64-baseline", "linux-arm64"],
   sha256: {
     "darwin-arm64":
-      "b2c4bffad569add1d390d7565da4fd049555d25c7424ba0e2912a4cd675d39dd",
+      "88b2262d41556f5790117e599a1c50d605e74b216c47f0c0ab883d4bf1726d95",
     "linux-x64-baseline":
-      "00391b9acc60615b745efc061380503a17f10bf52b8203c858507bdac4f51731",
+      "16b9a7e87e077e2565a298396ca50e603f31508338374ef9cd450eea9a51101a",
     "linux-arm64":
-      "0a2dfdea8f29b894cae6990bd79e3f77d97c35b1103166656b922c6e06516800",
+      "73829e230f087e906058d35d8c01418d06cb883e88a81994d4a4fcca6e862f1b",
   },
 };
