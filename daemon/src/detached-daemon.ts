@@ -203,16 +203,26 @@ export const readDetachedProcessCommandLine = (pid: number): string | null => {
   }
 };
 
+/** True when a command line is a durable `__session-host` process. */
+export const sessionHostCommandLine = (commandLine: string): boolean =>
+  /(?:^|[\s/])__session-host(?:\s|$)/.test(commandLine.split("\0").join(" "));
+
 /**
  * True when a command line looks like our detached daemon (`openllm daemon` /
  * `openllmd daemon` / a target-named compile like `openllm-linux-x64-baseline
- * daemon` that `serviceBinPath()` may launch) or a durable `__session-host`
- * child. Exported for tests.
+ * daemon` that `serviceBinPath()` may launch). Exported for tests.
+ *
+ * A durable `__session-host` (`openllm daemon __session-host …`, the host of an
+ * `openllm claude` session) is NOT the daemon: it belongs to the wrapper and
+ * outlives daemon restarts. Matching it here let a recycled pidfile / lock pid
+ * that landed on a session host block `openllm daemon restart` (and the
+ * update's restart) with "still running — kill <pid>", pointing the user at
+ * their live Claude session.
  */
 export const detachedCommandLineLooksOwned = (commandLine: string): boolean => {
   // `/proc/.../cmdline` is NUL-separated; normalize without a control-char regex.
   const normalized = commandLine.split("\0").join(" ");
-  if (/(?:^|[\s/])__session-host(?:\s|$)/.test(normalized)) return true;
+  if (sessionHostCommandLine(normalized)) return false;
   // Managed `openllm`/`openllmd`, or a release/compile target binary
   // (`openllm-darwin-arm64`, `openllm-linux-x64-baseline`, …).
   return /(?:^|\/)(openllm(?:-[A-Za-z0-9._-]+)?|openllmd)(?:\.exe)?[\s]+daemon(?:\s|$)/i.test(
