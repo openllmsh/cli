@@ -190,6 +190,7 @@ export type TDeviceSessionsDisableRefusal =
   | "device_not_anchored"
   | "stale_ts"
   | "bad_sig"
+  | "replayed_nonce"
   | "persist_failed";
 
 export type TApplyDeviceSessionsDisableResult =
@@ -200,9 +201,17 @@ export type TApplyDeviceSessionsDisableResult =
  * Verify one signed `{ v, key_id, ts, nonce }` disable and turn sessions off.
  * Requires an ANCHORED control pin (a cloud-chosen pin could be the cloud's
  * own key), this daemon's key id, a fresh `ts`, and a signature by the pinned
- * key. The anchor is kept. Idempotent when already off after a successful
- * verify — unanchored without a valid statement is `device_not_anchored`.
+ * key, used once (`replayed_nonce` after). The anchor is kept; unanchored
+ * is `device_not_anchored`.
  */
+/**
+ * Nonces of disables already applied, until their `ts` window closes. A
+ * statement the cloud relayed once must not be re-sent after the user turns
+ * sessions back on locally: the cloud can't forge a disable, and it can't
+ * replay one either.
+ */
+const disableNoncesSeen = new Map<string, number>();
+
 export const applyDeviceSessionsDisable = async (
   encoded: string,
   now: number = Date.now(),
@@ -232,6 +241,16 @@ export const applyDeviceSessionsDisable = async (
   ) {
     return { ok: false, reason: "bad_sig" };
   }
+  for (const [n, until] of disableNoncesSeen) {
+    if (until < now) disableNoncesSeen.delete(n);
+  }
+  if (disableNoncesSeen.has(command.nonce)) {
+    return { ok: false, reason: "replayed_nonce" };
+  }
+  disableNoncesSeen.set(
+    command.nonce,
+    command.ts + DEVICE_SESSIONS_DISABLE_TS_WINDOW_MS,
+  );
   const set = setDeviceSessionsEnabled(false);
   // Disable never returns `routing_box` (only enable does).
   if (!set.ok) return { ok: false, reason: "persist_failed" };

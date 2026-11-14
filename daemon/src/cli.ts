@@ -137,7 +137,9 @@ const runDevice = async (args: readonly string[]): Promise<number> => {
   process.stdout.write(
     report.enabled
       ? "device sessions enabled\n"
-      : "device sessions disabled — run `openllm daemon device enable` (or re-install with Device sessions on)\n",
+      : report.dpk_proof === undefined
+        ? "device sessions not set up — this device has no trust anchor; run `openllm login` from the app (or re-install) to add it\n"
+        : "device sessions disabled — run `openllm daemon device enable`\n",
   );
   return 0;
 };
