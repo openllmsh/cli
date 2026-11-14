@@ -171,7 +171,11 @@ const anchorResponse = async (req: Request): Promise<Response> => {
   }
   if ("remove" in input) {
     const removed = removeDeviceAnchor();
-    if (!removed.ok) return anchorRefusal(500, "persist_failed");
+    if (!removed.ok) {
+      return removed.reason === "routing_box"
+        ? anchorRefusal(409, "routing_box")
+        : anchorRefusal(500, "persist_failed");
+    }
     const body: TLocalDeviceAnchorResponse = {
       ok: true,
       device_sessions: await deviceSessionsReport(),

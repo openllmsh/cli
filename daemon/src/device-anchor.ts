@@ -111,13 +111,16 @@ export const installDeviceAnchor = (
 
 export type TRemoveDeviceAnchorResult =
   | { readonly ok: true; readonly changed: boolean }
-  | { readonly ok: false; readonly reason: "persist_failed" };
+  | { readonly ok: false; readonly reason: "persist_failed" | "routing_box" };
 
 /**
  * Blank `OPENLLM_DEVICE_ANCHOR` in the runtime env file and drop the derived
  * pin. Idempotent when already absent. Sessions off == no anchor.
  */
 export const removeDeviceAnchor = (): TRemoveDeviceAnchorResult => {
+  // A routing box's anchor is what lets a browser reach it over WebRTC, and
+  // its sessions are already off (locked, like auto-update): never blank it.
+  if (isRoutingBox()) return { ok: false, reason: "routing_box" };
   const had = deviceAnchorFromEnvFile() !== null;
   if (!had) {
     invalidateDeviceAccessPin();
@@ -179,7 +182,8 @@ export type TDeviceSessionsDisableRefusal =
   | "device_not_anchored"
   | "stale_ts"
   | "bad_sig"
-  | "persist_failed";
+  | "persist_failed"
+  | "routing_box";
 
 export type TApplyDeviceSessionsDisableResult =
   | { readonly ok: true; readonly changed: boolean }
@@ -196,6 +200,7 @@ export const applyDeviceSessionsDisable = async (
   encoded: string,
   now: number = Date.now(),
 ): Promise<TApplyDeviceSessionsDisableResult> => {
+  if (isRoutingBox()) return { ok: false, reason: "routing_box" };
   const command = decodeDeviceSessionsDisable(encoded);
   if (command === null) return { ok: false, reason: "malformed" };
   const keyId = daemonApiKeyId();
@@ -222,6 +227,6 @@ export const applyDeviceSessionsDisable = async (
     return { ok: false, reason: "bad_sig" };
   }
   const removed = removeDeviceAnchor();
-  if (!removed.ok) return { ok: false, reason: "persist_failed" };
+  if (!removed.ok) return { ok: false, reason: removed.reason };
   return { ok: true, changed: removed.changed };
 };

@@ -118,7 +118,11 @@ const runDevice = async (args: readonly string[]): Promise<number> => {
   if (action === "disable") {
     const removed = removeDeviceAnchor();
     if (!removed.ok) {
-      process.stderr.write("could not remove the device trust anchor\n");
+      process.stderr.write(
+        removed.reason === "routing_box"
+          ? "device sessions are always off on a routing box; its anchor stays\n"
+          : "could not remove the device trust anchor\n",
+      );
       return 1;
     }
   } else if (action !== "status") {
