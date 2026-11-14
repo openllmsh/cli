@@ -5,26 +5,22 @@
 //
 // `tag: ""` means nothing is published yet — the route returns 503 until the
 // first release run fills in the tag + checksums.
+// `targets` lists ONLY what this release published (a prerelease omits
+// darwin-x64-baseline); consumers treat a host target absent from the list as
+// unavailable for this pin, not as an unknown arch.
 
 import type { TCliRelease } from "./release-types";
 
 export const CLI_RELEASE: TCliRelease = {
   repo: "openllmsh/cli",
-  tag: "v2.10.18-alpha.3",
-  targets: [
-    "darwin-arm64",
-    "darwin-x64-baseline",
-    "linux-x64-baseline",
-    "linux-arm64",
-  ],
+  tag: "v2.10.18-alpha.4",
+  targets: ["darwin-arm64", "linux-x64-baseline", "linux-arm64"],
   sha256: {
     "darwin-arm64":
-      "15157496dfd5fcb2081a38bdea88706c25e0c12d4bdd52d518ba9a13490c677e",
-    "darwin-x64-baseline":
-      "855c29617880e2d153e007ea0e400f7b5dbb8edd8c115024313165a544ae181b",
+      "b2c4bffad569add1d390d7565da4fd049555d25c7424ba0e2912a4cd675d39dd",
     "linux-x64-baseline":
-      "c0bfcc88864b2ed92f7b215e37a7e3eda1aea0de3e4eccf5fda5718c0024765a",
+      "00391b9acc60615b745efc061380503a17f10bf52b8203c858507bdac4f51731",
     "linux-arm64":
-      "d8878b5c0028b42f87f63b3043d08a72abbe2cf239109988d5d3699bd92df41c",
+      "0a2dfdea8f29b894cae6990bd79e3f77d97c35b1103166656b922c6e06516800",
   },
 };
