@@ -2,14 +2,20 @@
  * `POST /local/agent-hook` — Claude hook calls for agent sessions, from
  * `openllm exec agent hook <event>` in the session's own Claude process.
  * Admission is the loopback `/local/*` gate with the local control capability
- * (`localAgentRefusal`); no device grant on loopback.
+ * (`localAgentRefusal`) plus the same sessions-flag gate `/local/agent`
+ * upgrades use (`localAgentSessionsFlagRefusal`); no device grant on loopback.
+ * Refusing when the flag flips mid-session is correct — sessions are off.
  */
 import {
   AGENT_HOOK_EVENTS,
   AGENT_SESSION_ID_PATTERN,
 } from "@openllmsh/sdk/protocol";
 import { handleAgentHook } from "./claude-code";
-import { localAgentRefusal, localAgentRefusalResponse } from "./loopback";
+import {
+  localAgentRefusal,
+  localAgentRefusalResponse,
+  localAgentSessionsFlagRefusal,
+} from "./loopback";
 
 /** Max hook request body (a tool input can be large). */
 const HOOK_BODY_MAX_BYTES = 1024 * 1024;
@@ -31,6 +37,10 @@ export const handleLocalAgentHook = async (
   req: Request,
   remoteAddress: string | null | undefined,
 ): Promise<Response> => {
+  const sessionsRefusal = localAgentSessionsFlagRefusal();
+  if (sessionsRefusal !== null) {
+    return localAgentRefusalResponse(sessionsRefusal);
+  }
   const refusal = localAgentRefusal(req, remoteAddress);
   if (refusal !== null) return localAgentRefusalResponse(refusal);
   if (req.method !== "POST") return json(405, { error: "method_not_allowed" });

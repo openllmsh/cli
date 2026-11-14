@@ -201,23 +201,30 @@ export type TApplyDeviceSessionsDisableResult =
  * own key), this daemon's key id, a fresh `ts`, and a signature by the pinned
  * key, used once (`replayed_nonce` after). The anchor is kept; unanchored
  * is `device_not_anchored`.
+ *
+ * Order: verify → durably burn the nonce → set the flag off. A later local
+ * enable is a legitimate later user action, not a race to defend against. If
+ * the flag write fails after a successful burn, the nonce stays burned and the
+ * caller must sign a fresh statement to retry (the browser/cloud path always
+ * does — `signDeviceSessionsDisable` mints a new nonce per attempt).
  */
 /**
- * Burn a successfully applied disable nonce into `state.json` (0600), pruned
- * of expired entries. Returns false when the write did not stick — the flag
- * may already be off, but the nonce stays unburned so the statement can retry.
+ * Burn a disable nonce into `state.json` (0600), pruned of expired entries
+ * with the caller's `now`. Confirms from the {@link mutateState} result
+ * itself (no second `readState` with a different clock). Returns false when
+ * the write did not stick — nothing else has changed yet.
  */
 const burnDisableNonce = (
   nonce: string,
   until: number,
   now: number,
 ): boolean => {
-  mutateState((s) => {
+  const next = mutateState((s) => {
     const kept = pruneDisableNonces(s.deviceSessionsDisableNonces, now);
     kept[nonce] = until;
     return { ...s, deviceSessionsDisableNonces: kept };
   });
-  return readState().deviceSessionsDisableNonces?.[nonce] === until;
+  return next?.deviceSessionsDisableNonces?.[nonce] === until;
 };
 
 export const applyDeviceSessionsDisable = async (
@@ -250,7 +257,7 @@ export const applyDeviceSessionsDisable = async (
     return { ok: false, reason: "bad_sig" };
   }
   // Durable set: survives a restart inside the ts window so a replay after a
-  // local re-enable is still refused. Prune expired entries on every check.
+  // local re-enable is still refused. Prune expired entries with this `now`.
   const burned = pruneDisableNonces(
     readState().deviceSessionsDisableNonces,
     now,
@@ -258,17 +265,15 @@ export const applyDeviceSessionsDisable = async (
   if (burned[command.nonce] !== undefined) {
     return { ok: false, reason: "replayed_nonce" };
   }
-  const set = setDeviceSessionsEnabled(false);
-  // Disable never returns `routing_box` (only enable does). A failed persist
-  // leaves the nonce unburned so the same statement can be retried.
-  if (!set.ok) return { ok: false, reason: "persist_failed" };
   const until = command.ts + DEVICE_SESSIONS_DISABLE_TS_WINDOW_MS;
-  // Burn only after the flag write stuck — same rule as the in-memory map.
+  // Burn FIRST. A failed burn leaves the flag untouched so a reported
+  // failure never claims the statement was consumed.
   if (!burnDisableNonce(command.nonce, until, now)) {
-    // The flag is off but the nonce isn't durably burned: undo the disable so
-    // a reported failure never leaves a replayable statement in effect.
-    if (set.changed) setDeviceSessionsEnabled(true);
     return { ok: false, reason: "persist_failed" };
   }
+  const set = setDeviceSessionsEnabled(false);
+  // Disable never returns `routing_box` (only enable does). A failed flag
+  // persist keeps the nonce burned — retry signs a fresh statement.
+  if (!set.ok) return { ok: false, reason: "persist_failed" };
   return { ok: true, changed: set.changed };
 };

@@ -121,10 +121,11 @@ export const localPreflightRefusal = (
 };
 
 /**
- * Sessions-flag gate for `/local/agent` only. Independent of the trust anchor
- * and pin — loopback needs no anchor; the flag alone turns agent sessions off.
- * Not folded into {@link localAgentRefusal}: identity / device-control /
- * anchor routes share that helper and must keep working while sessions are off.
+ * Sessions-flag gate for `/local/agent` upgrades and `/local/agent-hook`.
+ * Independent of the trust anchor and pin — loopback needs no anchor; the
+ * flag alone turns agent sessions off. Not folded into
+ * {@link localAgentRefusal}: identity / device-control / anchor routes share
+ * that helper and must keep working while sessions are off.
  */
 export const localAgentSessionsFlagRefusal = ():
   | "device_sessions_disabled"
@@ -134,7 +135,7 @@ export const localAgentSessionsFlagRefusal = ():
  * Admission for a loopback agent upgrade. `remoteAddress` is the TCP peer
  * (`server.requestIP(req)?.address`). Null = admitted. Does not check the
  * sessions flag — call {@link localAgentSessionsFlagRefusal} at the
- * `/local/agent` site.
+ * `/local/agent` and `/local/agent-hook` sites.
  */
 export const localAgentRefusal = (
   req: Request,

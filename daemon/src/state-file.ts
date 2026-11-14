@@ -20,7 +20,10 @@
  * guards in the callers still prevent tight loops.
  */
 import {
+  closeSync,
+  fsyncSync,
   mkdirSync,
+  openSync,
   readFileSync,
   renameSync,
   rmSync,
@@ -260,19 +263,36 @@ const coerceState = (v: unknown): TDaemonState => {
   };
 };
 
-/** Atomic write: pid-suffixed temp + rename. Best-effort — swallows errors. */
-const writeStateAtomic = (state: TDaemonState): void => {
+/**
+ * Atomic write: pid-suffixed temp + fsync + rename. Best-effort — swallows
+ * errors and returns false when the write did not stick.
+ */
+const writeStateAtomic = (state: TDaemonState): boolean => {
   const tmp = join(stateDir(), `.state.json.${process.pid}.tmp`);
+  let fd: number | null = null;
   try {
     mkdirSync(stateDir(), { recursive: true });
-    writeFileSync(tmp, JSON.stringify(state), { mode: 0o600 });
+    fd = openSync(tmp, "w", 0o600);
+    writeFileSync(fd, JSON.stringify(state), { encoding: "utf8" });
+    fsyncSync(fd);
+    closeSync(fd);
+    fd = null;
     renameSync(tmp, stateFilePath());
+    return true;
   } catch {
+    if (fd !== null) {
+      try {
+        closeSync(fd);
+      } catch {
+        // best-effort fd close
+      }
+    }
     try {
       rmSync(tmp, { force: true });
     } catch {
       // best-effort temp cleanup
     }
+    return false;
   }
 };
 
@@ -297,9 +317,13 @@ export const readState = (): TDaemonState => {
 /**
  * Synchronous read-fresh → transform → atomic-write. MUST stay synchronous
  * end to end (see the module header) — that is the whole concurrency story.
+ * Returns the written state, or `null` when the write did not stick.
  */
-export const mutateState = (fn: (s: TDaemonState) => TDaemonState): void => {
-  writeStateAtomic(fn(readState()));
+export const mutateState = (
+  fn: (s: TDaemonState) => TDaemonState,
+): TDaemonState | null => {
+  const next = fn(readState());
+  return writeStateAtomic(next) ? next : null;
 };
 
 /**
