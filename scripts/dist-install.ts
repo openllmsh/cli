@@ -16,20 +16,14 @@
 import { existsSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import type { TCliTarget } from "../release-types";
+import { CLI_TARGETS, isCliTargetName } from "../release-types";
 
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
 const DIST_DIR = join(resolve(SCRIPT_DIR, ".."), "dist");
 
-const ALL_TARGETS = [
-  "darwin-arm64",
-  "darwin-x64-baseline",
-  "linux-x64-baseline",
-  "linux-arm64",
-] as const;
-type TTarget = (typeof ALL_TARGETS)[number];
-
-const isTarget = (t: string): t is TTarget =>
-  (ALL_TARGETS as readonly string[]).includes(t);
+type TTarget = TCliTarget;
+const isTarget = isCliTargetName;
 
 /** This host's `<os>-<arch>` target — the default when none is passed. */
 const hostTarget = (): TTarget => {
@@ -59,7 +53,7 @@ const main = async (): Promise<void> => {
   const target = arg ?? hostTarget();
   if (!isTarget(target)) {
     throw new Error(
-      `unknown target "${target}" (expected one of ${ALL_TARGETS.join(", ")})`,
+      `unknown target "${target}" (expected one of ${CLI_TARGETS.join(", ")})`,
     );
   }
 

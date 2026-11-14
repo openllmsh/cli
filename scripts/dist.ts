@@ -17,7 +17,7 @@
  * Usage:
  *   bun run daemon:dist                       # all targets, version = package.json
  *   bun run daemon:dist -- --version 1.2.3    # stamp a specific version
- *   bun run daemon:dist -- --target linux-x64-baseline # only wrap one target (still builds all)
+ *   bun run daemon:dist -- --target linux-x64-baseline # only wrap one target
  *
  * Run an emitted installer on a target box (OPENLLM_* names match the real
  * install + the shared .env; both are reused from an existing ~/.openllm/.env
@@ -41,6 +41,12 @@ import { chmodSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { $ } from "bun";
+import type { TCliTarget } from "../release-types";
+import {
+  CLI_TARGETS,
+  cliTargetsForRelease,
+  isCliTargetName,
+} from "../release-types";
 
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url)); // packages/cli/scripts
 const PKG_ROOT = resolve(SCRIPT_DIR, "..");
@@ -50,16 +56,8 @@ const COMPILE_SCRIPT = join(SCRIPT_DIR, "compile.ts");
 const INSTALL_SH = join(PKG_ROOT, "install.sh");
 const TEMPLATE = join(SCRIPT_DIR, "dist-installer-template.sh");
 
-const ALL_TARGETS = [
-  "darwin-arm64",
-  "darwin-x64-baseline",
-  "linux-x64-baseline",
-  "linux-arm64",
-] as const;
-type TTarget = (typeof ALL_TARGETS)[number];
-
-const isTarget = (t: string): t is TTarget =>
-  (ALL_TARGETS as readonly string[]).includes(t);
+type TTarget = TCliTarget;
+const isTarget = isCliTargetName;
 
 const flagValue = (name: string): string | undefined => {
   const i = process.argv.indexOf(name);
@@ -88,17 +86,19 @@ const main = async (): Promise<void> => {
   const onlyTarget = flagValue("--target");
   if (onlyTarget !== undefined && !isTarget(onlyTarget)) {
     throw new Error(
-      `unknown --target "${onlyTarget}" (expected one of ${ALL_TARGETS.join(", ")})`,
+      `unknown --target "${onlyTarget}" (expected one of ${CLI_TARGETS.join(", ")})`,
     );
   }
   const wrapTargets: readonly TTarget[] = onlyTarget
     ? [onlyTarget]
-    : [...ALL_TARGETS];
+    : [...cliTargetsForRelease(version.includes("-"))];
 
-  // Native build via the existing compile script (always all four targets in
-  // parallel — compile.ts has no per-target selection; we just wrap a subset).
+  // Native build via the existing compile script — only the targets we wrap
+  // (prerelease versions omit darwin-x64-baseline, matching the release path).
   console.log(`Building openllm binaries (version ${version})…`);
-  await $`bun ${COMPILE_SCRIPT} --version ${version}`.cwd(REPO_ROOT);
+  await $`bun ${COMPILE_SCRIPT} --version ${version} --targets ${wrapTargets.join(",")}`.cwd(
+    REPO_ROOT,
+  );
 
   const template = readFileSync(TEMPLATE, "utf-8");
   // The real installer, minus its shebang (the wrapper supplies its own).

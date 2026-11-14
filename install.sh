@@ -1150,8 +1150,26 @@ install_component() {
 # an immutable release tag, so the bytes cannot drift after this read.
 CLI_URL="$(json_field "cli_url_$TARGET")"
 CLI_SHA256="$(json_field "cli_sha256_$TARGET")"
-[ -n "$CLI_URL" ] && [ -n "$CLI_SHA256" ] \
-  || die "$ORIGIN/api/install names no openllm binary for $TARGET — a release may be rolling out; try again in a minute"
+if [ -z "$CLI_URL" ] || [ -z "$CLI_SHA256" ]; then
+  # The pin's `targets` arrays (under cli/daemon) name what this release
+  # published. Absent from them → this arch was omitted. (A target listed
+  # without cli_url_* can't happen: /api/install builds both from the same
+  # valid-digest list.)
+  if printf '%s' "$MANIFEST" | tr -d '\n' \
+      | grep -oE '"targets"[[:space:]]*:[[:space:]]*\[[^]]*\]' \
+      | grep -q . \
+    && ! printf '%s' "$MANIFEST" | tr -d '\n' \
+      | grep -oE '"targets"[[:space:]]*:[[:space:]]*\[[^]]*\]' \
+      | grep -q "\"$TARGET\""; then
+    case "$CLI_VERSION" in
+      *-*)
+        die "this release has no build for $TARGET; use the stable installer (https://www.openllm.sh/install)"
+        ;;
+    esac
+    die "this release has no build for $TARGET"
+  fi
+  die "$ORIGIN/api/install names no openllm binary for $TARGET — a release may be rolling out; try again in a minute"
+fi
 [[ "$CLI_SHA256" =~ ^[0-9a-f]{64}$ ]] || die "malformed checksum for openllm"
 [ "$CLI_URL" = "https://github.com/openllmsh/cli/releases/download/v$CLI_VERSION/openllm-$TARGET.gz" ] \
   || die "unexpected openllm asset URL in $ORIGIN/api/install: $CLI_URL"

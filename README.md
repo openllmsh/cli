@@ -197,7 +197,7 @@ cd cli
 bun install
 bun run compile:host       # → dist/openllm (this machine's target)
 ./dist/openllm version     # v0.0.0-dev
-bun run compile            # all 4 targets: darwin/linux × arm64/x64 (+ .gz)
+bun run compile            # all 4 targets (+ .gz); pass --targets for a subset
 ```
 
 Source builds report `0.0.0-dev`; release builds get their version from the

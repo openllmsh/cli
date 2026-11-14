@@ -17,22 +17,28 @@
  * there is exactly one origin-security contract.
  */
 
+import { pinOmitsHostTarget } from "../release-types";
 import { CLI_VERSION, cliConfig } from "./env";
 import { awaitPipeCodes, bunSubprocessPeer } from "./process-pipe";
-import { isSecureOrigin } from "./self-update";
+import { cliHostTarget, isSecureOrigin } from "./self-update";
 
 /** Bound on the best-effort pinned-version probe so `update` never hangs on it. */
 const VERSION_FETCH_TIMEOUT_MS = 5_000;
 
+type TPinnedCliVersion = {
+  readonly latest: string;
+  readonly targets: unknown;
+};
+
 /**
- * The gateway's pinned CLI version (`GET /api/cli/version`), normalized without
- * a leading `v`, or null when it can't be read. Best-effort and never throws —
- * it only feeds an informational "current → incoming" line, so a slow or broken
- * gateway must not block or fail the actual update.
+ * The gateway's pinned CLI version (`GET /api/cli/version`) plus its targets
+ * list. Best-effort and never throws — a slow or broken gateway must not block
+ * the actual update when the pin is unreachable; when the pin IS readable and
+ * omits this host, we refuse the installer (same honesty as self-update).
  */
 const fetchPinnedCliVersion = async (
   gatewayUrl: string,
-): Promise<string | null> => {
+): Promise<TPinnedCliVersion | null> => {
   try {
     const res = await fetch(`${gatewayUrl}/api/cli/version`, {
       signal: AbortSignal.timeout(VERSION_FETCH_TIMEOUT_MS),
@@ -40,12 +46,14 @@ const fetchPinnedCliVersion = async (
     if (!res.ok) return null;
     const payload = (await res.json().catch(() => null)) as {
       latest_version?: unknown;
+      targets?: unknown;
     } | null;
     if (payload === null || typeof payload.latest_version !== "string") {
       return null;
     }
     const latest = payload.latest_version.replace(/^v/, "");
-    return latest.length > 0 ? latest : null;
+    if (latest.length === 0) return null;
+    return { latest, targets: payload.targets };
   } catch {
     return null;
   }
@@ -66,16 +74,21 @@ export const runUpdate = async (): Promise<number> => {
     return 1;
   }
 
-  // Informational current → incoming line before we hand off to the installer.
-  // Best-effort: the pinned version covers the CLI binary; the installer also
-  // converges the daemon, which may pin its own version.
-  const incoming = await fetchPinnedCliVersion(gatewayUrl);
+  const pin = await fetchPinnedCliVersion(gatewayUrl);
+  const host = cliHostTarget();
+  if (pin !== null && host !== null && pinOmitsHostTarget(pin.targets, host)) {
+    process.stderr.write(
+      `[update] pinned v${pin.latest} has no binary for ${host} — staying on v${CLI_VERSION}\n`,
+    );
+    return 0;
+  }
+
   process.stderr.write(
-    incoming === null
+    pin === null
       ? `[update] current v${CLI_VERSION}\n`
-      : incoming === CLI_VERSION
+      : pin.latest === CLI_VERSION
         ? `[update] current v${CLI_VERSION} (already the pinned release; reconverging)\n`
-        : `[update] current v${CLI_VERSION} → incoming v${incoming}\n`,
+        : `[update] current v${CLI_VERSION} → incoming v${pin.latest}\n`,
   );
 
   const url = `${gatewayUrl}/install`;

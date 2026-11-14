@@ -7,12 +7,15 @@
 
 import { gunzipSync } from "node:zlib";
 import type { TCliTarget } from "../../release-types";
-import { CLI_TARGETS } from "../../release-types";
+import {
+  CLI_TARGETS,
+  isNoBinaryForTargetMessage,
+  NoBinaryForTargetError,
+} from "../../release-types";
 import { downloadWithStallTimeout } from "../../src/binary-download";
+import { endDaemonApply, tryBeginDaemonApply } from "./delegation/login-flow";
 
 export { BINARY_STALL_TIMEOUT_MS } from "../../src/binary-download";
-
-import { endDaemonApply, tryBeginDaemonApply } from "./delegation/login-flow";
 
 // Cap on how long we hold the restart waiting for `/v1` requests to drain.
 const DRAIN_MAX_MS = 30_000;
@@ -167,11 +170,27 @@ export const fetchBinary = async (
 };
 
 // The `.sha256` endpoint returns `"<hex>  openllm-<target>\n"` — take the hex.
+// Soft-skip only on the API's explicit "no binary for" 404 body (deploy skew:
+// bootstrap still lists the target, newer pin omits it). A plain 404 /
+// non-OK without that body stays a normal failure.
 export const fetchDigest = async (url: string): Promise<string> => {
   const res = await fetch(url, {
     redirect: "follow",
     signal: AbortSignal.timeout(DOWNLOAD_TIMEOUT_MS),
   });
+  if (res.status === 404) {
+    const body = (await res.json().catch(() => null)) as {
+      error?: { message?: unknown };
+    } | null;
+    const message =
+      body !== null && typeof body.error?.message === "string"
+        ? body.error.message
+        : "";
+    if (isNoBinaryForTargetMessage(message)) {
+      throw new NoBinaryForTargetError(message);
+    }
+    throw new Error(`checksum download failed: ${res.status}`);
+  }
   if (!res.ok) throw new Error(`checksum download failed: ${res.status}`);
   const text = (await res.text()).trim();
   const hex = text.split(/\s+/)[0] ?? "";

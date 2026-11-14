@@ -42,11 +42,13 @@ packages/cli/
 │   ├── claude/ codex/ grok/ opencode/ raycast/
 │   └── hooks/            # statusline.sh, materialized into the run dir
 ├── manifest.ts           # COMMITTED release pin (repo/tag/per-target sha256)
-├── release-types.ts      # CLI_TARGETS (SSOT of buildable targets) + TCliRelease
+├── release-types.ts      # CLI_TARGETS (SSOT of buildable targets) + CLI_PRERELEASE_TARGETS
+│                         #   + cliTargetsForRelease + TCliRelease
 ├── index.ts              # barrel: manifest + release-types only (gateway reads the pin)
 ├── scripts/
-│   ├── compile.ts        # bun --compile --minify --bytecode ×4 targets + gzip sidecars;
-│   │                     #   bakes the version + the daemon code fingerprint
+│   ├── compile.ts        # bun --compile --minify --bytecode for the channel's targets
+│   │                     #   (--targets subset) + gzip sidecars; bakes the
+│   │                     #   version + the daemon code fingerprint
 │   ├── daemon-fingerprint.ts # sha-256 over the daemon entry's bundled import closure
 │   ├── dist.ts · dist-install.ts · dev-dist-run.ts # self-contained offline installers; sandboxed dev daemon
 │   └── generate-sdk.ts   # MONOREPO-ONLY: HttpApi → committed SDK artifacts
@@ -423,9 +425,16 @@ See [`packages/release/commands/cli.ts`](../release/commands/cli.ts):
   modules). It deliberately excludes `manifest.ts` — the fingerprint refuses
   to build if the daemon ever imports the pin, since that would restart the
   daemon on every release.
-- 4 targets (`CLI_TARGETS`), compiled in parallel, gzipped release assets
-  `openllm-<target>.gz` on `openllmsh/cli`; the manifest pins the
-  sha256 of the DECOMPRESSED binary.
+- Targets from `CLI_TARGETS` (4: darwin-arm64, darwin-x64-baseline,
+  linux-x64-baseline, linux-arm64), compiled in parallel, gzipped release
+  assets `openllm-<target>.gz` on `openllmsh/cli`; the manifest pins the
+  sha256 of the DECOMPRESSED binary. A **prerelease** publishes
+  `CLI_PRERELEASE_TARGETS` only (no Intel Mac / `darwin-x64-baseline`) —
+  fewer compiles and one fewer binary to sign+notarize, mirroring the
+  desktop app's Apple-Silicon-only prerelease. The committed manifest's
+  `targets` lists only what that release published so install /
+  self-update / `/api/cli/binary` can tell a skipped arch from an unknown
+  one.
 - Change-gated on `CLI_BINARY_SOURCES`: `cli/src`, `cli/daemon/src` (+ its
   `execution-registry.ts`), embedded `cli/setup`, `cli/install.sh` (not
   compiled, but `/install` serves it at the pinned tag), `release-types.ts`,
@@ -448,12 +457,16 @@ See [`packages/release/commands/cli.ts`](../release/commands/cli.ts):
 
 - `GET /api/cli/binary/<target>` → 302 to the pinned release asset;
   `<target>.sha256` serves the committed digest
-  (`packages/api/handlers/cli-binary.ts`). `GET /api/daemon/binary/<target>`
+  (`packages/api/handlers/cli-binary.ts`). A buildable target this pin
+  skipped (Intel Mac on a prerelease) is 404 `"This release has no binary
+  for …"` — not "unknown target". `GET /api/daemon/binary/<target>`
   serves the SAME artifact — the upgrade bridge for pre-merge daemons, which
   self-update through it into the single binary.
-- `GET /api/cli/version` → `{ latest_version }` from the committed pin; the
-  daemon bootstrap carries the same tag (`latest_cli_version`, and
-  `latest_version` for pre-merge daemons).
+- `GET /api/cli/version` → `{ latest_version, targets }` from the committed
+  pin; the daemon bootstrap carries the same tag (`latest_cli_version`, and
+  `latest_version` for pre-merge daemons) plus `cli_targets`. Self-update
+  (CLI + daemon) treats a host target absent from that list as "no update"
+  and stays on the current binary.
 - **At CLI launch** (`src/launch-update.ts`): at most once per 5 min, an
   invocation (TTY or not) spawns a DETACHED `openllm __self-update`. The child
   probes this machine's daemon first: a running daemon owns updates, so the
