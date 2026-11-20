@@ -4,10 +4,11 @@
  * `createMcpServer` come from `@openllmsh/sdk/mcp`.
  */
 
-import { fromJsonSchema, type McpServer } from "@modelcontextprotocol/server";
+import type { McpServer } from "@modelcontextprotocol/server";
 import { serveStdio } from "@modelcontextprotocol/server/stdio";
 import type {
   TBeginMarketplaceLoadOptions,
+  THostTool,
   TMarketplaceLaunch,
   TMarketplaceLoad,
   TPermission,
@@ -27,14 +28,9 @@ import type { TMcpGroup } from "../commands";
 import { mcpGroupsForTier } from "../commands";
 import { CLI_VERSION } from "../env";
 import { requireCliApiKey } from "../onboarding";
-import {
-  handleLocalAuthTool,
-  isLocalAuthTool,
-  localAuthToolDefs,
-} from "./local-auth";
+import { handleLocalAuthTool, localAuthToolDefs } from "./local-auth";
 import { connectUpstreams as connectUpstreamsWithStdio } from "./marketplace/upstream";
 import { transcribeAudio } from "./openllm/transcribe-audio";
-import type { TToolResult } from "./types";
 
 export type { TMcpGroup } from "../commands";
 export { MCP_ONLY_GROUPS as MCP_GROUPS } from "../commands";
@@ -44,28 +40,23 @@ export {
   OPENLLM_MEMORY_BUILTIN_ID,
 };
 
-/** Register CLI-only local-auth tools on a live server. */
-const registerLocalAuthTools = (server: McpServer): void => {
-  for (const tool of localAuthToolDefs) {
-    const name = tool.name;
-    const inputSchema: Record<string, unknown> = tool.inputSchema;
-    server.registerTool(
-      name,
-      {
-        description: tool.description,
-        ...("annotations" in tool ? { annotations: tool.annotations } : {}),
-        inputSchema: fromJsonSchema<Record<string, unknown>>(inputSchema),
-      },
-      async (args): Promise<TToolResult> => {
-        if (isLocalAuthTool(name)) return handleLocalAuthTool(name, args);
-        return {
-          content: [{ type: "text", text: `Unknown tool: ${name}` }],
-          isError: true,
-        };
-      },
-    );
-  }
-};
+/** Local-auth tools an agent needs up front; the rest are found on demand. */
+const LISTED_LOCAL_AUTH: ReadonlySet<string> = new Set([
+  "local_auth_status",
+  "local_auth_login",
+]);
+
+/** The CLI-only local-auth group, as SDK host tools. */
+const localAuthHostTools: readonly THostTool[] = localAuthToolDefs.map(
+  (tool): THostTool => ({
+    name: tool.name,
+    description: tool.description,
+    inputSchema: tool.inputSchema,
+    annotations: tool.annotations,
+    listed: LISTED_LOCAL_AUTH.has(tool.name),
+    run: (args) => handleLocalAuthTool(tool.name, args),
+  }),
+);
 
 /**
  * Build the MCP server for this process: SDK tools + CLI local-auth +
@@ -87,7 +78,7 @@ export const createCliMcpServer = ({
   upstreams?: readonly TUpstream[];
 }): McpServer => {
   const groups = mcpGroupsForTier(requested, tier);
-  const server = createSdkMcpServer({
+  return createSdkMcpServer({
     version: CLI_VERSION,
     groups,
     config,
@@ -101,9 +92,8 @@ export const createCliMcpServer = ({
       transcribeAudio(args, cfg, {
         uploadBase: async () => (await resolveGateway()).base,
       }),
+    hostTools: groups.includes("openllm") ? localAuthHostTools : [],
   });
-  if (groups.includes("openllm")) registerLocalAuthTools(server);
-  return server;
 };
 
 /** Tests and older imports still call `createMcpServer` from this module. */
