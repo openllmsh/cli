@@ -67,6 +67,7 @@ import {
   inferenceAdmission,
   withHoldSession,
 } from "./hold-session";
+import { withHopOutputLimits } from "./hop-output-limits";
 import { runImageEditWalker, runImageWalker } from "./image-walker";
 import { isLocalServerSlug } from "./local-servers";
 import { logWarn, safeDiagnosticMessage } from "./logger";
@@ -515,6 +516,8 @@ const handleInferenceIn = async (
   // runs inside `withHoldNonce` so signatures verify and records settle it.
   let holdNonce: string | null = null;
   let maxOutputTokens: number | null = null;
+  // A Fusion plan's signed per-hop output ceilings; the walk runs inside them.
+  let hopOutputLimits: ReadonlyArray<number | null> | null = null;
   // A single cloud hop can be a capped plan without a daemon hold: origin
   // reserves and settles its own hold when the pinned request arrives.
   let singleCloudHop = false;
@@ -667,6 +670,7 @@ const handleInferenceIn = async (
           readonly tuple: TPlanTuple;
           readonly holdNonce: string | null;
           readonly maxOutputTokens: number | null;
+          readonly hopOutputLimits: ReadonlyArray<number | null> | null;
           readonly singleCloudHop: boolean;
           readonly fusion: boolean;
         }
@@ -747,6 +751,7 @@ const handleInferenceIn = async (
         fetched.context_overflow_strategy ?? null;
       const fetchedHoldNonce = fetched.hold_nonce ?? null;
       const fetchedMaxOutputTokens = fetched.max_output_tokens ?? null;
+      const fetchedHopOutputLimits = fetched.hop_output_limits ?? null;
       if (isResponsesCompact && fetchedHoldNonce !== null) {
         session.adopt(
           fetchedHoldNonce,
@@ -773,6 +778,7 @@ const handleInferenceIn = async (
         fetched.sig,
         fetchedHoldNonce,
         fetchedMaxOutputTokens,
+        fetchedHopOutputLimits,
       );
       if (verified) observePolicyRevision(fetched.policy_rev, callerIdentity);
       if (verified && fetched.fusion === true && planCacheKey !== null) {
@@ -830,6 +836,7 @@ const handleInferenceIn = async (
         },
         holdNonce: fetchedHoldNonce,
         maxOutputTokens: fetchedMaxOutputTokens,
+        hopOutputLimits: fetchedHopOutputLimits,
         singleCloudHop: singleCloud,
         fusion: fetched.fusion === true,
       };
@@ -875,6 +882,7 @@ const handleInferenceIn = async (
             outcome.tuple.originParam,
           );
         maxOutputTokens = outcome.maxOutputTokens;
+        hopOutputLimits = outcome.hopOutputLimits;
         planParam = outcome.tuple.planParam;
         pmidsParam = outcome.tuple.pmidsParam;
         originParam = outcome.tuple.originParam;
@@ -1231,8 +1239,10 @@ const handleInferenceIn = async (
       );
     }
     const outcome = session.outcome;
-    if (holdNonce === null || outcome === null) return walkOnce();
-    return withHoldNonce(holdNonce, walkOnce, maxOutputTokens, outcome);
+    const walkPlan = (): Promise<Response> =>
+      withHopOutputLimits(parsePlan(planParam), hopOutputLimits, walkOnce);
+    if (holdNonce === null || outcome === null) return walkPlan();
+    return withHoldNonce(holdNonce, walkPlan, maxOutputTokens, outcome);
   };
   let response = await walk();
   let overflowResponse: Response | null = null;

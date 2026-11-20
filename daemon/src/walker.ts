@@ -249,6 +249,7 @@ import {
   peekHopCooldown,
   TRANSIENT_COOLDOWN_REASONS,
 } from "./hop-cooldown";
+import { currentHopOutputLimits, hopOutputLimitOf } from "./hop-output-limits";
 import { serveLocalKeyHop } from "./local-keys";
 import { isLocalServerSlug, serveLocalHop } from "./local-servers";
 import { logWarn, safeDiagnosticMessage } from "./logger";
@@ -539,6 +540,7 @@ export const planSignatureOk = (
   sigParam: string | null,
   holdNonce?: string | null,
   maxOutputTokens?: number | null,
+  hopOutputLimits?: ReadonlyArray<number | null> | null,
 ): boolean => {
   const sigKey = planSigningKey();
   return (
@@ -553,6 +555,9 @@ export const planSignatureOk = (
         maxOutputTokens === undefined
           ? currentHoldOutputLimit()
           : maxOutputTokens,
+        hopOutputLimits === undefined
+          ? currentHopOutputLimits()
+          : hopOutputLimits,
       ),
       sigParam,
       sigKey,
@@ -3010,6 +3015,26 @@ const walkPlan = async (
         .buffer as ArrayBuffer,
     };
   }
+  // Each hop dials with its own Fusion ceiling (lower-only, on top of the
+  // hold's). Closures read `args`, so it is rebound before every dial.
+  const baseArgs = args;
+  const argsForHop = (hop: THop): typeof args => {
+    const limit = hopOutputLimitOf(hop.modelId);
+    if (limit === null) return baseArgs;
+    const body = clampHoldOutputLimit(
+      baseArgs.rawBody,
+      baseArgs.surface,
+      limit,
+    );
+    return body === baseArgs.rawBody
+      ? baseArgs
+      : {
+          ...baseArgs,
+          rawBody: body,
+          rawBytes: new TextEncoder().encode(JSON.stringify(body))
+            .buffer as ArrayBuffer,
+        };
+  };
   walkCounter += 1;
   const walkSessionKey = `walk-${walkCounter}`;
   const hopRetryDelayMs = args.hopRetryDelayMs ?? DEFAULT_HOP_RETRY_DELAY_MS;
@@ -3513,7 +3538,13 @@ const walkPlan = async (
         providerModelId: hop.providerModelId,
         surface: args.surface,
         rawBody: args.rawBody,
-        canonical: applyModelSettings(canonical, hop.modelSettings),
+        canonical: applyModelSettings(
+          // A Fusion ceiling lowered this hop's body: re-read its output limit.
+          args.rawBody === baseArgs.rawBody
+            ? canonical
+            : canonicalFromInbound(args.surface, args.rawBody),
+          hop.modelSettings,
+        ),
         wantsStream:
           (args.rawBody as { stream?: unknown } | null)?.stream === true,
         // TODO(docs/audit/2026-08-30-claude-code-bridge-failures.md §4 B1):
@@ -3912,6 +3943,7 @@ const walkPlan = async (
     if (candidate === undefined) break;
     queueIndex += 1;
     const { hop, forceContextAttempt } = candidate;
+    args = argsForHop(hop);
     attempted.push(hop.modelId);
     // A skipped ordinary candidate means the physical queue still has a
     // forced-context epilogue. Its successor must remain walkable until that
@@ -4239,6 +4271,7 @@ const walkPlan = async (
     // this walk. Covers a chain that lists the same model at two positions.
     if (dialedHops.has(`${hop.provider}|${hop.modelId}`)) continue;
     if (recoveryDialed.has(`${hop.provider}|${hop.modelId}`)) continue; // at-most-once per hop
+    args = argsForHop(hop);
     // Each account of the provider is its own candidate (its own cooldown
     // provenance and usage floor); single-account providers loop once.
     for (const index of subscriptionAccounts(hop.provider)) {
