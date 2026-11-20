@@ -81,6 +81,11 @@ export const COMPILE_BUN_FLAGS = [
   "--sourcemap=none",
   "--format=esm",
   "--bytecode",
+  // A standalone executable autoloads `.env*` from its cwd by default, so
+  // `openllm` run inside a project whose `.env` sets `OPENLLM_API_KEY` used
+  // that key instead of the paired one. Config comes from `~/.openllm/.env`
+  // (read by `env.ts`) and the service's env file — never the cwd.
+  "--no-compile-autoload-dotenv",
 ] as const;
 
 // OpenLLM's own Vercel preview deployments, anchored to the `openllm` project +
