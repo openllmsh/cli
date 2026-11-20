@@ -249,7 +249,11 @@ import {
   peekHopCooldown,
   TRANSIENT_COOLDOWN_REASONS,
 } from "./hop-cooldown";
-import { currentHopOutputLimits, hopOutputLimitOf } from "./hop-output-limits";
+import {
+  currentHopOutputLimits,
+  hopOutputLimitOf,
+  lowerToHopOutputLimit,
+} from "./hop-output-limits";
 import { serveLocalKeyHop } from "./local-keys";
 import { isLocalServerSlug, serveLocalHop } from "./local-servers";
 import { logWarn, safeDiagnosticMessage } from "./logger";
@@ -1581,14 +1585,17 @@ export const serveSubscription = async (
   let body = await applyDelegateModelCompat(
     getDelegate(hop.provider),
     hop.providerModelId,
-    applyOutputTokenBackfill(built.body, {
-      hopModelId: hop.modelId,
-      rawBody: args.rawBody,
-      getOutputTokenLimit: (modelId) =>
-        lookupCatalogEntry(modelId)?.output_token_limit ?? null,
-      wire,
-      codexInstructions: wantsCodexPreamble(hop.provider),
-    }),
+    lowerToHopOutputLimit(
+      hop.modelId,
+      applyOutputTokenBackfill(built.body, {
+        hopModelId: hop.modelId,
+        rawBody: args.rawBody,
+        getOutputTokenLimit: (modelId) =>
+          lookupCatalogEntry(modelId)?.output_token_limit ?? null,
+        wire,
+        codexInstructions: wantsCodexPreamble(hop.provider),
+      }),
+    ),
   );
   // Provider-native search: the client DECLARED the Anthropic
   // `web_search_*` server tool — an explicit platform-executes-search

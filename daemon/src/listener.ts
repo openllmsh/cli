@@ -38,6 +38,7 @@ import {
   resolveContextOverflowStrategy,
   shouldDemoteOnContextOverflow,
 } from "@openllmsh/sdk/wire/features/context-overflow-strategy";
+import { clampOutputLimitBytes } from "@openllmsh/sdk/wire/features/output-limit-clamp";
 import { estimateBodyTokens } from "@openllmsh/sdk/wire/lib/canonical/token-estimate";
 import { Schema } from "effect";
 import { waitForHoldRecords, withHoldNonce } from "./access-hold-context";
@@ -1230,9 +1231,14 @@ const handleInferenceIn = async (
     if (singleCloudHop && planParam !== null) {
       // Origin authenticates the caller and owns this hop's reservation;
       // no daemon hold is used or charged for the forward.
+      // Origin runs the pinned hop without Fusion: its ceiling rides here.
+      const ceiling = hopOutputLimits?.[0] ?? null;
       return forwardToCloud(
         walkReq,
-        rawBytes,
+        ceiling === null
+          ? rawBytes
+          : (clampOutputLimitBytes(new Uint8Array(rawBytes), surface, ceiling)
+              .buffer as ArrayBuffer),
         planParam,
         originParam,
         callerKey,

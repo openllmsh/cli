@@ -1,4 +1,5 @@
 import { AsyncLocalStorage } from "node:async_hooks";
+import { lowerPresentOutputLimitFields } from "@openllmsh/sdk/wire/features/output-limit-clamp";
 
 /**
  * A Fusion plan's per-hop output ceilings (signed `hop_output_limits`),
@@ -35,3 +36,15 @@ export const currentHopOutputLimits = (): ReadonlyArray<number | null> | null =>
 /** This hop's output ceiling; null when it never hands off. */
 export const hopOutputLimitOf = (modelId: string): number | null =>
   hopOutputLimitsContext.getStore()?.byModel.get(modelId) ?? null;
+
+/**
+ * Lower a built upstream body back to its hop's ceiling: the alias output
+ * backfill runs after the walker's clamp and may raise it to the catalog cap.
+ */
+export const lowerToHopOutputLimit = (
+  modelId: string,
+  body: unknown,
+): unknown => {
+  const limit = hopOutputLimitOf(modelId);
+  return limit === null ? body : lowerPresentOutputLimitFields(body, limit);
+};
