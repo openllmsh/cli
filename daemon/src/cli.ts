@@ -35,12 +35,12 @@ import {
   deviceKeyFingerprint,
   getDeviceAccessPin,
 } from "./device-access-verify";
-import { deviceSessionsPrefEnabled } from "./device-sessions-pref";
 import {
   deviceSessionsReport,
   installDeviceAnchor,
   setDeviceSessionsEnabled,
 } from "./device-anchor";
+import { deviceSessionsPrefEnabled } from "./device-sessions-pref";
 import { loadIdentityKey } from "./keypair";
 import { logError } from "./logger";
 import { runLogs } from "./logs";

@@ -9,22 +9,22 @@ import {
 } from "node:fs";
 import { extname, isAbsolute, join } from "node:path";
 import { processAlive } from "../daemon/src/child-supervisor/posix";
+import type { TSessionHostStopTarget } from "../daemon/src/session-host-stop";
 import {
   readSessionHostProcessStartTime,
   sessionHostProcessAlive,
   stopSessionHost,
 } from "../daemon/src/session-host-stop";
-import type { TSessionHostStopTarget } from "../daemon/src/session-host-stop";
 import type { TDaemonCli } from "./clients/registry";
 import { DAEMON_CLIS } from "./clients/registry";
 import { daemonStateDir } from "./env";
 
+export type { TSessionHostStopTarget } from "../daemon/src/session-host-stop";
 export {
   killSessionHostViaCtl,
   sessionHostProcessAlive,
   stopSessionHost,
 } from "../daemon/src/session-host-stop";
-export type { TSessionHostStopTarget } from "../daemon/src/session-host-stop";
 
 export type TSessionHostMeta = {
   readonly id: string;
@@ -290,10 +290,7 @@ export const discoverLiveSessionHosts = (
     }
 
     if (!existsSync(socketPath)) {
-      if (
-        reapStale &&
-        Date.now() - meta.startedAtMs > HOST_STARTUP_GRACE_MS
-      ) {
+      if (reapStale && Date.now() - meta.startedAtMs > HOST_STARTUP_GRACE_MS) {
         reapDirectory(directory);
       }
       continue;

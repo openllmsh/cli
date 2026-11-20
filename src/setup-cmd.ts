@@ -32,8 +32,8 @@ import {
 } from "node:fs";
 import { userInfo } from "node:os";
 import { basename, join } from "node:path";
-import { COMPLETION_SHELLS } from "./commands";
 import type { TCompletionShell } from "./commands";
+import { COMPLETION_SHELLS } from "./commands";
 import { completionTargetPath, installCompletion } from "./completion";
 import { userHome } from "./env";
 
@@ -155,8 +155,7 @@ const parentProcessShell = (): string | null => {
  * shell, then the parent process's command, accepting only bash/zsh/fish.
  */
 export const resolveShell = (deps: TResolveShellDeps = {}): TResolvedShell => {
-  const envShell =
-    "envShell" in deps ? deps.envShell : process.env.SHELL;
+  const envShell = "envShell" in deps ? deps.envShell : process.env.SHELL;
   if (envShell !== undefined && envShell !== "") {
     const name = shellBasename(envShell);
     return { name: name.length > 0 ? name : null, known: isKnownShell(name) };
@@ -334,9 +333,7 @@ export type TInstallRcResult =
  * Write (or refresh) the owned rc block. Idempotent: an existing block is
  * replaced in place; otherwise the block is appended.
  */
-export const installRcBlock = (
-  deps?: TResolveShellDeps,
-): TInstallRcResult => {
+export const installRcBlock = (deps?: TResolveShellDeps): TInstallRcResult => {
   const resolved = resolveShell(deps);
   if (!resolved.known || resolved.name === null) {
     return { ok: false, kind: "unsupported", shell: resolved.name };
@@ -370,7 +367,9 @@ export const installRcBlock = (
     return { ok: true, rc };
   } catch (error) {
     const reason =
-      error instanceof Error && "code" in error && typeof error.code === "string"
+      error instanceof Error &&
+      "code" in error &&
+      typeof error.code === "string"
         ? error.code
         : error instanceof Error
           ? error.message
@@ -524,9 +523,7 @@ export const runSetup = (options: TRunSetupOptions = {}): number => {
   // Show whenever the binary isn't on PATH — even if rc/completion failed —
   // so the current session can still reach the just-installed binary.
   if (!openllmBinOnPath()) {
-    process.stdout.write(
-      `\n# for this session:\n${sessionPathExportLine()}\n`,
-    );
+    process.stdout.write(`\n# for this session:\n${sessionPathExportLine()}\n`);
   }
 
   return failures === 0 ? 0 : 1;

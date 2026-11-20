@@ -97,7 +97,9 @@ if (import.meta.main && process.argv.includes("--check")) {
     );
     process.exit(1);
   }
-  process.stdout.write(`[binary-sdk-paths] OK — ${BINARY_SDK_PATHS_FILE} matches the binary's closure\n`);
+  process.stdout.write(
+    `[binary-sdk-paths] OK — ${BINARY_SDK_PATHS_FILE} matches the binary's closure\n`,
+  );
 } else if (import.meta.main) {
   const paths = await computeBinarySdkPaths();
   writeFileSync(

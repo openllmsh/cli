@@ -176,11 +176,14 @@ export type TGatewayAccess = {
   readonly tier: "free" | "trial" | "pro" | undefined;
   /** This key's permissions; `undefined` when the gateway didn't say. */
   readonly permissions: readonly TPermission[] | undefined;
+  /** A gateway admin's key: admin operations are offered (on demand). */
+  readonly admin: boolean;
 };
 
 const UNKNOWN_ACCESS: TGatewayAccess = {
   tier: undefined,
   permissions: undefined,
+  admin: false,
 };
 
 export const fetchTier = async (
@@ -204,12 +207,17 @@ export const fetchAccess = async (
     const body = (await res.json()) as {
       tier?: unknown;
       permissions?: unknown;
+      admin?: unknown;
     };
     const tier =
       body.tier === "free" || body.tier === "trial" || body.tier === "pro"
         ? body.tier
         : undefined;
-    return { tier, permissions: parseKeyPermissions(body.permissions) };
+    return {
+      tier,
+      permissions: parseKeyPermissions(body.permissions),
+      admin: body.admin === true,
+    };
   } catch {
     return UNKNOWN_ACCESS;
   }

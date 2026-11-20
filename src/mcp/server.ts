@@ -69,6 +69,7 @@ export const createCliMcpServer = ({
   permissions,
   config,
   upstreams = [],
+  admin = false,
 }: {
   requested: readonly TMcpGroup[];
   tier: Parameters<typeof mcpGroupsForTier>[1];
@@ -76,6 +77,8 @@ export const createCliMcpServer = ({
   permissions?: readonly TPermission[];
   config: { baseUrl: string; apiKey: string };
   upstreams?: readonly TUpstream[];
+  /** A gateway admin's key: admin operations become findable. */
+  admin?: boolean;
 }): McpServer => {
   const groups = mcpGroupsForTier(requested, tier);
   return createSdkMcpServer({
@@ -84,6 +87,7 @@ export const createCliMcpServer = ({
     config,
     upstreams,
     includeFreeTierOnlyTools: tier === "free",
+    admin,
     ...(permissions !== undefined ? { permissions } : {}),
     // Upload to this machine's daemon when it answers: subscription hops
     // (Grok, Claude Dictation) then serve locally, past Vercel's 4.5 MB body
@@ -194,7 +198,7 @@ export const runMcpServer = async (
 
   let attachedLate = false;
   serveStdio(async () => {
-    const [{ tier, permissions }] = await Promise.all([
+    const [{ tier, permissions, admin }] = await Promise.all([
       accessPromise,
       Promise.race([
         launchPromise.then(() => undefined),
@@ -208,6 +212,7 @@ export const runMcpServer = async (
       requested,
       tier,
       ...(permissions !== undefined ? { permissions } : {}),
+      admin,
       config,
       upstreams: includedAtCreate,
     });
