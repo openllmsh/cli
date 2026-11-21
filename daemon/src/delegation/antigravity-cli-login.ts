@@ -317,3 +317,71 @@ export const startAgyLogin = (args: {
     cancel: () => settle({ kind: "failed", reason: "sign-in cancelled" }),
   };
 };
+
+/**
+ * Sign out through `agy`'s own `/logout` command (it is not one of the
+ * read-only print-mode commands): open the signed-in screen, type `/logout`,
+ * and judge success by the sign-in store (`isSignedIn`, metadata only) rather
+ * than by screen text. Enter is repeated once in case the first one only
+ * accepted a command-completion suggestion.
+ */
+export const runAgyLogout = async (args: {
+  readonly argv: ReadonlyArray<string>;
+  readonly env: Record<string, string>;
+  readonly cwd: string;
+  readonly isSignedIn: () => Promise<boolean>;
+  readonly spawn?: TAgyLoginPtySpawner;
+  readonly timeoutMs: number;
+  readonly pollMs?: number;
+}): Promise<{ readonly ok: boolean; readonly detail: string }> => {
+  if (!(await args.isSignedIn())) {
+    return { ok: true, detail: "already signed out" };
+  }
+  let screen = "";
+  let typed = false;
+  const decoder = new TextDecoder();
+  let pty: TAgyLoginPty;
+  try {
+    pty = (args.spawn ?? bunAgyLoginPty)({
+      argv: args.argv,
+      env: args.env,
+      cwd: args.cwd,
+      cols: AGY_LOGIN_COLS,
+      rows: AGY_LOGIN_ROWS,
+      onData: (chunk) => {
+        screen =
+          `${screen}${stripTerminal(decoder.decode(chunk, { stream: true }))}`.slice(
+            -32_768,
+          );
+        if (!typed && SIGNED_IN_RE.test(screen)) {
+          typed = true;
+          pty.write("/logout");
+          pty.write("\r");
+          setTimeout(() => pty.write("\r"), 1_500);
+        }
+      },
+    });
+  } catch (error) {
+    return {
+      ok: false,
+      detail: `could not start agy: ${error instanceof Error ? error.message : String(error)}`,
+    };
+  }
+  const deadline = Date.now() + args.timeoutMs;
+  try {
+    while (Date.now() < deadline) {
+      await Bun.sleep(args.pollMs ?? 500);
+      if (typed && !(await args.isSignedIn())) {
+        return { ok: true, detail: "signed out of Google Antigravity" };
+      }
+    }
+    return {
+      ok: false,
+      detail: typed
+        ? "agy did not sign out in time"
+        : "agy did not show its signed-in screen",
+    };
+  } finally {
+    pty.kill();
+  }
+};

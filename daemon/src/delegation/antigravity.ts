@@ -23,7 +23,13 @@
  * Demand-only: `status()` never spawns the agent (each launch unpacks ~1 GB).
  */
 
-import { existsSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import { request as httpRequest } from "node:http";
 import { join } from "node:path";
@@ -73,7 +79,7 @@ import { accountHashField } from "./account-id";
 import type { TAgyModelRow } from "./antigravity-cli";
 import { agyCliSignedIn, readAgyModels, readAgyUsage } from "./antigravity-cli";
 import type { TAgyLogin } from "./antigravity-cli-login";
-import { startAgyLogin } from "./antigravity-cli-login";
+import { runAgyLogout, startAgyLogin } from "./antigravity-cli-login";
 import {
   readAntigravityAccountId,
   readAntigravityUsage,
@@ -645,6 +651,35 @@ const cancelConnect = makeCancelConnect(PROVIDER, wiring.slot, {
   none: "no sign-in was in progress",
 });
 
+/** Sign out of an `agy` sign-in with `agy`'s own `/logout`. */
+const logoutViaAgy = async (
+  agyBin: string,
+): Promise<{ readonly ok: boolean; readonly detail: string }> => {
+  const home = agyHome();
+  if ((await ensureIsolatedKeychain(home)).kind !== "present") {
+    return { ok: false, detail: "couldn't open the sign-in store to sign out" };
+  }
+  const scratch = await mkdtemp(join(daemonTempDir(), "agy-logout-"));
+  try {
+    const result = await runAgyLogout({
+      argv: sandboxSpawnArgs([agyBin], { probe: unwrapAntigravityCliSpawn() }),
+      env: antigravitySpawnEnv(cliEnv(PROVIDER)),
+      cwd: scratch,
+      isSignedIn: () => agyCliSignedIn(home),
+      timeoutMs: LOGOUT_TIMEOUT_MS,
+    });
+    if (result.ok) {
+      // Nothing from the signed-out account may serve or be listed.
+      disposeAntigravityHeadlessSpares();
+      noteAuthStoreIdentityChange(PROVIDER);
+      rmSync(agyModelsPath(), { force: true });
+    }
+    return result;
+  } finally {
+    await rm(scratch, { recursive: true, force: true });
+  }
+};
+
 export const antigravityDelegate: TProviderDelegate = {
   slug: PROVIDER,
   primaryLoginMethod: "browser",
@@ -749,6 +784,14 @@ export const antigravityDelegate: TProviderDelegate = {
   },
 
   logout: async () => {
+    const agyBin = resolveAntigravityCli();
+    if (
+      !tokenPresent() &&
+      agyBin !== null &&
+      (await agyCliSignedIn(agyHome()))
+    ) {
+      return logoutViaAgy(agyBin);
+    }
     if (
       tokenPresent() &&
       (await cliInstallState(PROVIDER, { demand: true })).installed
