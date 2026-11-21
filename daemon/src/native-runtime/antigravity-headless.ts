@@ -41,7 +41,10 @@ import { sandboxSpawnArgs } from "../sandbox/exec";
 import { unwrapAntigravityCliSpawn } from "../sandbox/policy";
 import { daemonTempDir } from "../sandbox/working-set";
 import { antigravitySpawnEnv } from "./antigravity-acp";
-import { ensureAntigravityCliSettings } from "./antigravity-cli-settings";
+import {
+  ANTIGRAVITY_CLI_AGENT_NAME,
+  prepareAntigravityCliProfile,
+} from "./antigravity-cli-settings";
 import { createAcpTurnState } from "./cursor-acp";
 import type { TNativeRunResult } from "./types";
 import { PRE_COMMIT_TIMEOUT_MS } from "./types";
@@ -99,6 +102,8 @@ export const antigravityHeadlessArgv = (
   "stream-json",
   "--model",
   model,
+  "--agent",
+  ANTIGRAVITY_CLI_AGENT_NAME,
   "--disable-slash-commands",
 ];
 
@@ -435,7 +440,8 @@ export type TAntigravityHeadlessParams = {
   readonly spare?: boolean;
   /** Test overrides. */
   readonly argv?: (bin: string, model: string) => string[];
-  /** Tool lockdown (default {@link ensureAntigravityCliSettings}). */
+  /** Profile prep: tool deny rules + tool-less agent (default
+   *  {@link prepareAntigravityCliProfile}). */
   readonly ensureSettings?: (home: string) => boolean;
   /** Keychain readiness gate (default {@link ensureKeychainReady}). */
   readonly ensureKeychain?: (home: string) => Promise<TStoreRead<void>>;
@@ -485,8 +491,8 @@ export const runAntigravityHeadless = async (
   if (keychain.kind !== "present") {
     return fallback(`isolated keychain not ready (${keychain.kind})`);
   }
-  // `agy`'s built-in tools must be denied before it starts.
-  if (!(params.ensureSettings ?? ensureAntigravityCliSettings)(home)) {
+  // The tool-less agent and the tool deny rules must be in place first.
+  if (!(params.ensureSettings ?? prepareAntigravityCliProfile)(home)) {
     return fallback("agy settings could not be locked down");
   }
   if (params.signal.aborted) {

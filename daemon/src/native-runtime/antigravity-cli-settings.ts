@@ -116,3 +116,57 @@ export const ensureAntigravityCliSettings = (home: string): boolean => {
     return false;
   }
 };
+
+// ─── Custom agent ──────────────────────────────────────────────────────────
+//
+// `agy`'s default agent declares ~60 built-in tools plus a long IDE-agent
+// system prompt: ~9.6k input tokens on every new conversation. A documented
+// custom agent (antigravity.google/docs/subagents: a Markdown file whose
+// frontmatter `tools` is an allowlist and whose body IS the system prompt,
+// run as the main agent with `agy --agent <name>`) with no tools cut a
+// "reply ok" turn from 9,668 to 1,983 input tokens, measured 2026-11-20.
+// It lives only under the isolated HOME (`<home>/.gemini/config/agents/`), so
+// the user's own `agy` never sees it.
+
+export const ANTIGRAVITY_CLI_AGENT_NAME = "openllm";
+
+export const ANTIGRAVITY_CLI_AGENT_FILE = `---
+name: ${ANTIGRAVITY_CLI_AGENT_NAME}
+description: Plain chat completion for OpenLLM requests. No tools.
+tools: []
+mainAgent: true
+subagent: false
+model: inherit
+commandExecutionPolicy: off
+---
+
+You are a helpful assistant. Answer the user's message directly.
+`;
+
+export const antigravityCliAgentPath = (home: string): string =>
+  join(home, ".gemini", "config", "agents", `${ANTIGRAVITY_CLI_AGENT_NAME}.md`);
+
+/** Write the agent file when missing or different. False on a write error. */
+export const ensureAntigravityCliAgent = (home: string): boolean => {
+  const path = antigravityCliAgentPath(home);
+  try {
+    if (
+      existsSync(path) &&
+      readFileSync(path, "utf8") === ANTIGRAVITY_CLI_AGENT_FILE
+    ) {
+      return true;
+    }
+    mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+    const tmp = `${path}.${process.pid}.tmp`;
+    writeFileSync(tmp, ANTIGRAVITY_CLI_AGENT_FILE, { mode: 0o600 });
+    renameSync(tmp, path);
+    return true;
+  } catch {
+    return false;
+  }
+};
+
+/** Everything the isolated `agy` profile needs before a spawn: the tool deny
+ *  rules and the tool-less agent. False → do not run `agy`. */
+export const prepareAntigravityCliProfile = (home: string): boolean =>
+  ensureAntigravityCliSettings(home) && ensureAntigravityCliAgent(home);
