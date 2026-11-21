@@ -41,6 +41,7 @@ import { sandboxSpawnArgs } from "../sandbox/exec";
 import { unwrapAntigravityCliSpawn } from "../sandbox/policy";
 import { daemonTempDir } from "../sandbox/working-set";
 import { antigravitySpawnEnv } from "./antigravity-acp";
+import { ensureAntigravityCliSettings } from "./antigravity-cli-settings";
 import { createAcpTurnState } from "./cursor-acp";
 import type { TNativeRunResult } from "./types";
 import { PRE_COMMIT_TIMEOUT_MS } from "./types";
@@ -434,6 +435,8 @@ export type TAntigravityHeadlessParams = {
   readonly spare?: boolean;
   /** Test overrides. */
   readonly argv?: (bin: string, model: string) => string[];
+  /** Tool lockdown (default {@link ensureAntigravityCliSettings}). */
+  readonly ensureSettings?: (home: string) => boolean;
   /** Keychain readiness gate (default {@link ensureKeychainReady}). */
   readonly ensureKeychain?: (home: string) => Promise<TStoreRead<void>>;
   /** Wrap the argv for the daemon sandbox (default {@link sandboxSpawnArgs}
@@ -481,6 +484,10 @@ export const runAntigravityHeadless = async (
   const keychain = await (params.ensureKeychain ?? ensureKeychainReady)(home);
   if (keychain.kind !== "present") {
     return fallback(`isolated keychain not ready (${keychain.kind})`);
+  }
+  // `agy`'s built-in tools must be denied before it starts.
+  if (!(params.ensureSettings ?? ensureAntigravityCliSettings)(home)) {
+    return fallback("agy settings could not be locked down");
   }
   if (params.signal.aborted) {
     return { kind: "declined", reason: "client aborted" };
