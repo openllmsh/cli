@@ -2214,21 +2214,23 @@ install_antigravity_cli() {
   return 0
 }
 
-# Worker body for the whole Antigravity install: the ACP agent release (a
-# failure fails the install), then the `agy` CLI (never fatal).
+# Worker body for the whole Antigravity install: the ACP agent release, then
+# the `agy` CLI (never fatal). The CLI is attempted even when the ACP agent
+# fails — it is the primary transport — and the ACP failure is reported after.
 install_antigravity_all() {
-  local curl_bin="$1" registry="$2"
+  local curl_bin="$1" registry="$2" acp_rc=0
   # An active, complete ACP install is left alone — only the CLI is added.
   # The agent ships as a zip: without `unzip` it is skipped, the CLI is not.
   if [ ! -x "$ANTIGRAVITY_DIR/current/$ANTIGRAVITY_EXE" ] \
     || [ ! -x "$ANTIGRAVITY_DIR/current/$ANTIGRAVITY_HARNESS" ]; then
     if command -v unzip >/dev/null 2>&1; then
-      install_antigravity_release "$curl_bin" "$registry" || return $?
+      install_antigravity_release "$curl_bin" "$registry" || acp_rc=$?
     else
       echo "Antigravity: unzip not found — skipping the ACP agent (install unzip, then rerun the installer)." >&2
     fi
   fi
   install_antigravity_cli "$curl_bin"
+  return "$acp_rc"
 }
 
 # Launch the tracked Antigravity install when this host can take it. Skips
@@ -2722,7 +2724,9 @@ build_vendor_status_line() {
       reason=""
     # Prefer a live binary over a stale progress record (e.g. leftover
     # stage=installing / failed after a successful vendor install).
-    elif has_executable_command "$bin" || [ -x "$dest" ] || [ -x "$HOME/.local/bin/$bin" ]; then
+    # Antigravity counts either transport: the ACP agent or the `agy` CLI.
+    elif has_executable_command "$bin" || [ -x "$dest" ] || [ -x "$HOME/.local/bin/$bin" ] \
+      || { [ "$slug" = antigravity ] && [ -x "$ANTIGRAVITY_CLI_BIN" ]; }; then
       stage="installed"
       reason=""
     elif case "$VENDOR_LAUNCH_FAILED_SLUGS" in *",$slug,"*) true ;; *) false ;; esac; then

@@ -127,12 +127,25 @@ export const runVendorProvisioning = async (
   return ok ? "provisioned" : "failed";
 };
 
-/** Boot hook: converge vendors once the daemon has settled (Routebox only). */
+/**
+ * Boot hook: converge vendors once the daemon has settled (Routebox only).
+ * A failed attempt tries again after the retry cooldown while the daemon
+ * keeps running (a box whose network was down at boot still converges);
+ * `runVendorProvisioning`'s own guards decide every attempt.
+ */
 export const scheduleVendorProvisioning = (): void => {
   if (!isRoutebox()) return;
-  setTimeout(() => {
-    void runVendorProvisioning().catch((error: unknown) =>
-      logError("vendor-provision", error),
-    );
-  }, VENDOR_PROVISION_BOOT_DELAY_MS).unref?.();
+  const attempt = (delayMs: number): void => {
+    setTimeout(() => {
+      void runVendorProvisioning()
+        .catch((error: unknown): "failed" => {
+          logError("vendor-provision", error);
+          return "failed";
+        })
+        .then((outcome) => {
+          if (outcome === "failed") attempt(VENDOR_PROVISION_RETRY_MS);
+        });
+    }, delayMs).unref?.();
+  };
+  attempt(VENDOR_PROVISION_BOOT_DELAY_MS);
 };

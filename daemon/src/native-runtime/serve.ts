@@ -1510,7 +1510,10 @@ const serveAntigravityHop = async (
     }
   };
   const fail = (err: unknown): void => {
-    heldLease?.abandon();
+    // Committed: `agy` may already hold this turn, so a retry must not
+    // resume the same conversation and send it twice. Drop the entry (the
+    // retry starts a fresh, seeded conversation).
+    heldLease?.commit(conversationKey, null);
     if (params.signal.aborted || isClientHangUp(err)) return;
     const usage = partialUsageFrom(err);
     params.record(

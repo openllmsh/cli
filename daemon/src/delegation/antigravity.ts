@@ -76,7 +76,7 @@ import { sandboxSpawnArgs } from "../sandbox/exec";
 import { unwrapAntigravityCliSpawn } from "../sandbox/policy";
 import { daemonTempDir } from "../sandbox/working-set";
 import { accountHashField } from "./account-id";
-import type { TAgyModelRow } from "./antigravity-cli";
+import type { TAgyCliDeps, TAgyModelRow } from "./antigravity-cli";
 import {
   agyCliSignedIn,
   readAgyModels,
@@ -146,7 +146,10 @@ const tokenPresent = (): boolean => {
 /** The isolated HOME `agy` runs under (its own sign-in, keychain, settings). */
 const agyHome = (): string => cliHome(PROVIDER);
 
-const agyDeps = (bin: string) => ({ bin, env: cliEnv(PROVIDER) });
+const agyDeps = (bin: string): TAgyCliDeps => ({
+  bin,
+  env: cliEnv(PROVIDER),
+});
 
 /** Signed in on a transport that is installed: the ACP agent with its token
  *  file, or the `agy` CLI with its own sign-in (metadata only). A leftover
@@ -798,11 +801,8 @@ export const antigravityDelegate: TProviderDelegate = {
   // approach). `agy` sign-in: `agy`'s own `/usage` — no token is read.
   usage: async (): Promise<TProviderUsageSnapshot> => {
     const agyBin = resolveAntigravityCli();
-    if (
-      !tokenPresent() &&
-      agyBin !== null &&
-      (await agyCliSignedIn(agyHome()))
-    ) {
+    // Text turns run on `agy` first: its account's quota is the one shown.
+    if (agyBin !== null && (await agyCliSignedIn(agyHome()))) {
       return readAgyUsage(agyDeps(agyBin));
     }
     return readAntigravityUsage({ geminiHome: geminiHome() });

@@ -289,26 +289,34 @@ export const startAgyLogin = (args: {
         resolveUrl(parsed);
       }
     }
-    if (
-      SIGNED_IN_RE.test(screen) &&
-      (codeTyped || surfaced !== null || !menuAnswered)
-    ) {
-      // Signed in: after a code, after the browser finished on its own, or
-      // already signed in when the screen opened.
-      settle({ kind: "signed_in" });
+    if (SIGNED_IN_RE.test(screen)) {
+      // Already signed in when the screen opened: done. After a code or the
+      // browser, the banner only prompts a store check — the screen closes
+      // once `agy` has actually stored the sign-in, never before.
+      if (!menuAnswered) settle({ kind: "signed_in" });
+      else if (codeTyped || surfaced !== null) checkStore();
     }
   };
 
   // Once the link is out, the store decides: the browser may complete the
   // sign-in on its own, or a pasted code may.
-  const poll = setInterval(() => {
-    if (settled || surfaced === null) return;
+  // One store check at a time: a slow keychain probe never piles up.
+  let checking = false;
+  const checkStore = (): void => {
+    if (settled || checking) return;
+    checking = true;
     void args.isSignedIn().then(
       (yes) => {
+        checking = false;
         if (yes) settle({ kind: "signed_in" });
       },
-      () => {},
+      () => {
+        checking = false;
+      },
     );
+  };
+  const poll = setInterval(() => {
+    if (surfaced !== null) checkStore();
   }, args.pollMs ?? 1_000);
   timers.push(poll as unknown as ReturnType<typeof setTimeout>);
 

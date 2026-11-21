@@ -30,7 +30,7 @@
  */
 
 import { createHash } from "node:crypto";
-import { existsSync } from "node:fs";
+import { accessSync, constants, statSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -85,12 +85,22 @@ export const resolveAntigravityCli = (
   env: Readonly<Record<string, string | undefined>> = process.env,
   home: string = homedir(),
 ): string | null => {
+  // Executable, not merely present: a file that can't run must not take the
+  // route (and Connect) away from ACP.
+  const runnable = (path: string): boolean => {
+    try {
+      accessSync(path, constants.X_OK);
+      return statSync(path).isFile();
+    } catch {
+      return false;
+    }
+  };
   const override = env.OPENLLM_AGY_BIN;
   if (override !== undefined && override.length > 0) {
-    return existsSync(override) ? override : null;
+    return runnable(override) ? override : null;
   }
   const launcher = join(home, ".local", "bin", "agy");
-  if (existsSync(launcher)) return launcher;
+  if (runnable(launcher)) return launcher;
   return Bun.which("agy");
 };
 
@@ -121,11 +131,16 @@ export type THeadlessUsage = {
   readonly cacheRead: number;
 };
 
+/** Longest stdout line kept while waiting for its newline (4 MiB). */
+export const ANTIGRAVITY_HEADLESS_MAX_LINE_CHARS = 4 * 1024 * 1024;
+
 const count = (v: unknown): number =>
   typeof v === "number" && Number.isSafeInteger(v) && v > 0 ? v : 0;
 
 /** `agy` usage → the OpenAI usage row the daemon records: cached tokens are
- *  part of `prompt_tokens`, thinking is part of `completion_tokens`. */
+ *  part of `prompt_tokens`. `output_tokens` already includes thinking
+ *  (`total_tokens` = input + output in agy's own result), so thinking is
+ *  never added a second time. */
 export const openAiUsageOf = (
   u: THeadlessUsage,
 ): {
@@ -135,7 +150,7 @@ export const openAiUsageOf = (
   readonly prompt_tokens_details: { readonly cached_tokens: number };
 } => {
   const prompt = u.input + u.cacheRead;
-  const completion = u.output + u.thinking;
+  const completion = u.output;
   return {
     prompt_tokens: prompt,
     completion_tokens: completion,
@@ -356,6 +371,12 @@ class HeadlessProcess {
           buf = buf.slice(nl + 1);
           nl = buf.indexOf("\n");
           if (event !== null) this.listener?.(event);
+        }
+        // A line that never ends must not grow without bound: end the
+        // process (the turn then fails as an exit mid-turn).
+        if (buf.length > ANTIGRAVITY_HEADLESS_MAX_LINE_CHARS) {
+          this.dispose();
+          return;
         }
       }
     } catch {
@@ -875,7 +896,7 @@ export const runAntigravityHeadless = async (
       if (usage !== null) {
         turn.handleUpdate({
           sessionUpdate: "usage_update",
-          used: usage.input + usage.cacheRead + usage.output + usage.thinking,
+          used: usage.input + usage.cacheRead + usage.output,
         });
       } else if (event.totalTokens !== null && proc.usageBaseline === null) {
         turn.handleUpdate({
