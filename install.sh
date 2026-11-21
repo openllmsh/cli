@@ -2219,9 +2219,14 @@ install_antigravity_cli() {
 install_antigravity_all() {
   local curl_bin="$1" registry="$2"
   # An active, complete ACP install is left alone — only the CLI is added.
+  # The agent ships as a zip: without `unzip` it is skipped, the CLI is not.
   if [ ! -x "$ANTIGRAVITY_DIR/current/$ANTIGRAVITY_EXE" ] \
     || [ ! -x "$ANTIGRAVITY_DIR/current/$ANTIGRAVITY_HARNESS" ]; then
-    install_antigravity_release "$curl_bin" "$registry" || return $?
+    if command -v unzip >/dev/null 2>&1; then
+      install_antigravity_release "$curl_bin" "$registry" || return $?
+    else
+      echo "Antigravity: unzip not found — skipping the ACP agent (install unzip, then rerun the installer)." >&2
+    fi
   fi
   install_antigravity_cli "$curl_bin"
 }
@@ -2264,10 +2269,6 @@ provision_antigravity() {
   fi
   if [ -z "$(antigravity_platform_key)" ]; then
     echo "  $name agent: no supported release for this platform — skipping."
-    return 0
-  fi
-  if ! PATH="$run_path" command -v unzip >/dev/null 2>&1; then
-    echo "  $name agent: unzip not found — skipping (install unzip, then rerun the installer)."
     return 0
   fi
   launch_vendor_cli_install "$name" "$ANTIGRAVITY_EXE" antigravity "$dest" \

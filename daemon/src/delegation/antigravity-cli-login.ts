@@ -202,6 +202,10 @@ export const startAgyLogin = (args: {
   readonly isSignedIn: () => Promise<boolean>;
   readonly pollMs?: number;
 }): TAgyLogin => {
+  // The RAW tail, stripped as a whole on every read: a PTY read can end in
+  // the middle of an escape sequence, and stripping each read on its own
+  // would leave that sequence's tail in the text.
+  let raw = "";
   let screen = "";
   let menuAnswered = false;
   let surfaced: TAgyAuthUrl | null = null;
@@ -234,10 +238,8 @@ export const startAgyLogin = (args: {
   const onData = (chunk: Uint8Array): void => {
     if (settled) return;
     // Keep a bounded tail: the screen redraws, only the latest state matters.
-    screen =
-      `${screen}${stripTerminal(decoder.decode(chunk, { stream: true }))}`.slice(
-        -32_768,
-      );
+    raw = `${raw}${decoder.decode(chunk, { stream: true })}`.slice(-65_536);
+    screen = stripTerminal(raw);
     if (!menuAnswered && MENU_RE.test(screen)) {
       // The menu can arrive across several chunks: decide only once Google
       // OAuth is selected, or the menu is complete without it.

@@ -310,47 +310,52 @@ const connectViaAgy = (agyBin: string): Promise<TConnectResult> =>
 
       // Settle the attempt when the screen finishes, whichever way.
       const settled = login.done.then(async (outcome) => {
-        if (wiring.slot.wasCancelled()) {
+        // Cleanup runs however the attempt ends — including a failure below.
+        try {
+          if (wiring.slot.wasCancelled()) return false;
+          const ok = outcome.kind === "signed_in" && (await signedIn());
+          if (ok) {
+            // A new sign-in: nothing from the previous account may serve, and
+            // its model list is captured once now (no later probe). A capture
+            // failure never fails the sign-in: the next sign-in retries it.
+            disposeAntigravityHeadlessSpares();
+            noteAuthStoreIdentityChange(PROVIDER);
+            try {
+              const rows = await readAgyModels(agyDeps(agyBin));
+              if (rows !== null) writeAgyModels(rows);
+            } catch (error) {
+              logError("antigravity-connect", error);
+            }
+            finalizeLoginTerminal({
+              flow,
+              event: { kind: "succeeded" },
+              provider: PROVIDER,
+              clearPending: true,
+            });
+          } else {
+            finalizeLoginTerminal({
+              flow,
+              event: {
+                kind: "failed",
+                code:
+                  outcome.kind === "failed" && outcome.timedOut === true
+                    ? "prompt_timeout"
+                    : "cli_crash",
+                message:
+                  outcome.kind === "failed"
+                    ? outcome.reason
+                    : "Google sign-in did not complete",
+                retryable: true,
+              },
+              provider: PROVIDER,
+              clearPending: true,
+            });
+          }
+          return ok;
+        } finally {
           dispose();
           wiring.slot.end(flow.flowId);
-          return false;
         }
-        const ok = outcome.kind === "signed_in" && (await signedIn());
-        if (ok) {
-          // A new sign-in: nothing from the previous account may serve, and
-          // its model list is captured once now (no later probe).
-          disposeAntigravityHeadlessSpares();
-          noteAuthStoreIdentityChange(PROVIDER);
-          const rows = await readAgyModels(agyDeps(agyBin));
-          if (rows !== null) writeAgyModels(rows);
-          finalizeLoginTerminal({
-            flow,
-            event: { kind: "succeeded" },
-            provider: PROVIDER,
-            clearPending: true,
-          });
-        } else {
-          finalizeLoginTerminal({
-            flow,
-            event: {
-              kind: "failed",
-              code:
-                outcome.kind === "failed" && outcome.timedOut === true
-                  ? "prompt_timeout"
-                  : "cli_crash",
-              message:
-                outcome.kind === "failed"
-                  ? outcome.reason
-                  : "Google sign-in did not complete",
-              retryable: true,
-            },
-            provider: PROVIDER,
-            clearPending: true,
-          });
-        }
-        dispose();
-        wiring.slot.end(flow.flowId);
-        return ok;
       });
 
       const surfaced = await login.url;
@@ -777,15 +782,13 @@ export const antigravityDelegate: TProviderDelegate = {
     );
   },
 
+  // Sign out of EVERY store that holds a sign-in — `agy`'s (cleared from the
+  // isolated store, no launcher needed) and ACP's — and report success only
+  // when neither is still signed in.
   logout: async () => {
-    const agyBin = resolveAntigravityCli();
-    if (
-      !tokenPresent() &&
-      agyBin !== null &&
-      (await agyCliSignedIn(agyHome()))
-    ) {
-      return logoutViaAgy();
-    }
+    const agyOut = (await agyCliSignedIn(agyHome()))
+      ? await logoutViaAgy()
+      : { ok: true };
     if (
       tokenPresent() &&
       (await cliInstallState(PROVIDER, { demand: true })).installed
@@ -820,7 +823,7 @@ export const antigravityDelegate: TProviderDelegate = {
     }
     disposeAntigravityWarmPool();
     noteAuthStoreIdentityChange(PROVIDER);
-    return tokenPresent()
+    return tokenPresent() || !agyOut.ok
       ? { ok: false, detail: "credential still present after logout" }
       : { ok: true, detail: "signed out of Google Antigravity" };
   },

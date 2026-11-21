@@ -141,6 +141,20 @@ export const openAiUsageOf = (
   };
 };
 
+/** One turn's usage from a session-cumulative result (never negative). */
+export const turnUsageOf = (
+  cumulative: THeadlessUsage,
+  baseline: THeadlessUsage | null,
+): THeadlessUsage =>
+  baseline === null
+    ? cumulative
+    : {
+        input: Math.max(0, cumulative.input - baseline.input),
+        output: Math.max(0, cumulative.output - baseline.output),
+        thinking: Math.max(0, cumulative.thinking - baseline.thinking),
+        cacheRead: Math.max(0, cumulative.cacheRead - baseline.cacheRead),
+      };
+
 export type THeadlessEvent =
   | { readonly kind: "init"; readonly conversationId: string | null }
   | {
@@ -262,6 +276,10 @@ class HeadlessProcess {
   readonly initialized: Promise<boolean>;
   /** The conversation this process holds (from `init`). */
   conversationId: string | null = null;
+  /** `agy`'s `result.usage` ACCUMULATES over a stream-json session (Google's
+   *  headless docs); the last result's counters, so a reused process reports
+   *  each turn's own usage. */
+  usageBaseline: THeadlessUsage | null = null;
   private idleTimer: ReturnType<typeof setTimeout> | undefined;
 
   constructor(
@@ -699,6 +717,8 @@ export const runAntigravityHeadless = async (
   const fail = (failure: THeadlessFailure): void => end([{ failure }]);
   const abort = (): void => fail({ reason: "client aborted", fallback: false });
   params.signal.addEventListener("abort", abort, { once: true });
+  // The client may have gone while the process was being spawned.
+  if (params.signal.aborted) abort();
 
   const armIdle = (): void => {
     clearTimeout(idleTimer);
@@ -735,6 +755,9 @@ export const runAntigravityHeadless = async (
     promptText,
   });
 
+  // Whether answer TEXT streamed (thinking alone does not count): a result's
+  // `response` is used only when it did not.
+  let sawText = false;
   proc.route((event) => {
     if (ended) return;
     armIdle();
@@ -755,6 +778,7 @@ export const runAntigravityHeadless = async (
         if (chunk !== null) push(chunk);
       }
       if (event.textDelta) {
+        sawText = true;
         const chunk = turn.handleUpdate({
           sessionUpdate: "agent_message_chunk",
           content: { type: "text", text: event.textDelta },
@@ -768,8 +792,9 @@ export const runAntigravityHeadless = async (
         fail(classifyHeadlessFailure(event.error));
         return;
       }
-      // A reply with no streamed deltas still carries its text here.
-      if (!turn.sawOutput() && event.response) {
+      // A reply with no streamed text (none, or thinking only) still carries
+      // its answer here.
+      if (!sawText && event.response) {
         const chunk = turn.handleUpdate({
           sessionUpdate: "agent_message_chunk",
           content: { type: "text", text: event.response },
@@ -783,7 +808,18 @@ export const runAntigravityHeadless = async (
         });
         return;
       }
-      if (event.totalTokens !== null) {
+      // This turn's own usage: the session total minus the previous result's.
+      const usage =
+        event.usage === null
+          ? null
+          : turnUsageOf(event.usage, proc.usageBaseline);
+      if (event.usage !== null) proc.usageBaseline = event.usage;
+      if (usage !== null) {
+        turn.handleUpdate({
+          sessionUpdate: "usage_update",
+          used: usage.input + usage.cacheRead + usage.output + usage.thinking,
+        });
+      } else if (event.totalTokens !== null && proc.usageBaseline === null) {
         turn.handleUpdate({
           sessionUpdate: "usage_update",
           used: event.totalTokens,
@@ -792,7 +828,6 @@ export const runAntigravityHeadless = async (
       const terminal = turn.finish("end_turn");
       // The exact split `agy` reported (cache reads, thinking) replaces the
       // shared turn state's total-only estimate on the terminal chunk.
-      const usage = event.usage;
       const exact =
         usage === null
           ? terminal

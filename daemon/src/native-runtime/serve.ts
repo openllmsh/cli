@@ -52,7 +52,7 @@ import {
   providerSupportsCaptureFor,
   resolveExecutionSelection,
 } from "../execution-registry";
-import { logDebug, logWarn, safeDiagnosticMessage } from "../logger";
+import { logDebug, logError, logWarn, safeDiagnosticMessage } from "../logger";
 import { runAntigravityNative } from "./antigravity-acp";
 import type { TAntigravityHeadlessParams } from "./antigravity-headless";
 import {
@@ -1381,24 +1381,36 @@ const serveAntigravityHop = async (
   // Claude/Codex native paths: a known one continues its `agy` conversation
   // with only the new turn; an unknown one with history is seeded.
   const text = headlessBin === null ? null : nativeRequestOf(params.canonical);
+  // Conversations belong to one account slot: its isolated HOME is part of
+  // the identity, so another slot never continues this one's `agy` session.
+  const conversationKey = `${params.providerModelId}\u0000${env.HOME ?? ""}`;
   const conversation =
     text === null
       ? null
-      : deriveConversation(params.providerModelId, text.systemText, text.turns);
+      : deriveConversation(conversationKey, text.systemText, text.turns);
+  // A first turn has nothing to resume and no prefix worth serialising on
+  // (any two first turns with the same system text share one): it takes a
+  // private lease and still publishes its conversation for the follow-up.
   const lease =
     conversation === null || conversation.deltaText.length === 0
       ? null
-      : await antigravityHeadlessSessions.lease(conversation.prefixHash);
+      : await antigravityHeadlessSessions.lease(
+          conversation.hasPrior
+            ? conversation.prefixHash
+            : `first:${crypto.randomUUID()}`,
+        );
   const headless =
     headlessBin === null ||
     text === null ||
     conversation === null ||
     lease === null
       ? null
-      : await (async (): Promise<TNativeRunResult> => {
+      : await (async (): Promise<TNativeRunResult | null> => {
           const seed = conversation.hasPrior
             ? renderSeed(text.turns, conversation.deltaText)
             : conversation.deltaText;
+          // A setup error (keychain, spawn) must still release the lease;
+          // the request then falls back to ACP.
           return runAntigravityHeadless({
             bin: headlessBin,
             env,
@@ -1411,6 +1423,9 @@ const serveAntigravityHop = async (
             hasTools: false,
             signal: params.signal,
             ...(overrides?.headlessHooks ?? {}),
+          }).catch((error: unknown) => {
+            logError("native-runtime", error);
+            return null;
           });
         })();
   if (lease !== null && (headless === null || headless.kind === "declined")) {
@@ -1447,7 +1462,7 @@ const serveAntigravityHop = async (
       // new turn, so it lands on the same `agy` conversation.
       heldLease.commit(
         nextPrefixHash(
-          params.providerModelId,
+          conversationKey,
           text.systemText,
           text.turns,
           textOf(resp),
