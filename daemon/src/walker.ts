@@ -247,7 +247,6 @@ import {
   isHopCoolingDown,
   markHopCooldown,
   peekHopCooldown,
-  TRANSIENT_COOLDOWN_REASONS,
 } from "./hop-cooldown";
 import {
   currentHopOutputLimits,
@@ -3377,6 +3376,11 @@ const walkPlan = async (
   // check alone can let recovery re-dial a hop pass 1 already tried. This set
   // is walk-local and immune to sibling writes.
   const dialedHops = new Set<string>();
+  // Vendor Retry-After floors of cooldown-skipped hops, per account.
+  const skippedRecoverAt = new Map<string, number>();
+  // A failed final-hop answer held back for the recovery pass.
+  let heldFinal: { readonly hop: THop; readonly served: THopServed } | null =
+    null;
   let requeuedSkipped = false;
   const preserveTerminalResponse = (
     response: Response | undefined,
@@ -4001,7 +4005,23 @@ const walkPlan = async (
       // recovery pass (API-key hops cool via the cloud — excluded). A transient
       // sibling-set cooldown may be bypassable once the authoritative usage
       // floor confirms the shared account still has quota.
-      if (isOAuthSlug(hop.provider)) cooldownSkipped.push(hop);
+      if (isOAuthSlug(hop.provider)) {
+        cooldownSkipped.push(hop);
+        // Keep each account's vendor Retry-After floor: the cooldown entry
+        // (and the floor with it) can expire before the recovery pass runs.
+        for (const index of subscriptionAccounts(hop.provider)) {
+          const floor = runWithAccount(
+            index,
+            () => peekHopCooldown(hop.provider, hop.modelId)?.recoverAtMs,
+          );
+          if (floor !== undefined) {
+            skippedRecoverAt.set(
+              `${hop.provider}|${hop.modelId}|${index}`,
+              floor,
+            );
+          }
+        }
+      }
       continue;
     }
     // ── Context gate, per hop (shared with the cloud chain —
@@ -4099,6 +4119,27 @@ const walkPlan = async (
         if (isFleetTarget(hop))
           return fleetDecline(hop.provider, "unavailable");
         continue;
+      }
+      // The final hop's vendor refused the request (a 4xx, before any output)
+      // while an earlier hop was only skipped for a cooldown: hold this answer
+      // and give the recovery pass its turn first; it is returned unchanged
+      // when that pass finds nothing. Never held: a context overflow tagged
+      // for compact-in-place (that hop is retried by compaction), and 5xx
+      // answers — including the 502s for a send that may already have reached
+      // upstream or failed after output began, which are never re-dispatched.
+      if (
+        finalHop &&
+        served.servedLocally &&
+        served.response.status >= 400 &&
+        served.response.status < 499 &&
+        !served.response.headers.has(CONTEXT_OVERFLOW_HOP_HEADER) &&
+        !args.req.signal.aborted &&
+        cooldownSkipped.some(
+          (h) => !dialedHops.has(`${h.provider}|${h.modelId}`),
+        )
+      ) {
+        heldFinal = { hop, served };
+        break;
       }
       return commitSubscriptionServe(hop, served);
     }
@@ -4287,12 +4328,15 @@ const walkPlan = async (
       const recovered = await runWithAccount(
         index,
         async (): Promise<THopServed | null> => {
-          const cd = peekHopCooldown(hop.provider, hop.modelId);
-          if (cd === undefined) return null; // expired — leave to the next request
-          if (!TRANSIENT_COOLDOWN_REASONS.has(cd.reason)) return null; // hard reason
-          if (cd.setterSessionKey === walkSessionKey) return null; // I set it — already tried
-          // Past the vendor's authoritative recover floor (or none given).
-          if (cd.recoverAtMs !== undefined && Date.now() < cd.recoverAtMs)
+          // Last chance before the request fails: a cooldown is only a guess
+          // that the hop still fails (a 60s sign-in mark outlives a credential
+          // that has already recovered), so any reason is retried once. Only
+          // hard evidence that the dial is doomed skips it: the vendor's own
+          // Retry-After floor, size, or a confirmed exhausted quota.
+          const recoverAtMs =
+            peekHopCooldown(hop.provider, hop.modelId)?.recoverAtMs ??
+            skippedRecoverAt.get(`${hop.provider}|${hop.modelId}|${index}`);
+          if (recoverAtMs !== undefined && Date.now() < recoverAtMs)
             return null;
           // Provably doomed by size: pass 1's cooldown gate runs BEFORE its context
           // gate, so a cooldown-skipped hop was never size-checked. Mirror pass 1's
@@ -4311,21 +4355,23 @@ const walkPlan = async (
           ) {
             return null;
           }
-          // HARD usage floor — the STRICTER predicate: a confirmed quota snapshot that
-          // the gate says still has room. Absent / null / rejected → never bypass.
+          // A confirmed quota snapshot the gate rejects is doomed; unknown
+          // usage (e.g. after a sign-in failure) is no evidence — dial it.
           const snap = await usageForActiveAccount(
             hop.provider,
             accountHashByProvider,
             connectedByProvider,
           );
-          if (snap === null || snap.kind !== "quota") return null;
-          const gate = quotaGateDecision({
-            snapshot: snap,
-            meter: lookupCatalogEntry(hop.modelId)?.subscription_meter,
-            finalHop: false,
-            staleCapMs: GATE_STALE_CAP_MS,
-            now: Date.now(),
-          });
+          const gate =
+            snap === null || snap.kind !== "quota"
+              ? ({ kind: "allow" } as const)
+              : quotaGateDecision({
+                  snapshot: snap,
+                  meter: lookupCatalogEntry(hop.modelId)?.subscription_meter,
+                  finalHop: false,
+                  staleCapMs: GATE_STALE_CAP_MS,
+                  now: Date.now(),
+                });
           if (gate.kind !== "allow") return null;
           recoveryDialed.add(`${hop.provider}|${hop.modelId}`);
           recoveryDialed.add(`${hop.provider}|${hop.modelId}|${index}`);
@@ -4346,6 +4392,9 @@ const walkPlan = async (
       );
       if (recovered !== null) return commitSubscriptionServe(hop, recovered);
     }
+  }
+  if (heldFinal !== null) {
+    return commitSubscriptionServe(heldFinal.hop, heldFinal.served);
   }
   // Every hop in the plan failed pre-stream. Surface the trail so the client
   // (and Overview once rows land in Neon) can see WHY earlier hops walked.
