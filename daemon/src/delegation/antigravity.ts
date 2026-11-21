@@ -23,7 +23,7 @@
  * Demand-only: `status()` never spawns the agent (each launch unpacks ~1 GB).
  */
 
-import { existsSync, readFileSync, statSync } from "node:fs";
+import { existsSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import { request as httpRequest } from "node:http";
 import { join } from "node:path";
@@ -34,7 +34,7 @@ import type {
 import { accountCell } from "../account-scope";
 import { noteAuthStoreIdentityChange } from "../auth-user-action";
 import { cliInstallState } from "../cli-install";
-import { cliBin, cliConfigDir, cliEnv } from "../cli-paths";
+import { cliBin, cliConfigDir, cliEnv, cliHome } from "../cli-paths";
 import { logError, logInfo, safeDiagnosticMessage } from "../logger";
 import {
   ANTIGRAVITY_AUTH_METHOD,
@@ -53,6 +53,10 @@ import {
   writeAntigravityBrowserHelper,
 } from "../native-runtime/antigravity-acp";
 import {
+  disposeAntigravityHeadlessSpares,
+  resolveAntigravityCli,
+} from "../native-runtime/antigravity-headless";
+import {
   readAntigravityModels,
   recordAntigravityModels,
 } from "../native-runtime/antigravity-model-observation";
@@ -62,8 +66,14 @@ import {
   getPendingAuth,
   pendingAuthDetail,
 } from "../pending-auth";
+import { sandboxSpawnArgs } from "../sandbox/exec";
+import { unwrapAntigravityCliSpawn } from "../sandbox/policy";
 import { daemonTempDir } from "../sandbox/working-set";
 import { accountHashField } from "./account-id";
+import type { TAgyModelRow } from "./antigravity-cli";
+import { agyCliSignedIn, readAgyModels, readAgyUsage } from "./antigravity-cli";
+import type { TAgyLogin } from "./antigravity-cli-login";
+import { startAgyLogin } from "./antigravity-cli-login";
 import {
   readAntigravityAccountId,
   readAntigravityUsage,
@@ -90,6 +100,7 @@ import type {
 import {
   connectedObservation,
   disconnectedObservation,
+  ensureIsolatedKeychain,
   unknownObservation,
 } from "./util";
 
@@ -115,12 +126,74 @@ const tokenPresent = (): boolean => {
   }
 };
 
+// ─── The `agy` CLI path ────────────────────────────────────────────────────
+// Inference prefers the official `agy` CLI (`native-runtime/antigravity-
+// headless.ts`); its sign-in, status, quota and models come from `agy` itself
+// (`./antigravity-cli.ts`, `./antigravity-cli-login.ts`). The ACP agent stays
+// the fallback until `agy` is installed everywhere.
+
+/** The isolated HOME `agy` runs under (its own sign-in, keychain, settings). */
+const agyHome = (): string => cliHome(PROVIDER);
+
+const agyDeps = (bin: string) => ({ bin, env: cliEnv(PROVIDER) });
+
+/** Signed in through ACP's token file or through `agy` (metadata only). */
+const signedIn = async (): Promise<boolean> =>
+  tokenPresent() || (await agyCliSignedIn(agyHome()));
+
+/** `agy models` captured at sign-in, kept beside `agy`'s own state so the
+ *  list survives a daemon restart without another `agy` launch. Not a token. */
+const agyModelsPath = (): string => join(agyHome(), ".openllm-agy-models.json");
+
+const writeAgyModels = (rows: ReadonlyArray<TAgyModelRow>): void => {
+  try {
+    writeFileSync(agyModelsPath(), JSON.stringify(rows), { mode: 0o600 });
+  } catch {
+    // Best effort: the list is re-captured on the next sign-in.
+  }
+};
+
+const readAgyModelsFile = (): ReadonlyArray<{
+  readonly provider_model_id: string;
+  readonly display_name?: string;
+}> | null => {
+  try {
+    const rows = JSON.parse(
+      readFileSync(agyModelsPath(), "utf8"),
+    ) as ReadonlyArray<TAgyModelRow>;
+    if (!Array.isArray(rows) || rows.length === 0) return null;
+    return rows.map((row) => ({
+      provider_model_id: row.value,
+      ...(row.name !== null ? { display_name: row.name } : {}),
+    }));
+  } catch {
+    return null;
+  }
+};
+
+/** The model list for the current sign-in: ACP's observation, else `agy`'s. */
+const observedModels = (): ReturnType<typeof readAgyModelsFile> =>
+  readAntigravityModels(geminiHome()) ??
+  (tokenPresent() ? null : readAgyModelsFile());
+
+/** Installed when either the ACP agent or the `agy` CLI is present. */
+const installState = async (): Promise<{
+  readonly installed: boolean;
+  readonly version: string | null;
+}> => {
+  const acp = await cliInstallState(PROVIDER);
+  if (acp.installed) return acp;
+  return resolveAntigravityCli() !== null
+    ? { installed: true, version: null }
+    : acp;
+};
+
 const wiring = loginWiring({
   provider: PROVIDER,
   installHint: INSTALL_HINT,
   connectedDetail: "Google Antigravity already signed in",
   inProgressDetail: "Google sign-in already in progress",
-  readToken: async (): Promise<unknown> => (tokenPresent() ? true : null),
+  readToken: async (): Promise<unknown> => ((await signedIn()) ? true : null),
 });
 
 /** The live login's callback target, for the remote paste-back path. */
@@ -128,6 +201,9 @@ const pendingCallback = accountCell<Pick<
   TAntigravityAuthUrl,
   "redirectUri" | "state"
 > | null>(() => null);
+
+/** The live `agy` login screen, while a CLI sign-in waits for its code. */
+const activeAgyLogin = accountCell<TAgyLogin | null>(() => null);
 
 /** Replay one validated callback to the agent's loopback listener. */
 const forwardCallback = (callback: URL): Promise<boolean> =>
@@ -159,7 +235,144 @@ const forwardCallback = (callback: URL): Promise<boolean> =>
     req.end();
   });
 
-const connect = (): Promise<TConnectResult> =>
+const connect = (): Promise<TConnectResult> => {
+  const agyBin = resolveAntigravityCli();
+  return agyBin !== null ? connectViaAgy(agyBin) : connectViaAcp();
+};
+
+/**
+ * Sign in through `agy`'s own login screen: keychain ready (no dialog), the
+ * screen walked to Google OAuth, the link surfaced, the pasted code typed in.
+ * `agy` opens the link in the browser itself, so the daemon does not open a
+ * second tab; the link is still published for a remote machine.
+ */
+const connectViaAgy = (agyBin: string): Promise<TConnectResult> =>
+  guard(
+    {
+      provider: PROVIDER,
+      installed: async () => true,
+      installHint: INSTALL_HINT,
+      shortCircuit: {
+        connected: signedIn,
+        detail: wiring.connectedDetail,
+      },
+      slot: wiring.slot,
+      inProgressDetail: wiring.inProgressDetail,
+      mode: "browser",
+    },
+    async () => {
+      const flow = resolveLoginFlow(PROVIDER, "browser");
+      const home = agyHome();
+      const keychain = await ensureIsolatedKeychain(home);
+      if (keychain.kind !== "present") {
+        const message =
+          "Couldn't prepare the sign-in store for Google Antigravity. Try again.";
+        emitLoginFailed(flow, {
+          code: "spawn_denied",
+          message,
+          retryable: true,
+        });
+        return { connected: false, detail: message };
+      }
+      const scratch = await mkdtemp(join(daemonTempDir(), "agy-login-"));
+      const login = startAgyLogin({
+        argv: sandboxSpawnArgs([agyBin], {
+          probe: unwrapAntigravityCliSpawn(),
+        }),
+        env: antigravitySpawnEnv(cliEnv(PROVIDER)),
+        cwd: scratch,
+        urlWaitMs: URL_WAIT_MS,
+        loginTimeoutMs: LOGIN_TIMEOUT_MS,
+      });
+      const dispose = (): void => {
+        login.cancel();
+        activeAgyLogin.set(null);
+        void rm(scratch, { recursive: true, force: true });
+      };
+      if (!wiring.slot.start(dispose, flow)) {
+        dispose();
+        return { connected: false, detail: "daemon update in progress" };
+      }
+      activeAgyLogin.set(login);
+      emitLoginStarted(flow);
+
+      // Settle the attempt when the screen finishes, whichever way.
+      const settled = login.done.then(async (outcome) => {
+        if (wiring.slot.wasCancelled()) {
+          dispose();
+          wiring.slot.end(flow.flowId);
+          return false;
+        }
+        const ok = outcome.kind === "signed_in" && (await signedIn());
+        if (ok) {
+          // A new sign-in: nothing from the previous account may serve, and
+          // its model list is captured once now (no later probe).
+          disposeAntigravityHeadlessSpares();
+          noteAuthStoreIdentityChange(PROVIDER);
+          const rows = await readAgyModels(agyDeps(agyBin));
+          if (rows !== null) writeAgyModels(rows);
+          finalizeLoginTerminal({
+            flow,
+            event: { kind: "succeeded" },
+            provider: PROVIDER,
+            clearPending: true,
+          });
+        } else {
+          finalizeLoginTerminal({
+            flow,
+            event: {
+              kind: "failed",
+              code:
+                outcome.kind === "failed" && outcome.timedOut === true
+                  ? "prompt_timeout"
+                  : "cli_crash",
+              message:
+                outcome.kind === "failed"
+                  ? outcome.reason
+                  : "Google sign-in did not complete",
+              retryable: true,
+            },
+            provider: PROVIDER,
+            clearPending: true,
+          });
+        }
+        dispose();
+        wiring.slot.end(flow.flowId);
+        return ok;
+      });
+
+      const surfaced = await login.url;
+      if (surfaced === null) {
+        // Already signed in (the screen opened signed in) or it failed.
+        const ok = await settled;
+        return ok
+          ? { connected: true, detail: wiring.connectedDetail }
+          : {
+              connected: false,
+              detail:
+                "Couldn't start Google sign-in. Retry from the Providers page.",
+            };
+      }
+      if (wiring.slot.wasCancelled()) {
+        return { connected: false, detail: "sign-in cancelled" };
+      }
+      logInfo("antigravity-connect", "Google sign-in URL surfaced (agy)", {
+        urlLen: surfaced.url.length,
+      });
+      publishPendingAuth(flow, PROVIDER, {
+        url: surfaced.url,
+        code: "",
+        mode: "paste_code",
+      });
+      return {
+        connected: false,
+        pending: true,
+        detail: `Sign in with Google in the browser window that opened — or open ${surfaced.url}. Then paste the code Google shows back here.`,
+      };
+    },
+  );
+
+const connectViaAcp = (): Promise<TConnectResult> =>
   guard(
     {
       provider: PROVIDER,
@@ -408,6 +621,10 @@ const connect = (): Promise<TConnectResult> =>
 const submitLoginCode = async (
   pasted: string,
 ): Promise<{ readonly ok: boolean; readonly detail?: string }> => {
+  const agyLogin = activeAgyLogin.get();
+  if (agyLogin !== null && wiring.slot.inFlight()) {
+    return agyLogin.submitCode(pasted);
+  }
   const target = pendingCallback.get();
   if (target === null || !wiring.slot.inFlight()) {
     return { ok: false, detail: "no Google sign-in is awaiting a response." };
@@ -438,12 +655,15 @@ export const antigravityDelegate: TProviderDelegate = {
   cancelConnect,
 
   status: async (): Promise<TDaemonProviderConnection> => {
-    const { installed, version } = await cliInstallState(PROVIDER);
-    const connected = installed && tokenPresent();
+    const { installed, version } = await installState();
+    const connected = installed && (await signedIn());
     if (connected) clearPendingAuth(PROVIDER);
-    const accountId = connected
-      ? await readAntigravityAccountId(geminiHome())
-      : null;
+    // ACP's token carries a stable account id; an `agy` sign-in's token is
+    // never read, so it reports no account hash.
+    const accountId =
+      connected && tokenPresent()
+        ? await readAntigravityAccountId(geminiHome())
+        : null;
     const pending = connected ? null : getPendingAuth(PROVIDER);
     return {
       provider: PROVIDER,
@@ -492,21 +712,35 @@ export const antigravityDelegate: TProviderDelegate = {
   discoverModels: async (
     _options: TModelDiscoveryOptions,
   ): Promise<TModelDiscoveryResult> => {
-    const models = readAntigravityModels(geminiHome());
-    return models === null ? { kind: "skipped" } : { kind: "success", models };
+    const models = observedModels();
+    return models === null
+      ? { kind: "skipped" }
+      : { kind: "success", models: [...models] };
   },
   listModels: (opts?: TListModelsOptions) =>
     listWithReason(opts, async () => {
-      if (!tokenPresent()) {
+      if (!(await signedIn())) {
         return { kind: "null", reason: "token_unavailable" };
       }
-      return detailedFromCliList(readAntigravityModels(geminiHome()));
+      const models = observedModels();
+      return detailedFromCliList(models === null ? null : [...models]);
     }),
 
   // Quota windows via Google's Code Assist quota endpoints with the agent's
   // own token — the t3code approach (see `./antigravity-usage.ts`).
-  usage: (): Promise<TProviderUsageSnapshot> =>
-    readAntigravityUsage({ geminiHome: geminiHome() }),
+  // ACP sign-in: Google's quota endpoints with the agent's token (t3code's
+  // approach). `agy` sign-in: `agy`'s own `/usage` — no token is read.
+  usage: async (): Promise<TProviderUsageSnapshot> => {
+    const agyBin = resolveAntigravityCli();
+    if (
+      !tokenPresent() &&
+      agyBin !== null &&
+      (await agyCliSignedIn(agyHome()))
+    ) {
+      return readAgyUsage(agyDeps(agyBin));
+    }
+    return readAntigravityUsage({ geminiHome: geminiHome() });
+  },
 
   credentialForUpstream: async () => {
     throw new Error(

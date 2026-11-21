@@ -358,33 +358,44 @@ export const createAntigravityUsageReader = (): TAntigravityUsageReader => {
         link: ANTIGRAVITY_PLANS_URL,
       };
     }
-    if (windows.length === 0) {
-      return {
-        kind: "unavailable",
-        reason: "Antigravity did not return usable quota information.",
-        link: ANTIGRAVITY_PLANS_URL,
-      };
-    }
-    // Gemini and Claude/GPT are SEPARATE allowances: one exhausted family must
-    // not mark the whole provider rejected (the quota gate would then skip
-    // Gemini hops that still have room). Reject only when every window is out.
-    const percents = windows.map((w) => w.percent_used);
-    return {
-      kind: "quota",
-      status: percents.every((p) => p >= QUOTA_REJECT_PERCENT)
-        ? "rejected"
-        : percents.some((p) => p >= QUOTA_WARN_PERCENT)
-          ? "allowed_warning"
-          : "allowed",
-      windows,
-      note: "Google Antigravity — includes usage outside OpenLLM",
-    };
+    return antigravityQuotaSnapshot(windows);
   };
 
   return { readAntigravityUsage };
 };
 
 const defaultReader = createAntigravityUsageReader();
+
+/**
+ * Windows → the provider's usage snapshot. Shared by every source of
+ * Antigravity quota (the agent token reader here and the `agy` CLI's own
+ * `/usage`, `./antigravity-cli.ts`).
+ */
+export const antigravityQuotaSnapshot = (
+  windows: ReadonlyArray<TProviderUsageWindow>,
+): TProviderUsageSnapshot => {
+  if (windows.length === 0) {
+    return {
+      kind: "unavailable",
+      reason: "Antigravity did not return usable quota information.",
+      link: ANTIGRAVITY_PLANS_URL,
+    };
+  }
+  // Gemini and Claude/GPT are SEPARATE allowances: one exhausted family must
+  // not mark the whole provider rejected (the quota gate would then skip
+  // Gemini hops that still have room). Reject only when every window is out.
+  const percents = windows.map((w) => w.percent_used);
+  return {
+    kind: "quota",
+    status: percents.every((p) => p >= QUOTA_REJECT_PERCENT)
+      ? "rejected"
+      : percents.some((p) => p >= QUOTA_WARN_PERCENT)
+        ? "allowed_warning"
+        : "allowed",
+    windows: [...windows],
+    note: "Google Antigravity — includes usage outside OpenLLM",
+  };
+};
 
 export const readAntigravityUsage = (
   params: Parameters<TAntigravityUsageReader["readAntigravityUsage"]>[0],
