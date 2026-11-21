@@ -59,6 +59,7 @@ import {
   logSdkFacadePhaseTiming,
   planClaudeSdkFacadeTurn,
   replayClaudeSdkFacadeHistory,
+  withFacadeOutputCap,
 } from "./claude-sdk-facade";
 import type { TClaudeFacadeMcpServerRef } from "./claude-spawn";
 import { spawnClaudeFacadeCli } from "./claude-spawn";
@@ -149,7 +150,12 @@ const runClaudeSdkFacadeCaptureCore = async (
   }
 
   const cleaned = cleanNativeSpawnEnv(params.env);
-  const spawnEnv = withClaudeCaptureBaseUrl(cleaned, loopback.baseUrl);
+  // The caller's output cap rides the CLI's one captured call as its
+  // `max_tokens` — exact, since the daemon sends that call once.
+  const spawnEnv = withFacadeOutputCap(
+    withClaudeCaptureBaseUrl(cleaned, loopback.baseUrl),
+    params.canonical,
+  );
 
   let supervised: ReturnType<typeof spawnClaudeFacadeCli>;
   try {

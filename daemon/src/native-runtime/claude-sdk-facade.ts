@@ -174,6 +174,38 @@ export type TClaudeSdkFacadeTurnPlan =
  * a versioned, projection-checked carrier. Opaque foreign state, edited native
  * projections, unsupported content, and assistant prefills fail before spawn.
  */
+/** The Claude CLI's per-call output cap (its own env, read by every model
+ *  call it makes). */
+export const CLAUDE_MAX_OUTPUT_TOKENS_ENV = "CLAUDE_CODE_MAX_OUTPUT_TOKENS";
+
+/**
+ * The caller's output cap (`max_completion_tokens`, else `max_tokens`), or
+ * null when it set none. Only a positive whole number counts.
+ */
+export const facadeOutputCap = (
+  canonical: TChatCompletionRequest,
+): number | null => {
+  const cap = canonical.max_completion_tokens ?? canonical.max_tokens;
+  return cap !== undefined && Number.isInteger(cap) && cap > 0 ? cap : null;
+};
+
+/**
+ * The spawn env carrying the caller's output cap to the CLI. The CLI applies
+ * it to each model call it makes — not to the answer as a whole: on a capped
+ * call it keeps going or reports an error. So the native facade also ENDS the
+ * turn at the first capped call ({@link runFacadeDecode}'s `outputCapped`),
+ * and the capture variant, which sends exactly one call itself, is exact.
+ */
+export const withFacadeOutputCap = (
+  env: Record<string, string>,
+  canonical: TChatCompletionRequest,
+): Record<string, string> => {
+  const cap = facadeOutputCap(canonical);
+  return cap === null
+    ? env
+    : { ...env, [CLAUDE_MAX_OUTPUT_TOKENS_ENV]: String(cap) };
+};
+
 export const planClaudeSdkFacadeTurn = (
   canonical: TChatCompletionRequest,
   providerModelId: string = canonical.model,
@@ -555,6 +587,14 @@ export const runFacadeDecode = (args: {
   readonly exitCode: Promise<number>;
   /** Override the exit-code race budget (tests pass a tiny value). */
   readonly exitCodeWaitMs?: number;
+  /**
+   * The caller set an output cap (carried to the CLI by
+   * {@link withFacadeOutputCap}). A model call that stops on it
+   * (`stop_reason: "max_tokens"`) ENDS the turn with `finish_reason:
+   * "length"` — the CLI would otherwise continue past the cap or report it as
+   * an error.
+   */
+  readonly outputCapped?: boolean;
 }): Promise<TNativeRunResult> => {
   let emittedContent = false;
   let terminalSucceeded = false;
@@ -613,6 +653,14 @@ export const runFacadeDecode = (args: {
         // first so a client stopping at finish_reason has already received it.
         if (chunk.choices.some((choice) => choice.finish_reason != null)) {
           pendingTerminal = chunk;
+          // The caller's cap reached: this call's answer is the turn's.
+          if (
+            args.outputCapped === true &&
+            event.value.type === "message_delta" &&
+            event.value.delta.stop_reason === "max_tokens"
+          ) {
+            return successfulTerminal();
+          }
           continue;
         }
         if (isMeaningfulChunk(chunk)) emittedContent = true;
@@ -890,7 +938,10 @@ const runClaudeSdkFacadeCore = async (
       providerModelId: params.providerModelId,
       systemText: plan.systemText,
       mcpServer,
-      finalEnv: cleanNativeSpawnEnv(params.env),
+      finalEnv: withFacadeOutputCap(
+        cleanNativeSpawnEnv(params.env),
+        params.canonical,
+      ),
     });
   } catch (error) {
     stopMcpServer?.();
@@ -949,5 +1000,6 @@ const runClaudeSdkFacadeCore = async (
     exitCode: proc.exited,
     state,
     kill,
+    outputCapped: facadeOutputCap(params.canonical) !== null,
   });
 };
