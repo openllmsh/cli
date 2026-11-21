@@ -54,6 +54,11 @@ import {
 } from "../execution-registry";
 import { logDebug, logWarn, safeDiagnosticMessage } from "../logger";
 import { runAntigravityNative } from "./antigravity-acp";
+import {
+  isAntigravityHeadlessFallback,
+  resolveAntigravityCli,
+  runAntigravityHeadless,
+} from "./antigravity-headless";
 import { bridgeRequestCaptureReadiness } from "./bridge-request-capture-readiness";
 import { runClaudeNative } from "./claude-native";
 import { runClaudeSdkFacade } from "./claude-sdk-facade";
@@ -127,6 +132,9 @@ export type TNativeServeCaptureToolOverrides = {
 export type TNativeServeOverrides = {
   readonly bin?: string;
   readonly env?: Record<string, string>;
+  /** Antigravity headless `agy` CLI. Tests that pass overrides skip the
+   *  headless path unless they set this, so a host `agy` is never reached. */
+  readonly headlessBin?: string | null;
   readonly captureTool?: TNativeServeCaptureToolOverrides;
   /** Hermetic `sdk-facade-capture` sender (production omits → real fetch
    *  once), mirroring `captureTool.captureSender`'s role for the tool
@@ -1350,16 +1358,43 @@ const serveAntigravityHop = async (
   if (req.promptText.length === 0 && req.images.length === 0) {
     return { declined: "no user turn to answer" };
   }
-  const run = await runAntigravityNative({
-    bin: overrides?.bin ?? cliBin("antigravity"),
-    env: overrides?.env ?? cliEnv("antigravity"),
-    providerModelId: params.providerModelId,
-    systemText: req.systemText,
-    userText: req.promptText,
-    images: req.images,
-    tools: req.tools,
-    signal: params.signal,
-  });
+  const env = overrides?.env ?? cliEnv("antigravity");
+  // Headless stream-json first (streams text as it is generated); anything it
+  // cannot serve yet declines with the fallback marker and runs on ACP.
+  const headlessBin =
+    overrides === undefined
+      ? resolveAntigravityCli()
+      : (overrides.headlessBin ?? null);
+  const headless =
+    headlessBin === null
+      ? null
+      : await runAntigravityHeadless({
+          bin: headlessBin,
+          env,
+          providerModelId: params.providerModelId,
+          systemText: req.systemText,
+          userText: req.promptText,
+          hasImages: req.images.length > 0,
+          hasTools: (req.tools?.length ?? 0) > 0,
+          signal: params.signal,
+        });
+  const run =
+    headless !== null &&
+    !(
+      headless.kind === "declined" &&
+      isAntigravityHeadlessFallback(headless.reason)
+    )
+      ? headless
+      : await runAntigravityNative({
+          bin: overrides?.bin ?? cliBin("antigravity"),
+          env,
+          providerModelId: params.providerModelId,
+          systemText: req.systemText,
+          userText: req.promptText,
+          images: req.images,
+          tools: req.tools,
+          signal: params.signal,
+        });
   if (run.kind === "declined") {
     return declinedOutcome(run.reason, run.cooldownReason);
   }

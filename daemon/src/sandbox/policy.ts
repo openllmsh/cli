@@ -97,3 +97,19 @@ export const unwrapKeychainSpawn = (provider?: string): boolean =>
 export const unwrapMuseServeSpawn = (
   platform: NodeJS.Platform = process.platform,
 ): boolean => platform === "linux";
+
+/**
+ * Does the Antigravity `agy` CLI (headless stream-json inference) run
+ * unconfined here? True ONLY on macOS: `agy` saves and reads its sign-in
+ * through `/usr/bin/security` against the isolated HOME's login keychain
+ * (falling back to a file), and securityd refuses a Seatbelt-confined caller.
+ * Callers must gate the spawn on `ensureKeychainReady(home)` being `present`
+ * so a missing or locked keychain never raises a dialog. Linux stays confined
+ * (no D-Bus → `agy` uses its file store).
+ *
+ * Deliberately separate from {@link MAC_KEYCHAIN_PROVIDERS}: Antigravity's
+ * ACP agent forces file storage and its login/install stay confined.
+ */
+export const unwrapAntigravityCliSpawn = (
+  platform: NodeJS.Platform = process.platform,
+): boolean => platform === "darwin";
