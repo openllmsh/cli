@@ -1468,7 +1468,7 @@ const serveAntigravityHop = async (
   // sign-in. With `agy` present, the account may be signed in through `agy`
   // only: decline without an auth cooldown, which would also stop the text
   // requests `agy` serves fine.
-  if (toAcp && headlessBin !== null && !acpSignedIn(env)) {
+  if (toAcp && headlessBin !== null && text === null && !acpSignedIn(env)) {
     return {
       declined:
         "antigravity: images and client tools need the Antigravity agent signed in",

@@ -72,7 +72,9 @@ const RESPONSE_STEP_TYPES: ReadonlySet<string> = new Set([
   "checkpoint",
 ]);
 
-const SIGN_IN_RE = /not logged in|sign in|signed out|authentication failed/i;
+/** Includes print mode's own refusal, "Run 'agy' to log in". */
+const SIGN_IN_RE =
+  /not logged in|to log in|sign in|signed out|authentication failed/i;
 const QUOTA_RE = /quota|exhausted|rate.?limit|resource.?exhausted|429/i;
 const PLAN_RE = /subscription|not eligible|tier|upgrade|license/i;
 

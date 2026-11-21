@@ -246,9 +246,22 @@ const forwardCallback = (callback: URL): Promise<boolean> =>
     req.end();
   });
 
-const connect = (): Promise<TConnectResult> => {
+/**
+ * `agy` first (it serves text). Once `agy` is signed in, Connect again signs
+ * in the ACP agent when it is installed and has no sign-in of its own:
+ * images and client tools still run there.
+ */
+const connect = async (): Promise<TConnectResult> => {
   const agyBin = resolveAntigravityCli();
-  return agyBin !== null ? connectViaAgy(agyBin) : connectViaAcp();
+  if (agyBin === null) return connectViaAcp();
+  if (
+    !tokenPresent() &&
+    (await agyCliSignedIn(agyHome())) &&
+    (await cliInstallState(PROVIDER)).installed
+  ) {
+    return connectViaAcp();
+  }
+  return connectViaAgy(agyBin);
 };
 
 /**
@@ -320,7 +333,9 @@ const connectViaAgy = (agyBin: string): Promise<TConnectResult> =>
             // failure never fails the sign-in: the next sign-in retries it.
             disposeAntigravityHeadlessSpares();
             noteAuthStoreIdentityChange(PROVIDER);
+            // The previous account's list never outlives its sign-in.
             try {
+              rmSync(agyModelsPath(), { force: true });
               const rows = await readAgyModels(agyDeps(agyBin));
               if (rows !== null) writeAgyModels(rows);
             } catch (error) {
@@ -668,7 +683,10 @@ const logoutViaAgy = async (): Promise<{
   readonly ok: boolean;
   readonly detail: string;
 }> => {
-  const ok = await removeAgySignIn(agyHome());
+  const ok = await removeAgySignIn(agyHome()).catch((error: unknown) => {
+    logError("antigravity-logout", error);
+    return false;
+  });
   if (!ok) {
     return { ok: false, detail: "credential still present after logout" };
   }
