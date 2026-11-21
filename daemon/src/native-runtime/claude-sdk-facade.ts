@@ -602,6 +602,11 @@ export const runFacadeDecode = (args: {
   const nativeMessages: unknown[] = [];
   let pendingTerminal: TChatCompletionChunk | null = null;
   const exitCodeWaitMs = args.exitCodeWaitMs ?? EXIT_CODE_WAIT_MS;
+  /** A call stopped on the caller's cap: the turn ends once that call's
+   *  assistant snapshot (the lossless carrier — signed thinking for replay)
+   *  is out, and before anything from a following call. */
+  let cappedCall = false;
+  let carrierAfterCap = false;
 
   const successfulTerminal = (): TChatCompletionChunk | "end" => {
     terminalSucceeded = true;
@@ -628,6 +633,7 @@ export const runFacadeDecode = (args: {
     TChatCompletionChunk | "end" | { error: string }
   > => {
     if (terminalSucceeded) return "end";
+    if (carrierAfterCap) return successfulTerminal();
     for (;;) {
       const { value, done } = await args.reader.read();
       if (done) {
@@ -643,6 +649,10 @@ export const runFacadeDecode = (args: {
       if (line.type === "stream_event" && line.event !== undefined) {
         const event = decodeStreamEvent(line.event);
         if (event._tag !== "Some") continue;
+        // The CLI carrying on past a capped call: the turn already ended.
+        if (cappedCall && event.value.type === "message_start") {
+          return successfulTerminal();
+        }
         toolTracker.observe(event.value);
         const chunk = fromAnthropicStreamEvent(event.value, args.state, {
           providerModelId: args.providerModelId,
@@ -653,13 +663,14 @@ export const runFacadeDecode = (args: {
         // first so a client stopping at finish_reason has already received it.
         if (chunk.choices.some((choice) => choice.finish_reason != null)) {
           pendingTerminal = chunk;
-          // The caller's cap reached: this call's answer is the turn's.
+          // The caller's cap reached: this call's answer is the turn's. Its
+          // assistant snapshot still follows; finish after that.
           if (
             args.outputCapped === true &&
             event.value.type === "message_delta" &&
             event.value.delta.stop_reason === "max_tokens"
           ) {
-            return successfulTerminal();
+            cappedCall = true;
           }
           continue;
         }
@@ -680,6 +691,8 @@ export const runFacadeDecode = (args: {
           : chunk;
       }
       if (line.type === "assistant") {
+        // Only the capped call's own snapshot rides out; it ends the turn.
+        if (cappedCall) carrierAfterCap = true;
         nativeMessages.push(line.message);
         const carrier = claudeNativeAssistantCarrier(
           nativeMessages,
@@ -726,6 +739,9 @@ export const runFacadeDecode = (args: {
         };
       }
       if (line.type === "result") {
+        // A capped turn already has its answer; the CLI's own verdict on the
+        // cap (an error) is not the caller's.
+        if (cappedCall) return successfulTerminal();
         const isError = line.is_error === true;
         const subtype = typeof line.subtype === "string" ? line.subtype : null;
         // Hermes's exact carved-out boundary
