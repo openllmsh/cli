@@ -820,6 +820,13 @@ export const main = async (): Promise<void> => {
   // retries. Its identity publish coalesces with the gate above.
   startBootstrapLoop();
 
+  // Routebox only: install vendors a newer release needs that the box was
+  // never given (its owner has no SSH to re-run the installer). Background,
+  // a minute after boot, once per version — see vendor-provision.ts.
+  void import("./vendor-provision")
+    .then((m) => m.scheduleVendorProvisioning())
+    .catch((err) => logError("main", err));
+
   // Mark this boot as healthy once the listener is bound and a small stabilization
   // window has elapsed, then clear the crash-loop history so transient restarts do
   // not accumulate into a permanent park.
