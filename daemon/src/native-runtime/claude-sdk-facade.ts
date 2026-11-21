@@ -607,6 +607,9 @@ export const runFacadeDecode = (args: {
    *  is out, and before anything from a following call. */
   let cappedCall = false;
   let carrierAfterCap = false;
+  /** This call's assistant snapshot is already out — the CLI may send it
+   *  before or after the call's `message_delta`. */
+  let snapshotThisCall = false;
 
   const successfulTerminal = (): TChatCompletionChunk | "end" => {
     terminalSucceeded = true;
@@ -653,6 +656,7 @@ export const runFacadeDecode = (args: {
         if (cappedCall && event.value.type === "message_start") {
           return successfulTerminal();
         }
+        if (event.value.type === "message_start") snapshotThisCall = false;
         toolTracker.observe(event.value);
         const chunk = fromAnthropicStreamEvent(event.value, args.state, {
           providerModelId: args.providerModelId,
@@ -670,6 +674,8 @@ export const runFacadeDecode = (args: {
             event.value.type === "message_delta" &&
             event.value.delta.stop_reason === "max_tokens"
           ) {
+            // Snapshot already out: nothing left of this call to pass on.
+            if (snapshotThisCall) return successfulTerminal();
             cappedCall = true;
           }
           continue;
@@ -693,6 +699,7 @@ export const runFacadeDecode = (args: {
       if (line.type === "assistant") {
         // Only the capped call's own snapshot rides out; it ends the turn.
         if (cappedCall) carrierAfterCap = true;
+        snapshotThisCall = true;
         nativeMessages.push(line.message);
         const carrier = claudeNativeAssistantCarrier(
           nativeMessages,
