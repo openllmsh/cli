@@ -109,6 +109,38 @@ export const antigravityHeadlessArgv = (
 
 // ─── Event parsing (pure) ──────────────────────────────────────────────────
 
+/** `result.usage` as `agy` reports it. `input` EXCLUDES cache reads (the
+ *  total is input + output), unlike OpenAI's `prompt_tokens`. */
+export type THeadlessUsage = {
+  readonly input: number;
+  readonly output: number;
+  readonly thinking: number;
+  readonly cacheRead: number;
+};
+
+const count = (v: unknown): number =>
+  typeof v === "number" && Number.isSafeInteger(v) && v > 0 ? v : 0;
+
+/** `agy` usage → the OpenAI usage row the daemon records: cached tokens are
+ *  part of `prompt_tokens`, thinking is part of `completion_tokens`. */
+export const openAiUsageOf = (
+  u: THeadlessUsage,
+): {
+  readonly prompt_tokens: number;
+  readonly completion_tokens: number;
+  readonly total_tokens: number;
+  readonly prompt_tokens_details: { readonly cached_tokens: number };
+} => {
+  const prompt = u.input + u.cacheRead;
+  const completion = u.output + u.thinking;
+  return {
+    prompt_tokens: prompt,
+    completion_tokens: completion,
+    total_tokens: prompt + completion,
+    prompt_tokens_details: { cached_tokens: u.cacheRead },
+  };
+};
+
 export type THeadlessEvent =
   | { readonly kind: "init"; readonly conversationId: string | null }
   | {
@@ -123,6 +155,7 @@ export type THeadlessEvent =
       readonly error: string | null;
       readonly response: string | null;
       readonly totalTokens: number | null;
+      readonly usage: THeadlessUsage | null;
     }
   | { readonly kind: "other" };
 
@@ -157,6 +190,14 @@ export const parseHeadlessLine = (line: string): THeadlessEvent | null => {
     const r = (obj.result ?? {}) as Record<string, unknown>;
     const usage = (r.usage ?? {}) as Record<string, unknown>;
     const total = usage.total_tokens;
+    const parsedUsage: THeadlessUsage = {
+      input: count(usage.input_tokens),
+      output: count(usage.output_tokens),
+      thinking: count(usage.thinking_tokens),
+      cacheRead: count(usage.cache_read_tokens),
+    };
+    const hasUsage =
+      parsedUsage.input + parsedUsage.output + parsedUsage.cacheRead > 0;
     return {
       kind: "result",
       ok: str(r.status)?.toUpperCase() === "SUCCESS",
@@ -166,6 +207,7 @@ export const parseHeadlessLine = (line: string): THeadlessEvent | null => {
         typeof total === "number" && Number.isSafeInteger(total) && total > 0
           ? total
           : null,
+      usage: hasUsage ? parsedUsage : null,
     };
   }
   return { kind: "other" };
@@ -218,7 +260,9 @@ class HeadlessProcess {
   private listener: TListener | null = null;
   private exitedFlag = false;
   readonly initialized: Promise<boolean>;
-  private spareTimer: ReturnType<typeof setTimeout> | undefined;
+  /** The conversation this process holds (from `init`). */
+  conversationId: string | null = null;
+  private idleTimer: ReturnType<typeof setTimeout> | undefined;
 
   constructor(
     key: string,
@@ -243,6 +287,7 @@ class HeadlessProcess {
     const initTimer = setTimeout(() => resolveInit(false), initTimeoutMs);
     this.listener = (e) => {
       if (e.kind === "init") {
+        this.conversationId = e.conversationId;
         clearTimeout(initTimer);
         resolveInit(true);
       }
@@ -299,13 +344,18 @@ class HeadlessProcess {
     stdin.flush?.();
   }
 
-  armSpareTimer(ms: number, onExpire: () => void): void {
-    clearTimeout(this.spareTimer);
-    this.spareTimer = setTimeout(onExpire, ms);
+  /** Kill-after-idle timer for a parked or spare process. */
+  armIdleTimer(ms: number, onExpire: () => void): void {
+    clearTimeout(this.idleTimer);
+    this.idleTimer = setTimeout(onExpire, ms);
+  }
+
+  disarmIdleTimer(): void {
+    clearTimeout(this.idleTimer);
   }
 
   dispose(): void {
-    clearTimeout(this.spareTimer);
+    clearTimeout(this.idleTimer);
     this.listener = null;
     if (!this.exitedFlag) this.proc.kill();
     void rm(this.cwd, { recursive: true, force: true });
@@ -405,14 +455,74 @@ const addSpare = (
     return;
   }
   spares.push(proc);
-  proc.armSpareTimer(ttlMs, () => {
+  proc.armIdleTimer(ttlMs, () => {
     const i = spares.indexOf(proc);
     if (i >= 0) spares.splice(i, 1);
     proc.dispose();
   });
 };
 
+// ─── Parked conversations ──────────────────────────────────────────────────
+//
+// After a clean turn the process keeps its conversation and is parked under
+// that conversation's id, so the client's next message (which resends the
+// whole history) is fed as just the new turn on a live process — no start-up,
+// and Google's prompt cache is warm (a resumed-by-id process re-sends the
+// history: measured 4.2k uncached vs cache reads on a live one).
+//   - Keyed by conversation id and checked against the request key (binary +
+//     model + env), so another account slot or model never takes it.
+//   - Exclusive: leaving the pool for a turn; failures dispose it.
+//   - Bounded: ANTIGRAVITY_HEADLESS_PARK_MAX, each killed after
+//     ANTIGRAVITY_HEADLESS_PARK_TTL_MS idle. Evicting kills an idle process
+//     that served real traffic; it never starts anything.
+
+export const ANTIGRAVITY_HEADLESS_PARK_TTL_MS = 300_000;
+export const ANTIGRAVITY_HEADLESS_PARK_MAX = 4;
+
+const parked = new Map<string, HeadlessProcess>();
+
+const takeParked = (
+  key: string,
+  conversationId: string,
+): HeadlessProcess | null => {
+  const proc = parked.get(conversationId);
+  if (proc === undefined) return null;
+  parked.delete(conversationId);
+  proc.disarmIdleTimer();
+  if (!proc.alive || proc.key !== key) {
+    proc.dispose();
+    return null;
+  }
+  return proc;
+};
+
+const park = (proc: HeadlessProcess, ttlMs: number): void => {
+  const conversationId = proc.conversationId;
+  if (conversationId === null || !proc.alive) {
+    proc.dispose();
+    return;
+  }
+  proc.route(null);
+  parked.get(conversationId)?.dispose();
+  parked.delete(conversationId);
+  while (parked.size >= ANTIGRAVITY_HEADLESS_PARK_MAX) {
+    const oldest = parked.keys().next().value;
+    if (oldest === undefined) break;
+    parked.get(oldest)?.dispose();
+    parked.delete(oldest);
+  }
+  parked.set(conversationId, proc);
+  proc.armIdleTimer(ttlMs, () => {
+    if (parked.get(conversationId) === proc) parked.delete(conversationId);
+    proc.dispose();
+  });
+};
+
+export const antigravityHeadlessParkedCount = (): number => parked.size;
+
 export const disposeAntigravityHeadlessSpares = (): void => {
+  for (const proc of parked.values()) proc.dispose();
+  parked.clear();
   for (const proc of spares.splice(0)) proc.dispose();
   lastRequestAt.clear();
   reservedSpares = 0;
@@ -438,6 +548,13 @@ export type TAntigravityHeadlessParams = {
   readonly signal: AbortSignal;
   /** Start a spare for the next request after this one leases (default on). */
   readonly spare?: boolean;
+  /** Continue this `agy` conversation: a parked process, else
+   *  `--conversation <id>`. `userText` is then only the new turn. */
+  readonly conversationId?: string | null;
+  /** Sent instead of `userText` when the conversation could not be resumed
+   *  (the full transcript seed). */
+  readonly seedText?: string;
+  readonly parkTtlMs?: number;
   /** Test overrides. */
   readonly argv?: (bin: string, model: string) => string[];
   /** Profile prep: tool deny rules + tool-less agent (default
@@ -508,20 +625,27 @@ export const runAntigravityHeadless = async (
       sandboxSpawnArgs(argv, { probe: unwrapAntigravityCliSpawn() }));
   const initTimeoutMs =
     params.initTimeoutMs ?? ANTIGRAVITY_HEADLESS_INIT_TIMEOUT_MS;
-  const spawn = async (): Promise<HeadlessProcess> => {
+  const spawn = async (
+    extra: ReadonlyArray<string> = [],
+  ): Promise<HeadlessProcess> => {
     const cwd = await mkdtemp(join(daemonTempDir(), "agy-h-"));
     return new HeadlessProcess(
       key,
-      wrap(argvOf(params.bin, model)),
+      wrap([...argvOf(params.bin, model), ...extra]),
       spawnEnv,
       cwd,
       initTimeoutMs,
     );
   };
 
+  const resumeId = params.conversationId ?? null;
   let proc: HeadlessProcess;
   try {
-    proc = takeSpare(key) ?? (await spawn());
+    proc =
+      resumeId !== null
+        ? (takeParked(key, resumeId) ??
+          (await spawn(["--conversation", resumeId])))
+        : (takeSpare(key) ?? (await spawn()));
   } catch (error) {
     return fallback(
       `spawn failed: ${error instanceof Error ? error.message : String(error)}`,
@@ -530,22 +654,18 @@ export const runAntigravityHeadless = async (
   // This request used a process: when the key is in active use, start the
   // next one now so the following request skips start-up (spare rules above).
   const spareTtlMs = params.spareTtlMs ?? ANTIGRAVITY_HEADLESS_SPARE_TTL_MS;
-  if (params.spare !== false && noteRequestAndWantSpare(key, spareTtlMs)) {
+  // Spares serve NEW conversations only; a continuing one has its own process.
+  if (
+    resumeId === null &&
+    params.spare !== false &&
+    noteRequestAndWantSpare(key, spareTtlMs)
+  ) {
     const epoch = sparesEpoch;
     void spawn().then(
       (next) => addSpare(next, spareTtlMs, epoch),
       () => releaseSpareReservation(),
     );
   }
-
-  const promptText =
-    params.systemText !== null
-      ? `${params.systemText}\n\n${params.userText}`
-      : params.userText;
-  const turn = createAcpTurnState({
-    providerModelId: params.providerModelId,
-    promptText,
-  });
 
   type TItem =
     | TChatCompletionChunk
@@ -561,18 +681,20 @@ export const runAntigravityHeadless = async (
   let ended = false;
   let idleTimer: ReturnType<typeof setTimeout> | undefined;
   let turnTimer: ReturnType<typeof setTimeout> | undefined;
-  const settle = (): void => {
+  /** `keep`: the turn ended cleanly — park the process with its
+   *  conversation. Anything else disposes it. */
+  const settle = (keep: boolean): void => {
     clearTimeout(idleTimer);
     clearTimeout(turnTimer);
     params.signal.removeEventListener("abort", abort);
-    // One conversation per process: it never serves another request.
-    proc.dispose();
+    if (keep) park(proc, params.parkTtlMs ?? ANTIGRAVITY_HEADLESS_PARK_TTL_MS);
+    else proc.dispose();
   };
-  const end = (items: ReadonlyArray<TItem>): void => {
+  const end = (items: ReadonlyArray<TItem>, keep = false): void => {
     if (ended) return;
     ended = true;
     for (const item of items) push(item);
-    settle();
+    settle(keep);
   };
   const fail = (failure: THeadlessFailure): void => end([{ failure }]);
   const abort = (): void => fail({ reason: "client aborted", fallback: false });
@@ -590,12 +712,28 @@ export const runAntigravityHeadless = async (
   if (!ready || ended) {
     if (!ended) {
       ended = true;
-      settle();
+      settle(false);
     }
     return params.signal.aborted
       ? { kind: "declined", reason: "client aborted" }
       : fallback("agy did not start");
   }
+
+  // A resume that came back as another conversation lost the history: send
+  // the full seed instead of only the new turn.
+  const resumed = resumeId !== null && proc.conversationId === resumeId;
+  const userText =
+    resumeId !== null && !resumed
+      ? (params.seedText ?? params.userText)
+      : params.userText;
+  const promptText =
+    params.systemText !== null && !resumed
+      ? `${params.systemText}\n\n${userText}`
+      : userText;
+  const turn = createAcpTurnState({
+    providerModelId: params.providerModelId,
+    promptText,
+  });
 
   proc.route((event) => {
     if (ended) return;
@@ -651,7 +789,22 @@ export const runAntigravityHeadless = async (
           used: event.totalTokens,
         });
       }
-      end([...turn.finish("end_turn"), "end"]);
+      const terminal = turn.finish("end_turn");
+      // The exact split `agy` reported (cache reads, thinking) replaces the
+      // shared turn state's total-only estimate on the terminal chunk.
+      const usage = event.usage;
+      const exact =
+        usage === null
+          ? terminal
+          : terminal.map((chunk) =>
+              "usage" in chunk && chunk.usage !== undefined
+                ? ({
+                    ...chunk,
+                    usage: openAiUsageOf(usage),
+                  } as TChatCompletionChunk)
+                : chunk,
+            );
+      end([...exact, "end"], true);
     }
   });
   // Exit mid-turn surfaces as a failure rather than a hang.
@@ -734,5 +887,9 @@ export const runAntigravityHeadless = async (
       abort();
     },
   });
-  return { kind: "committed", chunks, sessionId: () => null };
+  return {
+    kind: "committed",
+    chunks,
+    sessionId: () => proc.conversationId,
+  };
 };

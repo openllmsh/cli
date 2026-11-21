@@ -54,6 +54,7 @@ import {
 } from "../execution-registry";
 import { logDebug, logWarn, safeDiagnosticMessage } from "../logger";
 import { runAntigravityNative } from "./antigravity-acp";
+import type { TAntigravityHeadlessParams } from "./antigravity-headless";
 import {
   isAntigravityHeadlessFallback,
   resolveAntigravityCli,
@@ -87,6 +88,7 @@ import {
   deriveConversation,
   NativeSessionStore,
   nextPrefixHash,
+  renderSeed,
 } from "./session-store";
 import type {
   TNativeRunResult,
@@ -135,6 +137,12 @@ export type TNativeServeOverrides = {
   /** Antigravity headless `agy` CLI. Tests that pass overrides skip the
    *  headless path unless they set this, so a host `agy` is never reached. */
   readonly headlessBin?: string | null;
+  /** Test hooks for the headless spawn (keychain gate, argv, sandbox wrap) so
+   *  a serve-level test never reaches the real `security` or sandbox. */
+  readonly headlessHooks?: Pick<
+    TAntigravityHeadlessParams,
+    "ensureKeychain" | "wrapArgv" | "argv" | "spare"
+  >;
   readonly captureTool?: TNativeServeCaptureToolOverrides;
   /** Hermetic `sdk-facade-capture` sender (production omits → real fetch
    *  once), mirroring `captureTool.captureSender`'s role for the tool
@@ -1342,6 +1350,9 @@ const serveCursorHop = async (
  * `agy_acp_server` (on a warm agent process when one is idle). The conversation is flattened by `cursorRequestOf` (same
  * ACP prompt shape); client tools ride the loopback MCP server.
  */
+/** Antigravity headless conversations (prefix hash → `agy` conversation id). */
+const antigravityHeadlessSessions = new NativeSessionStore();
+
 const serveAntigravityHop = async (
   params: TNativeServeParams,
   overrides?: TNativeServeOverrides,
@@ -1365,19 +1376,46 @@ const serveAntigravityHop = async (
     overrides === undefined
       ? resolveAntigravityCli()
       : (overrides.headlessBin ?? null);
-  const headless =
-    headlessBin === null
+  // Plain text conversations only (tools, images and structured output are
+  // null here → ACP). The conversation is correlated by content like the
+  // Claude/Codex native paths: a known one continues its `agy` conversation
+  // with only the new turn; an unknown one with history is seeded.
+  const text = headlessBin === null ? null : nativeRequestOf(params.canonical);
+  const conversation =
+    text === null
       ? null
-      : await runAntigravityHeadless({
-          bin: headlessBin,
-          env,
-          providerModelId: params.providerModelId,
-          systemText: req.systemText,
-          userText: req.promptText,
-          hasImages: req.images.length > 0,
-          hasTools: (req.tools?.length ?? 0) > 0,
-          signal: params.signal,
-        });
+      : deriveConversation(params.providerModelId, text.systemText, text.turns);
+  const lease =
+    conversation === null || conversation.deltaText.length === 0
+      ? null
+      : await antigravityHeadlessSessions.lease(conversation.prefixHash);
+  const headless =
+    headlessBin === null ||
+    text === null ||
+    conversation === null ||
+    lease === null
+      ? null
+      : await (async (): Promise<TNativeRunResult> => {
+          const seed = conversation.hasPrior
+            ? renderSeed(text.turns, conversation.deltaText)
+            : conversation.deltaText;
+          return runAntigravityHeadless({
+            bin: headlessBin,
+            env,
+            providerModelId: params.providerModelId,
+            systemText: text.systemText,
+            userText: lease.sessionId !== null ? conversation.deltaText : seed,
+            seedText: seed,
+            conversationId: lease.sessionId,
+            hasImages: false,
+            hasTools: false,
+            signal: params.signal,
+            ...(overrides?.headlessHooks ?? {}),
+          });
+        })();
+  if (lease !== null && (headless === null || headless.kind === "declined")) {
+    lease.abandon();
+  }
   const run =
     headless !== null &&
     !(
@@ -1398,12 +1436,28 @@ const serveAntigravityHop = async (
   if (run.kind === "declined") {
     return declinedOutcome(run.reason, run.cooldownReason);
   }
+  // Only a committed headless turn holds the conversation lease.
+  const heldLease = run === headless ? lease : null;
   const settle = (
     resp: Awaited<ReturnType<typeof accumulateChunksToResponse>>,
   ): void => {
     params.record(tokensFromResponse(resp), "success", nativeAttempt);
+    if (heldLease !== null && text !== null) {
+      // The next request carries these turns + this reply before its own
+      // new turn, so it lands on the same `agy` conversation.
+      heldLease.commit(
+        nextPrefixHash(
+          params.providerModelId,
+          text.systemText,
+          text.turns,
+          textOf(resp),
+        ),
+        run.sessionId(),
+      );
+    }
   };
   const fail = (err: unknown): void => {
+    heldLease?.abandon();
     if (params.signal.aborted || isClientHangUp(err)) return;
     const usage = partialUsageFrom(err);
     params.record(
