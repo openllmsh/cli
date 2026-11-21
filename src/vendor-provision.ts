@@ -17,7 +17,7 @@ import {
   statSync,
 } from "node:fs";
 import { join } from "node:path";
-import { ANTIGRAVITY_ENABLED_MARKER } from "../daemon/src/antigravity-feature";
+import { ANTIGRAVITY_DISABLED_MARKER } from "../daemon/src/antigravity-feature";
 import { cliConfig, openllmDir, userHome } from "./env";
 import { awaitPipeCodes, bunSubprocessPeer } from "./process-pipe";
 import { isSecureOrigin } from "./self-update";
@@ -61,7 +61,7 @@ export type TProvisionMissingVendorClisDeps = {
   /** Override `OPENLLM_ANTIGRAVITY` for the present-check (tests). */
   readonly antigravityEnv?: string | undefined;
   /** Override marker existence for the present-check (tests). */
-  readonly antigravityMarkerPresent?: boolean;
+  readonly antigravityDisabledMarker?: boolean;
   /**
    * Launch the curl|bash pipe in a detached session and return immediately
    * (like interactive `install.sh`). Used by `openllm login --start` so the
@@ -89,7 +89,7 @@ type TVendorPlatformDeps = {
    * Override marker-file existence (tests). `undefined` checks the real path
    * under `home`.
    */
-  readonly antigravityMarkerPresent?: boolean;
+  readonly antigravityDisabledMarker?: boolean;
 };
 
 /**
@@ -105,11 +105,12 @@ const antigravityInstallable = (deps: TVendorPlatformDeps): boolean => {
       ? deps.antigravityEnv
       : process.env.OPENLLM_ANTIGRAVITY;
   if (env === "0") return false;
-  const markerPresent =
-    deps.antigravityMarkerPresent !== undefined
-      ? deps.antigravityMarkerPresent
-      : existsSync(join(openllmDirFor(deps.home), ANTIGRAVITY_ENABLED_MARKER));
-  if (env !== "1" && !markerPresent) return false;
+  // On by default; the opt-out marker turns it off unless env forces it on.
+  const disabledMarker =
+    deps.antigravityDisabledMarker !== undefined
+      ? deps.antigravityDisabledMarker
+      : existsSync(join(openllmDirFor(deps.home), ANTIGRAVITY_DISABLED_MARKER));
+  if (env !== "1" && disabledMarker) return false;
   const supported =
     (deps.platform === "darwin" &&
       (deps.arch === "arm64" || deps.arch === "x64")) ||
@@ -190,7 +191,7 @@ export const allProvisionedVendorClisPresent = (
     readonly platform?: NodeJS.Platform;
     readonly arch?: string;
     readonly antigravityEnv?: string | undefined;
-    readonly antigravityMarkerPresent?: boolean;
+    readonly antigravityDisabledMarker?: boolean;
   } = {},
 ): boolean => {
   const home = deps.home ?? userHome();
@@ -203,7 +204,7 @@ export const allProvisionedVendorClisPresent = (
     arch: deps.arch ?? process.arch,
     home,
     antigravityEnv: deps.antigravityEnv,
-    antigravityMarkerPresent: deps.antigravityMarkerPresent,
+    antigravityDisabledMarker: deps.antigravityDisabledMarker,
   };
   for (const vendor of PROVISIONED_VENDOR_CLIS) {
     if (vendor.installable !== undefined && !vendor.installable(platformDeps))
@@ -243,7 +244,7 @@ export const provisionMissingVendorClis = async (
       home: deps?.home,
       which: deps?.which,
       antigravityEnv: deps?.antigravityEnv,
-      antigravityMarkerPresent: deps?.antigravityMarkerPresent,
+      antigravityDisabledMarker: deps?.antigravityDisabledMarker,
     })
   ) {
     process.stderr.write(

@@ -2409,14 +2409,14 @@ provision_clis() {
         ;;
     esac
   done
-  # Antigravity is behind a kill switch (off by default — not yet reliable).
-  # `OPENLLM_ANTIGRAVITY=1` opts in and writes the marker the daemon reads
-  # (packages/cli/daemon/src/antigravity-feature.ts); `=0` opts back out.
+  # Antigravity is on by default. `OPENLLM_ANTIGRAVITY=0` opts out and writes
+  # the marker the daemon reads (packages/cli/daemon/src/antigravity-feature.ts);
+  # `=1` opts back in.
   case "${OPENLLM_ANTIGRAVITY:-}" in
-    1) touch "$OPENLLM_DIR/antigravity-enabled" 2>/dev/null || true ;;
-    0) rm -f "$OPENLLM_DIR/antigravity-enabled" 2>/dev/null || true ;;
+    1) rm -f "$OPENLLM_DIR/antigravity-disabled" 2>/dev/null || true ;;
+    0) touch "$OPENLLM_DIR/antigravity-disabled" 2>/dev/null || true ;;
   esac
-  if [ -f "$OPENLLM_DIR/antigravity-enabled" ] && vendor_cli_selected antigravity; then
+  if [ ! -f "$OPENLLM_DIR/antigravity-disabled" ] && vendor_cli_selected antigravity; then
     VENDOR_LAST_PID=""
     launch_rc=0
     provision_antigravity "$run_path" "$curl_bin" || launch_rc=$?
