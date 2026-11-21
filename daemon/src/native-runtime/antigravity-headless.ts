@@ -696,6 +696,9 @@ export const runAntigravityHeadless = async (
   const accountChanged =
     params.epoch !== undefined && params.epoch !== sparesEpoch;
   const resumeId = accountChanged ? null : requestedId;
+  // The account this process starts under: a change while it starts means
+  // it may hold the old account's sign-in or conversation.
+  const spawnEpoch = sparesEpoch;
   let proc: HeadlessProcess;
   try {
     proc =
@@ -771,6 +774,19 @@ export const runAntigravityHeadless = async (
   };
 
   const ready = await proc.initialized;
+  // A sign-in or logout during start-up: this process may hold the old
+  // account's conversation. Never serve on it.
+  if (
+    ready &&
+    !ended &&
+    params.epoch !== undefined &&
+    spawnEpoch !== sparesEpoch
+  ) {
+    ended = true;
+    proc.onExit(null);
+    proc.dispose();
+    return fallback("account changed while agy started");
+  }
   if (!ready || ended) {
     if (!ended) {
       ended = true;

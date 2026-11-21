@@ -331,9 +331,18 @@ export const startAgyLogin = (args: {
   // settled on it kills the screen now; a late menu is answered now.
   if (pty !== null && settled) pty.kill();
   else if (pty !== null) onData(new Uint8Array());
-  void pty?.exited.then(() =>
-    settle({ kind: "failed", reason: "agy exited before sign-in finished" }),
-  );
+  // `agy` may store the sign-in and exit before a poll sees it: the store
+  // decides once the link is out.
+  void pty?.exited.then(async () => {
+    if (settled) return;
+    const stored =
+      surfaced !== null && (await args.isSignedIn().catch(() => false));
+    settle(
+      stored
+        ? { kind: "signed_in" }
+        : { kind: "failed", reason: "agy exited before sign-in finished" },
+    );
+  });
   // A failed spawn already settled: arm no deadlines for it.
   if (!settled)
     timers.push(

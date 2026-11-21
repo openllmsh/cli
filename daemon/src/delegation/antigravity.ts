@@ -148,9 +148,12 @@ const agyHome = (): string => cliHome(PROVIDER);
 
 const agyDeps = (bin: string) => ({ bin, env: cliEnv(PROVIDER) });
 
-/** Signed in through ACP's token file or through `agy` (metadata only). */
+/** Signed in on a transport that is installed: the ACP agent with its token
+ *  file, or the `agy` CLI with its own sign-in (metadata only). A leftover
+ *  credential of a transport that isn't installed does not count. */
 const signedIn = async (): Promise<boolean> =>
-  tokenPresent() || (await agyCliSignedIn(agyHome()));
+  (resolveAntigravityCli() !== null && (await agyCliSignedIn(agyHome()))) ||
+  (tokenPresent() && (await cliInstallState(PROVIDER)).installed);
 
 /** `agy models` captured at sign-in, kept beside `agy`'s own state so the
  *  list survives a daemon restart without another `agy` launch. Not a token. */
@@ -183,9 +186,11 @@ const readAgyModelsFile = (): ReadonlyArray<{
 };
 
 /** The model list for the current sign-in: ACP's observation, else `agy`'s. */
+/** Text runs on `agy` when it is installed, so its list leads; ACP's
+ *  inventory serves ACP-only accounts. */
 const observedModels = (): ReturnType<typeof readAgyModelsFile> =>
-  readAntigravityModels(geminiHome()) ??
-  (tokenPresent() ? null : readAgyModelsFile());
+  (resolveAntigravityCli() !== null ? readAgyModelsFile() : null) ??
+  readAntigravityModels(geminiHome());
 
 /** Installed when either the ACP agent or the `agy` CLI is present. */
 const installState = async (): Promise<{
@@ -815,10 +820,9 @@ export const antigravityDelegate: TProviderDelegate = {
   logout: async () => {
     // Whenever `agy` is installed, remove its store outright: a store that
     // can't be observed (keychain not ready) is not an empty one.
-    const agyOut =
-      resolveAntigravityCli() !== null || (await agyCliSignedIn(agyHome()))
-        ? await logoutViaAgy()
-        : { ok: true };
+    // Always: removal itself readies the isolated keychain, so an
+    // unobservable store is cleared rather than assumed empty.
+    const agyOut = await logoutViaAgy();
     if (
       tokenPresent() &&
       (await cliInstallState(PROVIDER, { demand: true })).installed
