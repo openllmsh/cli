@@ -253,8 +253,11 @@ export const startAgyLogin = (args: {
         }
         return;
       }
+      // An injected spawner can deliver output before its handle returns:
+      // answer the menu only once there is a terminal to answer it on.
+      if (pty === null) return;
       menuAnswered = true;
-      pty?.write("\r");
+      pty.write("\r");
       return;
     }
     if (menuAnswered && surfaced === null) {
@@ -302,35 +305,40 @@ export const startAgyLogin = (args: {
       reason: `could not start agy: ${error instanceof Error ? error.message : String(error)}`,
     });
   }
+  // A late menu (delivered before the handle returned) is answered now.
+  if (pty !== null && !settled) onData(new Uint8Array());
   void pty?.exited.then(() =>
     settle({ kind: "failed", reason: "agy exited before sign-in finished" }),
   );
-  timers.push(
-    setTimeout(() => {
-      if (surfaced === null) {
-        settle({
-          kind: "failed",
-          reason: "agy did not show a Google sign-in link",
-          timedOut: true,
-        });
-      }
-    }, args.urlWaitMs),
-    setTimeout(
-      () =>
-        settle({
-          kind: "failed",
-          reason: "Google sign-in did not finish in time",
-          timedOut: true,
-        }),
-      args.loginTimeoutMs,
-    ),
-  );
+  // A failed spawn already settled: arm no deadlines for it.
+  if (!settled)
+    timers.push(
+      setTimeout(() => {
+        if (surfaced === null) {
+          settle({
+            kind: "failed",
+            reason: "agy did not show a Google sign-in link",
+            timedOut: true,
+          });
+        }
+      }, args.urlWaitMs),
+      setTimeout(
+        () =>
+          settle({
+            kind: "failed",
+            reason: "Google sign-in did not finish in time",
+            timedOut: true,
+          }),
+        args.loginTimeoutMs,
+      ),
+    );
 
   return {
     url,
     done,
     submitCode: (pasted) => {
-      if (settled || surfaced === null) {
+      // One code per screen: once typed, `agy` is no longer at the prompt.
+      if (settled || surfaced === null || codeTyped) {
         return { ok: false, detail: "no Google sign-in is awaiting a code." };
       }
       const checked = validateAgyAuthCode(pasted);

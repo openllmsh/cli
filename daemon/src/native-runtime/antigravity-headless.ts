@@ -280,6 +280,9 @@ class HeadlessProcess {
    *  headless docs); the last result's counters, so a reused process reports
    *  each turn's own usage. */
   usageBaseline: THeadlessUsage | null = null;
+  /** The current turn's exit handler — one slot, replaced each turn, so a
+   *  parked, reused process never accumulates past turns' callbacks. */
+  private exitHandler: (() => void) | null = null;
   private idleTimer: ReturnType<typeof setTimeout> | undefined;
 
   constructor(
@@ -315,7 +318,18 @@ class HeadlessProcess {
       this.exitedFlag = true;
       clearTimeout(initTimer);
       resolveInit(false);
+      this.exitHandler?.();
+      this.exitHandler = null;
     });
+  }
+
+  /** Run `handler` when the process exits (now, if it already has). */
+  onExit(handler: (() => void) | null): void {
+    if (handler !== null && this.exitedFlag) {
+      handler();
+      return;
+    }
+    this.exitHandler = handler;
   }
 
   get alive(): boolean {
@@ -421,6 +435,10 @@ const noteRequestAndWantSpare = (
   now: number = Date.now(),
 ): boolean => {
   const previous = lastRequestAt.get(key);
+  // Keys idle past the window can never warrant a spare again: drop them.
+  for (const [k, at] of lastRequestAt) {
+    if (now - at > ttlMs) lastRequestAt.delete(k);
+  }
   lastRequestAt.set(key, now);
   const active = previous !== undefined && now - previous <= ttlMs;
   if (!active) return false;
@@ -466,12 +484,13 @@ const addSpare = (
   ttlMs: number,
   epoch: number,
 ): void => {
-  releaseSpareReservation();
   if (epoch !== sparesEpoch) {
-    // The pool was disposed while this one was starting.
+    // The pool was disposed while this one was starting; its reservation
+    // was cleared with that pool and is not this epoch's to release.
     proc.dispose();
     return;
   }
+  releaseSpareReservation();
   spares.push(proc);
   proc.armIdleTimer(ttlMs, () => {
     const i = spares.indexOf(proc);
@@ -548,6 +567,10 @@ export const disposeAntigravityHeadlessSpares = (): void => {
 };
 
 export const antigravityHeadlessSpareCount = (): number => spares.length;
+
+/** The pool's account epoch: bumped by every disposal (sign-in, logout), so
+ *  conversations keyed with it never continue across an account change. */
+export const antigravityHeadlessEpoch = (): number => sparesEpoch;
 
 process.once("exit", disposeAntigravityHeadlessSpares);
 
@@ -647,13 +670,19 @@ export const runAntigravityHeadless = async (
     extra: ReadonlyArray<string> = [],
   ): Promise<HeadlessProcess> => {
     const cwd = await mkdtemp(join(daemonTempDir(), "agy-h-"));
-    return new HeadlessProcess(
-      key,
-      wrap([...argvOf(params.bin, model), ...extra]),
-      spawnEnv,
-      cwd,
-      initTimeoutMs,
-    );
+    try {
+      return new HeadlessProcess(
+        key,
+        wrap([...argvOf(params.bin, model), ...extra]),
+        spawnEnv,
+        cwd,
+        initTimeoutMs,
+      );
+    } catch (error) {
+      // No process owns the scratch dir: remove it, keep the spawn error.
+      await rm(cwd, { recursive: true, force: true }).catch(() => {});
+      throw error;
+    }
   };
 
   const resumeId = params.conversationId ?? null;
@@ -681,7 +710,9 @@ export const runAntigravityHeadless = async (
     const epoch = sparesEpoch;
     void spawn().then(
       (next) => addSpare(next, spareTtlMs, epoch),
-      () => releaseSpareReservation(),
+      () => {
+        if (epoch === sparesEpoch) releaseSpareReservation();
+      },
     );
   }
 
@@ -711,6 +742,7 @@ export const runAntigravityHeadless = async (
   const end = (items: ReadonlyArray<TItem>, keep = false): void => {
     if (ended) return;
     ended = true;
+    proc.onExit(null);
     for (const item of items) push(item);
     settle(keep);
   };
@@ -843,7 +875,7 @@ export const runAntigravityHeadless = async (
     }
   });
   // Exit mid-turn surfaces as a failure rather than a hang.
-  void proc.exited.then(() => {
+  proc.onExit(() => {
     if (!ended) fail({ reason: "agy exited mid-turn", fallback: false });
   });
 

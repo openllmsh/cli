@@ -16,6 +16,7 @@
  */
 
 import { randomUUID } from "node:crypto";
+import { statSync } from "node:fs";
 import type {
   TBridgeVariant,
   TChatCompletionChunk,
@@ -53,9 +54,13 @@ import {
   resolveExecutionSelection,
 } from "../execution-registry";
 import { logDebug, logError, logWarn, safeDiagnosticMessage } from "../logger";
-import { runAntigravityNative } from "./antigravity-acp";
+import {
+  antigravityTokenPath,
+  runAntigravityNative,
+} from "./antigravity-acp";
 import type { TAntigravityHeadlessParams } from "./antigravity-headless";
 import {
+  antigravityHeadlessEpoch,
   isAntigravityHeadlessFallback,
   resolveAntigravityCli,
   runAntigravityHeadless,
@@ -1350,6 +1355,18 @@ const serveCursorHop = async (
  * `agy_acp_server` (on a warm agent process when one is idle). The conversation is flattened by `cursorRequestOf` (same
  * ACP prompt shape); client tools ride the loopback MCP server.
  */
+/** ACP's own token file is present (metadata only, never its contents). */
+const acpSignedIn = (env: Readonly<Record<string, string>>): boolean => {
+  const geminiHome = env.GEMINI_HOME;
+  if (geminiHome === undefined) return false;
+  try {
+    const st = statSync(antigravityTokenPath(geminiHome));
+    return st.isFile() && st.size > 0;
+  } catch {
+    return false;
+  }
+};
+
 /** Antigravity headless conversations (prefix hash → `agy` conversation id). */
 const antigravityHeadlessSessions = new NativeSessionStore();
 
@@ -1383,7 +1400,9 @@ const serveAntigravityHop = async (
   const text = headlessBin === null ? null : nativeRequestOf(params.canonical);
   // Conversations belong to one account slot: its isolated HOME is part of
   // the identity, so another slot never continues this one's `agy` session.
-  const conversationKey = `${params.providerModelId}\u0000${env.HOME ?? ""}`;
+  // The account epoch too: a sign-in or logout in the same slot starts a new
+  // one, so nothing continues (or commits into) the previous account's.
+  const conversationKey = `${params.providerModelId}\u0000${env.HOME ?? ""}\u0000${antigravityHeadlessEpoch()}`;
   const conversation =
     text === null
       ? null
@@ -1431,14 +1450,23 @@ const serveAntigravityHop = async (
   if (lease !== null && (headless === null || headless.kind === "declined")) {
     lease.abandon();
   }
-  const run =
-    headless !== null &&
-    !(
-      headless.kind === "declined" &&
-      isAntigravityHeadlessFallback(headless.reason)
-    )
-      ? headless
-      : await runAntigravityNative({
+  const toAcp =
+    headless === null ||
+    (headless.kind === "declined" &&
+      isAntigravityHeadlessFallback(headless.reason));
+  // A request headless can't serve (images, client tools) needs ACP's own
+  // sign-in. With `agy` present, the account may be signed in through `agy`
+  // only: decline without an auth cooldown, which would also stop the text
+  // requests `agy` serves fine.
+  if (toAcp && headlessBin !== null && !acpSignedIn(env)) {
+    return {
+      declined:
+        "antigravity: images and client tools need the Antigravity agent signed in",
+    };
+  }
+  const run = !toAcp
+    ? headless
+    : await runAntigravityNative({
           bin: overrides?.bin ?? cliBin("antigravity"),
           env,
           providerModelId: params.providerModelId,

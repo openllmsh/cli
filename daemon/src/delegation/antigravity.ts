@@ -675,7 +675,12 @@ const logoutViaAgy = async (): Promise<{
   // Nothing from the signed-out account may serve or be listed.
   disposeAntigravityHeadlessSpares();
   noteAuthStoreIdentityChange(PROVIDER);
-  rmSync(agyModelsPath(), { force: true });
+  // A stale model list is cosmetic: never let it stop the ACP logout.
+  try {
+    rmSync(agyModelsPath(), { force: true });
+  } catch (error) {
+    logError("antigravity-logout", error);
+  }
   return { ok: true, detail: "signed out of Google Antigravity" };
 };
 

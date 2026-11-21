@@ -281,6 +281,9 @@ const defaultSecurityRun: TSecurityRun = async ({ argv, home }) => {
  * is not used: its screen first runs a first-run wizard whose Terms /
  * data-use consent page the daemon must not answer. Like ACP's logout this
  * clears the local sign-in; it does not revoke the grant at Google.
+ *
+ * Off macOS the token file is the whole store: `cliEnv` hands `agy` no
+ * `DBUS_SESSION_BUS_ADDRESS`, so it cannot reach a desktop keyring.
  */
 export const removeAgySignIn = async (
   home: string,
