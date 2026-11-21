@@ -277,7 +277,8 @@ const connectViaAgy = (agyBin: string): Promise<TConnectResult> =>
       installed: async () => true,
       installHint: INSTALL_HINT,
       shortCircuit: {
-        connected: signedIn,
+        // Only `agy`'s own sign-in: an ACP token alone still signs in `agy`.
+        connected: () => agyCliSignedIn(agyHome()),
         detail: wiring.connectedDetail,
       },
       slot: wiring.slot,
@@ -714,14 +715,17 @@ export const antigravityDelegate: TProviderDelegate = {
   status: async (): Promise<TDaemonProviderConnection> => {
     const { installed, version } = await installState();
     const connected = installed && (await signedIn());
-    if (connected) clearPendingAuth(PROVIDER);
+    // A second sign-in (ACP for images/tools, while `agy` is already signed
+    // in) keeps its prompt until that attempt ends.
+    const signingIn = wiring.slot.inFlight();
+    if (connected && !signingIn) clearPendingAuth(PROVIDER);
     // ACP's token carries a stable account id; an `agy` sign-in's token is
     // never read, so it reports no account hash.
     const accountId =
       connected && tokenPresent()
         ? await readAntigravityAccountId(geminiHome())
         : null;
-    const pending = connected ? null : getPendingAuth(PROVIDER);
+    const pending = connected && !signingIn ? null : getPendingAuth(PROVIDER);
     return {
       provider: PROVIDER,
       status: connected ? "connected" : "disconnected",
@@ -809,9 +813,12 @@ export const antigravityDelegate: TProviderDelegate = {
   // isolated store, no launcher needed) and ACP's — and report success only
   // when neither is still signed in.
   logout: async () => {
-    const agyOut = (await agyCliSignedIn(agyHome()))
-      ? await logoutViaAgy()
-      : { ok: true };
+    // Whenever `agy` is installed, remove its store outright: a store that
+    // can't be observed (keychain not ready) is not an empty one.
+    const agyOut =
+      resolveAntigravityCli() !== null || (await agyCliSignedIn(agyHome()))
+        ? await logoutViaAgy()
+        : { ok: true };
     if (
       tokenPresent() &&
       (await cliInstallState(PROVIDER, { demand: true })).installed
