@@ -118,6 +118,14 @@ const antigravityInstallable = (deps: TVendorPlatformDeps): boolean => {
   return supported && deps.which("unzip") !== null;
 };
 
+/** Google's `agy` CLI: same enablement and platforms as the ACP agent, but
+ *  its installer needs no `unzip`. */
+const antigravityCliInstallable = (deps: TVendorPlatformDeps): boolean =>
+  antigravityInstallable({
+    ...deps,
+    which: (c) => (c === "unzip" ? "unzip" : deps.which(c)),
+  });
+
 /** `~/.openllm` under an overridden home (tests) or the live openllm dir. */
 const openllmDirFor = (home: string): string =>
   home === userHome() ? openllmDir() : join(home, ".openllm");
@@ -164,6 +172,13 @@ export const PROVISIONED_VENDOR_CLIS: readonly {
         "agy_acp_server.par",
       ),
     installable: antigravityInstallable,
+  },
+  {
+    // Google's agy CLI (Antigravity's headless inference; the ACP agent above
+    // is the fallback). Google's own installer places it at ~/.local/bin/agy.
+    command: "agy",
+    dest: (home) => join(home, ".local", "bin", "agy"),
+    installable: antigravityCliInstallable,
   },
 ];
 
