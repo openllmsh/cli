@@ -2085,6 +2085,13 @@ ANTIGRAVITY_HARNESS="localharness_external"
 ANTIGRAVITY_REGISTRY_URL="https://raw.githubusercontent.com/agentclientprotocol/registry/main/antigravity-acp/agent.json"
 # Free space needed: archive + unpacked agent (~1.4 GB on Linux).
 ANTIGRAVITY_SPACE_NEED_KB=1572864
+# Google's official `agy` CLI. Inference prefers it (headless stream-json —
+# it streams; the ACP agent above stays the fallback), so the Antigravity
+# install provisions both. Its own installer verifies the download's SHA-512
+# against Google's manifest and places `agy` at ~/.local/bin/agy, which the
+# daemon resolves (packages/cli/daemon/src/native-runtime/antigravity-headless.ts).
+ANTIGRAVITY_CLI_INSTALLER_URL="https://antigravity.google/cli/install.sh"
+ANTIGRAVITY_CLI_BIN="$HOME/.local/bin/agy"
 
 # Registry platform key for this host, or nothing when unsupported (Windows is
 # not a daemon target; Intel macOS ships but is untested).
@@ -2189,6 +2196,36 @@ install_antigravity_release() {
   echo "Antigravity: installed release $version."
 }
 
+# Worker step: install the `agy` CLI with Google's official installer when it
+# is missing. Never fatal — the ACP agent still serves Antigravity without it,
+# and the next installer run retries.
+install_antigravity_cli() {
+  local curl_bin="$1"
+  if [ -x "$ANTIGRAVITY_CLI_BIN" ]; then
+    echo "Antigravity CLI: already installed."
+    return 0
+  fi
+  if "$curl_bin" -fsSL --proto '=https' --retry 2 "$ANTIGRAVITY_CLI_INSTALLER_URL" | bash \
+    && [ -x "$ANTIGRAVITY_CLI_BIN" ]; then
+    echo "Antigravity CLI: installed."
+  else
+    echo "Antigravity CLI: install failed — the ACP agent still serves Antigravity; $(vendor_cli_retry_hint) to retry." >&2
+  fi
+  return 0
+}
+
+# Worker body for the whole Antigravity install: the ACP agent release (a
+# failure fails the install), then the `agy` CLI (never fatal).
+install_antigravity_all() {
+  local curl_bin="$1" registry="$2"
+  # An active, complete ACP install is left alone — only the CLI is added.
+  if [ ! -x "$ANTIGRAVITY_DIR/current/$ANTIGRAVITY_EXE" ] \
+    || [ ! -x "$ANTIGRAVITY_DIR/current/$ANTIGRAVITY_HARNESS" ]; then
+    install_antigravity_release "$curl_bin" "$registry" || return $?
+  fi
+  install_antigravity_cli "$curl_bin"
+}
+
 # Launch the tracked Antigravity install when this host can take it. Skips
 # (with no progress record — nothing was started) on an unsupported platform
 # or a host without `unzip`.
@@ -2218,7 +2255,8 @@ vendor_cli_resolve_curl() {
 provision_antigravity() {
   local run_path="$1" curl_bin="$2"
   local name="Google Antigravity" dest="$ANTIGRAVITY_DIR/current/$ANTIGRAVITY_EXE"
-  if [ -x "$dest" ] && [ -x "$ANTIGRAVITY_DIR/current/$ANTIGRAVITY_HARNESS" ]; then
+  if [ -x "$dest" ] && [ -x "$ANTIGRAVITY_DIR/current/$ANTIGRAVITY_HARNESS" ] \
+    && [ -x "$ANTIGRAVITY_CLI_BIN" ]; then
     echo "  $name agent: already installed."
     echo "$name agent: already installed ($dest) — skipping install." \
       >>"$OPENLLM_DIR/cli-install.log" 2>/dev/null || true
@@ -2233,7 +2271,7 @@ provision_antigravity() {
     return 0
   fi
   launch_vendor_cli_install "$name" "$ANTIGRAVITY_EXE" antigravity "$dest" \
-    "$ANTIGRAVITY_REGISTRY_URL" "$run_path" "$curl_bin" install_antigravity_release
+    "$ANTIGRAVITY_REGISTRY_URL" "$run_path" "$curl_bin" install_antigravity_all
 }
 
 # Outcome of the last provision_clis run, by display name (", "-joined) — the
