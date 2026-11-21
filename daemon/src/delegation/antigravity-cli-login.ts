@@ -119,6 +119,31 @@ export type TAgyLoginPtySpawner = (args: {
   readonly onData: (chunk: Uint8Array) => void;
 }) => TAgyLoginPty;
 
+/** Grace between SIGTERM and SIGKILL for an `agy` child. */
+export const AGY_KILL_GRACE_MS = 2_000;
+
+/** SIGTERM now, SIGKILL if it is still running after the grace. */
+export const killHard = (proc: {
+  readonly kill: (signal?: number | NodeJS.Signals) => void;
+  readonly exitCode: number | null;
+  readonly signalCode?: string | null;
+}): void => {
+  try {
+    proc.kill();
+  } catch {
+    return; // already gone
+  }
+  const timer = setTimeout(() => {
+    if (proc.exitCode !== null || (proc.signalCode ?? null) !== null) return;
+    try {
+      proc.kill("SIGKILL");
+    } catch {
+      /* already gone */
+    }
+  }, AGY_KILL_GRACE_MS);
+  timer.unref?.();
+};
+
 /** Production spawner over Bun's built-in PTY. */
 export const bunAgyLoginPty: TAgyLoginPtySpawner = (args) => {
   const terminal = new Bun.Terminal({
@@ -150,13 +175,10 @@ export const bunAgyLoginPty: TAgyLoginPtySpawner = (args) => {
   );
   return {
     write: (data) => terminal.write(data),
-    kill: () => {
-      try {
-        proc.kill();
-      } catch {
-        /* already gone */
-      }
-    },
+    // agy's login screen can outlive SIGTERM; a survivor keeps running in a
+    // HOME whose keychain is about to be removed, and macOS then asks the
+    // user for a keychain out of nowhere. Escalate to SIGKILL.
+    kill: () => killHard(proc),
     exited,
   };
 };

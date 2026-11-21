@@ -35,6 +35,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import type { TChatCompletionChunk } from "@openllmsh/sdk/protocol";
+import { killHard } from "../delegation/antigravity-cli-login";
 import type { TStoreRead } from "../delegation/util";
 import { ensureKeychainReady } from "../delegation/util";
 import { sandboxSpawnArgs } from "../sandbox/exec";
@@ -389,7 +390,7 @@ class HeadlessProcess {
   dispose(): void {
     clearTimeout(this.idleTimer);
     this.listener = null;
-    if (!this.exitedFlag) this.proc.kill();
+    if (!this.exitedFlag) killHard(this.proc);
     void rm(this.cwd, { recursive: true, force: true });
   }
 }
