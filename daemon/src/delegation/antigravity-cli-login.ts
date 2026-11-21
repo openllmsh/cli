@@ -10,7 +10,10 @@
  *      "paste the authorization code below". The URL is surfaced to the UI.
  *   3. Google's callback page shows an authorization code; the user pastes it
  *      in the UI and the daemon types it into the waiting screen.
- *   4. `agy` lands on its signed-in screen (`<email> (<plan>)`) → done.
+ *   4. `agy` stores the sign-in → done (judged by the store, not the screen:
+ *      on a first sign-in `agy` next shows an onboarding wizard whose second
+ *      page is a Terms of Service / data-use consent — the daemon never
+ *      answers it; it closes the screen. Headless inference does not need it).
  *
  * Nothing here reads or writes a token: `agy` stores its own sign-in (the
  * isolated keychain on macOS — callers gate on `ensureKeychainReady` first —
@@ -190,6 +193,14 @@ export const startAgyLogin = (args: {
   readonly spawn?: TAgyLoginPtySpawner;
   readonly urlWaitMs: number;
   readonly loginTimeoutMs: number;
+  /**
+   * The sign-in store check (metadata only). Polled once the URL is out: a
+   * sign-in is complete when `agy` has stored it, which happens BEFORE its
+   * first-run wizard (colour scheme, then a Terms / data-use consent page).
+   * The wizard is never answered — the screen is closed instead.
+   */
+  readonly isSignedIn: () => Promise<boolean>;
+  readonly pollMs?: number;
 }): TAgyLogin => {
   let screen = "";
   let menuAnswered = false;
@@ -211,7 +222,10 @@ export const startAgyLogin = (args: {
   const settle = (outcome: TAgyLoginOutcome): void => {
     if (settled) return;
     settled = true;
-    for (const timer of timers) clearTimeout(timer);
+    for (const timer of timers) {
+      clearTimeout(timer);
+      clearInterval(timer);
+    }
     resolveUrl(surfaced);
     resolveDone(outcome);
     pty?.kill();
@@ -257,6 +271,19 @@ export const startAgyLogin = (args: {
       settle({ kind: "signed_in" });
     }
   };
+
+  // Once the link is out, the store decides: the browser may complete the
+  // sign-in on its own, or a pasted code may.
+  const poll = setInterval(() => {
+    if (settled || surfaced === null) return;
+    void args.isSignedIn().then(
+      (yes) => {
+        if (yes) settle({ kind: "signed_in" });
+      },
+      () => {},
+    );
+  }, args.pollMs ?? 1_000);
+  timers.push(poll as unknown as ReturnType<typeof setTimeout>);
 
   try {
     pty = (args.spawn ?? bunAgyLoginPty)({
@@ -316,72 +343,4 @@ export const startAgyLogin = (args: {
     },
     cancel: () => settle({ kind: "failed", reason: "sign-in cancelled" }),
   };
-};
-
-/**
- * Sign out through `agy`'s own `/logout` command (it is not one of the
- * read-only print-mode commands): open the signed-in screen, type `/logout`,
- * and judge success by the sign-in store (`isSignedIn`, metadata only) rather
- * than by screen text. Enter is repeated once in case the first one only
- * accepted a command-completion suggestion.
- */
-export const runAgyLogout = async (args: {
-  readonly argv: ReadonlyArray<string>;
-  readonly env: Record<string, string>;
-  readonly cwd: string;
-  readonly isSignedIn: () => Promise<boolean>;
-  readonly spawn?: TAgyLoginPtySpawner;
-  readonly timeoutMs: number;
-  readonly pollMs?: number;
-}): Promise<{ readonly ok: boolean; readonly detail: string }> => {
-  if (!(await args.isSignedIn())) {
-    return { ok: true, detail: "already signed out" };
-  }
-  let screen = "";
-  let typed = false;
-  const decoder = new TextDecoder();
-  let pty: TAgyLoginPty;
-  try {
-    pty = (args.spawn ?? bunAgyLoginPty)({
-      argv: args.argv,
-      env: args.env,
-      cwd: args.cwd,
-      cols: AGY_LOGIN_COLS,
-      rows: AGY_LOGIN_ROWS,
-      onData: (chunk) => {
-        screen =
-          `${screen}${stripTerminal(decoder.decode(chunk, { stream: true }))}`.slice(
-            -32_768,
-          );
-        if (!typed && SIGNED_IN_RE.test(screen)) {
-          typed = true;
-          pty.write("/logout");
-          pty.write("\r");
-          setTimeout(() => pty.write("\r"), 1_500);
-        }
-      },
-    });
-  } catch (error) {
-    return {
-      ok: false,
-      detail: `could not start agy: ${error instanceof Error ? error.message : String(error)}`,
-    };
-  }
-  const deadline = Date.now() + args.timeoutMs;
-  try {
-    while (Date.now() < deadline) {
-      await Bun.sleep(args.pollMs ?? 500);
-      if (typed && !(await args.isSignedIn())) {
-        return { ok: true, detail: "signed out of Google Antigravity" };
-      }
-    }
-    return {
-      ok: false,
-      detail: typed
-        ? "agy did not sign out in time"
-        : "agy did not show its signed-in screen",
-    };
-  } finally {
-    pty.kill();
-  }
 };

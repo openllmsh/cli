@@ -77,9 +77,14 @@ import { unwrapAntigravityCliSpawn } from "../sandbox/policy";
 import { daemonTempDir } from "../sandbox/working-set";
 import { accountHashField } from "./account-id";
 import type { TAgyModelRow } from "./antigravity-cli";
-import { agyCliSignedIn, readAgyModels, readAgyUsage } from "./antigravity-cli";
+import {
+  agyCliSignedIn,
+  readAgyModels,
+  readAgyUsage,
+  removeAgySignIn,
+} from "./antigravity-cli";
 import type { TAgyLogin } from "./antigravity-cli-login";
-import { runAgyLogout, startAgyLogin } from "./antigravity-cli-login";
+import { startAgyLogin } from "./antigravity-cli-login";
 import {
   readAntigravityAccountId,
   readAntigravityUsage,
@@ -289,6 +294,7 @@ const connectViaAgy = (agyBin: string): Promise<TConnectResult> =>
         cwd: scratch,
         urlWaitMs: URL_WAIT_MS,
         loginTimeoutMs: LOGIN_TIMEOUT_MS,
+        isSignedIn: () => agyCliSignedIn(home),
       });
       const dispose = (): void => {
         login.cancel();
@@ -651,33 +657,21 @@ const cancelConnect = makeCancelConnect(PROVIDER, wiring.slot, {
   none: "no sign-in was in progress",
 });
 
-/** Sign out of an `agy` sign-in with `agy`'s own `/logout`. */
-const logoutViaAgy = async (
-  agyBin: string,
-): Promise<{ readonly ok: boolean; readonly detail: string }> => {
-  const home = agyHome();
-  if ((await ensureIsolatedKeychain(home)).kind !== "present") {
-    return { ok: false, detail: "couldn't open the sign-in store to sign out" };
+/** Sign out of an `agy` sign-in by clearing the daemon's own isolated
+ *  store (`removeAgySignIn` — never `agy`'s interactive screen). */
+const logoutViaAgy = async (): Promise<{
+  readonly ok: boolean;
+  readonly detail: string;
+}> => {
+  const ok = await removeAgySignIn(agyHome());
+  if (!ok) {
+    return { ok: false, detail: "credential still present after logout" };
   }
-  const scratch = await mkdtemp(join(daemonTempDir(), "agy-logout-"));
-  try {
-    const result = await runAgyLogout({
-      argv: sandboxSpawnArgs([agyBin], { probe: unwrapAntigravityCliSpawn() }),
-      env: antigravitySpawnEnv(cliEnv(PROVIDER)),
-      cwd: scratch,
-      isSignedIn: () => agyCliSignedIn(home),
-      timeoutMs: LOGOUT_TIMEOUT_MS,
-    });
-    if (result.ok) {
-      // Nothing from the signed-out account may serve or be listed.
-      disposeAntigravityHeadlessSpares();
-      noteAuthStoreIdentityChange(PROVIDER);
-      rmSync(agyModelsPath(), { force: true });
-    }
-    return result;
-  } finally {
-    await rm(scratch, { recursive: true, force: true });
-  }
+  // Nothing from the signed-out account may serve or be listed.
+  disposeAntigravityHeadlessSpares();
+  noteAuthStoreIdentityChange(PROVIDER);
+  rmSync(agyModelsPath(), { force: true });
+  return { ok: true, detail: "signed out of Google Antigravity" };
 };
 
 export const antigravityDelegate: TProviderDelegate = {
@@ -790,7 +784,7 @@ export const antigravityDelegate: TProviderDelegate = {
       agyBin !== null &&
       (await agyCliSignedIn(agyHome()))
     ) {
-      return logoutViaAgy(agyBin);
+      return logoutViaAgy();
     }
     if (
       tokenPresent() &&

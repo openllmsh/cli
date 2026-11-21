@@ -14,7 +14,7 @@
  * and the daemon sandbox wrap, like inference (`antigravity-headless.ts`).
  */
 
-import { statSync } from "node:fs";
+import { rmSync, statSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -251,4 +251,63 @@ export const readAgyModels = async (
   if (out.kind !== "ok") return null;
   const rows = agyModelRows(out.stdout);
   return rows.length > 0 ? rows : null;
+};
+
+// ─── Sign-out ──────────────────────────────────────────────────────────────
+
+/** The account name `agy` saves its keychain item under. */
+export const AGY_KEYCHAIN_ACCOUNT = "antigravity";
+
+export type TSecurityRun = (args: {
+  readonly argv: ReadonlyArray<string>;
+  readonly home: string;
+}) => Promise<number | null>;
+
+const defaultSecurityRun: TSecurityRun = async ({ argv, home }) => {
+  const proc = Bun.spawn([...argv], {
+    env: { ...process.env, HOME: home },
+    stdin: "ignore",
+    stdout: "ignore",
+    stderr: "ignore",
+  });
+  return proc.exited;
+};
+
+/**
+ * Remove `agy`'s sign-in from the daemon's OWN isolated stores: its token
+ * file, and (macOS) the `gemini`/`antigravity` item in the isolated keychain
+ * named by explicit path — never the user's login keychain. Gated on the
+ * keychain being ready so nothing can prompt. `agy`'s interactive `/logout`
+ * is not used: its screen first runs a first-run wizard whose Terms /
+ * data-use consent page the daemon must not answer. Like ACP's logout this
+ * clears the local sign-in; it does not revoke the grant at Google.
+ */
+export const removeAgySignIn = async (
+  home: string,
+  deps: {
+    readonly keychain?: TAgyKeychain;
+    readonly security?: TSecurityRun;
+    readonly platform?: NodeJS.Platform;
+  } = {},
+): Promise<boolean> => {
+  const keychain = deps.keychain ?? defaultKeychain;
+  rmSync(agyTokenFilePath(home), { force: true });
+  if ((deps.platform ?? process.platform) === "darwin") {
+    if ((await keychain.ensure(home)).kind !== "present") return false;
+    const code = await (deps.security ?? defaultSecurityRun)({
+      argv: [
+        "/usr/bin/security",
+        "delete-generic-password",
+        "-s",
+        AGY_KEYCHAIN_SERVICE,
+        "-a",
+        AGY_KEYCHAIN_ACCOUNT,
+        join(home, "Library", "Keychains", "login.keychain-db"),
+      ],
+      home,
+    });
+    // 0 = deleted, 44 = no such item: both leave it signed out.
+    if (code !== 0 && code !== 44) return false;
+  }
+  return !(await agyCliSignedIn(home, keychain));
 };
