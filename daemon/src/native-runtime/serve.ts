@@ -54,10 +54,7 @@ import {
   resolveExecutionSelection,
 } from "../execution-registry";
 import { logDebug, logError, logWarn, safeDiagnosticMessage } from "../logger";
-import {
-  antigravityTokenPath,
-  runAntigravityNative,
-} from "./antigravity-acp";
+import { antigravityTokenPath, runAntigravityNative } from "./antigravity-acp";
 import type { TAntigravityHeadlessParams } from "./antigravity-headless";
 import {
   antigravityHeadlessEpoch,
@@ -1402,7 +1399,8 @@ const serveAntigravityHop = async (
   // the identity, so another slot never continues this one's `agy` session.
   // The account epoch too: a sign-in or logout in the same slot starts a new
   // one, so nothing continues (or commits into) the previous account's.
-  const conversationKey = `${params.providerModelId}\u0000${env.HOME ?? ""}\u0000${antigravityHeadlessEpoch()}`;
+  const epoch = antigravityHeadlessEpoch();
+  const conversationKey = `${params.providerModelId}\u0000${env.HOME ?? ""}\u0000${epoch}`;
   const conversation =
     text === null
       ? null
@@ -1425,8 +1423,19 @@ const serveAntigravityHop = async (
     lease === null
       ? null
       : await (async (): Promise<TNativeRunResult | null> => {
+          // The transcript ends at the last assistant turn: every user turn
+          // after it is already in the delta, so it must not repeat there.
+          const lastAssistant = text.turns.findLastIndex(
+            (t) => t.role === "assistant",
+          );
           const seed = conversation.hasPrior
-            ? renderSeed(text.turns, conversation.deltaText)
+            ? renderSeed(
+                [
+                  ...text.turns.slice(0, lastAssistant + 1),
+                  text.turns[text.turns.length - 1],
+                ].filter((t) => t !== undefined),
+                conversation.deltaText,
+              )
             : conversation.deltaText;
           // A setup error (keychain, spawn) must still release the lease;
           // the request then falls back to ACP.
@@ -1438,6 +1447,7 @@ const serveAntigravityHop = async (
             userText: lease.sessionId !== null ? conversation.deltaText : seed,
             seedText: seed,
             conversationId: lease.sessionId,
+            epoch,
             hasImages: false,
             hasTools: false,
             signal: params.signal,
@@ -1467,15 +1477,15 @@ const serveAntigravityHop = async (
   const run = !toAcp
     ? headless
     : await runAntigravityNative({
-          bin: overrides?.bin ?? cliBin("antigravity"),
-          env,
-          providerModelId: params.providerModelId,
-          systemText: req.systemText,
-          userText: req.promptText,
-          images: req.images,
-          tools: req.tools,
-          signal: params.signal,
-        });
+        bin: overrides?.bin ?? cliBin("antigravity"),
+        env,
+        providerModelId: params.providerModelId,
+        systemText: req.systemText,
+        userText: req.promptText,
+        images: req.images,
+        tools: req.tools,
+        signal: params.signal,
+      });
   if (run.kind === "declined") {
     return declinedOutcome(run.reason, run.cooldownReason);
   }

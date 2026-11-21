@@ -593,6 +593,10 @@ export type TAntigravityHeadlessParams = {
   /** Continue this `agy` conversation: a parked process, else
    *  `--conversation <id>`. `userText` is then only the new turn. */
   readonly conversationId?: string | null;
+  /** The account epoch the conversation was looked up under
+   *  ({@link antigravityHeadlessEpoch}). A sign-in or logout during setup
+   *  makes the leased conversation the old account's: start fresh, seeded. */
+  readonly epoch?: number;
   /** Sent instead of `userText` when the conversation could not be resumed
    *  (the full transcript seed). */
   readonly seedText?: string;
@@ -686,7 +690,10 @@ export const runAntigravityHeadless = async (
     }
   };
 
-  const resumeId = params.conversationId ?? null;
+  const requestedId = params.conversationId ?? null;
+  const accountChanged =
+    params.epoch !== undefined && params.epoch !== sparesEpoch;
+  const resumeId = accountChanged ? null : requestedId;
   let proc: HeadlessProcess;
   try {
     proc =
@@ -776,7 +783,7 @@ export const runAntigravityHeadless = async (
   // the full seed instead of only the new turn.
   const resumed = resumeId !== null && proc.conversationId === resumeId;
   const userText =
-    resumeId !== null && !resumed
+    requestedId !== null && !resumed
       ? (params.seedText ?? params.userText)
       : params.userText;
   const promptText =

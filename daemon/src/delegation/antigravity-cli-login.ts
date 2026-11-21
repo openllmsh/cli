@@ -327,8 +327,10 @@ export const startAgyLogin = (args: {
       reason: `could not start agy: ${error instanceof Error ? error.message : String(error)}`,
     });
   }
-  // A late menu (delivered before the handle returned) is answered now.
-  if (pty !== null && !settled) onData(new Uint8Array());
+  // Output delivered before the handle returned: a flow that already
+  // settled on it kills the screen now; a late menu is answered now.
+  if (pty !== null && settled) pty.kill();
+  else if (pty !== null) onData(new Uint8Array());
   void pty?.exited.then(() =>
     settle({ kind: "failed", reason: "agy exited before sign-in finished" }),
   );
