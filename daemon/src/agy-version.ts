@@ -155,7 +155,9 @@ export const readCliVersionAsync = async (
       new Response(proc.stdout).text(),
       proc.exited,
     ]);
-    if (proc.signalCode !== null) return undefined;
+    // Killed by the cap (its kill signal): slow, version unknown. Any other
+    // signal is a crash — no usable version.
+    if (proc.signalCode === "SIGKILL") return undefined;
     return code === 0 ? out.trim() : null;
   } catch {
     return null;
