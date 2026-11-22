@@ -51,6 +51,7 @@ import {
   prepareAntigravityCliProfile,
 } from "./antigravity-cli-settings";
 import { antigravitySpawnEnv } from "./antigravity-env";
+import { agySeatbeltArgv } from "./antigravity-seatbelt";
 import { createAcpTurnState } from "./cursor-acp";
 import type { TNativeRunResult } from "./types";
 import { PRE_COMMIT_TIMEOUT_MS } from "./types";
@@ -65,6 +66,24 @@ export const ANTIGRAVITY_HEADLESS_IDLE_TIMEOUT_MS = 60_000;
 export const ANTIGRAVITY_HEADLESS_INIT_TIMEOUT_MS = 30_000;
 /** A spare process is killed after this long unused. */
 export const ANTIGRAVITY_HEADLESS_SPARE_TTL_MS = 120_000;
+/** A `read_file` step on one of the turn's own stored images. Compared as
+ *  normalized absolute paths (case-SENSITIVE: a case variant of a stored
+ *  path is refused, never mapped onto it). */
+const isAttachmentRead = (
+  event: {
+    readonly stepType: string;
+    readonly toolName: string | null;
+    readonly toolPath: string | null;
+  },
+  attachments: ReadonlySet<string> | undefined,
+): boolean =>
+  attachments !== undefined &&
+  attachments.size > 0 &&
+  event.stepType === "tool" &&
+  (event.toolName === "read_file" || event.toolName === "view_file") &&
+  event.toolPath !== null &&
+  attachments.has(resolvePath(event.toolPath));
+
 /** At most this many spares across all keys. */
 export const ANTIGRAVITY_HEADLESS_SPARE_MAX = 2;
 
@@ -202,6 +221,9 @@ export type THeadlessEvent =
       readonly stepType: string;
       readonly textDelta: string | null;
       readonly thinkingDelta: string | null;
+      /** A tool step's name (`tool_name`) and its `Path` parameter. */
+      readonly toolName: string | null;
+      readonly toolPath: string | null;
     }
   | {
       readonly kind: "result";
@@ -233,11 +255,15 @@ export const parseHeadlessLine = (line: string): THeadlessEvent | null => {
   }
   if (event === "step_update") {
     const s = (obj.step_update ?? {}) as Record<string, unknown>;
+    const info = (s.tool_info ?? {}) as Record<string, unknown>;
+    const toolParams = (info.parameters ?? {}) as Record<string, unknown>;
     return {
       kind: "step",
       stepType: (str(s.step_type) ?? "").toLowerCase(),
       textDelta: str(s.text_delta),
       thinkingDelta: str(s.thinking_delta),
+      toolName: str(s.tool_name) ?? str(info.name),
+      toolPath: str(toolParams.Path) ?? str(toolParams.path),
     };
   }
   if (event === "result") {
@@ -639,17 +665,6 @@ const park = (proc: HeadlessProcess, ttlMs: number): void => {
 
 export const antigravityHeadlessParkedCount = (): number => parked.size;
 
-/**
- * Kill the parked process holding `conversationId`: another writer (an
- * `agy acp` turn on the same conversation) moved it on, so that process's
- * in-memory state is stale. The next CLI turn resumes it from disk
- * (`--conversation`), which sees every turn.
- */
-export const dropAntigravityHeadlessParked = (conversationId: string): void => {
-  parked.get(conversationId)?.dispose();
-  parked.delete(conversationId);
-};
-
 export const disposeAntigravityHeadlessSpares = (): void => {
   for (const proc of parked.values()) proc.dispose();
   parked.clear();
@@ -686,7 +701,9 @@ export type TAntigravityHeadlessParams = {
   readonly providerModelId: string;
   readonly systemText: string | null;
   readonly userText: string;
-  readonly hasImages: boolean;
+  /** Stored image paths this turn names (`antigravity-attachments.ts`):
+   *  the ONLY tool step allowed is `agy`'s `read_file` on one of them. */
+  readonly attachments?: ReadonlySet<string>;
   readonly hasTools: boolean;
   readonly signal: AbortSignal;
   /** Start a spare for the next request after this one leases (default on). */
@@ -751,7 +768,6 @@ export const runAntigravityHeadless = async (
   params: TAntigravityHeadlessParams,
 ): Promise<TNativeRunResult> => {
   if (params.hasTools) return fallback("client tools");
-  if (params.hasImages) return fallback("images");
   if (params.signal.aborted) {
     return { kind: "declined", reason: "client aborted" };
   }
@@ -780,10 +796,15 @@ export const runAntigravityHeadless = async (
   const spawnEnv = antigravitySpawnEnv(params.env);
   const key = antigravityHeadlessKey(params.bin, model, spawnEnv);
   const argvOf = params.argv ?? antigravityHeadlessArgv;
+  // macOS: the inference profile (`antigravity-seatbelt.ts`) — `agy` must
+  // reach its slot keychain, which the daemon's shared profile can't grant.
+  // Elsewhere: the daemon sandbox.
   const wrap =
     params.wrapArgv ??
     ((argv: string[]): string[] =>
-      sandboxSpawnArgs(argv, { probe: unwrapAntigravityCliSpawn() }));
+      unwrapAntigravityCliSpawn()
+        ? agySeatbeltArgv(argv, home)
+        : sandboxSpawnArgs(argv, { probe: false }));
   const initTimeoutMs =
     params.initTimeoutMs ?? ANTIGRAVITY_HEADLESS_INIT_TIMEOUT_MS;
   const spawn = async (
@@ -952,6 +973,9 @@ export const runAntigravityHeadless = async (
       // turn wrote to, seen live 2026-11-22): not a tool, not the reply —
       // never forwarded.
       if (event.stepType === "system_message") return;
+      // `agy` opening one of this turn's stored images: the one tool step
+      // allowed (the Seatbelt profile confines the read itself on macOS).
+      if (isAttachmentRead(event, params.attachments)) return;
       if (!RESPONSE_STEP_TYPES.has(event.stepType)) {
         // The agent reached for one of ITS tools — never let it run.
         fail({

@@ -58,11 +58,10 @@ import { runAntigravityNative } from "./antigravity-acp";
 import type { TAntigravityHeadlessParams } from "./antigravity-headless";
 import {
   antigravityHeadlessEpoch,
-  dropAntigravityHeadlessParked,
   resolveAntigravityCli,
   runAntigravityHeadless,
 } from "./antigravity-headless";
-import { trailingUserImages, withImageMarkers } from "./antigravity-request";
+import { agyImageInputSupported, agyImageView } from "./antigravity-request";
 import { bridgeRequestCaptureReadiness } from "./bridge-request-capture-readiness";
 import { runClaudeNative } from "./claude-native";
 import { runClaudeSdkFacade } from "./claude-sdk-facade";
@@ -153,6 +152,9 @@ export type TNativeServeOverrides = {
     | "idleMs"
     | "warmIdleTtlMs"
   >;
+  /** Where image attachments are stored (default `agyAttachmentsDir()`);
+   *  tests point it at a temp dir. */
+  readonly attachmentsDir?: string;
   /** Test hooks for the headless spawn (keychain gate, argv, sandbox wrap) so
    *  a serve-level test never reaches the real `security` or sandbox. */
   readonly headlessHooks?: Pick<
@@ -1365,65 +1367,20 @@ const serveCursorHop = async (
 /**
  * Antigravity serve path. `agy` is the single source of truth for sign-in,
  * and the transport is chosen by the request's CONTENT, never by a failure:
- *   - text turns run on the headless `agy` CLI (streams as generated);
- *   - a turn whose conversation carries images runs on `agy acp`, which
- *     LOADS the same `agy` conversation (`session/load`: the CLI and ACP
- *     share one conversation store per slot) and sends only the new turn;
- *     the next text turn resumes it on the CLI (`--conversation`). One
- *     conversation throughout; only the image turn itself misses Google's
- *     prompt cache (ACP's prompt prefix differs; measured 2026-11-22);
- *   - client tools run on a fresh `agy acp` session per request (the full
- *     transcript each time, as before).
+ *   - text and image turns run on the headless `agy` CLI (streams as
+ *     generated). Each image is stored once under the hash of its bytes
+ *     (`antigravity-attachments.ts`) and replaced in the prompt by a stable
+ *     `[image: <path>]` line, which `agy` opens with its own `read_file`; the
+ *     same image always renders the same text, so the conversation and
+ *     Google's prompt cache hold across turns. macOS only: there the chat
+ *     `agy` runs under a Seatbelt profile that can read nothing in `$HOME`
+ *     but its slot, its binary and the daemon's `agy-*` temp dirs
+ *     (`antigravity-seatbelt.ts`); elsewhere image turns decline;
+ *   - client tools run on a fresh `agy acp` session per request.
  * A decline (including an unanticipated failure) declines the hop and the
  * walker moves on; there is no fallback between the two. A sign-in miss is
  * an `auth` cooldown.
  */
-/** The primer turn that opens an `agy` conversation on the CLI for an image
- *  turn (`primeAntigravityConversation`). */
-export const ANTIGRAVITY_PRIMER_TEXT = "Conversation start. Reply only: ok";
-
-/** Run the primer turn to completion; its conversation id, or a decline. */
-const primeAntigravityConversation = async (
-  params: Pick<
-    TAntigravityHeadlessParams,
-    "bin" | "env" | "providerModelId" | "systemText" | "epoch" | "signal"
-  > &
-    NonNullable<TNativeServeOverrides["headlessHooks"]>,
-): Promise<
-  | { readonly kind: "primed"; readonly conversationId: string }
-  | Extract<TNativeRunResult, { kind: "declined" }>
-> => {
-  const unavailable = {
-    kind: "declined",
-    reason: "antigravity: agy CLI unavailable: could not open the conversation",
-  } as const;
-  const run = await runAntigravityHeadless({
-    ...params,
-    userText: ANTIGRAVITY_PRIMER_TEXT,
-    seedText: ANTIGRAVITY_PRIMER_TEXT,
-    conversationId: null,
-    hasImages: false,
-    hasTools: false,
-  }).catch((error: unknown): null => {
-    logError("native-runtime", error);
-    return null;
-  });
-  if (run === null) return unavailable;
-  if (run.kind === "declined") return run;
-  try {
-    const reader = run.chunks.getReader();
-    while (!(await reader.read()).done) {
-      // drain: the primer's reply is not the client's
-    }
-  } catch {
-    return unavailable;
-  }
-  const conversationId = run.sessionId();
-  return conversationId === null
-    ? unavailable
-    : { kind: "primed", conversationId };
-};
-
 /** Antigravity headless conversations (prefix hash → `agy` conversation id). */
 const antigravityHeadlessSessions = new NativeSessionStore();
 
@@ -1454,24 +1411,27 @@ const serveAntigravityHop = async (
     return { declined: "antigravity: agy CLI not installed" };
   }
   // Structured output was already declined by the native-control gate. The
-  // conversation is correlated by content like the
-  // Claude/Codex native paths: a known one continues its `agy` conversation
-  // with only the new turn; an unknown one with history is seeded.
-  // `tool_choice: "auto"` with no tools is the default, not a tool request.
-  // Tool requests (and shapes with no text view, null) take a fresh ACP
-  // session with no conversation. An image conversation is correlated by a
-  // text view whose images are stable markers (`withImageMarkers`).
+  // conversation is correlated by content like the Claude/Codex native
+  // paths: a known one continues its `agy` conversation with only the new
+  // turn; an unknown one with history is seeded. `tool_choice: "auto"` with
+  // no tools is the default, not a tool request.
   const { tool_choice: toolChoice, ...withoutChoice } = params.canonical;
-  /** Images in the turns being answered now (after the last reply). */
-  const newImages = trailingUserImages(params.canonical);
-  const text =
-    req.tools.length > 0
-      ? null
-      : nativeRequestOf(
-          withImageMarkers(
-            toolChoice === "auto" ? withoutChoice : params.canonical,
-          ),
-        );
+  const viaAcp = req.tools.length > 0;
+  const view = viaAcp
+    ? null
+    : agyImageView(
+        toolChoice === "auto" ? withoutChoice : params.canonical,
+        overrides?.attachmentsDir,
+      );
+  if (view !== null && view.kind === "declined") {
+    return { declined: view.reason };
+  }
+  if (view !== null && view.paths.size > 0 && !agyImageInputSupported()) {
+    return {
+      declined: "antigravity: image input needs the macOS agy sandbox",
+    };
+  }
+  const text = view === null ? null : nativeRequestOf(view.canonical);
   // Conversations belong to one account slot: its isolated HOME is part of
   // the identity, so another slot never continues this one's `agy` session.
   // The account epoch too: a sign-in or logout in the same slot starts a new
@@ -1501,34 +1461,37 @@ const serveAntigravityHop = async (
             ? conversation.prefixHash
             : `first:${crypto.randomUUID()}`,
         );
-  // The transcript ends at the last assistant turn: every user turn after it
-  // is already in the delta, so it must not repeat there.
-  const seed =
-    text === null || conversation === null
-      ? ""
-      : conversation.hasPrior
-        ? renderSeed(
-            [
-              ...text.turns.slice(
-                0,
-                text.turns.findLastIndex((t) => t.role === "assistant") + 1,
-              ),
-              text.turns[text.turns.length - 1],
-            ].filter((t) => t !== undefined),
-            conversation.deltaText,
-          )
-        : conversation.deltaText;
-  const viaAcp = text === null || conversation === null || lease === null;
-  // ACP for a turn that ADDS images, or for history images with no `agy`
-  // conversation to resume (a seed can't carry them). A text turn after an
-  // image turn resumes the conversation on the CLI: agy already holds it.
-  const hasImages =
-    newImages.length > 0 ||
-    (req.images.length > 0 && (lease === null || lease.sessionId === null));
-  const headless =
-    viaAcp || hasImages
+  const run: TNativeRunResult | null = viaAcp
+    ? await runAntigravityNative({
+        bin: agyBin,
+        env,
+        signInEpoch: epoch,
+        currentSignInEpoch: antigravityHeadlessEpoch,
+        providerModelId: params.providerModelId,
+        systemText: req.systemText,
+        userText: req.promptText,
+        images: req.images,
+        tools: req.tools,
+        signal: params.signal,
+        ...(overrides?.acpHooks ?? {}),
+      })
+    : text === null || conversation === null || lease === null || view === null
       ? null
       : await (async (): Promise<TNativeRunResult | null> => {
+          // The transcript ends at the last assistant turn: every user turn
+          // after it is already in the delta, so it must not repeat there.
+          const lastAssistant = text.turns.findLastIndex(
+            (t) => t.role === "assistant",
+          );
+          const seed = conversation.hasPrior
+            ? renderSeed(
+                [
+                  ...text.turns.slice(0, lastAssistant + 1),
+                  text.turns[text.turns.length - 1],
+                ].filter((t) => t !== undefined),
+                conversation.deltaText,
+              )
+            : conversation.deltaText;
           // A setup error (keychain, spawn) must still release the lease;
           // the hop then declines.
           return runAntigravityHeadless({
@@ -1546,7 +1509,7 @@ const serveAntigravityHop = async (
             onPromptSent: (): void => {
               promptSent = true;
             },
-            hasImages: false,
+            attachments: view.paths,
             hasTools: false,
             signal: params.signal,
             ...(overrides?.headlessHooks ?? {}),
@@ -1555,80 +1518,6 @@ const serveAntigravityHop = async (
             return null;
           });
         })();
-  // An image turn with no `agy` conversation yet: the CLI opens one with a
-  // short primer turn first, so the conversation carries the CLI's small
-  // agent prompt — one ACP creates carries `agy`'s default one (~9.8k tokens,
-  // measured 2026-11-22) and no later turn of it would hit the cache.
-  const primed =
-    hasImages && !viaAcp && lease.sessionId === null
-      ? await primeAntigravityConversation({
-          bin: agyBin,
-          env,
-          providerModelId: params.providerModelId,
-          systemText: text.systemText,
-          epoch,
-          signal: params.signal,
-          ...(overrides?.headlessHooks ?? {}),
-        })
-      : null;
-  if (primed !== null && primed.kind === "declined") {
-    if (lease !== null) lease.abandon();
-    return declinedOutcome(primed.reason, primed.cooldownReason);
-  }
-  /** The `agy` conversation an image turn continues on ACP. */
-  const loadSessionId =
-    primed !== null
-      ? primed.conversationId
-      : hasImages && !viaAcp
-        ? lease.sessionId
-        : null;
-  const acpRun =
-    !viaAcp && !hasImages
-      ? null
-      : async (): Promise<TNativeRunResult> => {
-          if (loadSessionId !== null) {
-            // ACP writes this turn into the conversation: the CLI process
-            // parked on it would continue from stale memory.
-            dropAntigravityHeadlessParked(loadSessionId);
-          }
-          servedEpoch = epoch;
-          promptSent = true;
-          return runAntigravityNative({
-            bin: agyBin,
-            env,
-            signInEpoch: epoch,
-            currentSignInEpoch: antigravityHeadlessEpoch,
-            providerModelId: params.providerModelId,
-            // A loaded conversation already holds the system text and the
-            // history: only the new turn (and its own images) is sent.
-            systemText:
-              loadSessionId !== null
-                ? null
-                : text !== null
-                  ? text.systemText
-                  : req.systemText,
-            // A primed conversation holds only the primer: the whole seed
-            // and every image go in; a resumed one gets only the new turn.
-            userText:
-              primed !== null
-                ? seed
-                : loadSessionId !== null && conversation !== null
-                  ? conversation.deltaText
-                  : viaAcp
-                    ? req.promptText
-                    : seed,
-            images:
-              loadSessionId !== null && primed === null
-                ? newImages
-                : req.images,
-            tools: req.tools,
-            loadSessionId,
-            signal: params.signal,
-            ...(overrides?.acpHooks ?? {}),
-          });
-        };
-  const run: TNativeRunResult | null =
-    acpRun !== null ? await acpRun() : headless;
   if (lease !== null && (run === null || run.kind === "declined")) {
     if (promptSent) lease.commit(conversationKey, null);
     else lease.abandon();
@@ -1636,7 +1525,11 @@ const serveAntigravityHop = async (
   // A decline (or a headless setup error, `null`) declines the hop and the
   // walker moves on: there is no fallback between the transports.
   if (run === null) {
-    return declinedOutcome("antigravity: agy CLI unavailable: setup failed");
+    return declinedOutcome(
+      text === null
+        ? "antigravity: request shape not served by the agy CLI"
+        : "antigravity: agy CLI unavailable: setup failed",
+    );
   }
   if (run.kind === "declined") {
     return declinedOutcome(run.reason, run.cooldownReason);

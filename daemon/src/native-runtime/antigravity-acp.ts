@@ -62,6 +62,7 @@ import { daemonTempDir } from "../sandbox/working-set";
 import { DAEMON_VERSION } from "../version";
 import { ensureAntigravityCliSettings } from "./antigravity-cli-settings";
 import { antigravitySpawnEnv } from "./antigravity-env";
+import { agySeatbeltArgv } from "./antigravity-seatbelt";
 import { AcpClient, AcpRpcError, createAcpTurnState } from "./cursor-acp";
 import type { TCursorMcpServer } from "./cursor-mcp-server";
 import { startCursorMcpServer } from "./cursor-mcp-server";
@@ -285,7 +286,7 @@ export type TAntigravityModelState = {
   readonly configId: string;
 };
 
-/** Read the model selector out of a `session/new` / `session/load` result. */
+/** Read the model selector out of a `session/new` result. */
 export const antigravityModelState = (
   sessionResult: unknown,
 ): TAntigravityModelState => {
@@ -650,12 +651,6 @@ export type TAntigravityNativeParams = {
   readonly userText: string;
   readonly images?: ReadonlyArray<TCursorImage>;
   readonly tools?: ReadonlyArray<TCursorTool>;
-  /** Continue this `agy` conversation (`session/load`) instead of opening a
-   *  new one: the headless CLI and `agy acp` share one conversation store
-   *  under the slot's HOME, so an image or tool turn lands on the SAME
-   *  conversation the CLI was running (`userText` is then only the new
-   *  turn). Verified live 2026-11-22, agy 1.5.14. */
-  readonly loadSessionId?: string | null;
   readonly signal: AbortSignal;
   /** Test overrides. */
   readonly precommitMs?: number;
@@ -771,7 +766,15 @@ export const runAntigravityNative = async (
   // serves in worker mode (one isolated worker per session). Plain turns
   // keep the single-process server. The argv is part of the warm key, so a
   // worker-mode process only ever serves tool turns and vice versa.
-  const argv = antigravityAcpArgv(params.bin, (params.tools?.length ?? 0) > 0);
+  // macOS: confined by the inference Seatbelt profile (it grants the slot
+  // keychain, unlike the daemon's shared profile). A test's `probe` override
+  // runs the fake agent bare.
+  const bareArgv = antigravityAcpArgv(
+    params.bin,
+    (params.tools?.length ?? 0) > 0,
+  );
+  const argv =
+    params.probe === undefined ? agySeatbeltArgv(bareArgv, home) : bareArgv;
   const warmKey = antigravityWarmKey(
     argv.join("\u0000"),
     spawnEnv,
@@ -964,12 +967,10 @@ export const runAntigravityNative = async (
     );
   };
 
-  const loadSessionId = params.loadSessionId ?? null;
   const openSession = (owned: TWarmAgent): Promise<unknown> =>
     owned.client.request(
-      loadSessionId !== null ? "session/load" : "session/new",
+      "session/new",
       {
-        ...(loadSessionId !== null ? { sessionId: loadSessionId } : {}),
         cwd,
         mcpServers:
           mcp !== null
@@ -1041,11 +1042,7 @@ export const runAntigravityNative = async (
     if (owned === null || cleaned) {
       throw new DOMException("client aborted", "AbortError");
     }
-    // `session/load` replays the conversation as updates BEFORE it answers;
-    // `sessionId` is still null then, so `onUpdate` drops the replay.
-    const sid =
-      loadSessionId ??
-      (opened as { readonly sessionId?: unknown } | null)?.sessionId;
+    const sid = (opened as { readonly sessionId?: unknown } | null)?.sessionId;
     if (typeof sid !== "string" || sid.length === 0) {
       throw new AcpRpcError({
         method: "session/new",
@@ -1196,5 +1193,5 @@ export const runAntigravityNative = async (
       abort();
     },
   });
-  return { kind: "committed", chunks, sessionId: () => sessionId };
+  return { kind: "committed", chunks, sessionId: () => null };
 };

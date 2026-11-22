@@ -1,8 +1,9 @@
 /**
  * The daemon-owned `agy` CLI settings under the isolated HOME
- * (`<home>/.gemini/antigravity-cli/settings.json`): pins a deny-all
- * permission list so `agy`'s built-in tools never run when the daemon serves
- * inference through it.
+ * (`<home>/.gemini/antigravity-cli/settings.json`): pins a deny list so
+ * `agy`'s built-in tools never run when the daemon serves inference through
+ * it — except, on macOS, `read_file` of image attachments
+ * ({@link antigravityCliDenyRules}).
  *
  * Only documented settings are used (antigravity.google/docs/permissions,
  * CLI tab): rules are `action(target)`, `*` matches every target of an
@@ -38,6 +39,31 @@ export const ANTIGRAVITY_CLI_DENY_RULES: ReadonlyArray<string> = [
   "unsandboxed(*)",
 ];
 
+/**
+ * The rules for this platform. macOS lets `agy` read image attachments
+ * (`antigravity-attachments.ts`): there the Seatbelt profile
+ * (`antigravity-seatbelt.ts`) is what confines reads, so `read_file(*)` gives
+ * way to a deny on the slot's own HOME (its sign-in), and the transport's
+ * step guard allows only reads of the turn's stored images. Elsewhere every
+ * read stays denied (image turns decline there).
+ */
+export const antigravityCliDenyRules = (
+  home: string,
+  platform: NodeJS.Platform = process.platform,
+): {
+  readonly deny: ReadonlyArray<string>;
+  readonly drop: ReadonlyArray<string>;
+} =>
+  platform === "darwin"
+    ? {
+        deny: [
+          ...ANTIGRAVITY_CLI_DENY_RULES.filter((r) => r !== "read_file(*)"),
+          `read_file(${home})`,
+        ],
+        drop: ["read_file(*)"],
+      }
+    : { deny: ANTIGRAVITY_CLI_DENY_RULES, drop: [] };
+
 export const antigravityCliSettingsPath = (home: string): string =>
   join(home, ".gemini", "antigravity-cli", "settings.json");
 
@@ -48,8 +74,14 @@ export type TMergeResult =
   | { readonly kind: "changed"; readonly next: TSettings }
   | { readonly kind: "invalid" };
 
-/** Pure: merge the deny rules into parsed settings. */
-export const mergeAntigravityCliSettings = (current: unknown): TMergeResult => {
+/** Pure: merge the deny rules into parsed settings (removing `drop`). */
+export const mergeAntigravityCliSettings = (
+  current: unknown,
+  rules: {
+    readonly deny: ReadonlyArray<string>;
+    readonly drop: ReadonlyArray<string>;
+  } = { deny: ANTIGRAVITY_CLI_DENY_RULES, drop: [] },
+): TMergeResult => {
   if (
     typeof current !== "object" ||
     current === null ||
@@ -72,11 +104,14 @@ export const mergeAntigravityCliSettings = (current: unknown): TMergeResult => {
   if (rawDeny !== undefined && !Array.isArray(rawDeny)) {
     return { kind: "invalid" };
   }
-  const deny = (rawDeny ?? []) as unknown[];
-  const missing = ANTIGRAVITY_CLI_DENY_RULES.filter(
-    (rule) => !deny.includes(rule),
+  const previous = (rawDeny ?? []) as unknown[];
+  const deny = previous.filter(
+    (rule) => typeof rule !== "string" || !rules.drop.includes(rule),
   );
-  if (missing.length === 0) return { kind: "unchanged" };
+  const missing = rules.deny.filter((rule) => !deny.includes(rule));
+  if (missing.length === 0 && deny.length === previous.length) {
+    return { kind: "unchanged" };
+  }
   return {
     kind: "changed",
     next: {
@@ -101,7 +136,10 @@ export const ensureAntigravityCliSettings = (home: string): boolean => {
       return false;
     }
   }
-  const merged = mergeAntigravityCliSettings(current);
+  const merged = mergeAntigravityCliSettings(
+    current,
+    antigravityCliDenyRules(home),
+  );
   if (merged.kind === "invalid") return false;
   if (merged.kind === "unchanged") return true;
   try {
@@ -132,8 +170,8 @@ export const ANTIGRAVITY_CLI_AGENT_NAME = "openllm";
 
 export const ANTIGRAVITY_CLI_AGENT_FILE = `---
 name: ${ANTIGRAVITY_CLI_AGENT_NAME}
-description: Plain chat completion for OpenLLM requests. No tools.
-tools: []
+description: Chat completion for OpenLLM requests. Opens attached images only.
+tools: [view_file]
 mainAgent: true
 subagent: false
 model: inherit
@@ -141,6 +179,7 @@ commandExecutionPolicy: off
 ---
 
 You are a helpful assistant. Answer the user's message directly.
+The user's images appear as lines like [image: /path/to/file.png]: open each one with view_file before answering about it, exactly at the path given. Never open any other path.
 `;
 
 export const antigravityCliAgentPath = (home: string): string =>

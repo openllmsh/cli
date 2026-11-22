@@ -1,30 +1,40 @@
 /**
- * Request views for the Antigravity serve path (`serve.ts`): an image
- * conversation is correlated with the shared `agy` conversation store by a
- * TEXT view in which every image is a stable marker, and a turn that loads
- * the conversation over ACP sends only its own (trailing) images.
+ * The Antigravity request view for the headless `agy` CLI (`serve.ts`):
+ * every `image_url` part becomes one stable text line, `[image: <path>]`,
+ * naming the image's bytes stored under their hash
+ * (`antigravity-attachments.ts`). `agy` opens the path with its own
+ * `read_file`; the same image always renders the same line, so a resent
+ * conversation hashes (and is cached upstream) the same on every turn.
  */
 
-import { createHash } from "node:crypto";
 import type { TChatCompletionRequest } from "@openllmsh/sdk/protocol";
-import type { TCursorImage } from "./cursor-request";
-import { cursorRequestOf } from "./cursor-request";
+import { storeAgyImage } from "./antigravity-attachments";
 
-/** The marker standing in for one image in the text view: the same image
- *  always renders the same marker, so a resent conversation hashes the same. */
-export const imageMarkerOf = (url: string): string =>
-  `[image ${createHash("sha256").update(url).digest("hex").slice(0, 16)}]`;
+export type TAgyImageView =
+  | {
+      readonly kind: "view";
+      /** The request with images replaced by their path lines. */
+      readonly canonical: TChatCompletionRequest;
+      /** Every stored image path the request names (the turn may open). */
+      readonly paths: ReadonlySet<string>;
+    }
+  | { readonly kind: "declined"; readonly reason: string };
 
-/**
- * The request with every `image_url` part replaced by a text marker
- * ({@link imageMarkerOf}). Other parts are left as they are, so a shape the
- * text view can't hold (files, audio) still has no text view.
- */
-export const withImageMarkers = (
+/** The line standing in for one stored image. */
+export const agyImageLine = (path: string): string => `[image: ${path}]`;
+
+/** Image input needs the chat `agy`'s Seatbelt confinement (macOS). */
+export const agyImageInputSupported = (
+  platform: NodeJS.Platform = process.platform,
+): boolean => platform === "darwin";
+
+export const agyImageView = (
   canonical: TChatCompletionRequest,
-): TChatCompletionRequest => ({
-  ...canonical,
-  messages: canonical.messages.map((message) => {
+  dir?: string,
+): TAgyImageView => {
+  const paths = new Set<string>();
+  let refused: string | null = null;
+  const messages = canonical.messages.map((message) => {
     if (!Array.isArray(message.content)) return message;
     return {
       ...message,
@@ -33,27 +43,19 @@ export const withImageMarkers = (
           readonly type?: unknown;
           readonly image_url?: { readonly url?: unknown };
         };
-        return p.type === "image_url" && typeof p.image_url?.url === "string"
-          ? {
-              type: "text" as const,
-              text: `\n${imageMarkerOf(p.image_url.url)}\n`,
-            }
-          : part;
+        if (p.type !== "image_url") return part;
+        const url = p.image_url?.url;
+        const stored = typeof url === "string" ? storeAgyImage(url, dir) : null;
+        if (stored === null) {
+          refused ??=
+            "antigravity: images must be data: URLs of a PNG, JPEG, GIF or WebP";
+          return part;
+        }
+        paths.add(stored);
+        return { type: "text" as const, text: `\n${agyImageLine(stored)}\n` };
       }),
     } as typeof message;
-  }),
-});
-
-/** The images of the trailing user turns (after the last reply): what a
- *  loaded conversation has not seen yet. */
-export const trailingUserImages = (
-  canonical: TChatCompletionRequest,
-): ReadonlyArray<TCursorImage> => {
-  const lastReply = canonical.messages.findLastIndex(
-    (message) => message.role !== "user" && message.role !== "system",
-  );
-  const trailing = canonical.messages
-    .slice(lastReply + 1)
-    .filter((message) => message.role === "user");
-  return cursorRequestOf({ ...canonical, messages: trailing }).images;
+  });
+  if (refused !== null) return { kind: "declined", reason: refused };
+  return { kind: "view", canonical: { ...canonical, messages }, paths };
 };
