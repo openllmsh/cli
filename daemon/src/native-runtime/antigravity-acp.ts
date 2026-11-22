@@ -285,7 +285,7 @@ export type TAntigravityModelState = {
   readonly configId: string;
 };
 
-/** Read the model selector out of a `session/new` result. */
+/** Read the model selector out of a `session/new` / `session/load` result. */
 export const antigravityModelState = (
   sessionResult: unknown,
 ): TAntigravityModelState => {
@@ -302,14 +302,28 @@ export const antigravityModelState = (
       readonly availableModels?: ReadonlyArray<{ readonly modelId?: unknown }>;
     };
   } | null;
+  const models = (r?.models?.availableModels ?? []).flatMap((m) =>
+    typeof m.modelId === "string" ? [m.modelId] : [],
+  );
   const config = r?.configOptions?.find(
     (o) => o.id === "model" || o.category === "model",
   );
-  if (config !== undefined && config.type === "select") {
+  // agy 1.5.14 lists the effort-suffixed ids (`gemini-3.8-flash-low`, the
+  // ids we pin) only in the `models` block; its `configOptions` model select
+  // carries the stem with thinking level as a separate option. Prefer the
+  // block that names exact ids (`session/set_model` accepts them, verified
+  // live 2026-11-22).
+  const configValues =
+    config !== undefined && config.type === "select"
+      ? selectValues(config.options)
+      : [];
+  const preferModels =
+    models.length > 0 && !models.every((id) => configValues.includes(id));
+  if (config !== undefined && config.type === "select" && !preferModels) {
     return {
       current:
         typeof config.currentValue === "string" ? config.currentValue : null,
-      available: selectValues(config.options),
+      available: configValues,
       via: "config",
       configId: typeof config.id === "string" ? config.id : "model",
     };
@@ -319,9 +333,7 @@ export const antigravityModelState = (
       typeof r?.models?.currentModelId === "string"
         ? r.models.currentModelId
         : null,
-    available: (r?.models?.availableModels ?? []).flatMap((m) =>
-      typeof m.modelId === "string" ? [m.modelId] : [],
-    ),
+    available: models,
     via: "models",
     configId: "model",
   };

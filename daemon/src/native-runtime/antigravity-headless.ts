@@ -948,6 +948,10 @@ export const runAntigravityHeadless = async (
     if (ended) return;
     armIdle();
     if (event.kind === "step") {
+      // agy's own context note (e.g. resuming a conversation an `agy acp`
+      // turn wrote to, seen live 2026-11-22): not a tool, not the reply —
+      // never forwarded.
+      if (event.stepType === "system_message") return;
       if (!RESPONSE_STEP_TYPES.has(event.stepType)) {
         // The agent reached for one of ITS tools — never let it run.
         fail({

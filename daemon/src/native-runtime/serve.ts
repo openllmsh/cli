@@ -1378,6 +1378,52 @@ const serveCursorHop = async (
  * walker moves on; there is no fallback between the two. A sign-in miss is
  * an `auth` cooldown.
  */
+/** The primer turn that opens an `agy` conversation on the CLI for an image
+ *  turn (`primeAntigravityConversation`). */
+export const ANTIGRAVITY_PRIMER_TEXT = "Conversation start. Reply only: ok";
+
+/** Run the primer turn to completion; its conversation id, or a decline. */
+const primeAntigravityConversation = async (
+  params: Pick<
+    TAntigravityHeadlessParams,
+    "bin" | "env" | "providerModelId" | "systemText" | "epoch" | "signal"
+  > &
+    NonNullable<TNativeServeOverrides["headlessHooks"]>,
+): Promise<
+  | { readonly kind: "primed"; readonly conversationId: string }
+  | Extract<TNativeRunResult, { kind: "declined" }>
+> => {
+  const unavailable = {
+    kind: "declined",
+    reason: "antigravity: agy CLI unavailable: could not open the conversation",
+  } as const;
+  const run = await runAntigravityHeadless({
+    ...params,
+    userText: ANTIGRAVITY_PRIMER_TEXT,
+    seedText: ANTIGRAVITY_PRIMER_TEXT,
+    conversationId: null,
+    hasImages: false,
+    hasTools: false,
+  }).catch((error: unknown): null => {
+    logError("native-runtime", error);
+    return null;
+  });
+  if (run === null) return unavailable;
+  if (run.kind === "declined") return run;
+  try {
+    const reader = run.chunks.getReader();
+    while (!(await reader.read()).done) {
+      // drain: the primer's reply is not the client's
+    }
+  } catch {
+    return unavailable;
+  }
+  const conversationId = run.sessionId();
+  return conversationId === null
+    ? unavailable
+    : { kind: "primed", conversationId };
+};
+
 /** Antigravity headless conversations (prefix hash → `agy` conversation id). */
 const antigravityHeadlessSessions = new NativeSessionStore();
 
@@ -1509,8 +1555,33 @@ const serveAntigravityHop = async (
             return null;
           });
         })();
+  // An image turn with no `agy` conversation yet: the CLI opens one with a
+  // short primer turn first, so the conversation carries the CLI's small
+  // agent prompt — one ACP creates carries `agy`'s default one (~9.8k tokens,
+  // measured 2026-11-22) and no later turn of it would hit the cache.
+  const primed =
+    hasImages && !viaAcp && lease.sessionId === null
+      ? await primeAntigravityConversation({
+          bin: agyBin,
+          env,
+          providerModelId: params.providerModelId,
+          systemText: text.systemText,
+          epoch,
+          signal: params.signal,
+          ...(overrides?.headlessHooks ?? {}),
+        })
+      : null;
+  if (primed !== null && primed.kind === "declined") {
+    if (lease !== null) lease.abandon();
+    return declinedOutcome(primed.reason, primed.cooldownReason);
+  }
   /** The `agy` conversation an image turn continues on ACP. */
-  const loadSessionId = hasImages && !viaAcp ? lease.sessionId : null;
+  const loadSessionId =
+    primed !== null
+      ? primed.conversationId
+      : hasImages && !viaAcp
+        ? lease.sessionId
+        : null;
   const acpRun =
     !viaAcp && !hasImages
       ? null
@@ -1536,13 +1607,20 @@ const serveAntigravityHop = async (
                 : text !== null
                   ? text.systemText
                   : req.systemText,
+            // A primed conversation holds only the primer: the whole seed
+            // and every image go in; a resumed one gets only the new turn.
             userText:
-              loadSessionId !== null && conversation !== null
-                ? conversation.deltaText
-                : viaAcp
-                  ? req.promptText
-                  : seed,
-            images: loadSessionId !== null ? newImages : req.images,
+              primed !== null
+                ? seed
+                : loadSessionId !== null && conversation !== null
+                  ? conversation.deltaText
+                  : viaAcp
+                    ? req.promptText
+                    : seed,
+            images:
+              loadSessionId !== null && primed === null
+                ? newImages
+                : req.images,
             tools: req.tools,
             loadSessionId,
             signal: params.signal,
