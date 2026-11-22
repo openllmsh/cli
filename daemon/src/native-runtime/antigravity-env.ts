@@ -45,19 +45,17 @@ const ANTIGRAVITY_KEYRING_KEYS: ReadonlySet<string> = new Set([
 export const antigravitySpawnEnv = (
   isolated: Record<string, string>,
 ): Record<string, string> => {
-  const base = cleanNativeSpawnEnv({});
+  // Filtered AFTER the overlay merge: no input — inherited or overlay — can
+  // carry a credential / keyring switch to `agy`.
+  const merged = { ...cleanNativeSpawnEnv({}), ...isolated };
   const out: Record<string, string> = {};
-  for (const [key, value] of Object.entries(base)) {
+  for (const [key, value] of Object.entries(merged)) {
     const upper = key.toUpperCase();
     if (ANTIGRAVITY_POISON_KEYS.has(upper)) continue;
     if (ANTIGRAVITY_POISON_PREFIX.test(upper)) continue;
     if (ANTIGRAVITY_KEYRING_KEYS.has(upper)) continue;
     out[key] = value;
   }
-  return {
-    ...out,
-    ...isolated,
-    // Last, so nothing can re-open the user's session bus.
-    DBUS_SESSION_BUS_ADDRESS: "disabled:",
-  };
+  // Last, so nothing can re-open the user's session bus.
+  return { ...out, DBUS_SESSION_BUS_ADDRESS: "disabled:" };
 };

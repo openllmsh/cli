@@ -321,6 +321,10 @@ class HeadlessProcess {
    *  headless docs); the last result's counters, so a reused process reports
    *  each turn's own usage. */
   usageBaseline: THeadlessUsage | null = null;
+  /** A result came without usable usage: the baseline no longer marks the
+   *  previous turn, so the next delta would span two turns — that turn is
+   *  estimated, and exact deltas resume from the one after. */
+  usageBaselineStale = false;
   /** The current turn's exit handler — one slot, replaced each turn, so a
    *  parked, reused process never accumulates past turns' callbacks. */
   private exitHandler: (() => void) | null = null;
@@ -892,12 +896,7 @@ export const runAntigravityHeadless = async (
   const ready = await proc.initialized;
   // A sign-in or logout during start-up: this process may hold the old
   // account's conversation. Never serve on it.
-  if (
-    ready &&
-    !ended &&
-    params.epoch !== undefined &&
-    spawnEpoch !== sparesEpoch
-  ) {
+  if (ready && !ended && spawnEpoch !== sparesEpoch) {
     ended = true;
     proc.onExit(null);
     // settle(false) disposes the process AND drops the abort listener.
@@ -985,10 +984,15 @@ export const runAntigravityHeadless = async (
       }
       // This turn's own usage: the session total minus the previous result's.
       const usage =
-        event.usage === null
+        event.usage === null || proc.usageBaselineStale
           ? null
           : turnUsageOf(event.usage, proc.usageBaseline);
-      if (event.usage !== null) proc.usageBaseline = event.usage;
+      if (event.usage !== null) {
+        proc.usageBaseline = event.usage;
+        proc.usageBaselineStale = false;
+      } else if (proc.usageBaseline !== null) {
+        proc.usageBaselineStale = true;
+      }
       if (usage !== null) {
         turn.handleUpdate({
           sessionUpdate: "usage_update",
@@ -1022,14 +1026,25 @@ export const runAntigravityHeadless = async (
     if (!ended) fail({ reason: "agy exited mid-turn", fallback: false });
   });
 
-  const writeFailed = (error: unknown): void =>
+  // Only a write that never reached agy may fall back to ACP: once the
+  // prompt was handed off, agy may hold the turn, and ACP running it again
+  // would answer it twice.
+  let handedOff = false;
+  const writeFailed = (error: unknown): void => {
+    const why = error instanceof Error ? error.message : String(error);
+    if (handedOff) {
+      fail({ reason: `antigravity write failed: ${why}`, fallback: false });
+      return;
+    }
     fail({
-      reason: `${ANTIGRAVITY_HEADLESS_FALLBACK}: write failed: ${error instanceof Error ? error.message : String(error)}`,
+      reason: `${ANTIGRAVITY_HEADLESS_FALLBACK}: write failed: ${why}`,
       fallback: true,
     });
+  };
   if (!ended) {
     try {
       proc.send(promptText, writeFailed);
+      handedOff = true;
       params.onPromptSent?.();
     } catch (error) {
       writeFailed(error);
