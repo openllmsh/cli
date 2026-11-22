@@ -41,6 +41,7 @@ import type { TChatCompletionChunk } from "@openllmsh/sdk/protocol";
 import { killHard } from "../delegation/antigravity-cli-login";
 import type { TStoreRead } from "../delegation/util";
 import { ensureKeychainReady } from "../delegation/util";
+import { logError } from "../logger";
 import { sandboxSpawnArgs } from "../sandbox/exec";
 import { unwrapAntigravityCliSpawn } from "../sandbox/policy";
 import { daemonTempDir } from "../sandbox/working-set";
@@ -372,6 +373,11 @@ class HeadlessProcess {
         buf += decoder.decode(chunk, { stream: true });
         let nl = buf.indexOf("\n");
         while (nl >= 0) {
+          // A complete line over the limit is as bad as an unfinished one.
+          if (nl > ANTIGRAVITY_HEADLESS_MAX_LINE_CHARS) {
+            this.dispose();
+            return;
+          }
           const event = parseHeadlessLine(buf.slice(0, nl));
           buf = buf.slice(nl + 1);
           nl = buf.indexOf("\n");
@@ -394,15 +400,22 @@ class HeadlessProcess {
     this.listener = listener;
   }
 
-  send(text: string): void {
+  /** Write one user turn. A synchronous throw propagates; a pending write
+   *  that later rejects (EPIPE when agy closed stdin) reaches `onError`. */
+  send(text: string, onError: (error: unknown) => void): void {
     const stdin = this.proc.stdin as {
-      write: (s: string) => void;
-      flush?: () => void;
+      write: (s: string) => unknown;
+      flush?: () => unknown;
     };
-    stdin.write(
-      `${JSON.stringify({ event: "user", message: { content: text } })}\n`,
+    const observe = (result: unknown): void => {
+      if (result instanceof Promise) result.catch(onError);
+    };
+    observe(
+      stdin.write(
+        `${JSON.stringify({ event: "user", message: { content: text } })}\n`,
+      ),
     );
-    stdin.flush?.();
+    observe(stdin.flush?.());
   }
 
   /** Kill-after-idle timer for a parked or spare process. */
@@ -419,7 +432,9 @@ class HeadlessProcess {
     clearTimeout(this.idleTimer);
     this.listener = null;
     if (!this.exitedFlag) killHard(this.proc);
-    void rm(this.cwd, { recursive: true, force: true });
+    rm(this.cwd, { recursive: true, force: true }).catch((error: unknown) =>
+      logError("antigravity-headless", error),
+    );
   }
 }
 
@@ -775,8 +790,11 @@ export const runAntigravityHeadless = async (
     clearTimeout(idleTimer);
     clearTimeout(turnTimer);
     params.signal.removeEventListener("abort", abort);
-    if (keep) park(proc, params.parkTtlMs ?? ANTIGRAVITY_HEADLESS_PARK_TTL_MS);
-    else proc.dispose();
+    // A sign-in or logout during the turn: the process is the old
+    // account's, so it never parks.
+    if (keep && spawnEpoch === sparesEpoch) {
+      park(proc, params.parkTtlMs ?? ANTIGRAVITY_HEADLESS_PARK_TTL_MS);
+    } else proc.dispose();
   };
   const end = (items: ReadonlyArray<TItem>, keep = false): void => {
     if (ended) return;
@@ -931,19 +949,26 @@ export const runAntigravityHeadless = async (
     if (!ended) fail({ reason: "agy exited mid-turn", fallback: false });
   });
 
-  try {
-    proc.send(promptText);
-  } catch (error) {
+  const writeFailed = (error: unknown): void =>
     fail({
       reason: `${ANTIGRAVITY_HEADLESS_FALLBACK}: write failed: ${error instanceof Error ? error.message : String(error)}`,
       fallback: true,
     });
+  if (!ended) {
+    try {
+      proc.send(promptText, writeFailed);
+    } catch (error) {
+      writeFailed(error);
+    }
   }
-  armIdle();
-  turnTimer = setTimeout(
-    () => fail({ reason: "antigravity turn timed out", fallback: false }),
-    params.turnTimeoutMs ?? ANTIGRAVITY_HEADLESS_TURN_TIMEOUT_MS,
-  );
+  // A turn that already ended (exit, abort, write failure) arms nothing.
+  if (!ended) {
+    armIdle();
+    turnTimer = setTimeout(
+      () => fail({ reason: "antigravity turn timed out", fallback: false }),
+      params.turnTimeoutMs ?? ANTIGRAVITY_HEADLESS_TURN_TIMEOUT_MS,
+    );
+  }
 
   const next = async (): Promise<TItem> => {
     for (;;) {

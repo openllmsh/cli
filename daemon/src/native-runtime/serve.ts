@@ -1405,7 +1405,12 @@ const serveAntigravityHop = async (
   // null here → ACP). The conversation is correlated by content like the
   // Claude/Codex native paths: a known one continues its `agy` conversation
   // with only the new turn; an unknown one with history is seeded.
-  const text = nativeRequestOf(params.canonical);
+  // `tool_choice: "auto"` with no tools is the default, not a tool request:
+  // it stays on headless. Real tools and forced choices still go to ACP.
+  const { tool_choice: toolChoice, ...withoutChoice } = params.canonical;
+  const text = nativeRequestOf(
+    toolChoice === "auto" ? withoutChoice : params.canonical,
+  );
   // Conversations belong to one account slot: its isolated HOME is part of
   // the identity, so another slot never continues this one's `agy` session.
   // The account epoch too: a sign-in or logout in the same slot starts a new
@@ -1477,7 +1482,11 @@ const serveAntigravityHop = async (
     : await runAntigravityNative({
         bin: agyBin,
         env,
-        signInEpoch: epoch,
+        // ACP starts fresh under the account current NOW (a change during
+        // the headless attempt is already behind it); one during ACP's own
+        // setup or turn retires its process.
+        signInEpoch: antigravityHeadlessEpoch(),
+        currentSignInEpoch: antigravityHeadlessEpoch,
         providerModelId: params.providerModelId,
         systemText: req.systemText,
         userText: req.promptText,

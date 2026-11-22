@@ -194,19 +194,31 @@ export const agyUsageWindows = (
   if (result?.status !== "SUCCESS" || result.command?.name !== "usage") {
     return null;
   }
+  // Shape checked at runtime: anything unexpected is "unavailable", never
+  // a throw out of the usage read.
+  const isObject = (v: unknown): v is Record<string, unknown> =>
+    typeof v === "object" && v !== null;
   const groups = result.command.data?.groups ?? [];
-  return summaryWindows({
-    groups: groups.map((group) => ({
-      displayName: group.name,
-      buckets: (group.buckets ?? []).map((bucket) => ({
+  if (!Array.isArray(groups)) return null;
+  const mapped = [];
+  for (const group of groups as ReadonlyArray<unknown>) {
+    if (!isObject(group)) return null;
+    const buckets = group.buckets ?? [];
+    if (!Array.isArray(buckets)) return null;
+    const out = [];
+    for (const bucket of buckets as ReadonlyArray<unknown>) {
+      if (!isObject(bucket)) return null;
+      out.push({
         bucketId: bucket.id,
         displayName: bucket.name,
         window: bucket.window,
         remainingFraction: bucket.remaining_fraction,
         resetTime: bucket.reset_time,
-      })),
-    })),
-  });
+      });
+    }
+    mapped.push({ displayName: group.name, buckets: out });
+  }
+  return summaryWindows({ groups: mapped });
 };
 
 export const readAgyUsage = async (

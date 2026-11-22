@@ -79,6 +79,17 @@ export const vendorProvisionDue = (
   return nowMs - last.at_ms >= VENDOR_PROVISION_RETRY_MS;
 };
 
+/** Pure: ms until a failed attempt's cooldown ends, or null when no retry
+ *  is owed (none yet, another version, or it succeeded). */
+export const vendorProvisionRetryInMs = (
+  last: TAttempt | undefined,
+  version: string,
+  nowMs: number,
+): number | null => {
+  if (last === undefined || last.version !== version || last.ok) return null;
+  return Math.max(0, last.at_ms + VENDOR_PROVISION_RETRY_MS - nowMs);
+};
+
 export type TVendorProvisionResult =
   | "not_routebox"
   | "all_present"
@@ -144,6 +155,16 @@ export const scheduleVendorProvisioning = (): void => {
         })
         .then((outcome) => {
           if (outcome === "failed") attempt(VENDOR_PROVISION_RETRY_MS);
+          // Restarted inside a failed attempt's cooldown: try again when it
+          // ends, not only at the next restart.
+          if (outcome === "not_due") {
+            const wait = vendorProvisionRetryInMs(
+              readAttempt(vendorProvisionStatePath()),
+              DAEMON_VERSION,
+              Date.now(),
+            );
+            if (wait !== null) attempt(wait);
+          }
         });
     }, delayMs).unref?.();
   };

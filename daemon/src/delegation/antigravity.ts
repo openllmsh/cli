@@ -133,11 +133,13 @@ const installState = async (): Promise<{
   readonly installed: boolean;
   readonly version: string | null;
 }> => {
+  // The resolver decides (an `agy` that can't run is not installed), so
+  // status and Connect always agree.
+  if (resolveAntigravityCli() === null) {
+    return { installed: false, version: null };
+  }
   const state = await cliInstallState(PROVIDER);
-  if (state.installed) return state;
-  return resolveAntigravityCli() !== null
-    ? { installed: true, version: null }
-    : state;
+  return { installed: true, version: state.installed ? state.version : null };
 };
 
 /** A new or removed sign-in: nothing from the previous account may serve —
@@ -159,6 +161,17 @@ const wiring = loginWiring({
 /** The live `agy` login screen, while a CLI sign-in waits for its code. */
 const activeAgyLogin = accountCell<TAgyLogin | null>(() => null);
 
+/** Capture `agy models` into the model list. A failure never fails the
+ *  caller: the list stays missing and the next Connect captures it. */
+const captureAgyModels = async (agyBin: string): Promise<void> => {
+  try {
+    const rows = await readAgyModels(agyDeps(agyBin));
+    if (rows !== null) writeAgyModels(rows);
+  } catch (error) {
+    logError("antigravity-connect", error);
+  }
+};
+
 /**
  * Sign in through `agy`'s own login screen: keychain ready (no dialog), the
  * screen walked to Google OAuth, the link surfaced, the pasted code typed in.
@@ -172,7 +185,16 @@ const connect = (): Promise<TConnectResult> =>
       installed: async () => resolveAntigravityCli() !== null,
       installHint: INSTALL_HINT,
       shortCircuit: {
-        connected: () => agyCliSignedIn(agyHome()),
+        // Already signed in: a model list the sign-in failed to capture is
+        // captured now (this Connect is the user asking; never a probe).
+        connected: async () => {
+          const yes = await agyCliSignedIn(agyHome());
+          const agyBin = resolveAntigravityCli();
+          if (yes && agyBin !== null && readAgyModelsFile() === null) {
+            await captureAgyModels(agyBin);
+          }
+          return yes;
+        },
         detail: wiring.connectedDetail,
       },
       slot: wiring.slot,
@@ -233,11 +255,10 @@ const connect = (): Promise<TConnectResult> =>
             // The previous account's list never outlives its sign-in.
             try {
               rmSync(agyModelsPath(), { force: true });
-              const rows = await readAgyModels(agyDeps(agyBin));
-              if (rows !== null) writeAgyModels(rows);
             } catch (error) {
               logError("antigravity-connect", error);
             }
+            await captureAgyModels(agyBin);
             finalizeLoginTerminal({
               flow,
               event: { kind: "succeeded" },
@@ -266,6 +287,10 @@ const connect = (): Promise<TConnectResult> =>
           return ok;
         } finally {
           dispose();
+          // The slot stays held until the login screen is gone: account
+          // removal waits on it, and a screen still in its kill grace could
+          // otherwise write a sign-in into a removed slot.
+          await login.exited;
           wiring.slot.end(flow.flowId);
         }
       });
@@ -369,8 +394,8 @@ export const antigravityDelegate: TProviderDelegate = {
     };
   },
 
-  // Models are `agy models`, captured once at sign-in — never a dedicated
-  // probe. Not captured → skipped (the previously reported list stands).
+  // Models are `agy models`, captured at sign-in (or by a Connect that finds
+  // it missing) — never a dedicated probe. Not captured → skipped.
   discoverModels: async (
     _options: TModelDiscoveryOptions,
   ): Promise<TModelDiscoveryResult> => {

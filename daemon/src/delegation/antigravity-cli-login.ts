@@ -202,6 +202,9 @@ export type TAgyLogin = {
     readonly detail: string;
   };
   readonly cancel: () => void;
+  /** Resolves once the login screen's process has exited (at once when it
+   *  never started). */
+  readonly exited: Promise<void>;
 };
 
 /**
@@ -393,5 +396,12 @@ export const startAgyLogin = (args: {
       };
     },
     cancel: () => settle({ kind: "failed", reason: "sign-in cancelled" }),
+    exited:
+      pty === null
+        ? Promise.resolve()
+        : pty.exited.then(
+            () => undefined,
+            () => undefined,
+          ),
   };
 };

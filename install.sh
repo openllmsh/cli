@@ -2108,9 +2108,11 @@ vendor_cli_resolve_curl() {
 provision_antigravity() {
   local run_path="$1" curl_bin="$2"
   local name="Google Antigravity" dest="$ANTIGRAVITY_CLI_BIN"
-  if [ -x "$dest" ]; then
+  # An executable FILE (a directory is -x too), or an `agy` already on PATH:
+  # the daemon accepts either, and a second copy would shadow the first.
+  if { [ -f "$dest" ] && [ -x "$dest" ]; } || has_executable_command agy; then
     echo "  $name CLI: already installed."
-    echo "$name CLI: already installed ($dest) — skipping install." \
+    echo "$name CLI: already installed — skipping install." \
       >>"$OPENLLM_DIR/cli-install.log" 2>/dev/null || true
     return 0
   fi

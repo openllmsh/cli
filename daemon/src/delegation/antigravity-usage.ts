@@ -55,6 +55,15 @@ const toWindow = (
   };
 };
 
+/** The shared allowance a bucket id belongs to (`gemini-…`, `3p-…`), or
+ *  null for any other bucket (its own allowance). */
+const quotaFamilyOf = (bucketId: string): string | null =>
+  bucketId.startsWith("gemini-")
+    ? "Gemini"
+    : bucketId.startsWith("3p-")
+      ? "Claude & GPT"
+      : null;
+
 /** `retrieveUserQuotaSummary` → windows (Claude + GPT share one allowance). */
 export const summaryWindows = (summary: unknown): TProviderUsageWindow[] => {
   const s = summary as {
@@ -71,13 +80,11 @@ export const summaryWindows = (summary: unknown): TProviderUsageWindow[] => {
   for (const group of groups ?? []) {
     for (const bucket of group.buckets ?? []) {
       if (bucket.disabled === true || !nonEmpty(bucket.bucketId)) continue;
-      const family = bucket.bucketId.startsWith("gemini-")
-        ? "Gemini"
-        : bucket.bucketId.startsWith("3p-")
-          ? "Claude & GPT"
-          : nonEmpty(group.displayName)
-            ? group.displayName.trim()
-            : bucket.bucketId;
+      const family =
+        quotaFamilyOf(bucket.bucketId) ??
+        (nonEmpty(group.displayName)
+          ? group.displayName.trim()
+          : bucket.bucketId);
       const weekly = bucket.window === "weekly";
       const session = bucket.window === "5h";
       const window = toWindow(
@@ -108,11 +115,20 @@ export const antigravityQuotaSnapshot = (
   }
   // Gemini and Claude/GPT are SEPARATE allowances: one exhausted family must
   // not mark the whole provider rejected (the quota gate would then skip
-  // Gemini hops that still have room). Reject only when every window is out.
+  // Gemini hops that still have room). A family is out when ANY of its
+  // windows is (a full 7-day window blocks however much 5-hour room is
+  // left); reject only when every family is out.
+  const families = new Map<string, boolean>();
+  for (const w of windows) {
+    const id = w.meter_id ?? w.label;
+    const family = quotaFamilyOf(id) ?? id;
+    const out = w.percent_used >= QUOTA_REJECT_PERCENT;
+    families.set(family, (families.get(family) ?? false) || out);
+  }
   const percents = windows.map((w) => w.percent_used);
   return {
     kind: "quota",
-    status: percents.every((p) => p >= QUOTA_REJECT_PERCENT)
+    status: [...families.values()].every((out) => out)
       ? "rejected"
       : percents.some((p) => p >= QUOTA_WARN_PERCENT)
         ? "allowed_warning"

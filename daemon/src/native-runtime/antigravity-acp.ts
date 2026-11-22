@@ -2,8 +2,8 @@
  * Google Antigravity over the official `agy` CLI's built-in ACP server
  * (`agy acp`, Agent Client Protocol over stdio) — the transport for what
  * headless stream-json (`antigravity-headless.ts`) cannot serve: image input
- * and caller (client) tools via our loopback MCP server, plus structured
- * output. It is also the fallback when a headless run fails unexpectedly
+ * and caller (client) tools via our loopback MCP server. (Structured
+ * output is declined before any Antigravity hop runs.) It is also the fallback when a headless run fails unexpectedly
  * (spawn / start-up / write failures carry `ANTIGRAVITY_HEADLESS_FALLBACK`).
  * The JSON-RPC client is the shared {@link AcpClient} (`cursor-acp.ts`).
  *
@@ -615,6 +615,9 @@ export type TAntigravityNativeParams = {
    *  (`antigravityHeadlessEpoch()`): a sign-in or sign-out changes it, so a
    *  warm process never serves across one. */
   readonly signInEpoch: number;
+  /** The live account epoch, re-read before the prompt and before parking:
+   *  an account change during setup or the turn retires the process. */
+  readonly currentSignInEpoch: () => number;
   readonly providerModelId: string;
   readonly systemText: string | null;
   readonly userText: string;
@@ -759,7 +762,10 @@ export const runAntigravityNative = async (
     if (owned !== null) {
       owned.route.onUpdate = null;
       owned.route.allowedMcpTools = new Set();
-      if (settle === "park") {
+      if (
+        settle === "park" &&
+        params.currentSignInEpoch() === params.signInEpoch
+      ) {
         releaseWarmAgent(
           owned,
           params.warmIdleTtlMs ?? ANTIGRAVITY_WARM_IDLE_TTL_MS,
@@ -983,6 +989,17 @@ export const runAntigravityNative = async (
   const owned = currentAgent();
   if (owned === null || sessionId === null) {
     return failSetup(new DOMException("client aborted", "AbortError"));
+  }
+  // Signed in or out while this process started: it may hold the old
+  // account — never prompt on it.
+  if (params.currentSignInEpoch() !== params.signInEpoch) {
+    return failSetup(
+      new AcpRpcError({
+        method: "session/prompt",
+        kind: "rpc",
+        message: "antigravity account changed during setup",
+      }),
+    );
   }
   void owned.client
     .request(
