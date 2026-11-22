@@ -27,6 +27,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { dirname, join } from "node:path";
+import { agyFileReadsConfined } from "./antigravity-seatbelt";
 
 /** Every documented action, all targets. */
 export const ANTIGRAVITY_CLI_DENY_RULES: ReadonlyArray<string> = [
@@ -40,21 +41,21 @@ export const ANTIGRAVITY_CLI_DENY_RULES: ReadonlyArray<string> = [
 ];
 
 /**
- * The rules for this platform. macOS lets `agy` read image attachments
- * (`antigravity-attachments.ts`): there the Seatbelt profile
- * (`antigravity-seatbelt.ts`) is what confines reads, so `read_file(*)` gives
- * way to a deny on the slot's own HOME (its sign-in), and the transport's
- * step guard allows only reads of the turn's stored images. Elsewhere every
- * read stays denied (image turns decline there).
+ * The rules here. Where the inference `agy`'s reads are kernel-confined
+ * (`antigravity-seatbelt.ts` `agyFileReadsConfined`: macOS Seatbelt, Linux
+ * Landlock) it may read image attachments (`antigravity-attachments.ts`):
+ * `read_file(*)` gives way to a deny on the slot's own HOME (its sign-in),
+ * and the transport's step guard allows only reads of the turn's stored
+ * images. Elsewhere every read stays denied (image turns decline there).
  */
 export const antigravityCliDenyRules = (
   home: string,
-  platform: NodeJS.Platform = process.platform,
+  readsConfined: boolean = agyFileReadsConfined(),
 ): {
   readonly deny: ReadonlyArray<string>;
   readonly drop: ReadonlyArray<string>;
 } =>
-  platform === "darwin"
+  readsConfined
     ? {
         deny: [
           ...ANTIGRAVITY_CLI_DENY_RULES.filter((r) => r !== "read_file(*)"),

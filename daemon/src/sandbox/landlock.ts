@@ -32,9 +32,13 @@
  * drain-and-exit + supervisor relaunch, never by widening a live ruleset.
  */
 import { fstatSync } from "node:fs";
+import { homedir } from "node:os";
+import { dirname } from "node:path";
+import { stateDir } from "../env";
 import { logDebug, logInfo, logWarn, safeDiagnosticMessage } from "../logger";
 import { DAEMON_VERSION } from "../version";
 import { daemonWorkingSet } from "./working-set";
+import { agyTempRoot } from "./working-set/base";
 
 /** The sandbox posture this process ended up with, for `DaemonStatus`. */
 export type TSandboxState = "enforced" | "off" | "unsupported" | "error";
@@ -279,6 +283,49 @@ export type TApplySandboxOpts = {
    *  `--sandbox-exec` shim runs with the CHILD's isolated `HOME`. Threaded
    *  into the working set; see `sandbox/exec.ts` `HOME_FLAG`. */
   readonly home?: string;
+  /** Apply the inference `agy` set ({@link agyWorkingSet}) instead. */
+  readonly agy?: { readonly slotHome: string; readonly bin: string };
+};
+
+/**
+ * The inference `agy` working set: the daemon's, with every grant inside
+ * `$HOME` or the state dir removed (other providers' sign-ins live there),
+ * then only the account slot's directory and the `agy` temp root
+ * (read-write) and the binary's folder (read-only) added back. `agy`'s
+ * `read_file` opens image attachments, so this is what confines it
+ * (`native-runtime/antigravity-seatbelt.ts` is the macOS counterpart).
+ */
+export const agyWorkingSet = (
+  ws: {
+    readonly readWrite: readonly string[];
+    readonly readOnly: readonly string[];
+  },
+  paths: {
+    readonly home: string;
+    readonly stateDir: string;
+    readonly slotHome: string;
+    readonly agyTempRoot: string;
+    readonly bin: string;
+  },
+): { readonly readWrite: string[]; readonly readOnly: string[] } => {
+  const under = (root: string, p: string): boolean =>
+    p === root || p.startsWith(`${root}/`);
+  const outside = (p: string): boolean =>
+    !under(paths.home, p) && !under(paths.stateDir, p);
+  const binDir = dirname(paths.bin);
+  return {
+    readWrite: [
+      ...ws.readWrite.filter(outside),
+      dirname(paths.slotHome),
+      paths.agyTempRoot,
+    ],
+    readOnly: [
+      ...ws.readOnly.filter(outside),
+      binDir !== paths.home && !under(binDir, paths.stateDir)
+        ? binDir
+        : paths.bin,
+    ],
+  };
 };
 
 /**
@@ -417,8 +464,18 @@ const applyInner = async (opts?: TApplySandboxOpts): Promise<TSandboxState> => {
         }
       }
     };
-    addRules(ws.readWrite, handled);
-    addRules(ws.readOnly, readOnlyAccess);
+    const applied =
+      opts?.agy !== undefined
+        ? agyWorkingSet(ws, {
+            home: opts.home ?? homedir(),
+            stateDir: stateDir(opts.home),
+            slotHome: opts.agy.slotHome,
+            agyTempRoot: agyTempRoot(opts.home),
+            bin: opts.agy.bin,
+          })
+        : ws;
+    addRules(applied.readWrite, handled);
+    addRules(applied.readOnly, readOnlyAccess);
 
     // restrict_self requires no_new_privs (we're an unprivileged process).
     if (libc.prctl(PR_SET_NO_NEW_PRIVS, 1n, 0n, 0n, 0n) !== 0) {

@@ -312,6 +312,21 @@ export const miseDirs = (
  * missing (mode 0o700). Returns the path even if creation fails — callers
  * can handle the failure as needed.
  */
+/**
+ * The ONE root holding every inference `agy` temp dir (turn cwds, process
+ * cwds, image attachments): the macOS Seatbelt profile and the Linux
+ * Landlock set grant this single folder, never the rest of the temp dir.
+ */
+export const agyTempRoot = (home?: string): string => {
+  const root = join(daemonTempDir(home), "agy");
+  try {
+    mkdirSync(root, { recursive: true, mode: 0o700 });
+  } catch {
+    // as daemonTempDir: callers fail on use
+  }
+  return root;
+};
+
 export const daemonTempDir = (home?: string): string => {
   const daemonTmp = join(stateDir(home), "tmp");
   try {

@@ -47,6 +47,11 @@ export type TSandboxSpawnOpts = {
    *  children (vendor scripts, login flows, anything fed remote data) must
    *  never set this. */
   readonly probe?: boolean;
+  /** The inference `agy` profile (Linux Landlock): the daemon working set
+   *  minus everything in `$HOME` and the state dir, plus only the account
+   *  slot, the `agy` temp root and the binary's folder
+   *  (`landlock.ts` {@link agyWorkingSet}). */
+  readonly agy?: { readonly slotHome: string; readonly bin: string };
 };
 
 /** Whether per-child sandboxing is enabled for this process — the two env
@@ -104,12 +109,23 @@ const DEV_ENTRY: string | undefined =
  * `opts` is reserved (v1: ignored) so future per-child grants / network
  * policy never churn call sites.
  */
+/** Whether {@link sandboxSpawnArgs} wraps children here at all (the same
+ *  gates it applies). */
+export const sandboxWrapsSpawns = (): boolean =>
+  sandboxingEnabled() &&
+  (!isDevSourceRun() ||
+    (process.env.OPENLLM_DAEMON_SANDBOX === "1" && DEV_ENTRY !== undefined));
+
 export const sandboxSpawnArgs = (
   argv: readonly string[],
   opts?: TSandboxSpawnOpts,
 ): string[] => {
   if (opts?.probe === true) return [...argv];
   if (!sandboxingEnabled()) return [...argv];
+  const agyFlags =
+    opts?.agy !== undefined
+      ? ["--agy-slot", opts.agy.slotHome, "--agy-bin", opts.agy.bin]
+      : [];
   if (isDevSourceRun()) {
     // Dev source runs are OPT-IN (`OPENLLM_DAEMON_SANDBOX=1`), and the wrap
     // must go through `bun <entry>` since execPath is the bun runtime.
@@ -120,11 +136,19 @@ export const sandboxSpawnArgs = (
       DEV_ENTRY,
       "--sandbox-exec",
       ...HOME_FLAG(),
+      ...agyFlags,
       "--",
       ...argv,
     ];
   }
-  return [process.execPath, "--sandbox-exec", ...HOME_FLAG(), "--", ...argv];
+  return [
+    process.execPath,
+    "--sandbox-exec",
+    ...HOME_FLAG(),
+    ...agyFlags,
+    "--",
+    ...argv,
+  ];
 };
 
 /**
@@ -159,7 +183,10 @@ const HOME_FLAG = (): string[] => ["--home", homedir()];
  */
 export const runSandboxExec = async (
   tail: readonly string[],
-  opts?: { readonly home?: string },
+  opts?: {
+    readonly home?: string;
+    readonly agy?: { readonly slotHome: string; readonly bin: string };
+  },
 ): Promise<never> => {
   // Build the working set from the DAEMON's home (see `HOME_FLAG`), NOT this
   // process's `HOME` — the shim inherits the child's isolated one. The tail's
@@ -167,6 +194,7 @@ export const runSandboxExec = async (
   const state = await applyDaemonSandbox({
     force: true,
     ...(opts?.home !== undefined ? { home: opts.home } : {}),
+    ...(opts?.agy !== undefined ? { agy: opts.agy } : {}),
   });
   if (state === "error" || state === "unsupported") {
     // Loud on BOTH channels: stderr for the immediate caller, and the shared

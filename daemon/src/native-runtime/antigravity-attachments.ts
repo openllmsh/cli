@@ -1,10 +1,10 @@
 /**
  * Image attachments for the headless `agy` CLI: each image is stored ONCE
- * under the SHA-256 of its bytes in `<daemon tmp>/agy-attachments/`, so the
+ * under the SHA-256 of its bytes in `<agy temp root>/attachments/`, so the
  * same image always has the same path (and the prompt line naming it never
- * changes between turns). The directory sits under the daemon's `agy-*`
- * temp prefix, the only part of `$HOME`'s `.openllm` the chat `agy`'s
- * Seatbelt profile can read (`antigravity-seatbelt.ts`).
+ * changes between turns). It sits in the `agy` temp root, the only part of
+ * the daemon's temp dir the inference `agy`'s confinement (Seatbelt on
+ * macOS, Landlock on Linux — `antigravity-seatbelt.ts`) can read.
  *
  * Files untouched for {@link AGY_ATTACHMENT_TTL_MS} are swept (each use
  * refreshes the mtime).
@@ -23,7 +23,7 @@ import {
 } from "node:fs";
 import { join } from "node:path";
 import { inspectImageBytes } from "@openllmsh/sdk/wire/lib/canonical/image-signature";
-import { daemonTempDir } from "../sandbox/working-set/base";
+import { agyTempRoot } from "../sandbox/working-set/base";
 
 export const AGY_ATTACHMENT_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 const SWEEP_EVERY_MS = 60 * 60 * 1000;
@@ -38,7 +38,7 @@ const EXT: Readonly<Record<string, string>> = {
 const DATA_URL = /^data:([^;,]+);base64,(.+)$/s;
 
 export const agyAttachmentsDir = (): string =>
-  join(daemonTempDir(), "agy-attachments");
+  join(agyTempRoot(), "attachments");
 
 let lastSweep = 0;
 

@@ -23,11 +23,6 @@ export type TAgyImageView =
 /** The line standing in for one stored image. */
 export const agyImageLine = (path: string): string => `[image: ${path}]`;
 
-/** Image input needs the chat `agy`'s Seatbelt confinement (macOS). */
-export const agyImageInputSupported = (
-  platform: NodeJS.Platform = process.platform,
-): boolean => platform === "darwin";
-
 export const agyImageView = (
   canonical: TChatCompletionRequest,
   dir?: string,

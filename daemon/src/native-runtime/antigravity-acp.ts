@@ -58,11 +58,11 @@ import { agyCliSignedIn } from "../delegation/antigravity-cli";
 import type { TStoreRead } from "../delegation/util";
 import { ensureKeychainReady } from "../delegation/util";
 import { unwrapAntigravityCliSpawn } from "../sandbox/policy";
-import { daemonTempDir } from "../sandbox/working-set";
+import { agyTempRoot, daemonTempDir } from "../sandbox/working-set/base";
 import { DAEMON_VERSION } from "../version";
 import { ensureAntigravityCliSettings } from "./antigravity-cli-settings";
 import { antigravitySpawnEnv } from "./antigravity-env";
-import { agySeatbeltArgv } from "./antigravity-seatbelt";
+import { confineAgyArgv } from "./antigravity-seatbelt";
 import { AcpClient, AcpRpcError, createAcpTurnState } from "./cursor-acp";
 import type { TCursorMcpServer } from "./cursor-mcp-server";
 import { startCursorMcpServer } from "./cursor-mcp-server";
@@ -766,15 +766,15 @@ export const runAntigravityNative = async (
   // serves in worker mode (one isolated worker per session). Plain turns
   // keep the single-process server. The argv is part of the warm key, so a
   // worker-mode process only ever serves tool turns and vice versa.
-  // macOS: confined by the inference Seatbelt profile (it grants the slot
-  // keychain, unlike the daemon's shared profile). A test's `probe` override
-  // runs the fake agent bare.
+  // Confined by the inference `agy` profile (`antigravity-seatbelt.ts`:
+  // Seatbelt on macOS, Landlock on Linux). A test's `probe` override runs
+  // the fake agent bare.
   const bareArgv = antigravityAcpArgv(
     params.bin,
     (params.tools?.length ?? 0) > 0,
   );
-  const argv =
-    params.probe === undefined ? agySeatbeltArgv(bareArgv, home) : bareArgv;
+  const confined = params.probe === undefined;
+  const argv = confined ? confineAgyArgv(bareArgv, home) : bareArgv;
   const warmKey = antigravityWarmKey(
     argv.join("\u0000"),
     spawnEnv,
@@ -785,7 +785,7 @@ export const runAntigravityNative = async (
   // natively. Fresh per request, independent of the process cwd.
   let cwd: string;
   try {
-    cwd = await mkdtemp(join(daemonTempDir(), "agy-"));
+    cwd = await mkdtemp(join(agyTempRoot(), "turn-"));
   } catch (error) {
     return declineFrom(error, params.signal, sameAccount());
   }
@@ -899,7 +899,7 @@ export const runAntigravityNative = async (
         message: "antigravity account changed during setup",
       });
     }
-    const procCwd = await mkdtemp(join(daemonTempDir(), "agy-proc-"));
+    const procCwd = await mkdtemp(join(agyTempRoot(), "proc-"));
     const route: TWarmRoute = { onUpdate: null, allowedMcpTools: new Set() };
     let client: AcpClient;
     try {
@@ -914,7 +914,10 @@ export const runAntigravityNative = async (
         {
           argv,
           label: "agy acp",
-          probe: params.probe ?? unwrapAntigravityCliSpawn(),
+          // Already confined above (final argv): never wrap it again.
+          probe: confined
+            ? true
+            : (params.probe ?? unwrapAntigravityCliSpawn()),
           exactEnv: true,
           cwd: procCwd,
           ...(params.cancelDisposeGraceMs !== undefined

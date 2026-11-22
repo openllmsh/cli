@@ -1,43 +1,47 @@
 /**
- * Kernel confinement for the inference `agy` (headless chat and `agy acp`) on
- * macOS: a per-spawn Seatbelt profile run through `/usr/bin/sandbox-exec`.
+ * Kernel confinement for the inference `agy` (headless chat and `agy acp`):
+ *   - macOS: a per-spawn Seatbelt profile run through `/usr/bin/sandbox-exec`
+ *     ({@link agySeatbeltProfile});
+ *   - Linux: the daemon's `--sandbox-exec` shim with the inference `agy`
+ *     Landlock set (`sandbox/landlock.ts` `agyWorkingSet`).
  *
  * Why its own profile: `agy`'s `read_file` is what opens image attachments
  * (`antigravity-attachments.ts`), and `agy`'s own deny rules can't confine it
  * — they are case-sensitive path prefixes on a case-insensitive filesystem
  * (`…/Secret` denied, `…/secret` read; probed 2026-11-22, agy 1.5.14). The
- * daemon's shared profile (`sandbox/seatbelt.ts`) can't be used either: it
- * grants the whole daemon working set, other providers' sign-ins included.
+ * daemon's shared profile can't be used either: it grants the whole daemon
+ * working set, other providers' sign-ins included.
  *
- * The profile: everything outside `$HOME` stays as the OS needs it; inside
- * `$HOME` only the account slot's directory (its HOME, keychain and sign-in),
- * the resolved `agy` binary (and its folder, when that is not `$HOME` or a
- * parent of the daemon's state) and the daemon's `agy-*` temp dirs (turn cwds and
- * the attachment store) can be read or written, plus metadata of their
- * ancestors for path resolution. The kernel resolves the real file, so case
- * variants and `..` are refused ("operation not permitted"). Verified live
- * 2026-11-22: sign-in through the slot keychain, a text turn and an
- * attachment read work confined; an outside file is refused as `…/.openllm`,
- * `…/.OPENLLM` and `/users/…`.
+ * What `agy` can reach in `$HOME` and the state dir: the account slot's
+ * directory (its HOME, keychain and sign-in), the `agy` binary (and its
+ * folder, when that is not `$HOME` or inside the state dir) and the ONE `agy`
+ * temp root (`agyTempRoot`: turn cwds and the attachment store). The kernel
+ * resolves the real file, so case variants and `..` are refused. Within the
+ * temp root `agy` could open another turn's stored image at the OS level;
+ * the step guard (`antigravity-headless.ts`) cancels any read but this turn's
+ * own images before the model answers, so nothing reaches the requester, and
+ * store names are SHA-256 hashes of the bytes.
  *
- * Login, `models` and `/usage` spawns keep their existing (unconfined) spawn.
+ * Verified live 2026-11-22 (macOS): sign-in through the slot keychain, a text
+ * turn and an attachment read work confined; an outside file is refused as
+ * `…/.openllm`, `…/.OPENLLM` and `/users/…`.
+ *
+ * Login, `models` and `/usage` spawns keep their existing spawn.
  */
 
 import { realpathSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, sep } from "node:path";
 import { stateDir } from "../env";
-import { daemonTempDir } from "../sandbox/working-set/base";
+import { sandboxSpawnArgs, sandboxWrapsSpawns } from "../sandbox/exec";
+import { probeLandlockSupport } from "../sandbox/landlock";
+import { agyTempRoot } from "../sandbox/working-set/base";
 
 export const SANDBOX_EXEC = "/usr/bin/sandbox-exec";
 
 /** SBPL string literal. */
 const lit = (value: string): string =>
   `"${value.replaceAll("\\", "\\\\").replaceAll('"', '\\"')}"`;
-
-/** SBPL regex literal matching `value` verbatim. */
-const rx = (value: string): string =>
-  value.replace(/[.*+?^${}()|[\]\\"]/g, "\\$&");
 
 const real = (path: string): string => {
   try {
@@ -62,6 +66,17 @@ const ancestors = (root: string, path: string): string[] => {
   return out;
 };
 
+/** Every directory above `path` up to `/` (excluded). */
+const parentsToRoot = (path: string): string[] => {
+  const out: string[] = [];
+  let cur = dirname(path);
+  while (cur !== dirname(cur)) {
+    out.push(cur);
+    cur = dirname(cur);
+  }
+  return out;
+};
+
 export type TAgySeatbeltPaths = {
   /** The daemon's real `$HOME` (the child's HOME is the isolated slot). */
   readonly realHome: string;
@@ -69,8 +84,8 @@ export type TAgySeatbeltPaths = {
   readonly slotHome: string;
   /** The `agy` binary as spawned. */
   readonly bin: string;
-  /** The daemon temp dir holding `agy-*` cwds and `agy-attachments`. */
-  readonly tempDir: string;
+  /** The `agy` temp root (`agyTempRoot()`). */
+  readonly agyTemp: string;
   /** The daemon state dir (every provider's sign-in lives under it). Denied
    *  too, so a state dir relocated outside `$HOME` stays covered. */
   readonly stateDir: string;
@@ -83,64 +98,113 @@ export const agySeatbeltProfile = (paths: TAgySeatbeltPaths): string => {
   // other account slots of this same provider.
   const slotRoot = dirname(real(paths.slotHome));
   const bin = real(paths.bin);
-  const tempDir = real(paths.tempDir);
-  const agyTemp = `^${rx(tempDir)}/agy-[^/]*(/.*)?$`;
+  const agyTemp = real(paths.agyTemp);
   const state = real(paths.stateDir);
+  const relocated = !inside(home, state);
   // `$HOME`, plus the state dir when it lives elsewhere.
-  const denyRoots = inside(home, state) ? [home] : [home, state];
+  const denyRoots = relocated ? [home, state] : [home];
+  const underDeny = (p: string): boolean =>
+    denyRoots.some((root) => inside(root, p));
   const metadata = new Set<string>(denyRoots);
-  for (const p of [slotRoot, bin, paths.bin, `${tempDir}/agy-`]) {
+  for (const p of [slotRoot, bin, paths.bin, agyTemp]) {
     for (const root of denyRoots) {
       if (inside(root, p)) for (const a of ancestors(root, p)) metadata.add(a);
     }
   }
   // The binary's own folder too (a versioned install or an
   // `OPENLLM_AGY_BIN` launcher may load files beside it) — unless that
-  // folder is `$HOME` itself or holds the daemon's state.
+  // folder is `$HOME` itself or inside the state dir.
   const binDir = dirname(bin);
   const binDirGrant =
-    inside(home, binDir) &&
-    binDir !== home &&
-    !inside(binDir, slotRoot) &&
-    !inside(binDir, tempDir) &&
-    !inside(binDir, state);
+    underDeny(binDir) && binDir !== home && !inside(state, binDir);
   const binRules = [
     ...[...new Set([bin, paths.bin])]
-      .filter((p) => inside(home, p))
+      .filter(underDeny)
       .map((p) => `(literal ${lit(p)})`),
     ...(binDirGrant ? [`(subpath ${lit(binDir)})`] : []),
   ];
+  const roots = denyRoots.map((r) => `(subpath ${lit(r)})`).join(" ");
+  // A relocated state dir is denied by path: its parents must not be
+  // renamed or replaced, or the dir would move out from under the rule.
+  const pinned = relocated
+    ? `(deny file-write* ${parentsToRoot(state)
+        .map((p) => `(literal ${lit(p)})`)
+        .join(" ")} (literal ${lit(state)}))\n`
+    : "";
   return `(version 1)
 (allow default)
-(deny file-read* ${denyRoots.map((r) => `(subpath ${lit(r)})`).join(" ")})
-(deny file-write* ${denyRoots.map((r) => `(subpath ${lit(r)})`).join(" ")})
+(deny file-read* ${roots})
+(deny file-write* ${roots})
 (allow file-read-metadata ${[...metadata].map((p) => `(literal ${lit(p)})`).join(" ")})
-(allow file-read* (subpath ${lit(slotRoot)}) (regex #"${agyTemp}")${binRules.length > 0 ? ` ${binRules.join(" ")}` : ""})
-(allow file-write* (subpath ${lit(slotRoot)}) (regex #"${agyTemp}"))
-`;
+(allow file-read* (subpath ${lit(slotRoot)}) (subpath ${lit(agyTemp)})${binRules.length > 0 ? ` ${binRules.join(" ")}` : ""})
+(allow file-write* (subpath ${lit(slotRoot)}) (subpath ${lit(agyTemp)}))
+${pinned}`;
+};
+
+/** Cached Linux Landlock support (`probeLandlockSupport`), probed once. */
+let landlock: "pending" | "enforced" | "no" = "pending";
+let landlockProbe: Promise<void> | null = null;
+const probeLandlockOnce = (): void => {
+  landlockProbe ??= probeLandlockSupport()
+    .then((state) => {
+      landlock = state === "enforced" ? "enforced" : "no";
+    })
+    .catch(() => {
+      landlock = "no";
+    });
 };
 
 /**
- * `argv` wrapped in the inference `agy` Seatbelt profile on macOS; unchanged
- * elsewhere (callers keep their own confinement there).
+ * Whether the inference `agy`'s file reads are kernel-confined here, so its
+ * `read_file` may open image attachments: always on macOS (the Seatbelt
+ * profile), and on Linux only while the daemon sandbox wraps spawns and the
+ * kernel supports Landlock (the shim fails OPEN). False while the Linux probe
+ * is still pending.
  */
-export const agySeatbeltArgv = (
+export const agyFileReadsConfined = (
+  platform: NodeJS.Platform = process.platform,
+): boolean => {
+  if (platform === "darwin") return true;
+  if (platform !== "linux" || !sandboxWrapsSpawns()) return false;
+  probeLandlockOnce();
+  return landlock === "enforced";
+};
+
+// Warm at load: the first image turn must not decline (or start `agy` with
+// reads still denied) only because the probe hadn't answered yet.
+if (process.platform === "linux") probeLandlockOnce();
+
+/** Settle the Linux Landlock probe (tests). */
+export const settleAgyConfinementProbe = async (): Promise<void> => {
+  probeLandlockOnce();
+  await landlockProbe;
+};
+
+/**
+ * `argv` confined for an inference `agy` spawn: the Seatbelt profile on
+ * macOS, the shim's `agy` Landlock set on Linux (unchanged where neither
+ * applies). The result is final — callers spawn it as is.
+ */
+export const confineAgyArgv = (
   argv: ReadonlyArray<string>,
   slotHome: string,
   platform: NodeJS.Platform = process.platform,
 ): string[] => {
   const bin = argv[0];
-  if (platform !== "darwin" || bin === undefined) return [...argv];
-  return [
-    SANDBOX_EXEC,
-    "-p",
-    agySeatbeltProfile({
-      realHome: homedir(),
-      slotHome,
-      bin,
-      tempDir: daemonTempDir(),
-      stateDir: stateDir(),
-    }),
-    ...argv,
-  ];
+  if (bin === undefined) return [...argv];
+  if (platform === "darwin") {
+    return [
+      SANDBOX_EXEC,
+      "-p",
+      agySeatbeltProfile({
+        realHome: homedir(),
+        slotHome,
+        bin,
+        agyTemp: agyTempRoot(),
+        stateDir: stateDir(),
+      }),
+      ...argv,
+    ];
+  }
+  return sandboxSpawnArgs(argv, { agy: { slotHome, bin } });
 };

@@ -250,14 +250,30 @@ export const runCli = (args: readonly string[] = userArgs()): boolean => {
     // apply + spawn + mirror exit. `runSandboxExec` never resolves; guard a
     // REJECTION (an unexpected throw before the exit mirror) so it can't
     // become an unhandled rejection / silent success.
-    runSandboxExec(tail, home !== undefined ? { home } : undefined).catch(
-      (err: unknown) => {
-        process.stderr.write(
-          `--sandbox-exec: ${err instanceof Error ? err.message : String(err)}\n`,
-        );
-        process.exit(1);
-      },
-    );
+    // `--agy-slot <slotHome> --agy-bin <bin>`: the inference `agy` profile
+    // (`sandbox/landlock.ts` `agyWorkingSet`).
+    const flag = (name: string): string | undefined => {
+      const at = args.indexOf(name);
+      const value = at >= 0 && (sep < 0 || at < sep) ? args[at + 1] : undefined;
+      return value !== undefined && value !== "--" && isAbsolute(value)
+        ? value
+        : undefined;
+    };
+    const agySlot = flag("--agy-slot");
+    const agyBin = flag("--agy-bin");
+    const agy =
+      agySlot !== undefined && agyBin !== undefined
+        ? { slotHome: agySlot, bin: agyBin }
+        : undefined;
+    runSandboxExec(tail, {
+      ...(home !== undefined ? { home } : {}),
+      ...(agy !== undefined ? { agy } : {}),
+    }).catch((err: unknown) => {
+      process.stderr.write(
+        `--sandbox-exec: ${err instanceof Error ? err.message : String(err)}\n`,
+      );
+      process.exit(1);
+    });
     return true;
   }
 

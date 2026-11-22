@@ -45,13 +45,13 @@ import { ensureKeychainReady } from "../delegation/util";
 import { logError } from "../logger";
 import { sandboxSpawnArgs } from "../sandbox/exec";
 import { unwrapAntigravityCliSpawn } from "../sandbox/policy";
-import { daemonTempDir } from "../sandbox/working-set";
+import { agyTempRoot, daemonTempDir } from "../sandbox/working-set/base";
 import {
   ANTIGRAVITY_CLI_AGENT_NAME,
   prepareAntigravityCliProfile,
 } from "./antigravity-cli-settings";
 import { antigravitySpawnEnv } from "./antigravity-env";
-import { agySeatbeltArgv } from "./antigravity-seatbelt";
+import { confineAgyArgv } from "./antigravity-seatbelt";
 import { createAcpTurnState } from "./cursor-acp";
 import type { TNativeRunResult } from "./types";
 import { PRE_COMMIT_TIMEOUT_MS } from "./types";
@@ -732,8 +732,7 @@ export type TAntigravityHeadlessParams = {
   readonly ensureSettings?: (home: string) => boolean;
   /** Keychain readiness gate (default {@link ensureKeychainReady}). */
   readonly ensureKeychain?: (home: string) => Promise<TStoreRead<void>>;
-  /** Wrap the argv for the daemon sandbox (default {@link sandboxSpawnArgs}
-   *  with {@link unwrapAntigravityCliSpawn}). */
+  /** Wrap the argv for confinement (default {@link confineAgyArgv}). */
   readonly wrapArgv?: (argv: string[]) => string[];
   readonly precommitMs?: number;
   readonly idleMs?: number;
@@ -796,21 +795,17 @@ export const runAntigravityHeadless = async (
   const spawnEnv = antigravitySpawnEnv(params.env);
   const key = antigravityHeadlessKey(params.bin, model, spawnEnv);
   const argvOf = params.argv ?? antigravityHeadlessArgv;
-  // macOS: the inference profile (`antigravity-seatbelt.ts`) — `agy` must
-  // reach its slot keychain, which the daemon's shared profile can't grant.
-  // Elsewhere: the daemon sandbox.
+  // The inference `agy` confinement (`antigravity-seatbelt.ts`): Seatbelt
+  // on macOS, the shim's `agy` Landlock set on Linux.
   const wrap =
     params.wrapArgv ??
-    ((argv: string[]): string[] =>
-      unwrapAntigravityCliSpawn()
-        ? agySeatbeltArgv(argv, home)
-        : sandboxSpawnArgs(argv, { probe: false }));
+    ((argv: string[]): string[] => confineAgyArgv(argv, home));
   const initTimeoutMs =
     params.initTimeoutMs ?? ANTIGRAVITY_HEADLESS_INIT_TIMEOUT_MS;
   const spawn = async (
     extra: ReadonlyArray<string> = [],
   ): Promise<HeadlessProcess> => {
-    const cwd = await mkdtemp(join(daemonTempDir(), "agy-h-"));
+    const cwd = await mkdtemp(join(agyTempRoot(), "h-"));
     try {
       return new HeadlessProcess(
         key,

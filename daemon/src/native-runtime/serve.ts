@@ -61,7 +61,8 @@ import {
   resolveAntigravityCli,
   runAntigravityHeadless,
 } from "./antigravity-headless";
-import { agyImageInputSupported, agyImageView } from "./antigravity-request";
+import { agyImageView } from "./antigravity-request";
+import { agyFileReadsConfined } from "./antigravity-seatbelt";
 import { bridgeRequestCaptureReadiness } from "./bridge-request-capture-readiness";
 import { runClaudeNative } from "./claude-native";
 import { runClaudeSdkFacade } from "./claude-sdk-facade";
@@ -155,8 +156,9 @@ export type TNativeServeOverrides = {
   /** Where image attachments are stored (default `agyAttachmentsDir()`);
    *  tests point it at a temp dir. */
   readonly attachmentsDir?: string;
-  /** Platform deciding image-input support (default `process.platform`). */
-  readonly platform?: NodeJS.Platform;
+  /** Whether `agy`'s reads are kernel-confined, gating image input
+   *  (default `agyFileReadsConfined()`). */
+  readonly imageReadsConfined?: boolean;
   /** Test hooks for the headless spawn (keychain gate, argv, sandbox wrap) so
    *  a serve-level test never reaches the real `security` or sandbox. */
   readonly headlessHooks?: Pick<
@@ -1374,10 +1376,10 @@ const serveCursorHop = async (
  *     (`antigravity-attachments.ts`) and replaced in the prompt by a stable
  *     `[image: <path>]` line, which `agy` opens with its own `read_file`; the
  *     same image always renders the same text, so the conversation and
- *     Google's prompt cache hold across turns. macOS only: there the chat
- *     `agy` runs under a Seatbelt profile that can read nothing in `$HOME`
- *     but its slot, its binary and the daemon's `agy-*` temp dirs
- *     (`antigravity-seatbelt.ts`); elsewhere image turns decline;
+ *     Google's prompt cache hold across turns. Only where `agy`'s reads are
+ *     kernel-confined (`antigravity-seatbelt.ts`: Seatbelt on macOS,
+ *     Landlock on Linux) to nothing in `$HOME` or the state dir but its slot,
+ *     its binary and the `agy` temp root; elsewhere image turns decline;
  *   - client tools, and shapes with no CLI text view (a final tool-result
  *     turn that omits `tools`), run on a fresh `agy acp` session per request.
  * A decline (including an unanticipated failure) declines the hop and the
@@ -1438,10 +1440,10 @@ const serveAntigravityHop = async (
     !viaAcp &&
     view !== null &&
     view.paths.size > 0 &&
-    !agyImageInputSupported(overrides?.platform)
+    !(overrides?.imageReadsConfined ?? agyFileReadsConfined())
   ) {
     return {
-      declined: "antigravity: image input needs the macOS agy sandbox",
+      declined: "antigravity: image input needs agy's file reads confined",
     };
   }
   // Conversations belong to one account slot: its isolated HOME is part of
