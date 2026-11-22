@@ -23,7 +23,10 @@ const ANTIGRAVITY_POISON_KEYS: ReadonlySet<string> = new Set([
   "ANTIGRAVITY_HARNESS_PATH",
   "BROWSER",
 ]);
-const ANTIGRAVITY_POISON_PREFIX = /^(GOOGLE_CLOUD_|AGY_ACP_)/;
+/** Every `AGY_*` switch is dropped too: e.g. `AGY_ADC_AUTH=true` makes `agy`
+ *  sign in with Application Default Credentials instead of the account
+ *  slot's own sign-in (another identity / project). The daemon sets none. */
+const ANTIGRAVITY_POISON_PREFIX = /^(GOOGLE_CLOUD_|AGY_)/;
 
 /**
  * The desktop keyring (Secret Service over the session D-Bus) is reached

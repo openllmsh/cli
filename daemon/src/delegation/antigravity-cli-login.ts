@@ -31,6 +31,12 @@ const GOOGLE_OAUTH_OPTION_RE = />\s*1\.\s*Google OAuth/;
 /** The menu is fully drawn once its second option is on screen. */
 const SECOND_OPTION_RE = /(^|\n)\s*>?\s*2\.\s+\S/;
 const CODE_PROMPT_RE = /paste the authorization code/i;
+/** A full-screen clear / reset / alternate-screen switch: what came before it
+ *  is no longer on screen (stripping would otherwise keep it as text). */
+const SCREEN_CLEAR_RE = new RegExp(
+  `${"\u001b"}\\[[23]?J|${"\u001b"}c|${"\u001b"}\\[\\?(?:1049|47|1047)[hl]`,
+  "g",
+);
 /** How much of the latest screen must still show the code prompt for a
  *  pasted code to be typed (the screen redraws in place). */
 const CODE_PROMPT_TAIL_CHARS = 4_096;
@@ -253,6 +259,15 @@ export const startAgyLogin = (args: {
   // would leave that sequence's tail in the text.
   let raw = "";
   let screen = "";
+  /** What is on screen NOW: the text after the last full clear / reset /
+   *  screen switch (a cleared prompt is gone even if its text is retained). */
+  const currentScreen = (): string => {
+    let from = 0;
+    for (const m of raw.matchAll(SCREEN_CLEAR_RE)) {
+      from = (m.index ?? 0) + m[0].length;
+    }
+    return stripTerminal(raw.slice(from));
+  };
   let menuAnswered = false;
   let surfaced: TAgyAuthUrl | null = null;
   let codeTyped = false;
@@ -419,7 +434,7 @@ export const startAgyLogin = (args: {
       // screen moved on (the browser finished, the first-run wizard with
       // its consent page), nothing pasted may reach it.
       const atPrompt = CODE_PROMPT_RE.test(
-        screen.slice(-CODE_PROMPT_TAIL_CHARS),
+        currentScreen().slice(-CODE_PROMPT_TAIL_CHARS),
       );
       if (
         settled ||

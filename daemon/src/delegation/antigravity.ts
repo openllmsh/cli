@@ -126,13 +126,16 @@ const agyModelsStaleMarker = (): string =>
     stateDir(),
     `antigravity-models-stale-${createHash("sha256").update(agyModelsPath()).digest("hex").slice(0, 16)}`,
   );
-const markAgyModelsStale = (): void => {
+/** True when the mark was persisted (it outlives a restart). */
+const markAgyModelsStale = (): boolean => {
   agyModelsStaleCell.set(true);
   try {
     mkdirSync(stateDir(), { recursive: true });
     writeFileSync(agyModelsStaleMarker(), "", { mode: 0o600 });
+    return true;
   } catch (error) {
     logError("antigravity-models", error);
+    return false;
   }
 };
 const clearAgyModelsStale = (): void => {
@@ -268,7 +271,17 @@ const connect = (): Promise<TConnectResult> =>
       if (agyBin === null) return { connected: false, detail: INSTALL_HINT };
       const flow = resolveLoginFlow(PROVIDER, "browser");
       const home = agyHome();
+      // The slot is claimed BEFORE any await: account removal sees a login in
+      // progress for the whole setup (keychain, spawn), never a free slot.
+      let disposeLogin: () => void = () => {};
+      if (!wiring.slot.start(() => disposeLogin(), flow)) {
+        return { connected: false, detail: "daemon update in progress" };
+      }
       const keychain = await ensureIsolatedKeychain(home);
+      if (wiring.slot.wasCancelled()) {
+        wiring.slot.end(flow.flowId);
+        return { connected: false, detail: "sign-in cancelled" };
+      }
       if (keychain.kind !== "present") {
         const message =
           "Couldn't prepare the sign-in store for Google Antigravity. Try again.";
@@ -277,9 +290,16 @@ const connect = (): Promise<TConnectResult> =>
           message,
           retryable: true,
         });
+        wiring.slot.end(flow.flowId);
         return { connected: false, detail: message };
       }
-      const scratch = await mkdtemp(join(daemonTempDir(), "agy-login-"));
+      let scratch: string;
+      try {
+        scratch = await mkdtemp(join(daemonTempDir(), "agy-login-"));
+      } catch (error) {
+        wiring.slot.end(flow.flowId);
+        throw error;
+      }
       const login = startAgyLogin({
         argv: sandboxSpawnArgs([agyBin], {
           probe: unwrapAntigravityCliSpawn(),
@@ -297,12 +317,13 @@ const connect = (): Promise<TConnectResult> =>
         if (activeAgyLogin.get() === login) activeAgyLogin.set(null);
         void rm(scratch, { recursive: true, force: true });
       };
-      if (!wiring.slot.start(dispose, flow)) {
+      disposeLogin = dispose;
+      // Cancelled while it was being set up: close the screen it just opened.
+      if (wiring.slot.wasCancelled()) {
         dispose();
-        // The losing attempt's screen is gone before this returns: nothing
-        // (account removal included) races a login screen nobody tracks.
         await login.exited;
-        return { connected: false, detail: "daemon update in progress" };
+        wiring.slot.end(flow.flowId);
+        return { connected: false, detail: "sign-in cancelled" };
       }
       activeAgyLogin.set(login);
       emitLoginStarted(flow);
@@ -328,6 +349,9 @@ const connect = (): Promise<TConnectResult> =>
               logError("antigravity-connect", error);
             }
             await captureAgyModels(agyBin);
+            // A cancel that landed during the checks above wins: the
+            // attempt never reports success after the user cancelled.
+            if (wiring.slot.wasCancelled()) return false;
             finalizeLoginTerminal({
               flow,
               event: { kind: "succeeded" },
@@ -519,14 +543,25 @@ export const antigravityDelegate: TProviderDelegate = {
     noteAuthStoreIdentityChange(PROVIDER);
     // Invalid for readers first: a cache that can't be deleted still never
     // lists the signed-out account's models.
-    markAgyModelsStale();
+    const marked = markAgyModelsStale();
+    let deleted = false;
     try {
       rmSync(agyModelsPath(), { force: true });
+      deleted = true;
     } catch (error) {
       logError("antigravity-logout", error);
     }
-    return removed
+    if (!removed) {
+      return { ok: false, detail: "credential still present after logout" };
+    }
+    // Either invalidation lasts past a restart; with neither, the old
+    // account's list could come back — say so (logging out again retries).
+    return marked || deleted
       ? { ok: true, detail: "signed out of Google Antigravity" }
-      : { ok: false, detail: "credential still present after logout" };
+      : {
+          ok: false,
+          detail:
+            "signed out of Google Antigravity, but its cached model list couldn't be cleared — sign out again to retry",
+        };
   },
 };

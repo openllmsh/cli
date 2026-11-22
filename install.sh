@@ -2187,13 +2187,6 @@ provision_antigravity() {
   # replaces ~/.local/bin/agy — the path the daemon resolves first.
   if [ -n "$found" ] && { [ ! -f "$found" ] || ! agy_version_ok "$found"; }; then
     echo "  $name CLI: $found is unusable or older than 1.5.0 — updating."
-    # Google's installer leaves an existing ~/.local/bin/agy in place, so an
-    # old launcher there is moved aside (kept, never deleted) for the fresh
-    # install to land on that path.
-    if [ "$found" = "$dest" ]; then
-      mv -f "$dest" "$dest.pre-1.5" 2>/dev/null \
-        || echo "  $name CLI: couldn't move the old $dest aside." >&2
-    fi
     found=""
   fi
   if [ -n "$found" ]; then
@@ -2203,7 +2196,37 @@ provision_antigravity() {
     return 0
   fi
   launch_vendor_cli_install "$name" agy antigravity "$dest" \
-    "$ANTIGRAVITY_CLI_INSTALLER_URL" "$run_path" "$curl_bin"
+    "$ANTIGRAVITY_CLI_INSTALLER_URL" "$run_path" "$curl_bin" install_agy_cli
+}
+
+# The tracked worker's installer for `agy` (`launch_vendor_cli_install`'s
+# installer_fn): Google's installer, with the upgrade it can't do itself.
+# Its script leaves an existing ~/.local/bin/agy untouched ("already
+# installed"), so an outdated launcher is moved aside HERE, inside the worker,
+# and restored if the install fails or is interrupted — a user's working
+# 1.4.x is never left without a launcher. A successful upgrade keeps the old
+# build beside it (`agy.pre-1.5`), never deleted.
+install_agy_cli() {
+  local curl_bin="$1" url="$2" dest="$ANTIGRAVITY_CLI_BIN" backup=""
+  restore_agy() {
+    if [ -n "$backup" ] && [ -e "$backup" ] && [ ! -e "$dest" ]; then
+      mv -f "$backup" "$dest" 2>/dev/null || true
+    fi
+  }
+  if { [ -e "$dest" ] || [ -L "$dest" ]; } \
+    && ! { [ -f "$dest" ] && agy_version_ok "$dest"; }; then
+    backup="$dest.pre-1.5"
+    mv -f "$dest" "$backup" || return 1
+  fi
+  trap 'restore_agy; exit 130' HUP INT TERM
+  if "$curl_bin" -fsSL --proto '=https' "$url" | bash \
+    && [ -f "$dest" ] && [ -x "$dest" ]; then
+    trap - HUP INT TERM
+    return 0
+  fi
+  restore_agy
+  trap - HUP INT TERM
+  return 1
 }
 
 # Outcome of the last provision_clis run, by display name (", "-joined) — the
