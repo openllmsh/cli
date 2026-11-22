@@ -138,28 +138,36 @@ const markAgyModelsStale = (): boolean => {
     return false;
   }
 };
-const clearAgyModelsStale = (): void => {
-  agyModelsStaleCell.set(false);
+/** True when no mark is left (in memory or on disk). */
+const clearAgyModelsStale = (): boolean => {
   try {
     rmSync(agyModelsStaleMarker(), { force: true });
+    agyModelsStaleCell.set(false);
+    return true;
   } catch (error) {
     logError("antigravity-models", error);
+    return false;
   }
 };
 const agyModelsStale = (): boolean =>
   agyModelsStaleCell.get() || existsSync(agyModelsStaleMarker());
 
-/** True when the list was written (it then replaces any old one). */
+/** True when the fresh list was written AND serves (its stale mark is
+ *  gone). A mark that can't be cleared is not reported as recovered: the
+ *  next Connect captures again — clearing the mark alone is never safe,
+ *  since the file under it might still be the old account's. */
 const writeAgyModels = (rows: ReadonlyArray<TAgyModelRow>): boolean => {
   try {
     writeFileSync(agyModelsPath(), JSON.stringify(rows), { mode: 0o600 });
-    clearAgyModelsStale();
-    agyModelsCleanupOwed.set(false);
-    return true;
   } catch {
     // Best effort: the list is re-captured on the next Connect.
     return false;
   }
+  // The fresh list is on disk; it serves once the stale mark is gone. A
+  // mark that won't clear keeps the warning (a later Connect retries it).
+  const cleared = clearAgyModelsStale();
+  if (cleared) agyModelsCleanupOwed.set(false);
+  return cleared;
 };
 
 /** A sign-in where the old list could be neither marked stale on disk,
@@ -311,6 +319,11 @@ const connect = (): Promise<TConnectResult> =>
         wiring.slot.end(flow.flowId);
         throw error;
       }
+      // Before agy can save a NEW sign-in: whatever list is cached belongs
+      // to no live sign-in here (Connect only gets this far signed out), so
+      // it is marked unusable now — a daemon that stops between agy saving
+      // the sign-in and the capture below never serves it to the new one.
+      markAgyModelsStale();
       const login = startAgyLogin({
         argv: sandboxSpawnArgs([agyBin], {
           probe: unwrapAntigravityCliSpawn(),

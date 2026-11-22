@@ -22,6 +22,8 @@
  * guess. The terminal is wide so the URL never wraps.
  */
 
+import { Terminal } from "@xterm/headless";
+
 /** Wide enough that Google's OAuth URL (~700 chars) is one line. */
 export const AGY_LOGIN_COLS = 4000;
 export const AGY_LOGIN_ROWS = 60;
@@ -31,15 +33,6 @@ const GOOGLE_OAUTH_OPTION_RE = />\s*1\.\s*Google OAuth/;
 /** The menu is fully drawn once its second option is on screen. */
 const SECOND_OPTION_RE = /(^|\n)\s*>?\s*2\.\s+\S/;
 const CODE_PROMPT_RE = /paste the authorization code/i;
-/** A full-screen clear / reset / alternate-screen switch: what came before it
- *  is no longer on screen (stripping would otherwise keep it as text). */
-const SCREEN_CLEAR_RE = new RegExp(
-  `${"\u001b"}\\[[23]?J|${"\u001b"}c|${"\u001b"}\\[\\?(?:1049|47|1047)[hl]`,
-  "g",
-);
-/** How much of the latest screen must still show the code prompt for a
- *  pasted code to be typed (the screen redraws in place). */
-const CODE_PROMPT_TAIL_CHARS = 4_096;
 /** The signed-in banner: `<email> (<plan>)`, e.g. `me@example.com (Antigravity Starter Quota)`. */
 const SIGNED_IN_RE =
   /[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\s+\([^)]+\)/;
@@ -259,14 +252,36 @@ export const startAgyLogin = (args: {
   // would leave that sequence's tail in the text.
   let raw = "";
   let screen = "";
-  /** What is on screen NOW: the text after the last full clear / reset /
-   *  screen switch (a cleared prompt is gone even if its text is retained). */
-  const currentScreen = (): string => {
-    let from = 0;
-    for (const m of raw.matchAll(SCREEN_CLEAR_RE)) {
-      from = (m.index ?? 0) + m[0].length;
+  // What is on screen NOW, rendered by a real terminal emulator: clears,
+  // line erases, cursor moves and screen switches all apply, so a prompt
+  // agy replaced (consent page, wizard) is gone — not retained as text the
+  // way stripping keeps it.
+  const emulator = new Terminal({
+    cols: AGY_LOGIN_COLS,
+    rows: AGY_LOGIN_ROWS,
+    scrollback: 0,
+    allowProposedApi: true,
+  });
+  let visible = "";
+  const renderVisible = (): void => {
+    if (settled) return;
+    const buffer = emulator.buffer.active;
+    const lines: string[] = [];
+    for (let y = 0; y < emulator.rows; y++) {
+      lines.push(
+        buffer.getLine(buffer.viewportY + y)?.translateToString(true) ?? "",
+      );
     }
-    return stripTerminal(raw.slice(from));
+    visible = lines.join("\n");
+    // The link is surfaced only once its code prompt is ON the rendered
+    // screen, so a code pasted right away is never refused for lag.
+    if (menuAnswered && surfaced === null) {
+      const parsed = parseAgyAuthUrl(screen);
+      if (parsed !== null && CODE_PROMPT_RE.test(visible)) {
+        surfaced = parsed;
+        resolveUrl(parsed);
+      }
+    }
   };
   let menuAnswered = false;
   let surfaced: TAgyAuthUrl | null = null;
@@ -295,6 +310,7 @@ export const startAgyLogin = (args: {
     resolveUrl(surfaced);
     resolveDone(outcome);
     pty?.kill();
+    emulator.dispose();
   };
 
   const onData = (chunk: Uint8Array): void => {
@@ -302,6 +318,7 @@ export const startAgyLogin = (args: {
     // Keep a bounded tail: the screen redraws, only the latest state matters.
     raw = `${raw}${decoder.decode(chunk, { stream: true })}`.slice(-65_536);
     screen = stripTerminal(raw);
+    if (chunk.length > 0) emulator.write(chunk, renderVisible);
     if (!menuAnswered && MENU_RE.test(screen)) {
       // The menu can arrive across several chunks: decide only once Google
       // OAuth is selected, or the menu is complete without it.
@@ -321,13 +338,6 @@ export const startAgyLogin = (args: {
       menuAnswered = true;
       pty.write("\r");
       return;
-    }
-    if (menuAnswered && surfaced === null) {
-      const parsed = parseAgyAuthUrl(screen);
-      if (parsed !== null && CODE_PROMPT_RE.test(screen)) {
-        surfaced = parsed;
-        resolveUrl(parsed);
-      }
     }
     if (SIGNED_IN_RE.test(screen)) {
       // Already signed in when the screen opened: done. After a code or the
@@ -433,9 +443,7 @@ export const startAgyLogin = (args: {
       // …and only while that prompt is still what `agy` shows: once its
       // screen moved on (the browser finished, the first-run wizard with
       // its consent page), nothing pasted may reach it.
-      const atPrompt = CODE_PROMPT_RE.test(
-        currentScreen().slice(-CODE_PROMPT_TAIL_CHARS),
-      );
+      const atPrompt = CODE_PROMPT_RE.test(visible);
       if (
         settled ||
         childExited ||
