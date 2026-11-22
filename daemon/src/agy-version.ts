@@ -12,6 +12,14 @@ import { join } from "node:path";
  *  daemon's image / tool / fallback transport. An older build is unusable. */
 export const AGY_MIN_VERSION: readonly [number, number, number] = [1, 5, 0];
 
+/** The whole `agy --version` output: one version, optionally prefixed. */
+const VERSION_SHAPE =
+  /^(?:agy\s+)?v?(\d+)\.(\d+)\.(\d+)(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$/;
+
+/** Output that is a version at all (whatever its value). */
+const isVersionOutput = (version: string | null): boolean =>
+  version !== null && VERSION_SHAPE.test(version.trim());
+
 /**
  * `agy --version` output (`1.5.13`, `agy 1.5.13`, `v1.5.13`, optionally with
  * a `-prerelease` / `+build` suffix) at or above the stable `min`. A
@@ -22,12 +30,7 @@ export const versionAtLeast = (
   version: string | null,
   min: readonly [number, number, number],
 ): boolean => {
-  const m =
-    version === null
-      ? null
-      : /^(?:agy\s+)?v?(\d+)\.(\d+)\.(\d+)(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$/.exec(
-          version.trim(),
-        );
+  const m = version === null ? null : VERSION_SHAPE.exec(version.trim());
   if (m === null) return false;
   const parts = [Number(m[1]), Number(m[2]), Number(m[3])];
   for (let i = 0; i < 3; i++) {
@@ -71,8 +74,9 @@ export const readCliVersion = (path: string): string | null => {
  *  binary that timed out once may answer next time). */
 export const AGY_VERSION_RETRY_MS = 60_000;
 
-/** Version answers per binary stamp (path + size + mtime): a successful
- *  read lasts until the binary is replaced; a failed one only
+/** Version answers per binary stamp (path + size + mtime): a read that is a
+ *  version lasts until the binary is replaced; a failed one — no output, or
+ *  output that is no version (a warning line) — only
  *  {@link AGY_VERSION_RETRY_MS}. */
 const versionCache = new Map<
   string,
@@ -91,7 +95,8 @@ export const cachedCliVersion = (path: string): string | null => {
   const cached = versionCache.get(stamp);
   if (
     cached !== undefined &&
-    (cached.version !== null || Date.now() - cached.atMs < AGY_VERSION_RETRY_MS)
+    (isVersionOutput(cached.version) ||
+      Date.now() - cached.atMs < AGY_VERSION_RETRY_MS)
   ) {
     return cached.version;
   }
