@@ -1,8 +1,11 @@
 /**
- * Google Antigravity quota windows: the mapping from the quota summary that
- * `agy -p "/usage"` prints (`./antigravity-cli.ts`, same field names as
- * Google's `retrieveUserQuotaSummary`) to the provider's usage snapshot.
- * Pure — no token is read and nothing is fetched here.
+ * Google Antigravity quota windows: the mapping from a NORMALIZED quota
+ * summary (`bucketId`, `remainingFraction`, `resetTime`, `displayName`,
+ * `disabled`) to the provider's usage snapshot. `agy -p "/usage"` prints
+ * other names (`id`, `remaining_fraction`, `reset_time`, `name`);
+ * `agyUsageQuota` (`./antigravity-cli.ts`) converts them before calling
+ * here — raw CLI buckets map to nothing. Pure — no token is read and
+ * nothing is fetched here.
  */
 import type {
   TProviderUsageSnapshot,

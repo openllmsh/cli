@@ -263,6 +263,26 @@ export const startAgyLogin = (args: {
     allowProposedApi: true,
   });
   let visible = "";
+  // Output not yet rendered: while any is pending, the screen may already
+  // have moved on, so no code is typed and no exit is judged.
+  let pendingWrites = 0;
+  let drained: Array<() => void> = [];
+  const renderDone = (): void => {
+    pendingWrites -= 1;
+    renderVisible();
+    if (pendingWrites === 0) {
+      const waiters = drained;
+      drained = [];
+      for (const resolve of waiters) resolve();
+    }
+  };
+  /** Resolves once every chunk received so far is rendered. */
+  const allRendered = (): Promise<void> =>
+    pendingWrites === 0
+      ? Promise.resolve()
+      : new Promise<void>((resolve) => {
+          drained.push(resolve);
+        });
   const renderVisible = (): void => {
     if (settled) return;
     const buffer = emulator.buffer.active;
@@ -318,7 +338,10 @@ export const startAgyLogin = (args: {
     // Keep a bounded tail: the screen redraws, only the latest state matters.
     raw = `${raw}${decoder.decode(chunk, { stream: true })}`.slice(-65_536);
     screen = stripTerminal(raw);
-    if (chunk.length > 0) emulator.write(chunk, renderVisible);
+    if (chunk.length > 0) {
+      pendingWrites += 1;
+      emulator.write(chunk, renderDone);
+    }
     if (!menuAnswered && MENU_RE.test(screen)) {
       // The menu can arrive across several chunks: decide only once Google
       // OAuth is selected, or the menu is complete without it.
@@ -397,6 +420,10 @@ export const startAgyLogin = (args: {
     childExited = true;
     // Wait for a poll already running (it may be the one that sees the
     // sign-in); if it doesn't confirm, check once more now `agy` is gone.
+    // Everything agy wrote before exiting is rendered first, so a link it
+    // printed just before storing the sign-in and exiting still counts.
+    await Promise.race([allRendered(), Bun.sleep(1_000)]);
+    if (settled) return;
     const running = inFlight;
     const finalCheck = async (): Promise<boolean> => {
       if (running !== null && (await running)) return true;
@@ -445,6 +472,7 @@ export const startAgyLogin = (args: {
       // its consent page), nothing pasted may reach it.
       const atPrompt = CODE_PROMPT_RE.test(visible);
       if (
+        pendingWrites > 0 ||
         settled ||
         childExited ||
         surfaced === null ||

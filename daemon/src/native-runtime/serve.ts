@@ -1496,10 +1496,12 @@ const serveAntigravityHop = async (
     ? headless
     : await runAntigravityNative({
         bin: agyBin,
-        env,
         // ACP starts fresh under the account current NOW (a change during
-        // the headless attempt is already behind it); one during ACP's own
-        // setup or turn retires its process.
+        // the headless attempt is already behind it): its HOME and its
+        // epoch are read together, so the process can't run under the
+        // previous account's home carrying the new account's epoch. A
+        // change during ACP's own setup or turn retires its process.
+        env: overrides?.env ?? cliEnv("antigravity"),
         signInEpoch: antigravityHeadlessEpoch(),
         currentSignInEpoch: antigravityHeadlessEpoch,
         providerModelId: params.providerModelId,
