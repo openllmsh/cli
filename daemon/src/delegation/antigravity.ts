@@ -24,8 +24,8 @@ import type {
   TProviderUsageSnapshot,
 } from "@openllmsh/sdk/protocol";
 import { accountCell } from "../account-scope";
+import { cachedCliVersion } from "../agy-version";
 import { noteAuthStoreIdentityChange } from "../auth-user-action";
-import { cliInstallState } from "../cli-install";
 import { cliEnv, cliHome } from "../cli-paths";
 import { logError, logInfo } from "../logger";
 import { disposeAntigravityWarmPool } from "../native-runtime/antigravity-acp";
@@ -102,23 +102,41 @@ const signedIn = async (): Promise<boolean> =>
  *  list survives a daemon restart without another `agy` launch. Not a token. */
 const agyModelsPath = (): string => join(agyHome(), ".openllm-agy-models.json");
 
+/** Set when a sign-in starts replacing the list: until the new account's
+ *  list is written, nothing serves the old file (even if it could not be
+ *  deleted). Per account slot. */
+const agyModelsStale = accountCell<boolean>(() => false);
+
 const writeAgyModels = (rows: ReadonlyArray<TAgyModelRow>): void => {
   try {
     writeFileSync(agyModelsPath(), JSON.stringify(rows), { mode: 0o600 });
+    agyModelsStale.set(false);
   } catch {
-    // Best effort: the list is re-captured on the next sign-in.
+    // Best effort: the list is re-captured on the next Connect.
   }
+};
+
+/** A cached row: a non-empty string id and a string-or-null name. */
+const isAgyModelRow = (row: unknown): row is TAgyModelRow => {
+  if (typeof row !== "object" || row === null) return false;
+  const { value, name } = row as { value?: unknown; name?: unknown };
+  return (
+    typeof value === "string" &&
+    value.length > 0 &&
+    (name === null || typeof name === "string")
+  );
 };
 
 const readAgyModelsFile = (): ReadonlyArray<{
   readonly provider_model_id: string;
   readonly display_name?: string;
 }> | null => {
+  if (agyModelsStale.get()) return null;
   try {
-    const rows = JSON.parse(
-      readFileSync(agyModelsPath(), "utf8"),
-    ) as ReadonlyArray<TAgyModelRow>;
+    const rows: unknown = JSON.parse(readFileSync(agyModelsPath(), "utf8"));
+    // Malformed counts as missing, so a Connect re-captures it.
     if (!Array.isArray(rows) || rows.length === 0) return null;
+    if (!rows.every(isAgyModelRow)) return null;
     return rows.map((row) => ({
       provider_model_id: row.value,
       ...(row.name !== null ? { display_name: row.name } : {}),
@@ -135,11 +153,11 @@ const installState = async (): Promise<{
 }> => {
   // The resolver decides (an `agy` that can't run is not installed), so
   // status and Connect always agree.
-  if (resolveAntigravityCli() === null) {
-    return { installed: false, version: null };
-  }
-  const state = await cliInstallState(PROVIDER);
-  return { installed: true, version: state.installed ? state.version : null };
+  const agyBin = resolveAntigravityCli();
+  if (agyBin === null) return { installed: false, version: null };
+  // The version of the binary that actually runs (it honours
+  // OPENLLM_AGY_BIN), read once per binary stamp.
+  return { installed: true, version: cachedCliVersion(agyBin) };
 };
 
 /** A new or removed sign-in: nothing from the previous account may serve —
@@ -252,7 +270,9 @@ const connect = (): Promise<TConnectResult> =>
             // failure never fails the sign-in: the next sign-in retries it.
             disposeAccountRuntimes();
             noteAuthStoreIdentityChange(PROVIDER);
-            // The previous account's list never outlives its sign-in.
+            // The previous account's list never outlives its sign-in —
+            // not even when its file cannot be deleted.
+            agyModelsStale.set(true);
             try {
               rmSync(agyModelsPath(), { force: true });
             } catch (error) {
@@ -344,8 +364,8 @@ const submitLoginCode = async (
 export const antigravityDelegate: TProviderDelegate = {
   slug: PROVIDER,
   primaryLoginMethod: "browser",
-  // Status reads sign-in metadata; its install probe may run a cached
-  // `agy --version` (bounded by the probe timeout) — nothing to cancel.
+  // Status reads sign-in metadata; its install check may run one
+  // `agy --version` per binary stamp (5 s cap) — nothing to cancel.
   statusCancellable: false,
   connect,
   submitLoginCode,

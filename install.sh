@@ -1941,6 +1941,9 @@ launch_vendor_cli_install() {
     # Background worker: parent may exit; this job continues and owns terminal
     # state transitions. pipefail so a nonzero curl fails the pipeline.
     set -euo pipefail
+    # A vendor's installer never needs the OpenLLM key: keep it out of its
+    # environment (this subshell only; the parent install still pairs).
+    unset OPENLLM_API_KEY SUPPLIED_KEY
     my_pid=""
     # Bounded wall deadline (~10s), not a fixed short iteration count — slow
     # parent `ps`/JSON write under load must still complete the handshake.
@@ -2141,17 +2144,18 @@ agy_version_ok() {
 provision_antigravity() {
   local run_path="$1" curl_bin="$2"
   local name="Google Antigravity" dest="$ANTIGRAVITY_CLI_BIN" found=""
-  # An executable FILE (a directory is -x too), or an `agy` already on PATH:
-  # the daemon accepts either, and a second copy would shadow the first.
-  if [ -f "$dest" ] && [ -x "$dest" ]; then
+  # The daemon's precedence: a home launcher that EXISTS decides (even an
+  # unusable one — it is repaired); only without it may an `agy` on PATH
+  # serve (a second copy would shadow it).
+  if [ -e "$dest" ] || [ -L "$dest" ]; then
     found="$dest"
   elif has_executable_command agy; then
     found="$(command -v agy)"
   fi
   # An older build (no `agy acp`) is upgraded by Google's installer, which
   # replaces ~/.local/bin/agy — the path the daemon resolves first.
-  if [ -n "$found" ] && ! agy_version_ok "$found"; then
-    echo "  $name CLI: $found is older than 1.5.0 — updating."
+  if [ -n "$found" ] && { [ ! -f "$found" ] || ! agy_version_ok "$found"; }; then
+    echo "  $name CLI: $found is unusable or older than 1.5.0 — updating."
     found=""
   fi
   if [ -n "$found" ]; then
@@ -2592,7 +2596,7 @@ fi
 # Fixed, parseable install summary (agents and humans both read this).
 build_vendor_status_line() {
   # display|PATH name|slug|dest launcher — dests match provision_clis.
-  local parts="" name bin slug dest stage reason path body
+  local parts="" name bin slug dest stage reason path body agy_candidate
   for entry in \
     "claude|claude|claude_code|$HOME/.local/bin/claude" \
     "codex|codex|chatgpt|$HOME/.local/bin/codex" \
@@ -2617,8 +2621,14 @@ build_vendor_status_line() {
     elif [ "$slug" = antigravity ] && [ -f "$OPENLLM_DIR/antigravity-disabled" ]; then
       stage="skipped"
       reason=""
-    elif { has_executable_command "$bin" || [ -x "$dest" ] || [ -x "$HOME/.local/bin/$bin" ]; } \
-      && { [ "$slug" != antigravity ] || agy_version_ok "$(if [ -f "$dest" ] && [ -x "$dest" ]; then printf '%s' "$dest"; else command -v "$bin"; fi)"; }; then
+    # Antigravity: the daemon's precedence (an existing home launcher
+    # decides; PATH only without it), and only a usable 1.5+ file counts.
+    elif if [ "$slug" = antigravity ]; then
+        agy_candidate="$(if [ -e "$dest" ] || [ -L "$dest" ]; then printf '%s' "$dest"; else command -v "$bin" 2>/dev/null; fi)"
+        [ -n "$agy_candidate" ] && [ -f "$agy_candidate" ] && agy_version_ok "$agy_candidate"
+      else
+        has_executable_command "$bin" || [ -x "$dest" ] || [ -x "$HOME/.local/bin/$bin" ]
+      fi; then
       stage="installed"
       reason=""
     elif case "$VENDOR_LAUNCH_FAILED_SLUGS" in *",$slug,"*) true ;; *) false ;; esac; then

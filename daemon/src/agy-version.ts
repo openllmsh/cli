@@ -11,12 +11,22 @@ import { tmpdir } from "node:os";
  *  daemon's image / tool / fallback transport. An older build is unusable. */
 export const AGY_MIN_VERSION: readonly [number, number, number] = [1, 5, 0];
 
-/** `x.y.z` at or above `min`; anything unparseable is not. */
+/**
+ * `agy --version` output (`1.5.13`, `agy 1.5.13`, `v1.5.13`, optionally with
+ * a `-prerelease` / `+build` suffix) at or above the stable `min`. A
+ * prerelease of `min` itself sorts below it (semver); anything that is not
+ * that whole shape is not a version.
+ */
 export const versionAtLeast = (
   version: string | null,
   min: readonly [number, number, number],
 ): boolean => {
-  const m = version === null ? null : /(\d+)\.(\d+)\.(\d+)/.exec(version);
+  const m =
+    version === null
+      ? null
+      : /^(?:agy\s+)?v?(\d+)\.(\d+)\.(\d+)(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$/.exec(
+          version.trim(),
+        );
   if (m === null) return false;
   const parts = [Number(m[1]), Number(m[2]), Number(m[3])];
   for (let i = 0; i < 3; i++) {
@@ -24,7 +34,8 @@ export const versionAtLeast = (
     const b = min[i] ?? 0;
     if (a !== b) return a > b;
   }
-  return true;
+  // Same core as the stable minimum: a prerelease of it is older.
+  return m[4] === undefined;
 };
 
 /** `<bin> --version` (local, no sign-in, 5 s cap), or null. Run with a
@@ -43,9 +54,17 @@ export const readCliVersion = (path: string): string | null => {
   }
 };
 
-/** Version answers per binary stamp (path + size + mtime): a binary is
- *  asked once until it is replaced. */
-const versionCache = new Map<string, string | null>();
+/** How long a FAILED version read is remembered before it is retried (a
+ *  binary that timed out once may answer next time). */
+export const AGY_VERSION_RETRY_MS = 60_000;
+
+/** Version answers per binary stamp (path + size + mtime): a successful
+ *  read lasts until the binary is replaced; a failed one only
+ *  {@link AGY_VERSION_RETRY_MS}. */
+const versionCache = new Map<
+  string,
+  { readonly version: string | null; readonly atMs: number }
+>();
 
 /** {@link readCliVersion}, cached per binary stamp. */
 export const cachedCliVersion = (path: string): string | null => {
@@ -56,9 +75,15 @@ export const cachedCliVersion = (path: string): string | null => {
   } catch {
     return null;
   }
-  if (versionCache.has(stamp)) return versionCache.get(stamp) ?? null;
+  const cached = versionCache.get(stamp);
+  if (
+    cached !== undefined &&
+    (cached.version !== null || Date.now() - cached.atMs < AGY_VERSION_RETRY_MS)
+  ) {
+    return cached.version;
+  }
   const version = readCliVersion(path);
-  versionCache.set(stamp, version);
+  versionCache.set(stamp, { version, atMs: Date.now() });
   return version;
 };
 

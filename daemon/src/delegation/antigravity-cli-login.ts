@@ -305,19 +305,18 @@ export const startAgyLogin = (args: {
   // Once the link is out, the store decides: the browser may complete the
   // sign-in on its own, or a pasted code may.
   // One store check at a time: a slow keychain probe never piles up.
-  let checking = false;
+  let inFlight: Promise<boolean> | null = null;
   const checkStore = (): void => {
-    if (settled || checking) return;
-    checking = true;
-    void args.isSignedIn().then(
-      (yes) => {
-        checking = false;
-        if (yes) settle({ kind: "signed_in" });
-      },
-      () => {
-        checking = false;
-      },
+    if (settled || inFlight !== null) return;
+    const check = args.isSignedIn().then(
+      (yes) => yes,
+      () => false,
     );
+    inFlight = check;
+    void check.then((yes) => {
+      inFlight = null;
+      if (yes) settle({ kind: "signed_in" });
+    });
   };
   const poll = setInterval(() => {
     if (surfaced !== null) checkStore();
@@ -350,8 +349,13 @@ export const startAgyLogin = (args: {
     // Nothing is listening any more: no code may be typed while the final
     // store check runs.
     childExited = true;
+    // Wait for a poll already running (it may be the one that sees the
+    // sign-in); if it doesn't confirm, check once more now `agy` is gone.
+    const running = inFlight;
     const stored =
-      surfaced !== null && (await args.isSignedIn().catch(() => false));
+      surfaced !== null &&
+      ((running !== null && (await running)) ||
+        (await args.isSignedIn().catch(() => false)));
     settle(
       stored
         ? { kind: "signed_in" }

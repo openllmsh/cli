@@ -806,7 +806,10 @@ export const runAntigravityHeadless = async (
   const push = (item: TItem): void => {
     // A reader that stopped reading: end the turn rather than buffer the
     // rest of the reply in memory.
+    // (Terminal items arrive after `ended` is set: they always fit, so a
+    // full queue never swallows the final usage chunk.)
     if (
+      !ended &&
       typeof item === "object" &&
       !("failure" in item) &&
       queue.length >= ANTIGRAVITY_HEADLESS_MAX_QUEUED

@@ -209,7 +209,9 @@ export const allProvisionedVendorClisPresent = (
     // decides — a newer copy on PATH never hides an old launcher.
     if (vendor.minVersion !== undefined) {
       const launcher = vendor.dest(home);
-      if (isExecutableFile(launcher)) {
+      // Present at all (even unusable: not executable, a directory, too old)
+      // → it alone decides, as in the runtime; absent → PATH may serve.
+      if (existsSync(launcher)) {
         if (usable(launcher)) continue;
         return false;
       }

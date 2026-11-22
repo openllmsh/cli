@@ -61,7 +61,7 @@ import { ensureKeychainReady } from "../delegation/util";
 import { unwrapAntigravityCliSpawn } from "../sandbox/policy";
 import { daemonTempDir } from "../sandbox/working-set";
 import { DAEMON_VERSION } from "../version";
-import { prepareAntigravityCliProfile } from "./antigravity-cli-settings";
+import { ensureAntigravityCliSettings } from "./antigravity-cli-settings";
 import { antigravitySpawnEnv } from "./antigravity-env";
 import { AcpClient, AcpRpcError, createAcpTurnState } from "./cursor-acp";
 import type { TCursorMcpServer } from "./cursor-mcp-server";
@@ -637,7 +637,8 @@ export type TAntigravityNativeParams = {
   /** Keychain readiness gate (default {@link ensureKeychainReady}). */
   readonly ensureKeychain?: (home: string) => Promise<TStoreRead<void>>;
   /** Profile prep: tool deny rules (default
-   *  {@link prepareAntigravityCliProfile}). */
+   *  {@link ensureAntigravityCliSettings} — the tool-deny settings only; the
+   *  headless custom agent is not ACP's to need). */
   readonly ensureSettings?: (home: string) => boolean;
   /** Spawn unconfined (default {@link unwrapAntigravityCliSpawn}: macOS, where
    *  `agy` must reach the isolated keychain through `/usr/bin/security`). */
@@ -687,7 +688,7 @@ export const runAntigravityNative = async (
     };
   }
   // The tool deny rules must be in place before the agent starts.
-  if (!(params.ensureSettings ?? prepareAntigravityCliProfile)(home)) {
+  if (!(params.ensureSettings ?? ensureAntigravityCliSettings)(home)) {
     return {
       kind: "declined",
       reason: "antigravity: agy settings could not be locked down",

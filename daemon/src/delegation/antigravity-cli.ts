@@ -220,6 +220,7 @@ export const agyUsageWindows = (
         window: bucket.window,
         remainingFraction: bucket.remaining_fraction,
         resetTime: bucket.reset_time,
+        disabled: bucket.disabled,
       });
     }
     mapped.push({ displayName: group.name, buckets: out });

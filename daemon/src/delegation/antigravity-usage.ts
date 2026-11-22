@@ -64,6 +64,10 @@ const quotaFamilyOf = (bucketId: string): string | null =>
       ? "Claude & GPT"
       : null;
 
+/** The allowance each mapped window belongs to (its bucket-id family, or
+ *  its model group): how the snapshot groups windows. */
+const windowFamily = new WeakMap<TProviderUsageWindow, string>();
+
 /** `retrieveUserQuotaSummary` → windows (Claude + GPT share one allowance). */
 export const summaryWindows = (summary: unknown): TProviderUsageWindow[] => {
   const s = summary as {
@@ -93,7 +97,10 @@ export const summaryWindows = (summary: unknown): TProviderUsageWindow[] => {
         bucket,
         weekly ? WEEK_MS : session ? FIVE_HOURS_MS : undefined,
       );
-      if (window !== null) out.set(bucket.bucketId, window);
+      if (window !== null) {
+        windowFamily.set(window, family);
+        out.set(bucket.bucketId, window);
+      }
     }
   }
   return [...out.values()];
@@ -121,7 +128,7 @@ export const antigravityQuotaSnapshot = (
   const families = new Map<string, boolean>();
   for (const w of windows) {
     const id = w.meter_id ?? w.label;
-    const family = quotaFamilyOf(id) ?? id;
+    const family = windowFamily.get(w) ?? quotaFamilyOf(id) ?? id;
     const out = w.percent_used >= QUOTA_REJECT_PERCENT;
     families.set(family, (families.get(family) ?? false) || out);
   }
