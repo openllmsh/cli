@@ -52,7 +52,13 @@ import {
   providerSupportsCaptureFor,
   resolveExecutionSelection,
 } from "../execution-registry";
-import { logDebug, logError, logWarn, safeDiagnosticMessage } from "../logger";
+import {
+  logDebug,
+  logError,
+  logInfo,
+  logWarn,
+  safeDiagnosticMessage,
+} from "../logger";
 import type { TAntigravityNativeParams } from "./antigravity-acp";
 import { runAntigravityNative } from "./antigravity-acp";
 import type { TAntigravityHeadlessParams } from "./antigravity-headless";
@@ -1546,6 +1552,11 @@ const serveAntigravityCli = async (
         conversation.deltaText,
       )
     : conversation.deltaText;
+  // A follow-up that found no conversation is seeded onto a fresh one: its
+  // prompt cache is cold, so say so (#1053).
+  if (conversation.hasPrior && lease.sessionId === null) {
+    logInfo("antigravity-headless", "follow-up has no conversation; seeding");
+  }
   // A setup error (keychain, spawn) still releases the lease (`null`).
   const run = await runAntigravityHeadless({
     bin: agyBin,

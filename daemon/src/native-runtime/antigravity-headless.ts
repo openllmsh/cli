@@ -42,7 +42,7 @@ import { agyVersionUsable, cachedCliVersion } from "../agy-version";
 import { killHard } from "../delegation/antigravity-cli-login";
 import type { TStoreRead } from "../delegation/util";
 import { ensureKeychainReady } from "../delegation/util";
-import { logError } from "../logger";
+import { logError, logInfo } from "../logger";
 import { sandboxSpawnArgs } from "../sandbox/exec";
 import { unwrapAntigravityCliSpawn } from "../sandbox/policy";
 import { agyTempRoot, daemonTempDir } from "../sandbox/working-set/base";
@@ -806,17 +806,29 @@ export const runAntigravityHeadless = async (
   const spawnEpoch = sparesEpoch;
   params.onServingEpoch?.(spawnEpoch);
   let proc: HeadlessProcess;
+  /** Which process serves the turn — the one signal that tells a warm
+   *  continuation from a seeded fresh conversation (#1053). */
+  let path: "parked" | "resume" | "spare" | "fresh";
   try {
-    proc =
-      resumeId !== null
-        ? (takeParked(key, resumeId) ??
-          (await spawn(["--conversation", resumeId])))
-        : (takeSpare(key) ?? (await spawn()));
+    const reused =
+      resumeId !== null ? takeParked(key, resumeId) : takeSpare(key);
+    if (reused !== null) {
+      proc = reused;
+      path = resumeId !== null ? "parked" : "spare";
+    } else {
+      proc = await spawn(resumeId !== null ? ["--conversation", resumeId] : []);
+      path = resumeId !== null ? "resume" : "fresh";
+    }
   } catch (error) {
     return fallback(
       `spawn failed: ${error instanceof Error ? error.message : String(error)}`,
     );
   }
+  logInfo("antigravity-headless", "turn process", {
+    path,
+    continuing: requestedId !== null,
+    accountChanged,
+  });
   // This request used a process: when the key is in active use, start the
   // next one now so the following request skips start-up (spare rules above).
   const spareTtlMs = params.spareTtlMs ?? ANTIGRAVITY_HEADLESS_SPARE_TTL_MS;

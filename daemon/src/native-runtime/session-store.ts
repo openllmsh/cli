@@ -53,7 +53,18 @@ const hashConversation = (
   // started with another model. Codex's own GPT-5.6 Sol/Terra (V2) and Luna
   // (V1) cannot share a resumed thread; resuming across a model change would
   // feed the wrong-model thread (audit 2026-07-14 §F3).
-  h.update(JSON.stringify({ model, systemText, turns }));
+  //
+  // Text is compared with its surrounding whitespace trimmed: clients
+  // routinely trim the assistant content they resend (vendor replies end in
+  // "\n"), and an exact match would then miss every follow-up — each one
+  // seeded onto a fresh vendor session with a cold prompt cache (#1053).
+  h.update(
+    JSON.stringify({
+      model,
+      systemText: systemText?.trim() ?? null,
+      turns: turns.map((t) => ({ role: t.role, text: t.text.trim() })),
+    }),
+  );
   return h.digest("hex");
 };
 
