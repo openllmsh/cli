@@ -86,7 +86,7 @@ export const summaryWindows = (summary: unknown): TProviderUsageWindow[] => {
       if (bucket.disabled === true || !nonEmpty(bucket.bucketId)) continue;
       const family =
         quotaFamilyOf(bucket.bucketId) ??
-        (nonEmpty(group.displayName)
+        (nonEmpty(group.displayName) && group.displayName.trim().length > 0
           ? group.displayName.trim()
           : bucket.bucketId);
       const weekly = bucket.window === "weekly";

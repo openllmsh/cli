@@ -2120,7 +2120,9 @@ agy_version_ok() {
   # hold a pipe open, never a finished read of a file.
   local tmp probe watchdog rc
   tmp="$(mktemp "${TMPDIR:-/tmp}/agy-version.XXXXXX")" || return 1
-  HOME="${TMPDIR:-/tmp}" "$1" --version >"$tmp" 2>/dev/null </dev/null &
+  # The probe never sees the pairing key (the parent still pairs with it).
+  env -u OPENLLM_API_KEY -u SUPPLIED_KEY HOME="${TMPDIR:-/tmp}" \
+    "$1" --version >"$tmp" 2>/dev/null </dev/null &
   probe=$!
   ( sleep 5; kill -9 "$probe" 2>/dev/null ) >/dev/null 2>&1 </dev/null &
   watchdog=$!
@@ -2135,7 +2137,9 @@ agy_version_ok() {
   # The daemon's rule (agy-version.ts): the WHOLE output is one version
   # (`1.5.13`, `agy 1.5.13`, `v1.5.13`, optional -pre / +build), and a
   # prerelease of 1.5.0 is older than 1.5.0.
-  out="$(printf '%s' "$out" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+  # Exactly one nonblank line: a version plus a diagnostic is no version.
+  [ "$(printf '%s\n' "$out" | grep -c '[^[:space:]]')" -eq 1 ] || return 1
+  out="$(printf '%s\n' "$out" | grep '[^[:space:]]' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
   printf '%s' "$out" | grep -Eq '^(agy[[:space:]]+)?v?[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$' || return 1
   v="$(printf '%s' "$out" | grep -Eo '[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?' | head -n 1)"
   local core patch pre=""
@@ -2239,6 +2243,14 @@ vendor_cli_on_wait_signal() {
 }
 
 provision_clis() {
+  # Antigravity is on by default. `OPENLLM_ANTIGRAVITY=0` opts out and writes
+  # the marker the daemon reads (packages/cli/daemon/src/antigravity-feature.ts);
+  # `=1` opts back in. Recorded FIRST, so the preference sticks even when a
+  # prerequisite below (curl) ends provisioning early.
+  case "${OPENLLM_ANTIGRAVITY:-}" in
+    1) rm -f "$OPENLLM_DIR/antigravity-disabled" 2>/dev/null || true ;;
+    0) touch "$OPENLLM_DIR/antigravity-disabled" 2>/dev/null || true ;;
+  esac
   VENDOR_FAILED_NAMES=""
   VENDOR_PENDING_NAMES=""
   VENDOR_REAPED_NAMES=""
@@ -2316,13 +2328,6 @@ provision_clis() {
         ;;
     esac
   done
-  # Antigravity is on by default. `OPENLLM_ANTIGRAVITY=0` opts out and writes
-  # the marker the daemon reads (packages/cli/daemon/src/antigravity-feature.ts);
-  # `=1` opts back in.
-  case "${OPENLLM_ANTIGRAVITY:-}" in
-    1) rm -f "$OPENLLM_DIR/antigravity-disabled" 2>/dev/null || true ;;
-    0) touch "$OPENLLM_DIR/antigravity-disabled" 2>/dev/null || true ;;
-  esac
   if [ ! -f "$OPENLLM_DIR/antigravity-disabled" ] && vendor_cli_selected antigravity; then
     VENDOR_LAST_PID=""
     launch_rc=0
