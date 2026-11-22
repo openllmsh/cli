@@ -7,16 +7,24 @@
  * (`native-runtime/antigravity-acp.ts`, images / client tools / structured
  * output / headless fallback) both use that one sign-in.
  *
- * Nothing here reads a token: `status()` is metadata only (an isolated
- * keychain item or `agy`'s own token file exists, `./antigravity-cli.ts`),
- * usage is `agy`'s own `/usage`, and the model list is `agy models` captured at
- * sign-in. Antigravity has no embeddings or image-generation surface, so those
- * endpoints are not served by it.
+ * Nothing here reads a token: `status()`'s credential check is metadata only
+ * (an isolated keychain item or `agy`'s own token file exists,
+ * `./antigravity-cli.ts`), usage is `agy`'s own `/usage`, and the model list
+ * is `agy models` captured at sign-in. Antigravity has no embeddings or
+ * image-generation surface, so those endpoints are not served by it.
  *
- * Demand-only: `status()` never spawns `agy`.
+ * `status()` signs nothing in and runs no inference. Its install check may
+ * run one `agy --version` per binary (cached per binary stamp, 5 s cap).
  */
 
-import { readFileSync, rmSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import {
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import { join } from "node:path";
 import type {
@@ -27,6 +35,7 @@ import { accountCell } from "../account-scope";
 import { cachedCliVersion } from "../agy-version";
 import { noteAuthStoreIdentityChange } from "../auth-user-action";
 import { cliEnv, cliHome } from "../cli-paths";
+import { stateDir } from "../env";
 import { logError, logInfo } from "../logger";
 import { disposeAntigravityWarmPool } from "../native-runtime/antigravity-acp";
 import { antigravitySpawnEnv } from "../native-runtime/antigravity-env";
@@ -103,15 +112,43 @@ const signedIn = async (): Promise<boolean> =>
  *  list survives a daemon restart without another `agy` launch. Not a token. */
 const agyModelsPath = (): string => join(agyHome(), ".openllm-agy-models.json");
 
-/** Set when a sign-in starts replacing the list: until the new account's
- *  list is written, nothing serves the old file (even if it could not be
- *  deleted). Per account slot. */
-const agyModelsStale = accountCell<boolean>(() => false);
+/**
+ * Set when a sign-in or logout starts replacing the list: until the new
+ * account's list is written, nothing serves the old file, even if it could
+ * not be deleted. Per account slot, in memory AND as a marker in the
+ * daemon's state dir (a different directory from the list), so it outlives
+ * a restart too.
+ */
+const agyModelsStaleCell = accountCell<boolean>(() => false);
+const agyModelsStaleMarker = (): string =>
+  join(
+    stateDir(),
+    `antigravity-models-stale-${createHash("sha256").update(agyModelsPath()).digest("hex").slice(0, 16)}`,
+  );
+const markAgyModelsStale = (): void => {
+  agyModelsStaleCell.set(true);
+  try {
+    mkdirSync(stateDir(), { recursive: true });
+    writeFileSync(agyModelsStaleMarker(), "", { mode: 0o600 });
+  } catch (error) {
+    logError("antigravity-models", error);
+  }
+};
+const clearAgyModelsStale = (): void => {
+  agyModelsStaleCell.set(false);
+  try {
+    rmSync(agyModelsStaleMarker(), { force: true });
+  } catch (error) {
+    logError("antigravity-models", error);
+  }
+};
+const agyModelsStale = (): boolean =>
+  agyModelsStaleCell.get() || existsSync(agyModelsStaleMarker());
 
 const writeAgyModels = (rows: ReadonlyArray<TAgyModelRow>): void => {
   try {
     writeFileSync(agyModelsPath(), JSON.stringify(rows), { mode: 0o600 });
-    agyModelsStale.set(false);
+    clearAgyModelsStale();
   } catch {
     // Best effort: the list is re-captured on the next Connect.
   }
@@ -132,7 +169,7 @@ const readAgyModelsFile = (): ReadonlyArray<{
   readonly provider_model_id: string;
   readonly display_name?: string;
 }> | null => {
-  if (agyModelsStale.get()) return null;
+  if (agyModelsStale()) return null;
   try {
     const rows: unknown = JSON.parse(readFileSync(agyModelsPath(), "utf8"));
     // Malformed counts as missing, so a Connect re-captures it.
@@ -250,7 +287,7 @@ const connect = (): Promise<TConnectResult> =>
         cwd: scratch,
         urlWaitMs: URL_WAIT_MS,
         loginTimeoutMs: LOGIN_TIMEOUT_MS,
-        isSignedIn: () => agyCliSignedIn(home),
+        isSignedIn: (): Promise<boolean> => agyCliSignedIn(home),
       });
       const dispose = (): void => {
         login.cancel();
@@ -265,7 +302,7 @@ const connect = (): Promise<TConnectResult> =>
       emitLoginStarted(flow);
 
       // Settle the attempt when the screen finishes, whichever way.
-      const settled = login.done.then(async (outcome) => {
+      const settled = login.done.then(async (outcome): Promise<boolean> => {
         // Cleanup runs however the attempt ends — including a failure below.
         try {
           if (wiring.slot.wasCancelled()) return false;
@@ -278,7 +315,7 @@ const connect = (): Promise<TConnectResult> =>
             noteAuthStoreIdentityChange(PROVIDER);
             // The previous account's list never outlives its sign-in —
             // not even when its file cannot be deleted.
-            agyModelsStale.set(true);
+            markAgyModelsStale();
             try {
               rmSync(agyModelsPath(), { force: true });
             } catch (error) {
@@ -464,17 +501,19 @@ export const antigravityDelegate: TProviderDelegate = {
   // cleared rather than assumed empty). That one store is the whole sign-in:
   // headless and `agy acp` share it.
   logout: async () => {
-    const removed = await removeAgySignIn(agyHome()).catch((error: unknown) => {
-      logError("antigravity-logout", error);
-      return false;
-    });
+    const removed = await removeAgySignIn(agyHome()).catch(
+      (error: unknown): boolean => {
+        logError("antigravity-logout", error);
+        return false;
+      },
+    );
     // Whatever was removed, nothing from the old account may serve or be
     // listed.
     disposeAccountRuntimes();
     noteAuthStoreIdentityChange(PROVIDER);
     // Invalid for readers first: a cache that can't be deleted still never
     // lists the signed-out account's models.
-    agyModelsStale.set(true);
+    markAgyModelsStale();
     try {
       rmSync(agyModelsPath(), { force: true });
     } catch (error) {

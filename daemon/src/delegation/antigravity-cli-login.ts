@@ -79,8 +79,24 @@ export const parseAgyAuthUrl = (screen: string): TAgyAuthUrl | null => {
     p.get("response_type") === "code" &&
     (p.get("client_id") ?? "").endsWith(".apps.googleusercontent.com") &&
     (p.get("code_challenge") ?? "").length > 0 &&
-    redirect.startsWith("https://antigravity.google/");
+    isAntigravityCallback(redirect);
   return ok ? { url: url.toString() } : null;
+};
+
+/** Exactly Antigravity's own OAuth callback page — never any other path on
+ *  the host. */
+const isAntigravityCallback = (redirect: string): boolean => {
+  try {
+    const u = new URL(redirect);
+    return (
+      u.protocol === "https:" &&
+      u.hostname === "antigravity.google" &&
+      u.port === "" &&
+      u.pathname === "/oauth-callback"
+    );
+  } catch {
+    return false;
+  }
 };
 
 /** Google authorization codes (`4/0A…`): printable token chars only, so
@@ -352,10 +368,14 @@ export const startAgyLogin = (args: {
     // Wait for a poll already running (it may be the one that sees the
     // sign-in); if it doesn't confirm, check once more now `agy` is gone.
     const running = inFlight;
-    const stored =
-      surfaced !== null &&
-      ((running !== null && (await running)) ||
-        (await args.isSignedIn().catch(() => false)));
+    const finalCheck = async (): Promise<boolean> => {
+      if (running !== null && (await running)) return true;
+      // Tracked like a poll, so the interval never starts another alongside.
+      const check = args.isSignedIn().catch(() => false);
+      inFlight = check;
+      return check;
+    };
+    const stored = surfaced !== null && (await finalCheck());
     settle(
       stored
         ? { kind: "signed_in" }

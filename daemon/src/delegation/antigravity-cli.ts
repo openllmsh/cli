@@ -158,6 +158,10 @@ const runAgy = async (
     return result.code === 0
       ? { kind: "ok", stdout: result.stdout }
       : { kind: "unavailable", reason: `agy exited ${result.code ?? "?"}` };
+  } catch {
+    // A runner that throws (spawn failure, timeout) is "unavailable" like
+    // every other failure here — never a rejected usage / models read.
+    return { kind: "unavailable", reason: "agy command failed" };
   } finally {
     await rm(cwd, { recursive: true, force: true });
   }

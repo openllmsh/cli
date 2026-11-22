@@ -2263,7 +2263,8 @@ provision_clis() {
       ;;
     0)
       ANTIGRAVITY_OPTED_OUT=1
-      touch "$ANTIGRAVITY_DISABLED_MARKER" 2>/dev/null \
+      { mkdir -p "$(dirname "$ANTIGRAVITY_DISABLED_MARKER")" \
+        && touch "$ANTIGRAVITY_DISABLED_MARKER"; } 2>/dev/null \
         || echo "  Google Antigravity: couldn't save the opt-out (it applies to this run)." >&2
       ;;
     *) [ -f "$ANTIGRAVITY_DISABLED_MARKER" ] && ANTIGRAVITY_OPTED_OUT=1 ;;
@@ -2653,7 +2654,13 @@ build_vendor_status_line() {
     # An `agy` older than 1.5.0 is not installed (it is being, or failed to
     # be, upgraded): fall through to the worker's own record.
     # Antigravity opted out: skipped, whatever is (not) on disk.
-    elif [ "$slug" = antigravity ] && { [ "${ANTIGRAVITY_OPTED_OUT:-0}" = 1 ] || [ -f "${ANTIGRAVITY_DISABLED_MARKER:-$OPENLLM_DIR/antigravity-disabled}" ]; }; then
+    # (provision_clis decided ANTIGRAVITY_OPTED_OUT from the explicit value
+    # first — an OPENLLM_ANTIGRAVITY=1 whose marker couldn't be removed is
+    # NOT skipped; only without that decision does the marker answer.)
+    elif [ "$slug" = antigravity ] && {
+        if [ -n "${ANTIGRAVITY_OPTED_OUT:-}" ]; then [ "$ANTIGRAVITY_OPTED_OUT" = 1 ]
+        else [ -f "${ANTIGRAVITY_DISABLED_MARKER:-$OPENLLM_DIR/antigravity-disabled}" ]; fi
+      }; then
       stage="skipped"
       reason=""
     # Antigravity: the daemon's precedence (an existing home launcher

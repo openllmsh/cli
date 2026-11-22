@@ -1059,12 +1059,18 @@ export const runAntigravityHeadless = async (
             fallback: false,
           }
         : first.failure;
+    const raw =
+      "cooldown" in failure && failure.cooldown !== undefined
+        ? failure.cooldown
+        : undefined;
+    // An `auth` miss from a process started under a superseded sign-in is
+    // the old account's: it never cools the hop the new account serves.
+    const cooldown =
+      raw === "auth" && spawnEpoch !== sparesEpoch ? undefined : raw;
     return {
       kind: "declined",
       reason: failure.reason,
-      ...("cooldown" in failure && failure.cooldown !== undefined
-        ? { cooldownReason: failure.cooldown }
-        : {}),
+      ...(cooldown !== undefined ? { cooldownReason: cooldown } : {}),
     };
   }
 

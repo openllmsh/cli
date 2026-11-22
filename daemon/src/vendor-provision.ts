@@ -144,11 +144,30 @@ export const runVendorProvisioning = async (
  * keeps running (a box whose network was down at boot still converges);
  * `runVendorProvisioning`'s own guards decide every attempt.
  */
-export const scheduleVendorProvisioning = (): void => {
-  if (!isRoutebox()) return;
+export type TScheduleVendorProvisioningDeps = {
+  readonly isRoutebox?: () => boolean;
+  readonly run?: () => Promise<TVendorProvisionResult>;
+  readonly setTimer?: (fn: () => void, ms: number) => void;
+  readonly statePath?: string;
+  readonly version?: string;
+  readonly now?: () => number;
+};
+
+export const scheduleVendorProvisioning = (
+  deps: TScheduleVendorProvisioningDeps = {},
+): void => {
+  if (!(deps.isRoutebox ?? isRoutebox)()) return;
+  const setTimer =
+    deps.setTimer ??
+    ((fn: () => void, ms: number): void => {
+      setTimeout(fn, ms).unref?.();
+    });
+  const run =
+    deps.run ??
+    ((): Promise<TVendorProvisionResult> => runVendorProvisioning());
   const attempt = (delayMs: number): void => {
-    setTimeout(() => {
-      void runVendorProvisioning()
+    setTimer(() => {
+      void run()
         .catch((error: unknown): "failed" => {
           logError("vendor-provision", error);
           return "failed";
@@ -159,14 +178,14 @@ export const scheduleVendorProvisioning = (): void => {
           // ends, not only at the next restart.
           if (outcome === "not_due") {
             const wait = vendorProvisionRetryInMs(
-              readAttempt(vendorProvisionStatePath()),
-              DAEMON_VERSION,
-              Date.now(),
+              readAttempt(deps.statePath ?? vendorProvisionStatePath()),
+              deps.version ?? DAEMON_VERSION,
+              (deps.now ?? Date.now)(),
             );
             if (wait !== null) attempt(wait);
           }
         });
-    }, delayMs).unref?.();
+    }, delayMs);
   };
   attempt(VENDOR_PROVISION_BOOT_DELAY_MS);
 };

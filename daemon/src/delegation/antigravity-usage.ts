@@ -100,9 +100,13 @@ export const summaryWindows = (summary: unknown): TProviderUsageWindow[] => {
       if (window !== null) {
         // A group's own allowance never shares a key with the reserved
         // bucket-id families (a group named "Gemini" is not `gemini-…`).
+        // An unnamed bucket is its own allowance, never a named group's.
+        const named =
+          nonEmpty(group.displayName) && group.displayName.trim().length > 0;
         windowFamily.set(
           window,
-          quotaFamilyOf(bucket.bucketId) ?? `group:${family}`,
+          quotaFamilyOf(bucket.bucketId) ??
+            (named ? `group:${family}` : `bucket:${bucket.bucketId}`),
         );
         out.set(bucket.bucketId, window);
       }
