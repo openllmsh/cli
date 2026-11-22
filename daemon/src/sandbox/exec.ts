@@ -196,6 +196,15 @@ export const runSandboxExec = async (
     ...(opts?.home !== undefined ? { home: opts.home } : {}),
     ...(opts?.agy !== undefined ? { agy: opts.agy } : {}),
   });
+  // The inference `agy` profile fails CLOSED: its caller already let `agy`
+  // read files (image attachments) on the promise of this confinement.
+  if (opts?.agy !== undefined && state !== "enforced") {
+    process.stderr.write(
+      `openllmd --sandbox-exec: agy confinement not applied (${state}) — refusing to run\n`,
+    );
+    logWarn("sandbox", "Sandbox-exec agy confinement refused.", { state });
+    return process.exit(126);
+  }
   if (state === "error" || state === "unsupported") {
     // Loud on BOTH channels: stderr for the immediate caller, and the shared
     // daemon log so per-spawn degradation is visible next to the boot-time

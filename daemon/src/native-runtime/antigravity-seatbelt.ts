@@ -206,5 +206,10 @@ export const confineAgyArgv = (
       ...argv,
     ];
   }
-  return sandboxSpawnArgs(argv, { agy: { slotHome, bin } });
+  // Linux: the `agy` Landlock set only where reads count as confined (the
+  // shim refuses to run without it); otherwise the plain daemon sandbox, with
+  // `read_file(*)` still denied and image turns declining.
+  return agyFileReadsConfined(platform)
+    ? sandboxSpawnArgs(argv, { agy: { slotHome, bin } })
+    : sandboxSpawnArgs(argv);
 };

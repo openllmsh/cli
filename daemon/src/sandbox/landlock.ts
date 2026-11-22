@@ -31,7 +31,7 @@
  * future §3.4 consent grant takes effect via the self-updater's existing
  * drain-and-exit + supervisor relaunch, never by widening a live ruleset.
  */
-import { fstatSync } from "node:fs";
+import { fstatSync, readdirSync, realpathSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname } from "node:path";
 import { stateDir } from "../env";
@@ -307,24 +307,66 @@ export const agyWorkingSet = (
     readonly agyTempRoot: string;
     readonly bin: string;
   },
+  fs: {
+    /** Canonical spelling (default `realpathSync`, raw on failure). */
+    readonly realpath?: (p: string) => string;
+    /** A directory's entry names, or null for a non-directory. */
+    readonly list?: (p: string) => readonly string[] | null;
+  } = {},
 ): { readonly readWrite: string[]; readonly readOnly: string[] } => {
+  const realpath =
+    fs.realpath ??
+    ((p: string): string => {
+      try {
+        return realpathSync(p);
+      } catch {
+        return p;
+      }
+    });
+  const list =
+    fs.list ??
+    ((p: string): readonly string[] | null => {
+      try {
+        return statSync(p).isDirectory() ? readdirSync(p) : null;
+      } catch {
+        return null;
+      }
+    });
   const under = (root: string, p: string): boolean =>
-    p === root || p.startsWith(`${root}/`);
-  const outside = (p: string): boolean =>
-    !under(paths.home, p) && !under(paths.stateDir, p);
-  const binDir = dirname(paths.bin);
+    root === "/" ? true : p === root || p.startsWith(`${root}/`);
+  // The protected trees, canonical: a grant is compared by where it really
+  // points (a symlinked grant into `$HOME` is caught).
+  const protectedRoots = [realpath(paths.home), realpath(paths.stateDir)];
+  /**
+   * A grant with the protected trees cut out: dropped when it lies inside
+   * one; when it CONTAINS one (`/var` holding a relocated state dir), its
+   * children are granted instead, walking down toward the protected tree
+   * and leaving out only the tree itself.
+   */
+  const narrow = (grant: string): string[] => {
+    const canon = realpath(grant);
+    if (protectedRoots.some((root) => under(root, canon))) return [];
+    if (!protectedRoots.some((root) => under(canon, root))) return [canon];
+    const children = list(canon);
+    if (children === null) return [];
+    return children.flatMap((name) =>
+      narrow(canon === "/" ? `/${name}` : `${canon}/${name}`),
+    );
+  };
+  const binDir = realpath(dirname(paths.bin));
+  // The binary's folder, unless it lies inside or contains a protected tree.
+  const binGrant = protectedRoots.some(
+    (root) => under(root, binDir) || under(binDir, root),
+  )
+    ? realpath(paths.bin)
+    : binDir;
   return {
     readWrite: [
-      ...ws.readWrite.filter(outside),
-      dirname(paths.slotHome),
-      paths.agyTempRoot,
+      ...ws.readWrite.flatMap(narrow),
+      realpath(dirname(paths.slotHome)),
+      realpath(paths.agyTempRoot),
     ],
-    readOnly: [
-      ...ws.readOnly.filter(outside),
-      binDir !== paths.home && !under(binDir, paths.stateDir)
-        ? binDir
-        : paths.bin,
-    ],
+    readOnly: [...ws.readOnly.flatMap(narrow), binGrant],
   };
 };
 
