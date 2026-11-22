@@ -75,7 +75,13 @@ export type TAntigravityQuota = {
 export const summaryWindows = (summary: unknown): TProviderUsageWindow[] =>
   summaryQuota(summary).windows;
 
-/** {@link summaryWindows} plus each window's allowance family. */
+/**
+ * {@link summaryWindows} plus each window's allowance family. Takes the
+ * NORMALIZED quota shape (`bucketId`, `remainingFraction`, `resetTime`,
+ * `displayName`, `disabled`): `agy /usage` emits `id` / `remaining_fraction`
+ * / `reset_time` / `name`, which `agyUsageQuota` (`./antigravity-cli.ts`)
+ * converts first — raw CLI buckets passed here map to nothing.
+ */
 export const summaryQuota = (summary: unknown): TAntigravityQuota => {
   const s = summary as {
     readonly groups?: ReadonlyArray<{

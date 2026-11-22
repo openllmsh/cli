@@ -22,6 +22,7 @@ import type {
   TProviderUsageSnapshot,
   TProviderUsageWindow,
 } from "@openllmsh/sdk/protocol";
+import { logError } from "../logger";
 import { antigravitySpawnEnv } from "../native-runtime/antigravity-env";
 import { sandboxSpawnArgs } from "../sandbox/exec";
 import { unwrapAntigravityCliSpawn } from "../sandbox/policy";
@@ -103,29 +104,39 @@ const defaultRun: TAgyRun = async (args) => {
   });
   // At the deadline: SIGKILL (agy can ignore SIGTERM), and stop waiting on
   // stdout shortly after — a child it left behind may hold the pipe open.
-  let timedOut = false;
+  // At the deadline: SIGKILL (agy can ignore SIGTERM), cancel the stdout
+  // read, and stop waiting shortly after — a child it left behind may hold
+  // the pipe open even after agy itself exits. The deadline stays armed
+  // until BOTH the exit and the read are done.
+  const stream = proc.stdout as ReadableStream<Uint8Array>;
+  let timer: ReturnType<typeof setTimeout> | undefined;
   const deadline = new Promise<"timeout">((resolve) => {
-    const timer = setTimeout(() => {
-      timedOut = true;
+    timer = setTimeout(() => {
       try {
         proc.kill("SIGKILL");
       } catch {
         /* already gone */
       }
+      void stream.cancel().catch(() => {});
       setTimeout(() => resolve("timeout"), AGY_KILL_DRAIN_MS).unref?.();
     }, args.timeoutMs);
-    void proc.exited.then(() => clearTimeout(timer));
   });
   const read = (async (): Promise<{
     readonly code: number | null;
     readonly stdout: string;
   }> => {
-    const stdout = await new Response(proc.stdout as ReadableStream).text();
+    const stdout = await new Response(stream).text();
     return { code: await proc.exited, stdout };
   })();
-  const result = await Promise.race([read, deadline]);
-  if (result === "timeout" || timedOut) return { code: null, stdout: "" };
-  return result;
+  try {
+    const result = await Promise.race([read, deadline]);
+    return result === "timeout" ? { code: null, stdout: "" } : result;
+  } catch {
+    // A read cancelled by the deadline: a timed-out command.
+    return { code: null, stdout: "" };
+  } finally {
+    clearTimeout(timer);
+  }
 };
 
 /** After a deadline kill, how long stdout may take to close. */
@@ -185,7 +196,10 @@ const runAgy = async (
     // every other failure here — never a rejected usage / models read.
     return { kind: "unavailable", reason: "agy command failed" };
   } finally {
-    await rm(cwd, { recursive: true, force: true });
+    // A cleanup failure never replaces the command's own outcome.
+    await rm(cwd, { recursive: true, force: true }).catch((error: unknown) =>
+      logError("antigravity-cli", error),
+    );
   }
 };
 
@@ -331,8 +345,9 @@ const defaultSecurityRun: TSecurityRun = async ({ argv, home }) => {
  * data-use consent page the daemon must not answer. Like ACP's logout this
  * clears the local sign-in; it does not revoke the grant at Google.
  *
- * Off macOS the token file is the whole store: `cliEnv` hands `agy` no
- * `DBUS_SESSION_BUS_ADDRESS`, so it cannot reach a desktop keyring.
+ * Off macOS the token file is the whole store: every `agy` spawn env sets
+ * `DBUS_SESSION_BUS_ADDRESS=disabled:` and drops the keyring sockets
+ * (`antigravitySpawnEnv`), so `agy` cannot reach a desktop keyring.
  */
 export const removeAgySignIn = async (
   home: string,

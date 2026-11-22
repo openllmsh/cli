@@ -4,8 +4,9 @@
  * login screen, driven by `./antigravity-cli-login.ts`) covers everything for
  * an account slot (each slot has its own isolated HOME, `cliHome`): headless
  * chat (`native-runtime/antigravity-headless.ts`) and `agy acp`
- * (`native-runtime/antigravity-acp.ts`, images / client tools / structured
- * output / headless fallback) both use that one sign-in.
+ * (`native-runtime/antigravity-acp.ts`, images / client tools / headless
+ * fallback) both use that one sign-in. (Structured output is declined
+ * before either runs.)
  *
  * Nothing here reads a token: `status()`'s credential check is metadata only
  * (an isolated keychain item or `agy`'s own token file exists,
@@ -298,6 +299,9 @@ const connect = (): Promise<TConnectResult> =>
       };
       if (!wiring.slot.start(dispose, flow)) {
         dispose();
+        // The losing attempt's screen is gone before this returns: nothing
+        // (account removal included) races a login screen nobody tracks.
+        await login.exited;
         return { connected: false, detail: "daemon update in progress" };
       }
       activeAgyLogin.set(login);
