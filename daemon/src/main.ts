@@ -85,6 +85,7 @@ import {
   isDevMode,
   stateDir,
 } from "./env";
+import { startEventLoopWatch } from "./event-loop-watch";
 import { buildHealth } from "./health";
 import {
   acquireHoldJournalLock,
@@ -307,6 +308,7 @@ export const main = async (): Promise<void> => {
   // with nothing to fall back to). See `usage-cache.ts`.
   enableUsagePersistence(stateDir());
   removeLegacyAntigravityMarker();
+  startEventLoopWatch();
   // Model-report observers pull the auth/delegate graph — defer off cold boot (§3).
   void import("./model-report")
     .then((m) => {

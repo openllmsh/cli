@@ -32,12 +32,18 @@ import type {
   TDaemonProviderConnection,
   TProviderUsageSnapshot,
 } from "@openllmsh/sdk/protocol";
+import { projectDoctorOutcomeLedger } from "@openllmsh/sdk/protocol";
 import { accountCell } from "../account-scope";
-import { cachedCliVersion, warmCliVersion } from "../agy-version";
+import type { TAgyVersionRead } from "../agy-version";
+import {
+  AGY_VERSION_READ_TIMEOUT_MS,
+  peekCliVersion,
+  warmCliVersion,
+} from "../agy-version";
 import { noteAuthStoreIdentityChange } from "../auth-user-action";
 import { cliEnv, cliHome } from "../cli-paths";
 import { stateDir } from "../env";
-import { logError, logInfo } from "../logger";
+import { logError, logInfo, logWarn, safeDiagnosticMessage } from "../logger";
 import { disposeAntigravityWarmPool } from "../native-runtime/antigravity-acp";
 import { antigravitySpawnEnv } from "../native-runtime/antigravity-env";
 import {
@@ -206,22 +212,43 @@ const readAgyModelsFile = (): ReadonlyArray<{
   }
 };
 
+/** A failed `agy --version` read is a doctor record: a slow or hung `agy` is
+ *  otherwise invisible (status just shows no version). */
+const noteAgyVersionRead = (result: TAgyVersionRead): void => {
+  if (result.ok) return;
+  logWarn(
+    "cli-install",
+    safeDiagnosticMessage`The agy version read failed or timed out.`,
+    undefined,
+    {
+      ...projectDoctorOutcomeLedger({ provider: PROVIDER }),
+      timings: {
+        elapsed_ms: Math.round(result.elapsedMs),
+        configured_timeout_ms: AGY_VERSION_READ_TIMEOUT_MS,
+      },
+    },
+  );
+};
+
 /** Installed when the `agy` CLI is present. */
 const installState = async (): Promise<{
   readonly installed: boolean;
   readonly version: string | null;
 }> => {
-  // Read the candidate's version off the event loop first: the resolver
-  // below is synchronous and would otherwise block on a cold `agy`.
+  // Read the candidate's version off the event loop first, so this status
+  // carries it when the read answers in time.
   const candidate = antigravityCliCandidate();
-  if (candidate !== null) await warmCliVersion(candidate);
+  if (candidate !== null) {
+    await warmCliVersion(candidate, undefined, noteAgyVersionRead);
+  }
   // The resolver decides (an `agy` that can't run is not installed), so
-  // status and Connect always agree.
+  // status and Connect always agree. A version still unknown (slow or timed
+  // out read) is installed, with no version yet.
   const agyBin = resolveAntigravityCli();
   if (agyBin === null) return { installed: false, version: null };
   // The version of the binary that actually runs (it honours
-  // OPENLLM_AGY_BIN), read once per binary stamp.
-  return { installed: true, version: cachedCliVersion(agyBin) };
+  // OPENLLM_AGY_BIN), from the background cache.
+  return { installed: true, version: peekCliVersion(agyBin) ?? null };
 };
 
 /** A new or removed sign-in: nothing from the previous account may serve —

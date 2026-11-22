@@ -38,7 +38,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join, resolve as resolvePath } from "node:path";
 import type { TChatCompletionChunk } from "@openllmsh/sdk/protocol";
-import { agyVersionUsable, cachedCliVersion } from "../agy-version";
+import { agyVersionUsable, peekCliVersion } from "../agy-version";
 import { killHard } from "../delegation/antigravity-cli-login";
 import type { TStoreRead } from "../delegation/util";
 import { ensureKeychainReady } from "../delegation/util";
@@ -120,11 +120,13 @@ export const antigravityCliCandidate = (
 export const resolveAntigravityCli = (
   env: Readonly<Record<string, string | undefined>> = process.env,
   home: string = homedir(),
-  versionOf: (path: string) => string | null = cachedCliVersion,
+  versionOf: (path: string) => string | null | undefined = peekCliVersion,
 ): string | null => {
-  // An executable FILE at or above 1.5.1 (`agy acp`, every model): a file that can't run,
-  // or an older build, must not take the route (and Connect). The version is
-  // read once per binary stamp.
+  // An executable FILE, not known to be older than 1.5.1 (`agy acp`, every
+  // model): a file that can't run, or a build READ as older, must not take the
+  // route (and Connect). The version comes from the background cache — never a
+  // blocking `agy --version` here; a read still pending or that timed out is
+  // unknown, not "not installed".
   const usable = (path: string): boolean => {
     try {
       accessSync(path, constants.X_OK);

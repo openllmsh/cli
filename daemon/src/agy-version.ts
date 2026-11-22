@@ -44,6 +44,9 @@ export const versionAtLeast = (
   return m[4] === undefined;
 };
 
+/** The cap on one `agy --version` read. */
+export const AGY_VERSION_READ_TIMEOUT_MS = 5_000;
+
 /** `<bin> --version` (local, no sign-in, 5 s cap), or null. Run with a
  *  throwaway HOME so it never reads or writes any `agy` profile. */
 export const readCliVersion = (path: string): string | null => {
@@ -56,7 +59,7 @@ export const readCliVersion = (path: string): string | null => {
       env: { PATH: process.env.PATH ?? "/usr/bin:/bin", HOME: home },
       stdout: "pipe",
       stderr: "ignore",
-      timeout: 5_000,
+      timeout: AGY_VERSION_READ_TIMEOUT_MS,
       // Uncatchable: a binary that ignores SIGTERM must not hold the daemon
       // (or this probe's HOME cleanup) past the cap.
       killSignal: "SIGKILL",
@@ -139,7 +142,7 @@ export const readCliVersionAsync = async (
       env: { PATH: process.env.PATH ?? "/usr/bin:/bin", HOME: home },
       stdout: "pipe",
       stderr: "ignore",
-      timeout: 5_000,
+      timeout: AGY_VERSION_READ_TIMEOUT_MS,
       killSignal: "SIGKILL",
     });
     const [out, code] = await Promise.all([
@@ -160,25 +163,79 @@ export const readCliVersionAsync = async (
   }
 };
 
+/** What one background version read saw — for the daemon's diagnostics. */
+export type TAgyVersionRead = {
+  /** A version was read (`agy --version` printed one). */
+  readonly ok: boolean;
+  readonly elapsedMs: number;
+};
+
+/** Background reads in flight, per binary stamp: one `agy --version` at a time. */
+const inflight = new Map<string, Promise<void>>();
+
 /**
  * Fill the version cache for `path` without blocking the daemon, so the
- * synchronous resolver that follows answers from the cache. A freshly
- * installed `agy`'s first run can be slow; a blocking read there stalled the
- * whole status snapshot past its budget (`probe_timeout`), which hid an
- * installed CLI until something re-probed it.
+ * resolver that follows answers from the cache. A freshly installed `agy`'s
+ * first run can be slow (or time out on a loaded machine); a blocking read
+ * there froze the whole daemon for up to the 5 s cap, timing out everything
+ * else in flight (keychain, status probes). Concurrent callers share one read.
  */
 export const warmCliVersion = async (
   path: string,
   read: (path: string) => Promise<string | null> = readCliVersionAsync,
+  onRead?: (result: TAgyVersionRead) => void,
 ): Promise<void> => {
   const stamp = binaryStamp(path);
   if (stamp === null || freshCached(stamp) !== undefined) return;
-  const version = await read(path);
-  versionCache.set(stamp, { version, atMs: Date.now() });
+  const running = inflight.get(stamp);
+  if (running !== undefined) return running;
+  const job = (async (): Promise<void> => {
+    const startedAt = performance.now();
+    const version = await read(path);
+    versionCache.set(stamp, { version, atMs: Date.now() });
+    onRead?.({
+      ok: isVersionOutput(version),
+      elapsedMs: performance.now() - startedAt,
+    });
+  })().finally(() => {
+    inflight.delete(stamp);
+  });
+  inflight.set(stamp, job);
+  return job;
 };
 
-/** An `agy` the daemon can use (at or above {@link AGY_MIN_VERSION}). */
+/**
+ * The daemon's NON-BLOCKING view of `path`'s version: the version a past read
+ * returned, or `undefined` when it is not known — never read yet, or the last
+ * read failed (timed out, printed no version). It never runs the binary on the
+ * caller's stack: a stale or missing answer starts a background
+ * {@link warmCliVersion} instead. Unknown is not "too old": callers treat only
+ * a version actually read below {@link AGY_MIN_VERSION} as unusable.
+ */
+export const peekCliVersion = (
+  path: string,
+  warm: (path: string) => Promise<void> = warmCliVersion,
+): string | undefined => {
+  const stamp = binaryStamp(path);
+  if (stamp === null) return undefined;
+  if (freshCached(stamp) === undefined) {
+    void warm(path).catch(() => {
+      // Best effort: the next peek retries.
+    });
+  }
+  const cached = versionCache.get(stamp);
+  return cached !== undefined && isVersionOutput(cached.version)
+    ? (cached.version as string)
+    : undefined;
+};
+
+/** An `agy` the daemon can use (at or above {@link AGY_MIN_VERSION}).
+ *  `versionOf` returning `undefined` means "not known yet" — usable; only a
+ *  version actually read (or `null`, no version at all) is judged. */
 export const agyVersionUsable = (
   path: string,
-  versionOf: (path: string) => string | null = cachedCliVersion,
-): boolean => versionAtLeast(versionOf(path), AGY_MIN_VERSION);
+  versionOf: (path: string) => string | null | undefined = cachedCliVersion,
+): boolean => {
+  const version = versionOf(path);
+  return version === undefined || versionAtLeast(version, AGY_MIN_VERSION);
+};
