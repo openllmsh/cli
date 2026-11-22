@@ -1387,195 +1387,70 @@ const serveCursorHop = async (
 /** Antigravity headless conversations (prefix hash → `agy` conversation id). */
 const antigravityHeadlessSessions = new NativeSessionStore();
 
-const serveAntigravityHop = async (
+/** Which `agy` transport serves a request — chosen by its content. */
+type TAntigravityRoute =
+  | { readonly kind: "declined"; readonly reason: string }
+  /** Client tools, or a shape the CLI has no text view for (a final
+   *  tool-result turn that omits `tools`): a fresh ACP session with the
+   *  full transcript. */
+  | { readonly kind: "acp"; readonly req: ReturnType<typeof cursorRequestOf> }
+  /** Text and image turns: the headless CLI, on the conversation's own
+   *  `agy` session. */
+  | {
+      readonly kind: "cli";
+      readonly text: NonNullable<ReturnType<typeof nativeRequestOf>>;
+      readonly attachments: ReadonlySet<string>;
+    };
+
+const routeAntigravity = (
   params: TNativeServeParams,
-  overrides?: TNativeServeOverrides,
-): Promise<TNativeServeOutcome> => {
-  const explicitDispatch = resolveExplicitDispatch(
-    "antigravity",
-    params.executionSelection,
-    { hasClientTools: hasClientTools(params.canonical) },
-  );
-  if (explicitDispatch !== null && !explicitDispatch.ok) {
-    return { declined: explicitDispatch.declined };
-  }
+  overrides: TNativeServeOverrides | undefined,
+): TAntigravityRoute => {
   const req = cursorRequestOf(params.canonical, { frameHistory: true });
   if (req.promptText.length === 0 && req.images.length === 0) {
-    return { declined: "no user turn to answer" };
+    return { kind: "declined", reason: "no user turn to answer" };
   }
-  const env = overrides?.env ?? cliEnv("antigravity");
-  const agyBin =
-    overrides === undefined
-      ? resolveAntigravityCli()
-      : overrides.headlessBin === undefined
-        ? (overrides.bin ?? null)
-        : overrides.headlessBin;
-  if (agyBin === null) {
-    return { declined: "antigravity: agy CLI not installed" };
-  }
-  // Structured output was already declined by the native-control gate. The
-  // conversation is correlated by content like the Claude/Codex native
-  // paths: a known one continues its `agy` conversation with only the new
-  // turn; an unknown one with history is seeded. `tool_choice: "auto"` with
-  // no tools is the default, not a tool request.
+  if (req.tools.length > 0) return { kind: "acp", req };
+  // `tool_choice: "auto"` with no tools is the default, not a tool request.
+  // Structured output was already declined by the native-control gate.
   const { tool_choice: toolChoice, ...withoutChoice } = params.canonical;
-  // Client tools, and any shape the CLI has no text view for (a final
-  // tool-result turn that omits `tools`, a `tool` role), run on a fresh ACP
-  // session with the full transcript — chosen by content, never a fallback.
-  const view =
-    req.tools.length > 0
-      ? null
-      : agyImageView(
-          toolChoice === "auto" ? withoutChoice : params.canonical,
-          overrides?.attachmentsDir,
-        );
-  if (view !== null && view.kind === "declined") {
-    return { declined: view.reason };
-  }
-  const text = view === null ? null : nativeRequestOf(view.canonical);
-  const viaAcp = text === null;
+  const view = agyImageView(
+    toolChoice === "auto" ? withoutChoice : params.canonical,
+    overrides?.attachmentsDir,
+  );
+  if (view.kind === "declined") return view;
+  const text = nativeRequestOf(view.canonical);
+  if (text === null) return { kind: "acp", req };
   if (
-    !viaAcp &&
-    view !== null &&
     view.paths.size > 0 &&
     !(overrides?.imageReadsConfined ?? agyFileReadsConfined())
   ) {
     return {
-      declined: "antigravity: image input needs agy's file reads confined",
+      kind: "declined",
+      reason: "antigravity: image input needs agy's file reads confined",
     };
   }
-  // Conversations belong to one account slot: its isolated HOME is part of
-  // the identity, so another slot never continues this one's `agy` session.
-  // The account epoch too: a sign-in or logout in the same slot starts a new
-  // one, so nothing continues (or commits into) the previous account's.
-  const epoch = antigravityHeadlessEpoch();
-  const keyFor = (generation: number): string =>
-    `${params.providerModelId}\u0000${env.HOME ?? ""}\u0000${generation}`;
-  const conversationKey = keyFor(epoch);
-  /** The generation the headless process that served this turn started
-   *  under (a change during setup starts it under the new one). */
-  let servedEpoch: number | null = null;
-  /** The prompt reached `agy`: a later decline (precommit timeout) must not
-   *  restore the conversation, or a retry would send the same turn twice. */
-  let promptSent = false;
-  const conversation =
-    text === null
-      ? null
-      : deriveConversation(conversationKey, text.systemText, text.turns);
-  // A first turn has nothing to resume and no prefix worth serialising on
-  // (any two first turns with the same system text share one): it takes a
-  // private lease and still publishes its conversation for the follow-up.
-  const lease =
-    conversation === null || conversation.deltaText.length === 0
-      ? null
-      : await antigravityHeadlessSessions.lease(
-          conversation.hasPrior
-            ? conversation.prefixHash
-            : `first:${crypto.randomUUID()}`,
-        );
-  const run: TNativeRunResult | null = viaAcp
-    ? await runAntigravityNative({
-        bin: agyBin,
-        env,
-        signInEpoch: epoch,
-        currentSignInEpoch: antigravityHeadlessEpoch,
-        providerModelId: params.providerModelId,
-        systemText: req.systemText,
-        userText: req.promptText,
-        images: req.images,
-        tools: req.tools,
-        signal: params.signal,
-        ...(overrides?.acpHooks ?? {}),
-      })
-    : conversation === null || lease === null || view === null
-      ? null
-      : await (async (): Promise<TNativeRunResult | null> => {
-          // The transcript ends at the last assistant turn: every user turn
-          // after it is already in the delta, so it must not repeat there.
-          const lastAssistant = text.turns.findLastIndex(
-            (t) => t.role === "assistant",
-          );
-          const seed = conversation.hasPrior
-            ? renderSeed(
-                [
-                  ...text.turns.slice(0, lastAssistant + 1),
-                  text.turns[text.turns.length - 1],
-                ].filter((t) => t !== undefined),
-                conversation.deltaText,
-              )
-            : conversation.deltaText;
-          // A setup error (keychain, spawn) must still release the lease;
-          // the hop then declines.
-          return runAntigravityHeadless({
-            bin: agyBin,
-            env,
-            providerModelId: params.providerModelId,
-            systemText: text.systemText,
-            userText: lease.sessionId !== null ? conversation.deltaText : seed,
-            seedText: seed,
-            conversationId: lease.sessionId,
-            epoch,
-            onServingEpoch: (served): void => {
-              servedEpoch = served;
-            },
-            onPromptSent: (): void => {
-              promptSent = true;
-            },
-            attachments: view.paths,
-            hasTools: false,
-            signal: params.signal,
-            ...(overrides?.headlessHooks ?? {}),
-          }).catch((error: unknown) => {
-            logError("native-runtime", error);
-            return null;
-          });
-        })();
-  if (lease !== null && (run === null || run.kind === "declined")) {
-    if (promptSent) lease.commit(conversationKey, null);
-    else lease.abandon();
-  }
-  // A decline (or a headless setup error, `null`) declines the hop and the
-  // walker moves on: there is no fallback between the transports.
-  if (run === null) {
-    return declinedOutcome(
-      text === null
-        ? "antigravity: request shape not served by the agy CLI"
-        : "antigravity: agy CLI unavailable: setup failed",
-    );
-  }
-  if (run.kind === "declined") {
-    return declinedOutcome(run.reason, run.cooldownReason);
-  }
-  const heldLease = viaAcp ? null : lease;
+  return { kind: "cli", text, attachments: view.paths };
+};
+
+/** Deliver a committed `agy` run (stream or JSON); `onSettle` / `onFail`
+ *  close the turn's bookkeeping. */
+const deliverAntigravityRun = async (
+  params: TNativeServeParams,
+  chunks: ReadableStream<TChatCompletionChunk>,
+  onSettle: (
+    resp: Awaited<ReturnType<typeof accumulateChunksToResponse>>,
+  ) => void,
+  onFail: (err: unknown) => void,
+): Promise<TNativeServeOutcome> => {
   const settle = (
     resp: Awaited<ReturnType<typeof accumulateChunksToResponse>>,
   ): void => {
     params.record(tokensFromResponse(resp), "success", nativeAttempt);
-    if (heldLease !== null && text !== null) {
-      // The next request carries these turns + this reply before its own
-      // new turn, so it lands on the same `agy` conversation — published
-      // under the generation that served it, and dropped when the account
-      // changed again before this settled.
-      if (servedEpoch !== null && servedEpoch === antigravityHeadlessEpoch()) {
-        heldLease.commit(
-          nextPrefixHash(
-            keyFor(servedEpoch),
-            text.systemText,
-            text.turns,
-            textOf(resp),
-          ),
-          run.sessionId(),
-        );
-      } else {
-        heldLease.commit(conversationKey, null);
-      }
-    }
+    onSettle(resp);
   };
   const fail = (err: unknown): void => {
-    // Committed: `agy` may already hold this turn, so a retry must not
-    // resume the same conversation and send it twice. Drop the entry (the
-    // retry starts a fresh, seeded conversation).
-    heldLease?.commit(conversationKey, null);
+    onFail(err);
     if (params.signal.aborted || isClientHangUp(err)) return;
     const usage = partialUsageFrom(err);
     params.record(
@@ -1586,7 +1461,7 @@ const serveAntigravityHop = async (
   };
   const clientWire = clientWireOf(params.surface);
   if (params.wantsStream) {
-    return deliverChunkStream(run.chunks, {
+    return deliverChunkStream(chunks, {
       surface: params.surface,
       clientWire,
       providerModelId: params.providerModelId,
@@ -1598,7 +1473,7 @@ const serveAntigravityHop = async (
   let canonical: Awaited<ReturnType<typeof accumulateChunksToResponse>>;
   try {
     canonical = await accumulateChunksToResponse(
-      run.chunks,
+      chunks,
       params.providerModelId,
     );
   } catch (err) {
@@ -1617,6 +1492,169 @@ const serveAntigravityHop = async (
     clientWire,
     undefined,
     params.stripSubagentIsolation,
+  );
+};
+
+/** The headless CLI turn on its conversation's `agy` session. */
+const serveAntigravityCli = async (
+  params: TNativeServeParams,
+  overrides: TNativeServeOverrides | undefined,
+  agyBin: string,
+  env: Record<string, string>,
+  route: Extract<TAntigravityRoute, { kind: "cli" }>,
+): Promise<TNativeServeOutcome> => {
+  const { text } = route;
+  // Conversations belong to one account slot: its isolated HOME is part of
+  // the identity, so another slot never continues this one's `agy` session.
+  // The account epoch too: a sign-in or logout in the same slot starts a new
+  // one, so nothing continues (or commits into) the previous account's.
+  const epoch = antigravityHeadlessEpoch();
+  const keyFor = (generation: number): string =>
+    `${params.providerModelId}\u0000${env.HOME ?? ""}\u0000${generation}`;
+  const conversationKey = keyFor(epoch);
+  /** The generation the process that served this turn started under (a
+   *  change during setup starts it under the new one). */
+  let servedEpoch: number | null = null;
+  /** The prompt reached `agy`: a later decline (precommit timeout) must not
+   *  restore the conversation, or a retry would send the same turn twice. */
+  let promptSent = false;
+  // Correlated by content like the Claude/Codex native paths: a known
+  // conversation continues with only the new turn; an unknown one with
+  // history is seeded.
+  const conversation = deriveConversation(
+    conversationKey,
+    text.systemText,
+    text.turns,
+  );
+  // A first turn has nothing to resume and no prefix worth serialising on
+  // (any two first turns with the same system text share one): it takes a
+  // private lease and still publishes its conversation for the follow-up.
+  const lease = await antigravityHeadlessSessions.lease(
+    conversation.hasPrior
+      ? conversation.prefixHash
+      : `first:${crypto.randomUUID()}`,
+  );
+  // The transcript ends at the last assistant turn: every user turn after it
+  // is already in the delta, so it must not repeat there.
+  const lastAssistant = text.turns.findLastIndex((t) => t.role === "assistant");
+  const seed = conversation.hasPrior
+    ? renderSeed(
+        [
+          ...text.turns.slice(0, lastAssistant + 1),
+          text.turns[text.turns.length - 1],
+        ].filter((t) => t !== undefined),
+        conversation.deltaText,
+      )
+    : conversation.deltaText;
+  // A setup error (keychain, spawn) still releases the lease (`null`).
+  const run = await runAntigravityHeadless({
+    bin: agyBin,
+    env,
+    providerModelId: params.providerModelId,
+    systemText: text.systemText,
+    userText: lease.sessionId !== null ? conversation.deltaText : seed,
+    seedText: seed,
+    conversationId: lease.sessionId,
+    epoch,
+    onServingEpoch: (served): void => {
+      servedEpoch = served;
+    },
+    onPromptSent: (): void => {
+      promptSent = true;
+    },
+    attachments: route.attachments,
+    hasTools: false,
+    signal: params.signal,
+    ...(overrides?.headlessHooks ?? {}),
+  }).catch((error: unknown): null => {
+    logError("native-runtime", error);
+    return null;
+  });
+  if (run === null || run.kind === "declined") {
+    if (promptSent) lease.commit(conversationKey, null);
+    else lease.abandon();
+    return run === null
+      ? declinedOutcome("antigravity: agy CLI unavailable: setup failed")
+      : declinedOutcome(run.reason, run.cooldownReason);
+  }
+  return deliverAntigravityRun(
+    params,
+    run.chunks,
+    (resp) => {
+      // The next request carries these turns + this reply before its own new
+      // turn, so it lands on the same `agy` conversation — published under
+      // the generation that served it, and dropped when the account changed
+      // again before this settled.
+      if (servedEpoch !== null && servedEpoch === antigravityHeadlessEpoch()) {
+        lease.commit(
+          nextPrefixHash(
+            keyFor(servedEpoch),
+            text.systemText,
+            text.turns,
+            textOf(resp),
+          ),
+          run.sessionId(),
+        );
+      } else {
+        lease.commit(conversationKey, null);
+      }
+    },
+    // Committed: `agy` may already hold this turn, so a retry must not
+    // resume the same conversation and send it twice. Drop the entry (the
+    // retry starts a fresh, seeded conversation).
+    () => lease.commit(conversationKey, null),
+  );
+};
+
+const serveAntigravityHop = async (
+  params: TNativeServeParams,
+  overrides?: TNativeServeOverrides,
+): Promise<TNativeServeOutcome> => {
+  const explicitDispatch = resolveExplicitDispatch(
+    "antigravity",
+    params.executionSelection,
+    { hasClientTools: hasClientTools(params.canonical) },
+  );
+  if (explicitDispatch !== null && !explicitDispatch.ok) {
+    return { declined: explicitDispatch.declined };
+  }
+  const route = routeAntigravity(params, overrides);
+  if (route.kind === "declined") return { declined: route.reason };
+  const env = overrides?.env ?? cliEnv("antigravity");
+  const agyBin =
+    overrides === undefined
+      ? resolveAntigravityCli()
+      : overrides.headlessBin === undefined
+        ? (overrides.bin ?? null)
+        : overrides.headlessBin;
+  if (agyBin === null) {
+    return { declined: "antigravity: agy CLI not installed" };
+  }
+  if (route.kind === "cli") {
+    return serveAntigravityCli(params, overrides, agyBin, env, route);
+  }
+  const epoch = antigravityHeadlessEpoch();
+  const run = await runAntigravityNative({
+    bin: agyBin,
+    env,
+    signInEpoch: epoch,
+    currentSignInEpoch: antigravityHeadlessEpoch,
+    providerModelId: params.providerModelId,
+    systemText: route.req.systemText,
+    userText: route.req.promptText,
+    images: route.req.images,
+    tools: route.req.tools,
+    signal: params.signal,
+    ...(overrides?.acpHooks ?? {}),
+  });
+  if (run.kind === "declined") {
+    return declinedOutcome(run.reason, run.cooldownReason);
+  }
+  return deliverAntigravityRun(
+    params,
+    run.chunks,
+    () => {},
+    () => {},
   );
 };
 
