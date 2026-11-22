@@ -33,7 +33,7 @@ import type {
   TProviderUsageSnapshot,
 } from "@openllmsh/sdk/protocol";
 import { accountCell } from "../account-scope";
-import { cachedCliVersion } from "../agy-version";
+import { cachedCliVersion, warmCliVersion } from "../agy-version";
 import { noteAuthStoreIdentityChange } from "../auth-user-action";
 import { cliEnv, cliHome } from "../cli-paths";
 import { stateDir } from "../env";
@@ -41,6 +41,7 @@ import { logError, logInfo } from "../logger";
 import { disposeAntigravityWarmPool } from "../native-runtime/antigravity-acp";
 import { antigravitySpawnEnv } from "../native-runtime/antigravity-env";
 import {
+  antigravityCliCandidate,
   antigravityHeadlessEpoch,
   disposeAntigravityHeadlessSpares,
   resolveAntigravityCli,
@@ -210,6 +211,10 @@ const installState = async (): Promise<{
   readonly installed: boolean;
   readonly version: string | null;
 }> => {
+  // Read the candidate's version off the event loop first: the resolver
+  // below is synchronous and would otherwise block on a cold `agy`.
+  const candidate = antigravityCliCandidate();
+  if (candidate !== null) await warmCliVersion(candidate);
   // The resolver decides (an `agy` that can't run is not installed), so
   // status and Connect always agree.
   const agyBin = resolveAntigravityCli();

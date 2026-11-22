@@ -101,6 +101,21 @@ const RESPONSE_STEP_TYPES: ReadonlySet<string> = new Set([
 
 // ─── Binary ────────────────────────────────────────────────────────────────
 
+/** The path {@link resolveAntigravityCli} would judge (override, home
+ *  launcher, then PATH), without running it. */
+export const antigravityCliCandidate = (
+  env: Readonly<Record<string, string | undefined>> = process.env,
+  home: string = homedir(),
+): string | null => {
+  const override = env.OPENLLM_AGY_BIN;
+  if (override !== undefined && override.length > 0) {
+    return resolvePath(override);
+  }
+  const launcher = join(home, ".local", "bin", "agy");
+  if (existsSync(launcher)) return launcher;
+  return Bun.which("agy");
+};
+
 /** The `agy` CLI: explicit override, the official installer's launcher, PATH. */
 export const resolveAntigravityCli = (
   env: Readonly<Record<string, string | undefined>> = process.env,

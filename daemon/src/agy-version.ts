@@ -89,28 +89,92 @@ const versionCache = new Map<
   { readonly version: string | null; readonly atMs: number }
 >();
 
-/** {@link readCliVersion}, cached per binary stamp. */
-export const cachedCliVersion = (path: string): string | null => {
-  let stamp: string;
+/** The binary's stamp: identity and change time too, so a same-size
+ *  replacement that kept its mtime (copied with -p, say) is still a new
+ *  binary to probe. Null when the path can't be read. */
+const binaryStamp = (path: string): string | null => {
   try {
     const st = statSync(path);
-    // Identity and change time too: a same-size replacement that kept its
-    // mtime (copied with -p, say) is still a new binary to probe.
-    stamp = `${path}\0${st.dev}\0${st.ino}\0${st.size}\0${st.mtimeMs}\0${st.ctimeMs}`;
+    return `${path}\0${st.dev}\0${st.ino}\0${st.size}\0${st.mtimeMs}\0${st.ctimeMs}`;
   } catch {
     return null;
   }
+};
+
+/** A cached answer still valid for `stamp`, or undefined when it must be read. */
+const freshCached = (
+  stamp: string,
+): { readonly version: string | null } | undefined => {
   const cached = versionCache.get(stamp);
   if (
     cached !== undefined &&
     (isVersionOutput(cached.version) ||
       Date.now() - cached.atMs < AGY_VERSION_RETRY_MS)
   ) {
-    return cached.version;
+    return cached;
   }
+  return undefined;
+};
+
+/** {@link readCliVersion}, cached per binary stamp. */
+export const cachedCliVersion = (path: string): string | null => {
+  const stamp = binaryStamp(path);
+  if (stamp === null) return null;
+  const cached = freshCached(stamp);
+  if (cached !== undefined) return cached.version;
   const version = readCliVersion(path);
   versionCache.set(stamp, { version, atMs: Date.now() });
   return version;
+};
+
+/** `<bin> --version` without blocking the event loop (same env, HOME and
+ *  5 s cap as {@link readCliVersion}). */
+export const readCliVersionAsync = async (
+  path: string,
+): Promise<string | null> => {
+  let home: string | null = null;
+  try {
+    home = mkdtempSync(join(tmpdir(), "agy-version-"));
+    const proc = Bun.spawn([path, "--version"], {
+      env: { PATH: process.env.PATH ?? "/usr/bin:/bin", HOME: home },
+      stdout: "pipe",
+      stderr: "ignore",
+      timeout: 5_000,
+      killSignal: "SIGKILL",
+    });
+    const [out, code] = await Promise.all([
+      new Response(proc.stdout).text(),
+      proc.exited,
+    ]);
+    return code === 0 ? out.trim() : null;
+  } catch {
+    return null;
+  } finally {
+    if (home !== null) {
+      try {
+        rmSync(home, { recursive: true, force: true });
+      } catch {
+        // A leftover empty temp dir is harmless.
+      }
+    }
+  }
+};
+
+/**
+ * Fill the version cache for `path` without blocking the daemon, so the
+ * synchronous resolver that follows answers from the cache. A freshly
+ * installed `agy`'s first run can be slow; a blocking read there stalled the
+ * whole status snapshot past its budget (`probe_timeout`), which hid an
+ * installed CLI until something re-probed it.
+ */
+export const warmCliVersion = async (
+  path: string,
+  read: (path: string) => Promise<string | null> = readCliVersionAsync,
+): Promise<void> => {
+  const stamp = binaryStamp(path);
+  if (stamp === null || freshCached(stamp) !== undefined) return;
+  const version = await read(path);
+  versionCache.set(stamp, { version, atMs: Date.now() });
 };
 
 /** An `agy` the daemon can use (at or above {@link AGY_MIN_VERSION}). */
