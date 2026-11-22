@@ -1376,7 +1376,8 @@ const serveCursorHop = async (
  *     `agy` runs under a Seatbelt profile that can read nothing in `$HOME`
  *     but its slot, its binary and the daemon's `agy-*` temp dirs
  *     (`antigravity-seatbelt.ts`); elsewhere image turns decline;
- *   - client tools run on a fresh `agy acp` session per request.
+ *   - client tools, and shapes with no CLI text view (a final tool-result
+ *     turn that omits `tools`), run on a fresh `agy acp` session per request.
  * A decline (including an unanticipated failure) declines the hop and the
  * walker moves on; there is no fallback between the two. A sign-in miss is
  * an `auth` cooldown.
@@ -1416,22 +1417,31 @@ const serveAntigravityHop = async (
   // turn; an unknown one with history is seeded. `tool_choice: "auto"` with
   // no tools is the default, not a tool request.
   const { tool_choice: toolChoice, ...withoutChoice } = params.canonical;
-  const viaAcp = req.tools.length > 0;
-  const view = viaAcp
-    ? null
-    : agyImageView(
-        toolChoice === "auto" ? withoutChoice : params.canonical,
-        overrides?.attachmentsDir,
-      );
+  // Client tools, and any shape the CLI has no text view for (a final
+  // tool-result turn that omits `tools`, a `tool` role), run on a fresh ACP
+  // session with the full transcript — chosen by content, never a fallback.
+  const view =
+    req.tools.length > 0
+      ? null
+      : agyImageView(
+          toolChoice === "auto" ? withoutChoice : params.canonical,
+          overrides?.attachmentsDir,
+        );
   if (view !== null && view.kind === "declined") {
     return { declined: view.reason };
   }
-  if (view !== null && view.paths.size > 0 && !agyImageInputSupported()) {
+  const text = view === null ? null : nativeRequestOf(view.canonical);
+  const viaAcp = text === null;
+  if (
+    !viaAcp &&
+    view !== null &&
+    view.paths.size > 0 &&
+    !agyImageInputSupported()
+  ) {
     return {
       declined: "antigravity: image input needs the macOS agy sandbox",
     };
   }
-  const text = view === null ? null : nativeRequestOf(view.canonical);
   // Conversations belong to one account slot: its isolated HOME is part of
   // the identity, so another slot never continues this one's `agy` session.
   // The account epoch too: a sign-in or logout in the same slot starts a new
@@ -1475,7 +1485,7 @@ const serveAntigravityHop = async (
         signal: params.signal,
         ...(overrides?.acpHooks ?? {}),
       })
-    : text === null || conversation === null || lease === null || view === null
+    : conversation === null || lease === null || view === null
       ? null
       : await (async (): Promise<TNativeRunResult | null> => {
           // The transcript ends at the last assistant turn: every user turn
