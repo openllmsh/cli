@@ -26,7 +26,7 @@ import { ANTIGRAVITY_DISABLED_MARKER } from "../daemon/src/antigravity-feature";
 import { stateDir } from "../daemon/src/env";
 import { cliConfig, openllmDir, userHome } from "./env";
 import { awaitPipeCodes, bunSubprocessPeer } from "./process-pipe";
-import { isSecureOrigin } from "./self-update";
+import { isSecureOrigin } from "./secure-origin";
 
 /** True when `path` is a regular file this process can execute (`install.sh -x`). */
 const isExecutableFile = (path: string): boolean => {

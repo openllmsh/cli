@@ -23,8 +23,11 @@ import {
 } from "../release-types";
 import { downloadWithStallTimeout } from "./binary-download";
 import { CLI_VERSION, cliConfig } from "./env";
+import { isSecureOrigin } from "./secure-origin";
 import type { TUpdateLeaseHandle } from "./update-lease";
 import { describeUpdateLease, tryAcquireUpdateLease } from "./update-lease";
+
+export { isSecureOrigin };
 
 const FETCH_TIMEOUT_MS = 30_000;
 
@@ -49,22 +52,6 @@ export const cliHostTarget = (): string | null => {
 };
 
 const GZIP_MAGIC = Buffer.from([0x1f, 0x8b]);
-
-/** Self-update downloads + swaps the running binary — the origin must be
- *  HTTPS (plain HTTP only for loopback dev gateways), or a network MITM
- *  could serve both the binary AND the checksum it's verified against. */
-export const isSecureOrigin = (raw: string): boolean => {
-  try {
-    const url = new URL(raw);
-    if (url.protocol === "https:") return true;
-    return (
-      url.protocol === "http:" &&
-      (url.hostname === "localhost" || url.hostname === "127.0.0.1")
-    );
-  } catch {
-    return false;
-  }
-};
 
 /** Whether the binary at `path` carries the daemon half (it answers
  *  `daemon --fingerprint` with a sha-256). */
