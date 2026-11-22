@@ -2110,7 +2110,11 @@ vendor_cli_resolve_curl() {
 # own `agy` profile.
 agy_version_ok() {
   local v major minor
-  v="$(HOME="${TMPDIR:-/tmp}" "$1" --version 2>/dev/null | grep -Eo '[0-9]+\.[0-9]+\.[0-9]+' | head -n 1)"
+  local out
+  # A nonzero exit is not a version, whatever it printed (matches the
+  # daemon's own probe).
+  out="$(HOME="${TMPDIR:-/tmp}" "$1" --version 2>/dev/null)" || return 1
+  v="$(printf '%s\n' "$out" | grep -Eo '[0-9]+\.[0-9]+\.[0-9]+' | head -n 1)"
   [ -n "$v" ] || return 1
   major="${v%%.*}"
   minor="${v#*.}"
@@ -2592,7 +2596,10 @@ build_vendor_status_line() {
       reason=""
     # Prefer a live binary over a stale progress record (e.g. leftover
     # stage=installing / failed after a successful vendor install).
-    elif has_executable_command "$bin" || [ -x "$dest" ] || [ -x "$HOME/.local/bin/$bin" ]; then
+    # An `agy` older than 1.5.0 is not installed (it is being, or failed to
+    # be, upgraded): fall through to the worker's own record.
+    elif { has_executable_command "$bin" || [ -x "$dest" ] || [ -x "$HOME/.local/bin/$bin" ]; } \
+      && { [ "$slug" != antigravity ] || agy_version_ok "$(if [ -x "$dest" ]; then printf '%s' "$dest"; else command -v "$bin"; fi)"; }; then
       stage="installed"
       reason=""
     elif case "$VENDOR_LAUNCH_FAILED_SLUGS" in *",$slug,"*) true ;; *) false ;; esac; then

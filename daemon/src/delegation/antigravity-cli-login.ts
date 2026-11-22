@@ -235,6 +235,7 @@ export const startAgyLogin = (args: {
   let menuAnswered = false;
   let surfaced: TAgyAuthUrl | null = null;
   let codeTyped = false;
+  let childExited = false;
   let settled = false;
   let resolveUrl: (value: TAgyAuthUrl | null) => void = () => {};
   const url = new Promise<TAgyAuthUrl | null>((resolve) => {
@@ -346,6 +347,9 @@ export const startAgyLogin = (args: {
   // decides once the link is out.
   void pty?.exited.then(async () => {
     if (settled) return;
+    // Nothing is listening any more: no code may be typed while the final
+    // store check runs.
+    childExited = true;
     const stored =
       surfaced !== null && (await args.isSignedIn().catch(() => false));
     settle(
@@ -382,7 +386,7 @@ export const startAgyLogin = (args: {
     done,
     submitCode: (pasted) => {
       // One code per screen: once typed, `agy` is no longer at the prompt.
-      if (settled || surfaced === null || codeTyped) {
+      if (settled || childExited || surfaced === null || codeTyped) {
         return { ok: false, detail: "no Google sign-in is awaiting a code." };
       }
       const checked = validateAgyAuthCode(pasted);

@@ -236,6 +236,16 @@ export const allProvisionedVendorClisPresent = (
       isExecutableFile(path) &&
       (vendor.minVersion === undefined ||
         versionAtLeast(cliVersion(path), vendor.minVersion));
+    // A versioned CLI follows the runtime's resolution order: the daemon
+    // launches the home launcher whenever it is there, so that one alone
+    // decides — a newer copy on PATH never hides an old launcher.
+    if (vendor.minVersion !== undefined) {
+      const launcher = vendor.dest(home);
+      if (isExecutableFile(launcher)) {
+        if (usable(launcher)) continue;
+        return false;
+      }
+    }
     const onPath = which(vendor.command);
     if (onPath !== null && onPath.length > 0 && usable(onPath)) continue;
     if (usable(vendor.dest(home))) continue;
