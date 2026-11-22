@@ -883,6 +883,15 @@ export const runAntigravityNative = async (
         message: "agent is not the expected Google Antigravity release",
       });
     }
+    // Signed out (or in) since the gate: never let `authenticate` start a
+    // browser sign-in on this host for an account that is gone.
+    if (params.currentSignInEpoch() !== params.signInEpoch) {
+      throw new AcpRpcError({
+        method: "authenticate",
+        kind: "rpc",
+        message: "antigravity account changed during setup",
+      });
+    }
     await client.request(
       "authenticate",
       { methodId: ANTIGRAVITY_AUTH_METHOD },

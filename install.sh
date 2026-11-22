@@ -1943,7 +1943,7 @@ launch_vendor_cli_install() {
     set -euo pipefail
     # A vendor's installer never needs the OpenLLM key: keep it out of its
     # environment (this subshell only; the parent install still pairs).
-    unset OPENLLM_API_KEY SUPPLIED_KEY
+    unset OPENLLM_API_KEY SUPPLIED_KEY API_KEY
     my_pid=""
     # Bounded wall deadline (~10s), not a fixed short iteration count — slow
     # parent `ps`/JSON write under load must still complete the handshake.
@@ -2121,7 +2121,7 @@ agy_version_ok() {
   local tmp probe watchdog rc
   tmp="$(mktemp "${TMPDIR:-/tmp}/agy-version.XXXXXX")" || return 1
   # The probe never sees the pairing key (the parent still pairs with it).
-  env -u OPENLLM_API_KEY -u SUPPLIED_KEY HOME="${TMPDIR:-/tmp}" \
+  env -u OPENLLM_API_KEY -u SUPPLIED_KEY -u API_KEY HOME="${TMPDIR:-/tmp}" \
     "$1" --version >"$tmp" 2>/dev/null </dev/null &
   probe=$!
   ( sleep 5; kill -9 "$probe" 2>/dev/null ) >/dev/null 2>&1 </dev/null &
@@ -2247,9 +2247,19 @@ provision_clis() {
   # the marker the daemon reads (packages/cli/daemon/src/antigravity-feature.ts);
   # `=1` opts back in. Recorded FIRST, so the preference sticks even when a
   # prerequisite below (curl) ends provisioning early.
+  # The explicit value decides THIS run even when the marker can't be written.
+  ANTIGRAVITY_OPTED_OUT=0
   case "${OPENLLM_ANTIGRAVITY:-}" in
-    1) rm -f "$OPENLLM_DIR/antigravity-disabled" 2>/dev/null || true ;;
-    0) touch "$OPENLLM_DIR/antigravity-disabled" 2>/dev/null || true ;;
+    1)
+      rm -f "$OPENLLM_DIR/antigravity-disabled" 2>/dev/null \
+        || echo "  Google Antigravity: couldn't clear the opt-out marker." >&2
+      ;;
+    0)
+      ANTIGRAVITY_OPTED_OUT=1
+      touch "$OPENLLM_DIR/antigravity-disabled" 2>/dev/null \
+        || echo "  Google Antigravity: couldn't save the opt-out (it applies to this run)." >&2
+      ;;
+    *) [ -f "$OPENLLM_DIR/antigravity-disabled" ] && ANTIGRAVITY_OPTED_OUT=1 ;;
   esac
   VENDOR_FAILED_NAMES=""
   VENDOR_PENDING_NAMES=""
@@ -2328,7 +2338,7 @@ provision_clis() {
         ;;
     esac
   done
-  if [ ! -f "$OPENLLM_DIR/antigravity-disabled" ] && vendor_cli_selected antigravity; then
+  if [ "$ANTIGRAVITY_OPTED_OUT" != 1 ] && vendor_cli_selected antigravity; then
     VENDOR_LAST_PID=""
     launch_rc=0
     provision_antigravity "$run_path" "$curl_bin" || launch_rc=$?
@@ -2636,7 +2646,7 @@ build_vendor_status_line() {
     # An `agy` older than 1.5.0 is not installed (it is being, or failed to
     # be, upgraded): fall through to the worker's own record.
     # Antigravity opted out: skipped, whatever is (not) on disk.
-    elif [ "$slug" = antigravity ] && [ -f "$OPENLLM_DIR/antigravity-disabled" ]; then
+    elif [ "$slug" = antigravity ] && { [ "${ANTIGRAVITY_OPTED_OUT:-0}" = 1 ] || [ -f "$OPENLLM_DIR/antigravity-disabled" ]; }; then
       stage="skipped"
       reason=""
     # Antigravity: the daemon's precedence (an existing home launcher
