@@ -16,8 +16,12 @@ import {
   mkdirSync,
   statSync,
 } from "node:fs";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
+import {
+  AGY_MIN_VERSION,
+  cachedCliVersion,
+  versionAtLeast,
+} from "../daemon/src/agy-version";
 import { ANTIGRAVITY_DISABLED_MARKER } from "../daemon/src/antigravity-feature";
 import { cliConfig, openllmDir, userHome } from "./env";
 import { awaitPipeCodes, bunSubprocessPeer } from "./process-pipe";
@@ -31,42 +35,6 @@ const isExecutableFile = (path: string): boolean => {
     return true;
   } catch {
     return false;
-  }
-};
-
-/** The oldest `agy` with the built-in ACP server (`agy acp`, 1.5.0) — the
- *  daemon's image / tool / fallback transport. An older build is "missing". */
-export const AGY_MIN_VERSION: readonly [number, number, number] = [1, 5, 0];
-
-/** `x.y.z` at or above `min`; anything unparseable is not. */
-export const versionAtLeast = (
-  version: string | null,
-  min: readonly [number, number, number],
-): boolean => {
-  const m = version === null ? null : /(\d+)\.(\d+)\.(\d+)/.exec(version);
-  if (m === null) return false;
-  const parts = [Number(m[1]), Number(m[2]), Number(m[3])];
-  for (let i = 0; i < 3; i++) {
-    const a = parts[i] ?? 0;
-    const b = min[i] ?? 0;
-    if (a !== b) return a > b;
-  }
-  return true;
-};
-
-/** `<bin> --version` (local, no sign-in), or null. Run with a throwaway
- *  HOME so it never reads or writes the user's own `agy` profile. */
-const defaultCliVersion = (path: string): string | null => {
-  try {
-    const out = Bun.spawnSync([path, "--version"], {
-      env: { PATH: process.env.PATH ?? "/usr/bin:/bin", HOME: tmpdir() },
-      stdout: "pipe",
-      stderr: "ignore",
-      timeout: 5_000,
-    });
-    return out.exitCode === 0 ? out.stdout.toString().trim() : null;
-  } catch {
-    return null;
   }
 };
 
@@ -217,7 +185,7 @@ export const allProvisionedVendorClisPresent = (
   } = {},
 ): boolean => {
   const home = deps.home ?? userHome();
-  const cliVersion = deps.cliVersion ?? defaultCliVersion;
+  const cliVersion = deps.cliVersion ?? cachedCliVersion;
   const which =
     deps.which ??
     ((command: string): string | null => Bun.which(command) ?? null);

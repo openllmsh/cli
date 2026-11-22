@@ -2109,11 +2109,26 @@ vendor_cli_resolve_curl() {
 # fallback. Run with a throwaway HOME: `--version` never touches the user's
 # own `agy` profile.
 agy_version_ok() {
-  local v major minor
-  local out
+  local v major minor out
   # A nonzero exit is not a version, whatever it printed (matches the
-  # daemon's own probe).
-  out="$(HOME="${TMPDIR:-/tmp}" "$1" --version 2>/dev/null)" || return 1
+  # daemon's own probe). Capped at 5 s (macOS has no `timeout`): a hung
+  # binary counts as failed, so setup proceeds and upgrades it.
+  # Output goes to a file, not a pipe: a child the probe left behind can
+  # hold a pipe open, never a finished read of a file.
+  local tmp probe watchdog rc
+  tmp="$(mktemp "${TMPDIR:-/tmp}/agy-version.XXXXXX")" || return 1
+  HOME="${TMPDIR:-/tmp}" "$1" --version >"$tmp" 2>/dev/null </dev/null &
+  probe=$!
+  ( sleep 5; kill -9 "$probe" 2>/dev/null ) >/dev/null 2>&1 </dev/null &
+  watchdog=$!
+  # (the shell's own "Killed" notice for a timed-out probe stays quiet)
+  { wait "$probe"; } 2>/dev/null
+  rc=$?
+  kill "$watchdog" 2>/dev/null
+  wait "$watchdog" 2>/dev/null
+  out="$(cat "$tmp" 2>/dev/null)"
+  rm -f "$tmp"
+  [ "$rc" -eq 0 ] || return 1
   v="$(printf '%s\n' "$out" | grep -Eo '[0-9]+\.[0-9]+\.[0-9]+' | head -n 1)"
   [ -n "$v" ] || return 1
   major="${v%%.*}"
@@ -2598,8 +2613,12 @@ build_vendor_status_line() {
     # stage=installing / failed after a successful vendor install).
     # An `agy` older than 1.5.0 is not installed (it is being, or failed to
     # be, upgraded): fall through to the worker's own record.
+    # Antigravity opted out: skipped, whatever is (not) on disk.
+    elif [ "$slug" = antigravity ] && [ -f "$OPENLLM_DIR/antigravity-disabled" ]; then
+      stage="skipped"
+      reason=""
     elif { has_executable_command "$bin" || [ -x "$dest" ] || [ -x "$HOME/.local/bin/$bin" ]; } \
-      && { [ "$slug" != antigravity ] || agy_version_ok "$(if [ -x "$dest" ]; then printf '%s' "$dest"; else command -v "$bin"; fi)"; }; then
+      && { [ "$slug" != antigravity ] || agy_version_ok "$(if [ -f "$dest" ] && [ -x "$dest" ]; then printf '%s' "$dest"; else command -v "$bin"; fi)"; }; then
       stage="installed"
       reason=""
     elif case "$VENDOR_LAUNCH_FAILED_SLUGS" in *",$slug,"*) true ;; *) false ;; esac; then

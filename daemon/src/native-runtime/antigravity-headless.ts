@@ -33,11 +33,12 @@
  */
 
 import { createHash } from "node:crypto";
-import { accessSync, constants, statSync } from "node:fs";
+import { accessSync, constants, existsSync, statSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import type { TChatCompletionChunk } from "@openllmsh/sdk/protocol";
+import { agyVersionUsable, cachedCliVersion } from "../agy-version";
 import { killHard } from "../delegation/antigravity-cli-login";
 import type { TStoreRead } from "../delegation/util";
 import { ensureKeychainReady } from "../delegation/util";
@@ -88,24 +89,30 @@ const PLAN_RE = /subscription|not eligible|tier|upgrade|license/i;
 export const resolveAntigravityCli = (
   env: Readonly<Record<string, string | undefined>> = process.env,
   home: string = homedir(),
+  versionOf: (path: string) => string | null = cachedCliVersion,
 ): string | null => {
-  // Executable, not merely present: a file that can't run must not take the
-  // route (and Connect) away from ACP.
-  const runnable = (path: string): boolean => {
+  // An executable FILE at or above 1.5.0 (`agy acp`): a file that can't run,
+  // or an older build, must not take the route (and Connect). The version is
+  // read once per binary stamp.
+  const usable = (path: string): boolean => {
     try {
       accessSync(path, constants.X_OK);
-      return statSync(path).isFile();
+      if (!statSync(path).isFile()) return false;
     } catch {
       return false;
     }
+    return agyVersionUsable(path, versionOf);
   };
   const override = env.OPENLLM_AGY_BIN;
   if (override !== undefined && override.length > 0) {
-    return runnable(override) ? override : null;
+    return usable(override) ? override : null;
   }
+  // The home launcher decides when it is there (the installer replaces an
+  // old one there); a copy on PATH serves only without it.
   const launcher = join(home, ".local", "bin", "agy");
-  if (runnable(launcher)) return launcher;
-  return Bun.which("agy");
+  if (existsSync(launcher)) return usable(launcher) ? launcher : null;
+  const onPath = Bun.which("agy");
+  return onPath !== null && usable(onPath) ? onPath : null;
 };
 
 export const antigravityHeadlessArgv = (
@@ -134,6 +141,13 @@ export type THeadlessUsage = {
   readonly thinking: number;
   readonly cacheRead: number;
 };
+
+/** How long an exit waits for stdout already written to be read. */
+export const ANTIGRAVITY_HEADLESS_EXIT_DRAIN_MS = 1_000;
+
+/** Chunks a turn holds for a reader that stopped reading; past this the
+ *  turn fails instead of buffering without bound. */
+export const ANTIGRAVITY_HEADLESS_MAX_QUEUED = 50_000;
 
 /** Longest stdout line kept while waiting for its newline (4 MiB). */
 export const ANTIGRAVITY_HEADLESS_MAX_LINE_CHARS = 4 * 1024 * 1024;
@@ -337,11 +351,18 @@ class HeadlessProcess {
         resolveInit(true);
       }
     };
-    void this.pump(this.proc.stdout as ReadableStream<Uint8Array>);
-    void this.proc.exited.then(() => {
+    const pumped = this.pump(this.proc.stdout as ReadableStream<Uint8Array>);
+    void this.proc.exited.then(async () => {
       this.exitedFlag = true;
       clearTimeout(initTimer);
       resolveInit(false);
+      // Deliver every line already written (a final result can still be
+      // unread when the process exits) before the turn hears of the exit —
+      // bounded, since a grandchild could hold stdout open.
+      await Promise.race([
+        pumped,
+        Bun.sleep(ANTIGRAVITY_HEADLESS_EXIT_DRAIN_MS),
+      ]);
       this.exitHandler?.();
       this.exitHandler = null;
     });
@@ -519,6 +540,8 @@ const takeSpare = (key: string): HeadlessProcess | null => {
   const i = spares.findIndex((p) => p.key === key && p.alive);
   if (i < 0) return null;
   const [spare] = spares.splice(i, 1);
+  // Leased: its pool expiry must never fire on the request now using it.
+  spare?.disarmIdleTimer();
   return spare ?? null;
 };
 
@@ -781,6 +804,16 @@ export const runAntigravityHeadless = async (
   const queue: TItem[] = [];
   let wake: (() => void) | null = null;
   const push = (item: TItem): void => {
+    // A reader that stopped reading: end the turn rather than buffer the
+    // rest of the reply in memory.
+    if (
+      typeof item === "object" &&
+      !("failure" in item) &&
+      queue.length >= ANTIGRAVITY_HEADLESS_MAX_QUEUED
+    ) {
+      fail({ reason: "antigravity reader stopped reading", fallback: false });
+      return;
+    }
     queue.push(item);
     wake?.();
     wake = null;
