@@ -149,14 +149,23 @@ const clearAgyModelsStale = (): void => {
 const agyModelsStale = (): boolean =>
   agyModelsStaleCell.get() || existsSync(agyModelsStaleMarker());
 
-const writeAgyModels = (rows: ReadonlyArray<TAgyModelRow>): void => {
+/** True when the list was written (it then replaces any old one). */
+const writeAgyModels = (rows: ReadonlyArray<TAgyModelRow>): boolean => {
   try {
     writeFileSync(agyModelsPath(), JSON.stringify(rows), { mode: 0o600 });
     clearAgyModelsStale();
+    agyModelsCleanupOwed.set(false);
+    return true;
   } catch {
     // Best effort: the list is re-captured on the next Connect.
+    return false;
   }
 };
+
+/** A sign-in where the old list could be neither marked stale on disk,
+ *  deleted, nor replaced: after a restart it could come back. Status says
+ *  so until a later Connect / sign-out clears it. Per account slot. */
+const agyModelsCleanupOwed = accountCell<boolean>(() => false);
 
 /** A cached row: a non-empty string id and a string-or-null name. */
 const isAgyModelRow = (row: unknown): row is TAgyModelRow => {
@@ -223,18 +232,20 @@ const activeAgyLogin = accountCell<TAgyLogin | null>(() => null);
 
 /** Capture `agy models` into the model list. A failure never fails the
  *  caller: the list stays missing and the next Connect captures it. */
-const captureAgyModels = async (agyBin: string): Promise<void> => {
+/** True when a fresh list was written. */
+const captureAgyModels = async (agyBin: string): Promise<boolean> => {
   // The account this capture belongs to: a logout or another sign-in that
   // lands while `agy models` runs must not get the old list written back.
   const epoch = antigravityHeadlessEpoch();
   try {
     const rows = await readAgyModels(agyDeps(agyBin));
     if (rows !== null && epoch === antigravityHeadlessEpoch()) {
-      writeAgyModels(rows);
+      return writeAgyModels(rows);
     }
   } catch (error) {
     logError("antigravity-connect", error);
   }
+  return false;
 };
 
 /**
@@ -342,13 +353,18 @@ const connect = (): Promise<TConnectResult> =>
             noteAuthStoreIdentityChange(PROVIDER);
             // The previous account's list never outlives its sign-in —
             // not even when its file cannot be deleted.
-            markAgyModelsStale();
+            const marked = markAgyModelsStale();
+            let deleted = false;
             try {
               rmSync(agyModelsPath(), { force: true });
+              deleted = true;
             } catch (error) {
               logError("antigravity-connect", error);
             }
-            await captureAgyModels(agyBin);
+            const captured = await captureAgyModels(agyBin);
+            // The sign-in stands either way; with none of the three, the old
+            // list could outlive a restart, so status says so.
+            agyModelsCleanupOwed.set(!(marked || deleted || captured));
             // A cancel that landed during the checks above wins: the
             // attempt never reports success after the user cancelled.
             if (wiring.slot.wasCancelled()) return false;
@@ -476,7 +492,15 @@ export const antigravityDelegate: TProviderDelegate = {
           }
         : {}),
       ...(connected
-        ? { last_login_at_ms: null }
+        ? {
+            last_login_at_ms: null,
+            ...(agyModelsCleanupOwed.get()
+              ? {
+                  detail:
+                    "Signed in, but the previous account's cached model list couldn't be cleared — Connect again to retry",
+                }
+              : {}),
+          }
         : {
             detail:
               pending !== null
@@ -554,6 +578,7 @@ export const antigravityDelegate: TProviderDelegate = {
     if (!removed) {
       return { ok: false, detail: "credential still present after logout" };
     }
+    if (marked || deleted) agyModelsCleanupOwed.set(false);
     // Either invalidation lasts past a restart; with neither, the old
     // account's list could come back — say so (logging out again retries).
     return marked || deleted
