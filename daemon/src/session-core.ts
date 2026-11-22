@@ -680,11 +680,31 @@ const pushScrollback = (s: TSession, chunk: Uint8Array): void => {
   }
 };
 
+/**
+ * Tell every observer (the agent engine) how many real viewers (a terminal)
+ * are attached. The engine holds a question for the web only while nobody
+ * could answer it in the terminal.
+ */
+const announceViewers = (session: TSession): void => {
+  let count = 0;
+  for (const consumer of session.consumers) if (!consumer.observer) count += 1;
+  const payload = encodeJsonPayload({ t: "viewers", count });
+  for (const consumer of session.consumers) {
+    if (!consumer.observer) continue;
+    try {
+      consumer.stream.sendCtrl(payload);
+    } catch {
+      /* the observer is going away */
+    }
+  }
+};
+
 const detachConsumer = (
   session: TSession,
   consumer: TAttachedConsumer,
 ): void => {
   if (!session.consumers.delete(consumer)) return;
+  announceViewers(session);
   if (consumer.observer) refreshUserAtFromObservers(session);
   consumer.exitHandler = null;
   consumer.queuedBytes = 0;
@@ -1566,6 +1586,7 @@ export const bindSessionStream = (
         generation: ack.generation,
       }),
     );
+    announceViewers(session);
     if (open.mode !== "attach") return;
     // Attaching does NOT steal the size from whoever is already driving it —
     // opening a second viewer must not resize the terminal someone is using.

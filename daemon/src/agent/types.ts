@@ -27,8 +27,6 @@ export type TAgentEngineStartOptions = {
   readonly skipPermissions: boolean;
   /** Optional human title (indexed by the local session list). */
   readonly title?: string;
-  /** True while a consumer (web / desktop) is attached to the session. */
-  readonly observed?: () => boolean;
 };
 
 /**

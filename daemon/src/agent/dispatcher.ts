@@ -223,6 +223,29 @@ const replayOf = (log: readonly TAgentEvent[]): TAgentEvent[] => {
   );
 };
 
+/**
+ * Questions and approvals still waiting in the log: a `user-input.requested`
+ * / `request.opened` with no later resolution. They stay answerable from the
+ * web whenever it attaches, so the replay carries them even when the window
+ * cut their turn off.
+ */
+const pendingRequestsOf = (log: readonly TAgentEvent[]): TAgentEvent[] => {
+  const open = new Map<string, TAgentEvent>();
+  for (const event of log) {
+    if (
+      event.type === "user-input.requested" ||
+      event.type === "request.opened"
+    )
+      open.set(event.request_id, event);
+    else if (
+      event.type === "user-input.resolved" ||
+      event.type === "request.resolved"
+    )
+      open.delete(event.request_id);
+  }
+  return [...open.values()];
+};
+
 /** Strict cwd validation: absolute, existing directory (realpath'd). */
 const validateCwd = (requested: string | undefined): string | null => {
   if (requested === undefined) return homedir();
@@ -467,7 +490,6 @@ export const createAgentDispatcher = (
         cwd: args.cwd,
         skipPermissions: args.skipPermissions,
         ...(args.title === undefined ? {} : { title: args.title }),
-        observed: () => session.consumers.size > 0,
       },
       (event) => {
         if (!session.exited) publish(session, event);
@@ -654,6 +676,9 @@ export const createAgentDispatcher = (
                 commandId,
               );
               for (const event of window.events) deliver(live, state, event);
+              const replayed = new Set(window.events);
+              for (const event of pendingRequestsOf(live.log))
+                if (!replayed.has(event)) deliver(live, state, event);
               live.consumers.add(state);
               reconcileFocus(live);
               void state.chain.then(() => {

@@ -27,9 +27,13 @@
  *     TUI is ready at once;
  *   - folder trust: the one screen read. Claude asks before its first run in a
  *     folder; the dialog becomes a web approval and the answer is typed back.
- *     A PermissionRequest waits for a web decision; with no viewer, or after
- *     {@link AGENT_APPROVAL_WAIT_MS}, it returns NO decision and Claude shows
- *     its native dialog in the terminal. A timeout never allows.
+ *     A PermissionRequest always reaches the web (and is replayed to any
+ *     browser that attaches later). With no terminal attached the hook is held
+ *     until the web answers. With one attached the hook returns NO decision,
+ *     so Claude shows its native dialog there, and the request stays open on
+ *     the web: a web answer is typed into that dialog (`claude-dialog-keys`),
+ *     and it clears when the transcript shows the tool finished (answered at
+ *     the terminal) or the turn moves on. Nothing is ever auto-allowed.
  */
 import {
   closeSync,
@@ -79,6 +83,12 @@ import { readClaudeSessionIdUnderPid } from "../local-sessions/claude";
 import { logError } from "../logger";
 import { defaultSessionHostClient } from "../session-host-proc";
 import { linkCachedAttachment, sweepAttachmentCache } from "./attachment-cache";
+import type { TClaudeDialogKey } from "./claude-dialog-keys";
+import {
+  claudeApprovalKeys,
+  claudeCancelKeys,
+  claudeQuestionKeys,
+} from "./claude-dialog-keys";
 import { createClaudeHistory } from "./claude-history";
 import {
   createSubagentFollower,
@@ -109,8 +119,9 @@ import type {
 
 /** Tool output kept on an item (the full result stays in the engine). */
 export const AGENT_TOOL_OUTPUT_MAX_CHARS = 64 * 1024;
-/** How long a PermissionRequest waits for a web decision before the TUI asks. */
-export const AGENT_APPROVAL_WAIT_MS = 90_000;
+/** Wait after a dialog key, and after one that moves to the next tab. */
+const DIALOG_KEY_MS = 40;
+const DIALOG_TAB_MS = 250;
 /**
  * How long a fresh TUI may take to report `SessionStart` before the web is
  * told it is waiting in the terminal. The queued prompt is NOT pasted then:
@@ -317,6 +328,11 @@ export type TPtyLink = {
   /** Drop the observer; the PTY keeps running. */
   readonly release: () => void;
   readonly onOutput: (handler: (bytes: Uint8Array) => void) => void;
+  /**
+   * How many real viewers (terminals) are attached to the host, announced on
+   * open and on every change. Absent / not yet announced: assume one.
+   */
+  readonly onViewers?: (handler: (count: number) => void) => void;
   /** The PTY or the host went away (not fired after `release`). */
   readonly onExit: (handler: (code: number | null) => void) => void;
 };
@@ -355,6 +371,8 @@ export const dialObserver = (
     }
     ws.binaryType = "arraybuffer";
     const outputHandlers: ((bytes: Uint8Array) => void)[] = [];
+    const viewerHandlers: ((count: number) => void)[] = [];
+    let viewerCount: number | null = null;
     const exitHandlers: ((code: number | null) => void)[] = [];
     let opened = false;
     let released = false;
@@ -396,6 +414,10 @@ export const dialObserver = (
       onOutput: (handler) => {
         outputHandlers.push(handler);
       },
+      onViewers: (handler) => {
+        viewerHandlers.push(handler);
+        if (viewerCount !== null) handler(viewerCount);
+      },
       onExit: (handler) => {
         exitHandlers.push(handler);
       },
@@ -431,6 +453,10 @@ export const dialObserver = (
       if (message.t === "exit" && typeof message.code === "number")
         exitCode = message.code;
       if (message.t === "ctrl" && isRecord(message.p)) {
+        if (message.p.t === "viewers" && typeof message.p.count === "number") {
+          viewerCount = message.p.count;
+          for (const handler of viewerHandlers) handler(viewerCount);
+        }
         if (message.p.t === "open_ack" && !opened) {
           clearTimeout(settleTimer);
           if (message.p.ok === true) {
@@ -1486,7 +1512,9 @@ export type TClaudeTuiDeps = {
   readonly projectsDir?: string;
   /** Transcript re-resolve / re-scan cadence (tests). */
   readonly transcriptScanMs?: number;
-  readonly approvalWaitMs?: number;
+  /** Pause after a dialog keystroke / a tab-advancing one (tests shrink it). */
+  readonly dialogKeyMs?: number;
+  readonly dialogTabMs?: number;
   readonly readyMaxMs?: number;
   readonly readySettleMs?: number;
   readonly submitDelayMs?: number;
@@ -1512,7 +1540,6 @@ export const createClaudeTuiSession = (
   emit: TAgentEngineEmit,
   deps: TClaudeTuiDeps = {},
 ): TAgentEngineSession => {
-  const approvalWaitMs = deps.approvalWaitMs ?? AGENT_APPROVAL_WAIT_MS;
   const submitDelayMs = deps.submitDelayMs ?? SUBMIT_DELAY_MS;
   const attachmentsDir = (deps.attachmentsDir ?? agentAttachmentsDir)(
     options.sessionId,
@@ -1522,6 +1549,13 @@ export const createClaudeTuiSession = (
     options.sessionId,
   );
   let link: TPtyLink | null = null;
+  /** Requests whose hook returned (Claude's own dialog is open) but the web may still answer. */
+  const tuiRequests = new Set<string>();
+  /**
+   * Real viewers (terminals) attached to the host; null until announced,
+   * which counts as present (the terminal must never be locked out).
+   */
+  let terminalViewers: number | null = null;
   /** Latest observer presence while the PTY link is still opening. */
   let focused: boolean | null = null;
   let ended = false;
@@ -1599,6 +1633,18 @@ export const createClaudeTuiSession = (
         }, deps.stopSettleMs ?? STOP_SETTLE_MS);
       if (drained !== null) drained.push(reconciled);
       else emit(reconciled);
+      // The terminal's own dialog was answered (its tool ran or was refused),
+      // or the turn moved on: nothing is left to answer from the web.
+      if (
+        reconciled.type === "item.completed" &&
+        reconciled.item.kind === "tool_call"
+      )
+        settleTuiRequests(reconciled.item.tool_name);
+      else if (
+        reconciled.type === "turn.completed" ||
+        reconciled.type === "turn.aborted"
+      )
+        settleTuiRequests(null);
     },
     toolOutputMax: AGENT_TOOL_OUTPUT_MAX_CHARS,
   });
@@ -2164,6 +2210,62 @@ export const createClaudeTuiSession = (
     });
   };
 
+  /**
+   * Hand a held decision to Claude's native dialog (the hook returns no
+   * decision; never an allow). The request stays open on the web: its answer
+   * is typed into that dialog.
+   */
+  const handOffToTui = (requestId: string): void => {
+    const open = pending.get(requestId);
+    if (open === undefined || !("resolve" in open)) return;
+    tuiRequests.add(requestId);
+    open.resolve(null);
+  };
+  const handOffAllToTui = (): void => {
+    for (const id of [...pending.keys()]) handOffToTui(id);
+  };
+  /** Close every held or handed-off request (interrupt): the turn is over. */
+  const dropHeldRequests = (): void => {
+    for (const [id, request] of [...pending]) {
+      if (!("resolve" in request)) continue;
+      pending.delete(id);
+      tuiRequests.delete(id);
+      request.resolve(null);
+      emit({ type: "request.resolved", request_id: id, decision: "cancel" });
+    }
+  };
+  /** The terminal answered (the tool finished) or the turn moved on. */
+  function settleTuiRequests(toolName: string | null): void {
+    for (const id of [...tuiRequests]) {
+      const request = pending.get(id);
+      if (request === undefined || !("resolve" in request)) {
+        tuiRequests.delete(id);
+        continue;
+      }
+      if (
+        toolName !== null &&
+        (request.kind === "approval" ? request.toolName : "AskUserQuestion") !==
+          toolName
+      )
+        continue;
+      tuiRequests.delete(id);
+      pending.delete(id);
+      emit({ type: "request.resolved", request_id: id, decision: "cancel" });
+    }
+  }
+  /** Type keys into Claude's open dialog, a beat apart. */
+  const typeDialogKeys = (keys: readonly TClaudeDialogKey[]): void => {
+    const [first, ...rest] = keys;
+    if (first === undefined || ended) return;
+    writeText(first.text);
+    setTimeout(
+      () => typeDialogKeys(rest),
+      first.settle === "tab"
+        ? (deps.dialogTabMs ?? DIALOG_TAB_MS)
+        : (deps.dialogKeyMs ?? DIALOG_KEY_MS),
+    );
+  };
+
   const onHook: THookHandler = async (event, payload) => {
     pump();
     // Any hook means Claude's session is running past its startup dialogs.
@@ -2264,7 +2366,8 @@ export const createClaudeTuiSession = (
       return null;
     }
     if (event !== "PermissionRequest") return null;
-    if (options.observed !== undefined && !options.observed()) return null;
+    // A new request means the previous dialog is over.
+    settleTuiRequests(null);
     const toolName = toolNameOf(payload.tool_name);
     const input = payload.tool_input;
     requestCounter += 1;
@@ -2296,22 +2399,10 @@ export const createClaudeTuiSession = (
         input,
       });
     });
-    const timer = setTimeout(() => {
-      const open = pending.get(requestId);
-      if (open === undefined || !("resolve" in open)) return;
-      pending.delete(requestId);
-      // Never auto-allow: hand the decision to Claude's native dialog.
-      open.resolve(null);
-      emit({
-        type: "request.resolved",
-        request_id: requestId,
-        decision: "cancel",
-      });
-    }, approvalWaitMs);
-    timer.unref?.();
-    const result = await reply;
-    clearTimeout(timer);
-    return result;
+    // With a terminal attached its dialog is how that person answers, so
+    // Claude shows it now; otherwise the hook is held for the web.
+    if (terminalViewers !== 0) handOffToTui(requestId);
+    return await reply;
   };
   hookHandlers.set(options.sessionId, onHook);
 
@@ -2354,6 +2445,12 @@ export const createClaudeTuiSession = (
       hookKeys.add(opened.hostId);
       hookHandlers.set(opened.hostId, onHook);
       opened.onOutput(onOutput);
+      opened.onViewers?.((count) => {
+        terminalViewers = count;
+        // A terminal arrived while a question was held: Claude shows its
+        // dialog there now; the web can still answer it.
+        if (count > 0) handOffAllToTui();
+      });
       opened.onExit(() => finish("completed"));
       settleReplayedTurn();
       maybeReady();
@@ -2735,6 +2832,8 @@ export const createClaudeTuiSession = (
       externalTurnSubmitted = false;
       if (!sendNowPending) sendNowInterrupt = false;
       emitQueue();
+      // Esc aborts the turn the held hooks belong to.
+      dropHeldRequests();
       if (ready) writeText(ESC);
       parser.abortTurn("interrupted");
       // Esc can skip Stop. Clear the turn state, but deliberately do not drain
@@ -2878,6 +2977,49 @@ export const createClaudeTuiSession = (
           decision: accept ? "accept" : "decline",
         });
         maybeReady();
+        return true;
+      }
+      if (
+        (request.kind === "user-input" || request.kind === "approval") &&
+        tuiRequests.has(command.request_id)
+      ) {
+        // Claude's dialog is open on the terminal: answer by typing into it.
+        const keys =
+          request.kind === "user-input"
+            ? command.answers === undefined
+              ? claudeCancelKeys()
+              : claudeQuestionKeys(
+                  askUserQuestionsOf(request.input) ?? [],
+                  command.answers,
+                )
+            : command.decision === undefined
+              ? null
+              : command.decision === "accept" ||
+                  command.decision === "accept_for_session"
+                ? claudeApprovalKeys(true)
+                : command.decision === "decline"
+                  ? claudeApprovalKeys(false)
+                  : claudeCancelKeys();
+        if (keys === null) {
+          pending.set(command.request_id, request);
+          return false;
+        }
+        tuiRequests.delete(command.request_id);
+        typeDialogKeys(keys);
+        if (request.kind === "user-input") {
+          emit({
+            type: "user-input.resolved",
+            request_id: command.request_id,
+            answers: command.answers ?? {},
+          });
+        } else {
+          emit({
+            type: "request.resolved",
+            request_id: command.request_id,
+            decision: command.decision ?? "cancel",
+          });
+          if (command.decision === "cancel") parser.abortTurn("cancelled");
+        }
         return true;
       }
       if (request.kind === "user-input") {
