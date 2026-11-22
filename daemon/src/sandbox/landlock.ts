@@ -343,10 +343,15 @@ export const agyWorkingSet = (
    * children are granted instead, walking down toward the protected tree
    * and leaving out only the tree itself.
    */
+  /** Canonical dirs already expanded: a symlinked child resolving back to
+   *  an ancestor must not walk the same tree again. */
+  const expanded = new Set<string>();
   const narrow = (grant: string): string[] => {
     const canon = realpath(grant);
     if (protectedRoots.some((root) => under(root, canon))) return [];
     if (!protectedRoots.some((root) => under(canon, root))) return [canon];
+    if (expanded.has(canon)) return [];
+    expanded.add(canon);
     const children = list(canon);
     if (children === null) return [];
     return children.flatMap((name) =>
