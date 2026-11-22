@@ -191,15 +191,22 @@ export const classifyAntigravityFailure = (
   return { reason: "antigravity ACP setup failed" };
 };
 
-const declineFrom = (error: unknown, signal: AbortSignal): TNativeRunResult => {
+/** A setup failure → decline. `sameAccount` false (the sign-in changed
+ *  since the request was planned): an `auth` miss belongs to the old
+ *  account, so it never cools the hop the new account now serves. */
+const declineFrom = (
+  error: unknown,
+  signal: AbortSignal,
+  sameAccount = true,
+): TNativeRunResult => {
   if (signal.aborted) return { kind: "declined", reason: "client aborted" };
   const failure = classifyAntigravityFailure(error);
+  const cooldown =
+    failure.cooldown === "auth" && !sameAccount ? undefined : failure.cooldown;
   return {
     kind: "declined",
     reason: failure.reason,
-    ...(failure.cooldown !== undefined
-      ? { cooldownReason: failure.cooldown }
-      : {}),
+    ...(cooldown !== undefined ? { cooldownReason: cooldown } : {}),
   };
 };
 
@@ -735,7 +742,11 @@ export const runAntigravityNative = async (
   try {
     cwd = await mkdtemp(join(daemonTempDir(), "agy-"));
   } catch (error) {
-    return declineFrom(error, params.signal);
+    return declineFrom(
+      error,
+      params.signal,
+      params.currentSignInEpoch() === params.signInEpoch,
+    );
   }
   let agent: TWarmAgent | null = null;
   /** Read through a function: `agent` is assigned inside closures, which
@@ -929,7 +940,11 @@ export const runAntigravityNative = async (
   const failSetup = (error: unknown): TNativeRunResult => {
     ended = true;
     cleanup("dispose");
-    return declineFrom(error, params.signal);
+    return declineFrom(
+      error,
+      params.signal,
+      params.currentSignInEpoch() === params.signInEpoch,
+    );
   };
 
   let opened: unknown;
