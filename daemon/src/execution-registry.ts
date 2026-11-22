@@ -73,8 +73,11 @@ export const PROVIDER_EXECUTION_REGISTRY: readonly TProviderExecutionRegistratio
     },
     {
       provider: "antigravity",
+      // ACP is the main method (caller tools load over the daemon's MCP
+      // server); `stream-json` is the headless CLI, selectable for tool-free
+      // turns until `agy`'s print mode loads MCP servers.
       defaultSelection: executionSelectionBridge("acp", false),
-      variants: ["acp"],
+      variants: ["acp", "stream-json"],
       captureVariants: [],
     },
     {
@@ -162,6 +165,13 @@ const requestShapeUnsupportedFor = (
     requestShape?.hasClientTools === true
   ) {
     return "claude_code stream-json has no proven caller-tool integration yet — refusing rather than silently invoking the official Agent SDK";
+  }
+  if (
+    provider === "antigravity" &&
+    variant === "stream-json" &&
+    requestShape?.hasClientTools === true
+  ) {
+    return "antigravity stream-json (headless agy) never loads an MCP server, so it cannot carry caller tools — select acp";
   }
   return null;
 };

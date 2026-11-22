@@ -1396,27 +1396,37 @@ const antigravityHeadlessSessions = new NativeSessionStore();
 /** Which `agy` transport serves a request — chosen by its content. */
 type TAntigravityRoute =
   | { readonly kind: "declined"; readonly reason: string }
-  /** Client tools, or a shape the CLI has no text view for (a final
-   *  tool-result turn that omits `tools`): a fresh ACP session with the
-   *  full transcript. */
+  /** The main method: a fresh ACP session with the full transcript, the
+   *  caller's tools and images. */
   | { readonly kind: "acp"; readonly req: ReturnType<typeof cursorRequestOf> }
-  /** Text and image turns: the headless CLI, on the conversation's own
-   *  `agy` session. */
+  /** The `stream-json` method (headless CLI, explicitly selected): text and
+   *  image turns on the conversation's own `agy` session. */
   | {
       readonly kind: "cli";
       readonly text: NonNullable<ReturnType<typeof nativeRequestOf>>;
       readonly attachments: ReadonlySet<string>;
     };
 
+/**
+ * Every Antigravity turn is served over `agy acp`, like the other
+ * subscription providers: the caller's tools (browser chat or any client) load
+ * through the daemon's loopback MCP server, and images ride ACP image blocks.
+ * The headless CLI is the `stream-json` method, used only when selected
+ * (`ACTIVE_SUB_METHOD`): `agy`'s print mode never loads an MCP server
+ * (1.5.14), so it can't carry tools — a tool request is refused for it before
+ * dispatch, and a shape it has no text view for declines rather than
+ * switching methods.
+ */
 const routeAntigravity = (
   params: TNativeServeParams,
+  variant: TBridgeVariant,
   overrides: TNativeServeOverrides | undefined,
 ): TAntigravityRoute => {
   const req = cursorRequestOf(params.canonical, { frameHistory: true });
   if (req.promptText.length === 0 && req.images.length === 0) {
     return { kind: "declined", reason: "no user turn to answer" };
   }
-  if (req.tools.length > 0) return { kind: "acp", req };
+  if (variant !== "stream-json") return { kind: "acp", req };
   // `tool_choice: "auto"` with no tools is the default, not a tool request.
   // Structured output was already declined by the native-control gate.
   const { tool_choice: toolChoice, ...withoutChoice } = params.canonical;
@@ -1426,7 +1436,12 @@ const routeAntigravity = (
   );
   if (view.kind === "declined") return view;
   const text = nativeRequestOf(view.canonical);
-  if (text === null) return { kind: "acp", req };
+  if (text === null) {
+    return {
+      kind: "declined",
+      reason: "antigravity stream-json has no text view of this request",
+    };
+  }
   if (
     view.paths.size > 0 &&
     !(overrides?.imageReadsConfined ?? agyFileReadsConfined())
@@ -1629,7 +1644,11 @@ const serveAntigravityHop = async (
   if (explicitDispatch !== null && !explicitDispatch.ok) {
     return { declined: explicitDispatch.declined };
   }
-  const route = routeAntigravity(params, overrides);
+  const route = routeAntigravity(
+    params,
+    explicitDispatch?.variant ?? "acp",
+    overrides,
+  );
   if (route.kind === "declined") return { declined: route.reason };
   const env = overrides?.env ?? cliEnv("antigravity");
   const agyBin =
