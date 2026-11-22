@@ -140,9 +140,8 @@ export type TNativeServeOverrides = {
   /** The `agy` CLI (headless AND `agy acp`). Tests that pass overrides never
    *  resolve a host `agy`: they set this, or get "not installed". */
   readonly headlessBin?: string | null;
-  /** Test hooks for `agy acp` (sign-in / keychain gates, settings, sandbox
-   *  probe) so a serve-level test never reaches the real `security`,
-   *  keychain or sandbox. */
+  /** Injected `agy acp` gates (sign-in / keychain, settings, sandbox probe);
+   *  omitted, the real ones run. */
   readonly acpHooks?: Pick<
     TAntigravityNativeParams,
     | "signedIn"
@@ -153,14 +152,13 @@ export type TNativeServeOverrides = {
     | "idleMs"
     | "warmIdleTtlMs"
   >;
-  /** Where image attachments are stored (default `agyAttachmentsDir()`);
-   *  tests point it at a temp dir. */
+  /** Where image attachments are stored (default `agyAttachmentsDir()`). */
   readonly attachmentsDir?: string;
   /** Whether `agy`'s reads are kernel-confined, gating image input
    *  (default `agyFileReadsConfined()`). */
   readonly imageReadsConfined?: boolean;
-  /** Test hooks for the headless spawn (keychain gate, argv, sandbox wrap) so
-   *  a serve-level test never reaches the real `security` or sandbox. */
+  /** Injected headless spawn gates (keychain, argv, confinement wrap);
+   *  omitted, the real ones run. */
   readonly headlessHooks?: Pick<
     TAntigravityHeadlessParams,
     "ensureKeychain" | "wrapArgv" | "argv" | "spare" | "initTimeoutMs"
