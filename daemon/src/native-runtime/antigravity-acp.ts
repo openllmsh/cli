@@ -1038,9 +1038,13 @@ export const runAntigravityNative = async (
   if (owned === null || sessionId === null) {
     return failSetup(new DOMException("client aborted", "AbortError"));
   }
-  // Signed in or out while this process started: it may hold the old
-  // account — never prompt on it.
-  if (params.currentSignInEpoch() !== params.signInEpoch) {
+  // Signed in or out while this process started — or its account slot was
+  // removed (that bumps the HOME's generation, not the epoch): it may hold
+  // the old account. Never prompt on it.
+  if (
+    params.currentSignInEpoch() !== params.signInEpoch ||
+    homeGenerationStale(owned)
+  ) {
     return failSetup(
       new AcpRpcError({
         method: "session/prompt",

@@ -271,6 +271,7 @@ export const startAgyLogin = (args: {
     pendingWrites -= 1;
     renderVisible();
     if (pendingWrites === 0) {
+      maybeSurface();
       const waiters = drained;
       drained = [];
       for (const resolve of waiters) resolve();
@@ -293,14 +294,17 @@ export const startAgyLogin = (args: {
       );
     }
     visible = lines.join("\n");
-    // The link is surfaced only once its code prompt is ON the rendered
-    // screen, so a code pasted right away is never refused for lag.
-    if (menuAnswered && surfaced === null) {
-      const parsed = parseAgyAuthUrl(screen);
-      if (parsed !== null && CODE_PROMPT_RE.test(visible)) {
-        surfaced = parsed;
-        resolveUrl(parsed);
-      }
+  };
+  // The link is surfaced only once ALL received output is rendered and the
+  // link and its code prompt are both on that one rendered screen: a
+  // replaced link (a second attempt) is never the one published, and a
+  // code pasted right away is never refused for lag.
+  const maybeSurface = (): void => {
+    if (settled || !menuAnswered || surfaced !== null) return;
+    const parsed = parseAgyAuthUrl(visible);
+    if (parsed !== null && CODE_PROMPT_RE.test(visible)) {
+      surfaced = parsed;
+      resolveUrl(parsed);
     }
   };
   let menuAnswered = false;

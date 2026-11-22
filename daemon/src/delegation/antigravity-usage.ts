@@ -98,7 +98,7 @@ export const summaryQuota = (summary: unknown): TAntigravityQuota => {
     : [{ displayName: undefined, buckets: s?.buckets }];
   const out = new Map<string, TProviderUsageWindow>();
   const families = new Map<string, string>();
-  for (const group of groups ?? []) {
+  for (const [groupIndex, group] of (groups ?? []).entries()) {
     for (const bucket of group.buckets ?? []) {
       if (bucket.disabled === true || !nonEmpty(bucket.bucketId)) continue;
       const family =
@@ -117,13 +117,15 @@ export const summaryQuota = (summary: unknown): TAntigravityQuota => {
       if (window !== null) {
         // A group's own allowance never shares a key with the reserved
         // bucket-id families (a group named "Gemini" is not `gemini-…`).
-        // An unnamed bucket is its own allowance, never a named group's.
+        // A named group's allowance never mixes with an unnamed one's.
         const named =
           nonEmpty(group.displayName) && group.displayName.trim().length > 0;
         families.set(
           bucket.bucketId,
           quotaFamilyOf(bucket.bucketId) ??
-            (named ? `group:${family}` : `bucket:${bucket.bucketId}`),
+            // An unnamed group is still ONE allowance (its weekly and 5-hour
+            // windows together): keyed by its position in the payload.
+            (named ? `group:${family}` : `group#${groupIndex}`),
         );
         out.set(bucket.bucketId, window);
       }

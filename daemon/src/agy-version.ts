@@ -8,9 +8,11 @@ import { mkdtempSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-/** The oldest `agy` with the built-in ACP server (`agy acp`, 1.5.0) — the
- *  daemon's image / tool / fallback transport. An older build is unusable. */
-export const AGY_MIN_VERSION: readonly [number, number, number] = [1, 5, 0];
+/** The oldest usable `agy`: 1.5.0 added the built-in ACP server (`agy acp`,
+ *  the daemon's image / tool / fallback transport), and 1.5.1 offers every
+ *  model the account has to every ACP client (1.5.0 limited non-Gemini
+ *  models to a fixed list of editors; the daemon is not one). */
+export const AGY_MIN_VERSION: readonly [number, number, number] = [1, 5, 1];
 
 /** The whole `agy --version` output: one version, optionally prefixed. */
 const VERSION_SHAPE =

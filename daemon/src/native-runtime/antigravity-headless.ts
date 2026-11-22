@@ -91,7 +91,7 @@ export const resolveAntigravityCli = (
   home: string = homedir(),
   versionOf: (path: string) => string | null = cachedCliVersion,
 ): string | null => {
-  // An executable FILE at or above 1.5.0 (`agy acp`): a file that can't run,
+  // An executable FILE at or above 1.5.1 (`agy acp`, every model): a file that can't run,
   // or an older build, must not take the route (and Connect). The version is
   // read once per binary stamp.
   const usable = (path: string): boolean => {

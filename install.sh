@@ -2114,9 +2114,10 @@ vendor_cli_resolve_curl() {
   printf '%s' "$curl_bin"
 }
 
-# True when `$1` is an `agy` at or above 1.5.0 — the first build with the
-# built-in ACP server (`agy acp`) the daemon uses for images, tools and its
-# fallback. Run with a throwaway HOME: `--version` never touches the user's
+# True when `$1` is an `agy` at or above 1.5.1 — 1.5.0 added the built-in
+# ACP server (`agy acp`) the daemon uses for images, tools and its fallback,
+# and 1.5.1 offers every model the account has to every ACP client (the
+# daemon's rule: packages/cli/daemon/src/agy-version.ts). Run with a throwaway HOME: `--version` never touches the user's
 # own `agy` profile.
 agy_version_ok() {
   local v major minor out
@@ -2150,7 +2151,7 @@ agy_version_ok() {
   [ "$rc" -eq 0 ] || return 1
   # The daemon's rule (agy-version.ts): the WHOLE output is one version
   # (`1.5.13`, `agy 1.5.13`, `v1.5.13`, optional -pre / +build), and a
-  # prerelease of 1.5.0 is older than 1.5.0.
+  # prerelease of 1.5.1 is older than 1.5.1.
   # Exactly one nonblank line: a version plus a diagnostic is no version.
   [ "$(printf '%s\n' "$out" | grep -c '[^[:space:]]')" -eq 1 ] || return 1
   out="$(printf '%s\n' "$out" | grep '[^[:space:]]' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
@@ -2167,7 +2168,8 @@ agy_version_ok() {
   [ "$major" -eq 1 ] || return 1
   [ "$minor" -gt 5 ] && return 0
   [ "$minor" -eq 5 ] || return 1
-  [ "$patch" -gt 0 ] && return 0
+  [ "$patch" -gt 1 ] && return 0
+  [ "$patch" -eq 1 ] || return 1
   [ -z "$pre" ]
 }
 
@@ -2186,7 +2188,7 @@ provision_antigravity() {
   # An older build (no `agy acp`) is upgraded by Google's installer, which
   # replaces ~/.local/bin/agy — the path the daemon resolves first.
   if [ -n "$found" ] && { [ ! -f "$found" ] || ! agy_version_ok "$found"; }; then
-    echo "  $name CLI: $found is unusable or older than 1.5.0 — updating."
+    echo "  $name CLI: $found is unusable or older than 1.5.1 — updating."
     found=""
   fi
   if [ -n "$found" ]; then
@@ -2698,7 +2700,7 @@ build_vendor_status_line() {
       reason=""
     # Prefer a live binary over a stale progress record (e.g. leftover
     # stage=installing / failed after a successful vendor install).
-    # An `agy` older than 1.5.0 is not installed (it is being, or failed to
+    # An `agy` older than 1.5.1 is not installed (it is being, or failed to
     # be, upgraded): fall through to the worker's own record.
     # Antigravity opted out: skipped, whatever is (not) on disk.
     # (provision_clis decided ANTIGRAVITY_OPTED_OUT from the explicit value
