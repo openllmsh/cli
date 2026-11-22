@@ -640,6 +640,9 @@ export type TAntigravityHeadlessParams = {
    *  ({@link antigravityHeadlessEpoch}). A sign-in or logout during setup
    *  makes the leased conversation the old account's: start fresh, seeded. */
   readonly epoch?: number;
+  /** Told the account epoch the serving process started under, so the
+   *  caller publishes the conversation under that generation. */
+  readonly onServingEpoch?: (epoch: number) => void;
   /** Sent instead of `userText` when the conversation could not be resumed
    *  (the full transcript seed). */
   readonly seedText?: string;
@@ -740,6 +743,7 @@ export const runAntigravityHeadless = async (
   // The account this process starts under: a change while it starts means
   // it may hold the old account's sign-in or conversation.
   const spawnEpoch = sparesEpoch;
+  params.onServingEpoch?.(spawnEpoch);
   let proc: HeadlessProcess;
   try {
     proc =
@@ -828,7 +832,8 @@ export const runAntigravityHeadless = async (
   ) {
     ended = true;
     proc.onExit(null);
-    proc.dispose();
+    // settle(false) disposes the process AND drops the abort listener.
+    settle(false);
     return fallback("account changed while agy started");
   }
   if (!ready || ended) {

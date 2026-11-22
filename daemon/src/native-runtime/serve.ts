@@ -1363,7 +1363,7 @@ const serveCursorHop = async (
 /**
  * Antigravity serve path. `agy` is the single source of truth for sign-in:
  * plain text runs on its headless stream-json mode (streams as generated);
- * images, client tools and structured output — and any unanticipated headless
+ * images and client tools — and any unanticipated headless
  * failure (marked `ANTIGRAVITY_HEADLESS_FALLBACK`) — run on `agy acp`, a fresh
  * ACP session per request (on a warm process when one is idle). The
  * conversation is flattened by `cursorRequestOf`; client tools ride the
@@ -1401,8 +1401,8 @@ const serveAntigravityHop = async (
   if (agyBin === null) {
     return { declined: "antigravity: agy CLI not installed" };
   }
-  // Plain text conversations only (tools, images and structured output are
-  // null here → ACP). The conversation is correlated by content like the
+  // Plain text conversations only (tools and images are null here → ACP;
+  // structured output was already declined by the native-control gate). The conversation is correlated by content like the
   // Claude/Codex native paths: a known one continues its `agy` conversation
   // with only the new turn; an unknown one with history is seeded.
   // `tool_choice: "auto"` with no tools is the default, not a tool request:
@@ -1416,7 +1416,12 @@ const serveAntigravityHop = async (
   // The account epoch too: a sign-in or logout in the same slot starts a new
   // one, so nothing continues (or commits into) the previous account's.
   const epoch = antigravityHeadlessEpoch();
-  const conversationKey = `${params.providerModelId}\u0000${env.HOME ?? ""}\u0000${epoch}`;
+  const keyFor = (generation: number): string =>
+    `${params.providerModelId}\u0000${env.HOME ?? ""}\u0000${generation}`;
+  const conversationKey = keyFor(epoch);
+  /** The generation the headless process that served this turn started
+   *  under (a change during setup starts it under the new one). */
+  let servedEpoch: number | null = null;
   const conversation =
     text === null
       ? null
@@ -1461,6 +1466,9 @@ const serveAntigravityHop = async (
             seedText: seed,
             conversationId: lease.sessionId,
             epoch,
+            onServingEpoch: (served) => {
+              servedEpoch = served;
+            },
             hasImages: false,
             hasTools: false,
             signal: params.signal,
@@ -1506,16 +1514,22 @@ const serveAntigravityHop = async (
     params.record(tokensFromResponse(resp), "success", nativeAttempt);
     if (heldLease !== null && text !== null) {
       // The next request carries these turns + this reply before its own
-      // new turn, so it lands on the same `agy` conversation.
-      heldLease.commit(
-        nextPrefixHash(
-          conversationKey,
-          text.systemText,
-          text.turns,
-          textOf(resp),
-        ),
-        run.sessionId(),
-      );
+      // new turn, so it lands on the same `agy` conversation — published
+      // under the generation that served it, and dropped when the account
+      // changed again before this settled.
+      if (servedEpoch !== null && servedEpoch === antigravityHeadlessEpoch()) {
+        heldLease.commit(
+          nextPrefixHash(
+            keyFor(servedEpoch),
+            text.systemText,
+            text.turns,
+            textOf(resp),
+          ),
+          run.sessionId(),
+        );
+      } else {
+        heldLease.commit(conversationKey, null);
+      }
     }
   };
   const fail = (err: unknown): void => {

@@ -344,7 +344,8 @@ const submitLoginCode = async (
 export const antigravityDelegate: TProviderDelegate = {
   slug: PROVIDER,
   primaryLoginMethod: "browser",
-  // Status reads metadata only — nothing to cancel.
+  // Status reads sign-in metadata; its install probe may run a cached
+  // `agy --version` (bounded by the probe timeout) — nothing to cancel.
   statusCancellable: false,
   connect,
   submitLoginCode,

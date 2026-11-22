@@ -16,6 +16,7 @@ import {
   mkdirSync,
   statSync,
 } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ANTIGRAVITY_DISABLED_MARKER } from "../daemon/src/antigravity-feature";
 import { cliConfig, openllmDir, userHome } from "./env";
@@ -30,6 +31,42 @@ const isExecutableFile = (path: string): boolean => {
     return true;
   } catch {
     return false;
+  }
+};
+
+/** The oldest `agy` with the built-in ACP server (`agy acp`, 1.5.0) — the
+ *  daemon's image / tool / fallback transport. An older build is "missing". */
+export const AGY_MIN_VERSION: readonly [number, number, number] = [1, 5, 0];
+
+/** `x.y.z` at or above `min`; anything unparseable is not. */
+export const versionAtLeast = (
+  version: string | null,
+  min: readonly [number, number, number],
+): boolean => {
+  const m = version === null ? null : /(\d+)\.(\d+)\.(\d+)/.exec(version);
+  if (m === null) return false;
+  const parts = [Number(m[1]), Number(m[2]), Number(m[3])];
+  for (let i = 0; i < 3; i++) {
+    const a = parts[i] ?? 0;
+    const b = min[i] ?? 0;
+    if (a !== b) return a > b;
+  }
+  return true;
+};
+
+/** `<bin> --version` (local, no sign-in), or null. Run with a throwaway
+ *  HOME so it never reads or writes the user's own `agy` profile. */
+const defaultCliVersion = (path: string): string | null => {
+  try {
+    const out = Bun.spawnSync([path, "--version"], {
+      env: { PATH: process.env.PATH ?? "/usr/bin:/bin", HOME: tmpdir() },
+      stdout: "pipe",
+      stderr: "ignore",
+      timeout: 5_000,
+    });
+    return out.exitCode === 0 ? out.stdout.toString().trim() : null;
+  } catch {
+    return null;
   }
 };
 
@@ -69,6 +106,8 @@ export type TProvisionMissingVendorClisDeps = {
    * is already serving.
    */
   readonly detach?: boolean;
+  /** `<bin> --version` (tests override). */
+  readonly cliVersion?: (path: string) => string | null;
 };
 
 /**
@@ -127,6 +166,8 @@ export const PROVISIONED_VENDOR_CLIS: readonly {
   readonly dest: (home: string) => string;
   /** False when the installer would skip it here, so it can't be missing. */
   readonly installable?: (deps: TVendorPlatformDeps) => boolean;
+  /** The oldest usable version; an older binary counts as missing. */
+  readonly minVersion?: readonly [number, number, number];
 }[] = [
   {
     command: "claude",
@@ -158,6 +199,7 @@ export const PROVISIONED_VENDOR_CLIS: readonly {
     command: "agy",
     dest: (home) => join(home, ".local", "bin", "agy"),
     installable: antigravityInstallable,
+    minVersion: AGY_MIN_VERSION,
   },
 ];
 
@@ -170,9 +212,12 @@ export const allProvisionedVendorClisPresent = (
     readonly arch?: string;
     readonly antigravityEnv?: string | undefined;
     readonly antigravityDisabledMarker?: boolean;
+    /** `<bin> --version` (tests override; never the real binary there). */
+    readonly cliVersion?: (path: string) => string | null;
   } = {},
 ): boolean => {
   const home = deps.home ?? userHome();
+  const cliVersion = deps.cliVersion ?? defaultCliVersion;
   const which =
     deps.which ??
     ((command: string): string | null => Bun.which(command) ?? null);
@@ -187,13 +232,14 @@ export const allProvisionedVendorClisPresent = (
   for (const vendor of PROVISIONED_VENDOR_CLIS) {
     if (vendor.installable !== undefined && !vendor.installable(platformDeps))
       continue;
+    const usable = (path: string): boolean =>
+      isExecutableFile(path) &&
+      (vendor.minVersion === undefined ||
+        versionAtLeast(cliVersion(path), vendor.minVersion));
     const onPath = which(vendor.command);
-    if (onPath !== null && onPath.length > 0 && isExecutableFile(onPath))
-      continue;
-    const dest = vendor.dest(home);
-    if (isExecutableFile(dest)) continue;
-    const localBin = join(home, ".local", "bin", vendor.command);
-    if (isExecutableFile(localBin)) continue;
+    if (onPath !== null && onPath.length > 0 && usable(onPath)) continue;
+    if (usable(vendor.dest(home))) continue;
+    if (usable(join(home, ".local", "bin", vendor.command))) continue;
     return false;
   }
   return true;
@@ -223,6 +269,7 @@ export const provisionMissingVendorClis = async (
       which: deps?.which,
       antigravityEnv: deps?.antigravityEnv,
       antigravityDisabledMarker: deps?.antigravityDisabledMarker,
+      cliVersion: deps?.cliVersion,
     })
   ) {
     process.stderr.write(

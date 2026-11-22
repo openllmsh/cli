@@ -2104,13 +2104,38 @@ vendor_cli_resolve_curl() {
   printf '%s' "$curl_bin"
 }
 
-# Launch the tracked Antigravity install unless `agy` is already present.
+# True when `$1` is an `agy` at or above 1.5.0 — the first build with the
+# built-in ACP server (`agy acp`) the daemon uses for images, tools and its
+# fallback. Run with a throwaway HOME: `--version` never touches the user's
+# own `agy` profile.
+agy_version_ok() {
+  local v major minor
+  v="$(HOME="${TMPDIR:-/tmp}" "$1" --version 2>/dev/null | grep -Eo '[0-9]+\.[0-9]+\.[0-9]+' | head -n 1)"
+  [ -n "$v" ] || return 1
+  major="${v%%.*}"
+  minor="${v#*.}"
+  minor="${minor%%.*}"
+  [ "$major" -gt 1 ] || { [ "$major" -eq 1 ] && [ "$minor" -ge 5 ]; }
+}
+
+# Launch the tracked Antigravity install unless a usable `agy` is present.
 provision_antigravity() {
   local run_path="$1" curl_bin="$2"
-  local name="Google Antigravity" dest="$ANTIGRAVITY_CLI_BIN"
+  local name="Google Antigravity" dest="$ANTIGRAVITY_CLI_BIN" found=""
   # An executable FILE (a directory is -x too), or an `agy` already on PATH:
   # the daemon accepts either, and a second copy would shadow the first.
-  if { [ -f "$dest" ] && [ -x "$dest" ]; } || has_executable_command agy; then
+  if [ -f "$dest" ] && [ -x "$dest" ]; then
+    found="$dest"
+  elif has_executable_command agy; then
+    found="$(command -v agy)"
+  fi
+  # An older build (no `agy acp`) is upgraded by Google's installer, which
+  # replaces ~/.local/bin/agy — the path the daemon resolves first.
+  if [ -n "$found" ] && ! agy_version_ok "$found"; then
+    echo "  $name CLI: $found is older than 1.5.0 — updating."
+    found=""
+  fi
+  if [ -n "$found" ]; then
     echo "  $name CLI: already installed."
     echo "$name CLI: already installed — skipping install." \
       >>"$OPENLLM_DIR/cli-install.log" 2>/dev/null || true

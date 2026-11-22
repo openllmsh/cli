@@ -141,7 +141,13 @@ const runAgy = async (
     deps.wrapArgv ??
     ((argv: string[]): string[] =>
       sandboxSpawnArgs(argv, { probe: unwrapAntigravityCliSpawn() }));
-  const cwd = await mkdtemp(join(daemonTempDir(), "agy-cmd-"));
+  let cwd: string;
+  try {
+    cwd = await mkdtemp(join(daemonTempDir(), "agy-cmd-"));
+  } catch {
+    // Every failure here is "unavailable", never a rejection.
+    return { kind: "unavailable", reason: "scratch dir unavailable" };
+  }
   try {
     const result = await (deps.run ?? defaultRun)({
       argv: wrap([deps.bin, ...args]),
