@@ -55,6 +55,9 @@ export const readCliVersion = (path: string): string | null => {
       stdout: "pipe",
       stderr: "ignore",
       timeout: 5_000,
+      // Uncatchable: a binary that ignores SIGTERM must not hold the daemon
+      // (or this probe's HOME cleanup) past the cap.
+      killSignal: "SIGKILL",
     });
     return out.exitCode === 0 ? out.stdout.toString().trim() : null;
   } catch {

@@ -503,7 +503,15 @@ const homeGenerationOf = (home: string): number =>
 const homeGenerationStale = (agent: TWarmAgent): boolean =>
   agent.homeGeneration !== homeGenerationOf(agent.home);
 
-/** Stable, non-reversible identity of a spawn (binary + final env + the
+/** `agy acp`, in worker mode (`--process-per-session`) when the session
+ *  carries caller tools over an HTTP MCP server. */
+export const antigravityAcpArgv = (
+  bin: string,
+  callerTools: boolean,
+): string[] =>
+  callerTools ? [bin, "acp", "--process-per-session"] : [bin, "acp"];
+
+/** Stable, non-reversible identity of a spawn (argv + final env + the
  *  account epoch the request was planned under). */
 export const antigravityWarmKey = (
   bin: string,
@@ -735,7 +743,16 @@ export const runAntigravityNative = async (
   });
 
   const spawnEnv = antigravitySpawnEnv(params.env);
-  const warmKey = antigravityWarmKey(params.bin, spawnEnv, params.signInEpoch);
+  // Caller tools ride a client-configured HTTP MCP server, which `agy acp`
+  // serves in worker mode (one isolated worker per session). Plain turns
+  // keep the single-process server. The argv is part of the warm key, so a
+  // worker-mode process only ever serves tool turns and vice versa.
+  const argv = antigravityAcpArgv(params.bin, (params.tools?.length ?? 0) > 0);
+  const warmKey = antigravityWarmKey(
+    argv.join("\u0000"),
+    spawnEnv,
+    params.signInEpoch,
+  );
 
   // Empty, daemon-owned TURN cwd: bounds anything the agent could see
   // natively. Fresh per request, independent of the process cwd.
@@ -863,6 +880,7 @@ export const runAntigravityNative = async (
         (method, p) =>
           handleAntigravityServerRequest(method, p, route.allowedMcpTools),
         {
+          argv,
           label: "agy acp",
           probe: params.probe ?? unwrapAntigravityCliSpawn(),
           exactEnv: true,
