@@ -11,7 +11,8 @@
  *
  * The profile: everything outside `$HOME` stays as the OS needs it; inside
  * `$HOME` only the account slot's directory (its HOME, keychain and sign-in),
- * the resolved `agy` binary and the daemon's `agy-*` temp dirs (turn cwds and
+ * the resolved `agy` binary (and its folder, when that is not `$HOME` or a
+ * parent of the daemon's state) and the daemon's `agy-*` temp dirs (turn cwds and
  * the attachment store) can be read or written, plus metadata of their
  * ancestors for path resolution. The kernel resolves the real file, so case
  * variants and `..` are refused ("operation not permitted"). Verified live
@@ -84,9 +85,21 @@ export const agySeatbeltProfile = (paths: TAgySeatbeltPaths): string => {
   for (const p of [slotRoot, bin, paths.bin, `${tempDir}/agy-`]) {
     if (inside(home, p)) for (const a of ancestors(home, p)) metadata.add(a);
   }
-  const binRules = [...new Set([bin, paths.bin])]
-    .filter((p) => inside(home, p))
-    .map((p) => `(literal ${lit(p)})`);
+  // The binary's own folder too (a versioned install or an
+  // `OPENLLM_AGY_BIN` launcher may load files beside it) — unless that
+  // folder is `$HOME` itself or holds the daemon's state.
+  const binDir = dirname(bin);
+  const binDirGrant =
+    inside(home, binDir) &&
+    binDir !== home &&
+    !inside(binDir, slotRoot) &&
+    !inside(binDir, tempDir);
+  const binRules = [
+    ...[...new Set([bin, paths.bin])]
+      .filter((p) => inside(home, p))
+      .map((p) => `(literal ${lit(p)})`),
+    ...(binDirGrant ? [`(subpath ${lit(binDir)})`] : []),
+  ];
   return `(version 1)
 (allow default)
 (deny file-read* (subpath ${lit(home)}))
