@@ -94,6 +94,7 @@ import {
 import { finishOpenHoldSessions, inferenceAdmission } from "./hold-session";
 import { stopForIdentityConflict } from "./identity-conflict-exit";
 import { hasIdentityConflict } from "./identity-state";
+import { removeLegacyAntigravityMarker } from "./legacy-antigravity-marker";
 import { handleLocalAuth } from "./local-auth";
 import {
   handleLocalDeviceControl,
@@ -305,6 +306,7 @@ export const main = async (): Promise<void> => {
   // the post-restart usage read is rate-limited (rather than showing an error
   // with nothing to fall back to). See `usage-cache.ts`.
   enableUsagePersistence(stateDir());
+  removeLegacyAntigravityMarker();
   // Model-report observers pull the auth/delegate graph — defer off cold boot (§3).
   void import("./model-report")
     .then((m) => {

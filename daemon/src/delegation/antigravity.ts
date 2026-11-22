@@ -95,7 +95,7 @@ const LOGIN_TIMEOUT_MS = 300_000;
 const URL_WAIT_MS = 60_000;
 
 const INSTALL_HINT =
-  "Google Antigravity (agy) not installed — rerun the OpenLLM installer (curl -fsSL https://www.openllm.sh/install | bash).";
+  "Google Antigravity CLI (agy) not installed — install it with: curl -fsSL https://antigravity.google/cli/install.sh | bash";
 
 /** The isolated HOME `agy` runs under (its own sign-in, keychain, settings). */
 const agyHome = (): string => cliHome(PROVIDER);

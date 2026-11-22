@@ -9,7 +9,6 @@
  * zsh/bash/fish completion grammars without escaping.
  */
 import { AUTH_COMMANDS } from "@openllmsh/sdk/protocol";
-import { antigravityEnabled } from "./antigravity-feature";
 
 export type TCommand = {
   readonly name: string;
@@ -86,7 +85,7 @@ export const PROVIDERS = [
   "grok",
   "cursor",
   "muse",
-  ...(antigravityEnabled() ? (["antigravity"] as const) : []),
+  "antigravity",
 ] as const;
 
 /** Argument choices for the `auto-update` and `sessions` subcommands. */

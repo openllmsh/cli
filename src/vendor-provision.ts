@@ -22,8 +22,6 @@ import {
   cachedCliVersion,
   versionAtLeast,
 } from "../daemon/src/agy-version";
-import { ANTIGRAVITY_DISABLED_MARKER } from "../daemon/src/antigravity-feature";
-import { stateDir } from "../daemon/src/env";
 import { cliConfig, openllmDir, userHome } from "./env";
 import { awaitPipeCodes, bunSubprocessPeer } from "./process-pipe";
 import { isSecureOrigin } from "./secure-origin";
@@ -64,10 +62,6 @@ export type TProvisionMissingVendorClisDeps = {
   readonly home?: string;
   /** Override PATH lookup (tests). */
   readonly which?: (command: string) => string | null;
-  /** Override `OPENLLM_ANTIGRAVITY` for the present-check (tests). */
-  readonly antigravityEnv?: string | undefined;
-  /** Override marker existence for the present-check (tests). */
-  readonly antigravityDisabledMarker?: boolean;
   /**
    * Launch the curl|bash pipe in a detached session and return immediately
    * (like interactive `install.sh`). Used by `openllm login --start` so the
@@ -87,39 +81,14 @@ type TVendorPlatformDeps = {
   readonly which: (command: string) => string | null;
   readonly platform: NodeJS.Platform;
   readonly arch: string;
-  /** Home used to locate `~/.openllm/antigravity-enabled` (tests override). */
   readonly home: string;
-  /**
-   * Override `OPENLLM_ANTIGRAVITY` (tests). `undefined` reads `process.env`.
-   */
-  readonly antigravityEnv?: string | undefined;
-  /**
-   * Override marker-file existence (tests). `undefined` checks the real path
-   * under `home`.
-   */
-  readonly antigravityDisabledMarker?: boolean;
 };
 
 /**
- * True when the installer would actually call `provision_antigravity`
- * (Google's `agy` CLI — the only Antigravity binary). Mirrors
- * `packages/cli/install.sh` `provision_clis` (kill switch + marker); the
- * platform check is `agy`'s own installer's support matrix.
+ * True when Google's `agy` installer supports this platform — the installer
+ * provisions Antigravity like every other vendor CLI.
  */
 const antigravityInstallable = (deps: TVendorPlatformDeps): boolean => {
-  const env =
-    deps.antigravityEnv !== undefined
-      ? deps.antigravityEnv
-      : process.env.OPENLLM_ANTIGRAVITY;
-  if (env === "0") return false;
-  // On by default; the opt-out marker turns it off unless env forces it on.
-  const disabledMarker =
-    deps.antigravityDisabledMarker !== undefined
-      ? deps.antigravityDisabledMarker
-      : // The daemon's state dir (honours OPENLLM_DAEMON_STATE_DIR), where
-        // install.sh writes it and antigravityEnabled() reads it.
-        existsSync(join(stateDir(deps.home), ANTIGRAVITY_DISABLED_MARKER));
-  if (env !== "1" && disabledMarker) return false;
   const supported =
     (deps.platform === "darwin" &&
       (deps.arch === "arm64" || deps.arch === "x64")) ||
@@ -181,8 +150,6 @@ export const allProvisionedVendorClisPresent = (
     readonly which?: (command: string) => string | null;
     readonly platform?: NodeJS.Platform;
     readonly arch?: string;
-    readonly antigravityEnv?: string | undefined;
-    readonly antigravityDisabledMarker?: boolean;
     /** `<bin> --version` (tests override; never the real binary there). */
     readonly cliVersion?: (path: string) => string | null;
   } = {},
@@ -197,8 +164,6 @@ export const allProvisionedVendorClisPresent = (
     platform: deps.platform ?? process.platform,
     arch: deps.arch ?? process.arch,
     home,
-    antigravityEnv: deps.antigravityEnv,
-    antigravityDisabledMarker: deps.antigravityDisabledMarker,
   };
   for (const vendor of PROVISIONED_VENDOR_CLIS) {
     if (vendor.installable !== undefined && !vendor.installable(platformDeps))
@@ -250,8 +215,6 @@ export const provisionMissingVendorClis = async (
     allProvisionedVendorClisPresent({
       home: deps?.home,
       which: deps?.which,
-      antigravityEnv: deps?.antigravityEnv,
-      antigravityDisabledMarker: deps?.antigravityDisabledMarker,
       cliVersion: deps?.cliVersion,
     })
   ) {

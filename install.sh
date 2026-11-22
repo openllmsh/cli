@@ -2083,7 +2083,7 @@ launch_vendor_cli_install() {
 # launch_vendor_cli_install.
 ANTIGRAVITY_CLI_INSTALLER_URL="https://antigravity.google/cli/install.sh"
 ANTIGRAVITY_CLI_BIN="$HOME/.local/bin/agy"
-# The opt-out marker lives where the daemon reads it: its state dir
+# The retired opt-out marker lived where the daemon read it: its state dir
 # (`stateDir()` in packages/cli/daemon/src/env.ts — an absolute
 # OPENLLM_DAEMON_STATE_DIR, else ~/.openllm).
 # Read like the other persisted settings: the shell env first, else the
@@ -2305,34 +2305,16 @@ vendor_cli_on_wait_signal() {
   exit 143
 }
 
-# Antigravity is on by default. `OPENLLM_ANTIGRAVITY=0` opts out and writes
-# the marker the daemon reads (packages/cli/daemon/src/antigravity-feature.ts);
-# `=1` opts back in. Applied in EVERY setup mode (minimal skips provisioning
-# but must still record the choice), and recorded before any prerequisite so
-# it sticks even when provisioning ends early. The explicit value decides
-# this run even when the marker can't be written. Idempotent.
-apply_antigravity_preference() {
-  ANTIGRAVITY_OPTED_OUT=0
-  case "${OPENLLM_ANTIGRAVITY:-}" in
-    1)
-      rm -f "$ANTIGRAVITY_DISABLED_MARKER" 2>/dev/null \
-        || echo "  Google Antigravity: couldn't clear the opt-out marker." >&2
-      ;;
-    0)
-      ANTIGRAVITY_OPTED_OUT=1
-      { mkdir -p "$(dirname "$ANTIGRAVITY_DISABLED_MARKER")" \
-        && touch "$ANTIGRAVITY_DISABLED_MARKER"; } 2>/dev/null \
-        || echo "  Google Antigravity: couldn't save the opt-out (it applies to this run)." >&2
-      ;;
-    *) [ -f "$ANTIGRAVITY_DISABLED_MARKER" ] && ANTIGRAVITY_OPTED_OUT=1 ;;
-  esac
-  # (no marker leaves the test above false: never this function's status
-  # under `set -e`)
+# Antigravity is part of the product — there is no opt-out. Older installers
+# wrote an `antigravity-disabled` marker (with OPENLLM_ANTIGRAVITY=0); remove
+# any leftover so it can't keep the provider off. The daemon does the same on
+# start (packages/cli/daemon/src/legacy-antigravity-marker.ts). Idempotent.
+remove_legacy_antigravity_marker() {
+  rm -f "$ANTIGRAVITY_DISABLED_MARKER" "$OPENLLM_DIR/antigravity-disabled" 2>/dev/null || true
   return 0
 }
 
 provision_clis() {
-  apply_antigravity_preference
   VENDOR_FAILED_NAMES=""
   VENDOR_PENDING_NAMES=""
   VENDOR_REAPED_NAMES=""
@@ -2410,7 +2392,7 @@ provision_clis() {
         ;;
     esac
   done
-  if [ "$ANTIGRAVITY_OPTED_OUT" != 1 ] && vendor_cli_selected antigravity; then
+  if vendor_cli_selected antigravity; then
     VENDOR_LAST_PID=""
     launch_rc=0
     provision_antigravity "$run_path" "$curl_bin" || launch_rc=$?
@@ -2461,8 +2443,8 @@ VENDOR_FAILED=0
 VENDOR_PENDING=0
 VENDOR_BACKGROUND=0
 VENDOR_WAITED=0
-# Every mode records the Antigravity choice (minimal skips provisioning).
-apply_antigravity_preference
+# Every mode clears the retired Antigravity opt-out marker.
+remove_legacy_antigravity_marker
 if { [ "$INSTALL_MODE" != update ]; } && [ "$SETUP_MODE" != minimal ] && [ -z "${OPENLLM_SKIP_VENDOR_CLIS:-}" ]; then
   VENDOR_PROVISIONED=1
   # `||` keeps a nonzero provision_clis status off the `set -e` path so we
@@ -2719,16 +2701,6 @@ build_vendor_status_line() {
     # stage=installing / failed after a successful vendor install).
     # An `agy` older than 1.5.1 is not installed (it is being, or failed to
     # be, upgraded): fall through to the worker's own record.
-    # Antigravity opted out: skipped, whatever is (not) on disk.
-    # (provision_clis decided ANTIGRAVITY_OPTED_OUT from the explicit value
-    # first — an OPENLLM_ANTIGRAVITY=1 whose marker couldn't be removed is
-    # NOT skipped; only without that decision does the marker answer.)
-    elif [ "$slug" = antigravity ] && {
-        if [ -n "${ANTIGRAVITY_OPTED_OUT:-}" ]; then [ "$ANTIGRAVITY_OPTED_OUT" = 1 ]
-        else [ -f "${ANTIGRAVITY_DISABLED_MARKER:-$OPENLLM_DIR/antigravity-disabled}" ]; fi
-      }; then
-      stage="skipped"
-      reason=""
     # Antigravity: the daemon's precedence (an existing home launcher
     # decides; PATH only without it), and only a usable 1.5+ file counts.
     elif if [ "$slug" = antigravity ]; then
