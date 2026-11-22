@@ -1137,10 +1137,15 @@ export const runAntigravityNative = async (
         : QUOTA_RE.test(reason)
           ? ("quota_exhausted" as const)
           : undefined;
+    // A sign-in change since the request was planned: the cooldown is the
+    // old account's (the same rule as `declineFrom`).
+    const sameAccount = params.currentSignInEpoch() === params.signInEpoch;
     return {
       kind: "declined",
       reason,
-      ...(failure !== undefined ? { cooldownReason: failure } : {}),
+      ...(failure !== undefined && sameAccount
+        ? { cooldownReason: failure }
+        : {}),
     };
   }
 

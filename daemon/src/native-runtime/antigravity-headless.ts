@@ -36,7 +36,7 @@ import { createHash } from "node:crypto";
 import { accessSync, constants, existsSync, statSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { join, resolve as resolvePath } from "node:path";
 import type { TChatCompletionChunk } from "@openllmsh/sdk/protocol";
 import { agyVersionUsable, cachedCliVersion } from "../agy-version";
 import { killHard } from "../delegation/antigravity-cli-login";
@@ -105,7 +105,10 @@ export const resolveAntigravityCli = (
   };
   const override = env.OPENLLM_AGY_BIN;
   if (override !== undefined && override.length > 0) {
-    return usable(override) ? override : null;
+    // Absolute: `agy` is launched from scratch directories, where a relative
+    // path would name something else.
+    const absolute = resolvePath(override);
+    return usable(absolute) ? absolute : null;
   }
   // The home launcher decides when it is there (the installer replaces an
   // old one there); a copy on PATH serves only without it.
@@ -340,11 +343,11 @@ class HeadlessProcess {
       stderr: "ignore",
     });
     let resolveInit: (ok: boolean) => void = () => {};
-    this.initialized = new Promise<boolean>((resolve) => {
+    this.initialized = new Promise<boolean>((resolve): void => {
       resolveInit = resolve;
     });
-    const initTimer = setTimeout(() => resolveInit(false), initTimeoutMs);
-    this.listener = (e) => {
+    const initTimer = setTimeout((): void => resolveInit(false), initTimeoutMs);
+    this.listener = (e): void => {
       if (e.kind === "init") {
         this.conversationId = e.conversationId;
         clearTimeout(initTimer);
@@ -559,6 +562,13 @@ const addSpare = (
   }
   releaseSpareReservation();
   spares.push(proc);
+  // A spare that dies while waiting gives its pool slot back at once (a
+  // leased one gets its turn's own exit handler instead).
+  proc.onExit((): void => {
+    const i = spares.indexOf(proc);
+    if (i >= 0) spares.splice(i, 1);
+    proc.dispose();
+  });
   proc.armIdleTimer(ttlMs, () => {
     const i = spares.indexOf(proc);
     if (i >= 0) spares.splice(i, 1);
@@ -675,6 +685,9 @@ export type TAntigravityHeadlessParams = {
   /** Told the account epoch the serving process started under, so the
    *  caller publishes the conversation under that generation. */
   readonly onServingEpoch?: (epoch: number) => void;
+  /** Told once the turn's prompt has been written to `agy`: from then on
+   *  `agy` may hold the turn, even if the run later declines. */
+  readonly onPromptSent?: () => void;
   /** Sent instead of `userText` when the conversation could not be resumed
    *  (the full transcript seed). */
   readonly seedText?: string;
@@ -696,6 +709,14 @@ export type TAntigravityHeadlessParams = {
   readonly spareTtlMs?: number;
 };
 
+/**
+ * A decline that sends the request on to `agy acp` (it carries
+ * {@link ANTIGRAVITY_HEADLESS_FALLBACK}): what headless can't serve (images,
+ * client tools) and unanticipated failures — spawn, start-up, a lost write,
+ * an account change while `agy` started. Every other decline (a sign-in
+ * miss, quota, a turn that failed after its prompt) is final for this hop:
+ * `agy acp` shares the same sign-in, so it would fail the same way.
+ */
 const fallback = (why: string): TNativeRunResult => ({
   kind: "declined",
   reason: `${ANTIGRAVITY_HEADLESS_FALLBACK}: ${why}`,
@@ -1009,6 +1030,7 @@ export const runAntigravityHeadless = async (
   if (!ended) {
     try {
       proc.send(promptText, writeFailed);
+      params.onPromptSent?.();
     } catch (error) {
       writeFailed(error);
     }

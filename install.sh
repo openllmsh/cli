@@ -2127,8 +2127,14 @@ agy_version_ok() {
   # hold a pipe open, never a finished read of a file.
   local tmp probe watchdog rc
   tmp="$(mktemp "${TMPDIR:-/tmp}/agy-version.XXXXXX")" || return 1
-  # The probe never sees the pairing key (the parent still pairs with it).
-  env -u OPENLLM_API_KEY -u SUPPLIED_KEY -u API_KEY HOME="${TMPDIR:-/tmp}" \
+  # A private HOME per probe (nothing one probe writes is seen by the next),
+  # and the probe never sees the pairing key (the parent still pairs).
+  local probe_home
+  probe_home="$(mktemp -d "${TMPDIR:-/tmp}/agy-version-home.XXXXXX")" || {
+    rm -f "$tmp"
+    return 1
+  }
+  env -u OPENLLM_API_KEY -u SUPPLIED_KEY -u API_KEY HOME="$probe_home" \
     "$1" --version >"$tmp" 2>/dev/null </dev/null &
   probe=$!
   ( sleep 5; kill -9 "$probe" 2>/dev/null ) >/dev/null 2>&1 </dev/null &
@@ -2140,6 +2146,7 @@ agy_version_ok() {
   wait "$watchdog" 2>/dev/null
   out="$(cat "$tmp" 2>/dev/null)"
   rm -f "$tmp"
+  rm -rf "$probe_home"
   [ "$rc" -eq 0 ] || return 1
   # The daemon's rule (agy-version.ts): the WHOLE output is one version
   # (`1.5.13`, `agy 1.5.13`, `v1.5.13`, optional -pre / +build), and a
@@ -2180,6 +2187,13 @@ provision_antigravity() {
   # replaces ~/.local/bin/agy — the path the daemon resolves first.
   if [ -n "$found" ] && { [ ! -f "$found" ] || ! agy_version_ok "$found"; }; then
     echo "  $name CLI: $found is unusable or older than 1.5.0 — updating."
+    # Google's installer leaves an existing ~/.local/bin/agy in place, so an
+    # old launcher there is moved aside (kept, never deleted) for the fresh
+    # install to land on that path.
+    if [ "$found" = "$dest" ]; then
+      mv -f "$dest" "$dest.pre-1.5" 2>/dev/null \
+        || echo "  $name CLI: couldn't move the old $dest aside." >&2
+    fi
     found=""
   fi
   if [ -n "$found" ]; then
@@ -2249,12 +2263,13 @@ vendor_cli_on_wait_signal() {
   exit 143
 }
 
-provision_clis() {
-  # Antigravity is on by default. `OPENLLM_ANTIGRAVITY=0` opts out and writes
-  # the marker the daemon reads (packages/cli/daemon/src/antigravity-feature.ts);
-  # `=1` opts back in. Recorded FIRST, so the preference sticks even when a
-  # prerequisite below (curl) ends provisioning early.
-  # The explicit value decides THIS run even when the marker can't be written.
+# Antigravity is on by default. `OPENLLM_ANTIGRAVITY=0` opts out and writes
+# the marker the daemon reads (packages/cli/daemon/src/antigravity-feature.ts);
+# `=1` opts back in. Applied in EVERY setup mode (minimal skips provisioning
+# but must still record the choice), and recorded before any prerequisite so
+# it sticks even when provisioning ends early. The explicit value decides
+# this run even when the marker can't be written. Idempotent.
+apply_antigravity_preference() {
   ANTIGRAVITY_OPTED_OUT=0
   case "${OPENLLM_ANTIGRAVITY:-}" in
     1)
@@ -2269,6 +2284,13 @@ provision_clis() {
       ;;
     *) [ -f "$ANTIGRAVITY_DISABLED_MARKER" ] && ANTIGRAVITY_OPTED_OUT=1 ;;
   esac
+  # (no marker leaves the test above false: never this function's status
+  # under `set -e`)
+  return 0
+}
+
+provision_clis() {
+  apply_antigravity_preference
   VENDOR_FAILED_NAMES=""
   VENDOR_PENDING_NAMES=""
   VENDOR_REAPED_NAMES=""
@@ -2397,6 +2419,8 @@ VENDOR_FAILED=0
 VENDOR_PENDING=0
 VENDOR_BACKGROUND=0
 VENDOR_WAITED=0
+# Every mode records the Antigravity choice (minimal skips provisioning).
+apply_antigravity_preference
 if { [ "$INSTALL_MODE" != update ]; } && [ "$SETUP_MODE" != minimal ] && [ -z "${OPENLLM_SKIP_VENDOR_CLIS:-}" ]; then
   VENDOR_PROVISIONED=1
   # `||` keeps a nonzero provision_clis status off the `set -e` path so we

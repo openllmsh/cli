@@ -248,7 +248,7 @@ const connect = (): Promise<TConnectResult> =>
       shortCircuit: {
         // Already signed in: a model list the sign-in failed to capture is
         // captured now (this Connect is the user asking; never a probe).
-        connected: async () => {
+        connected: async (): Promise<boolean> => {
           const yes = await agyCliSignedIn(agyHome());
           const agyBin = resolveAntigravityCli();
           if (yes && agyBin !== null && readAgyModelsFile() === null) {

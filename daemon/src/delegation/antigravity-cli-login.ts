@@ -31,6 +31,9 @@ const GOOGLE_OAUTH_OPTION_RE = />\s*1\.\s*Google OAuth/;
 /** The menu is fully drawn once its second option is on screen. */
 const SECOND_OPTION_RE = /(^|\n)\s*>?\s*2\.\s+\S/;
 const CODE_PROMPT_RE = /paste the authorization code/i;
+/** How much of the latest screen must still show the code prompt for a
+ *  pasted code to be typed (the screen redraws in place). */
+const CODE_PROMPT_TAIL_CHARS = 4_096;
 /** The signed-in banner: `<email> (<plan>)`, e.g. `me@example.com (Antigravity Starter Quota)`. */
 const SIGNED_IN_RE =
   /[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\s+\([^)]+\)/;
@@ -180,21 +183,23 @@ export const bunAgyLoginPty: TAgyLoginPtySpawner = (args) => {
     throw error;
   }
   const exited = proc.exited.then(
-    (code) => {
+    (code): number | null => {
       terminal.close();
       return code;
     },
-    () => {
+    (): null => {
       terminal.close();
       return null;
     },
   );
   return {
-    write: (data) => terminal.write(data),
+    write: (data): void => {
+      terminal.write(data);
+    },
     // agy's login screen can outlive SIGTERM; a survivor keeps running in a
     // HOME whose keychain is about to be removed, and macOS then asks the
     // user for a keychain out of nowhere. Escalate to SIGKILL.
-    kill: () => killHard(proc),
+    kill: (): void => killHard(proc),
     exited,
   };
 };
@@ -410,7 +415,19 @@ export const startAgyLogin = (args: {
     done,
     submitCode: (pasted) => {
       // One code per screen: once typed, `agy` is no longer at the prompt.
-      if (settled || childExited || surfaced === null || codeTyped) {
+      // …and only while that prompt is still what `agy` shows: once its
+      // screen moved on (the browser finished, the first-run wizard with
+      // its consent page), nothing pasted may reach it.
+      const atPrompt = CODE_PROMPT_RE.test(
+        screen.slice(-CODE_PROMPT_TAIL_CHARS),
+      );
+      if (
+        settled ||
+        childExited ||
+        surfaced === null ||
+        codeTyped ||
+        !atPrompt
+      ) {
         return { ok: false, detail: "no Google sign-in is awaiting a code." };
       }
       const checked = validateAgyAuthCode(pasted);

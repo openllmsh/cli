@@ -1422,6 +1422,9 @@ const serveAntigravityHop = async (
   /** The generation the headless process that served this turn started
    *  under (a change during setup starts it under the new one). */
   let servedEpoch: number | null = null;
+  /** The prompt reached `agy`: a later decline (precommit timeout) must not
+   *  restore the conversation, or a retry would send the same turn twice. */
+  let promptSent = false;
   const conversation =
     text === null
       ? null
@@ -1466,8 +1469,11 @@ const serveAntigravityHop = async (
             seedText: seed,
             conversationId: lease.sessionId,
             epoch,
-            onServingEpoch: (served) => {
+            onServingEpoch: (served): void => {
               servedEpoch = served;
+            },
+            onPromptSent: (): void => {
+              promptSent = true;
             },
             hasImages: false,
             hasTools: false,
@@ -1479,7 +1485,8 @@ const serveAntigravityHop = async (
           });
         })();
   if (lease !== null && (headless === null || headless.kind === "declined")) {
-    lease.abandon();
+    if (promptSent) lease.commit(conversationKey, null);
+    else lease.abandon();
   }
   const toAcp =
     headless === null ||

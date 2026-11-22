@@ -101,14 +101,35 @@ const defaultRun: TAgyRun = async (args) => {
     // Native stderr is not a safe diagnostic channel (may carry secrets).
     stderr: "ignore",
   });
-  const timer = setTimeout(() => proc.kill(), args.timeoutMs);
-  try {
+  // At the deadline: SIGKILL (agy can ignore SIGTERM), and stop waiting on
+  // stdout shortly after — a child it left behind may hold the pipe open.
+  let timedOut = false;
+  const deadline = new Promise<"timeout">((resolve) => {
+    const timer = setTimeout(() => {
+      timedOut = true;
+      try {
+        proc.kill("SIGKILL");
+      } catch {
+        /* already gone */
+      }
+      setTimeout(() => resolve("timeout"), AGY_KILL_DRAIN_MS).unref?.();
+    }, args.timeoutMs);
+    void proc.exited.then(() => clearTimeout(timer));
+  });
+  const read = (async (): Promise<{
+    readonly code: number | null;
+    readonly stdout: string;
+  }> => {
     const stdout = await new Response(proc.stdout as ReadableStream).text();
     return { code: await proc.exited, stdout };
-  } finally {
-    clearTimeout(timer);
-  }
+  })();
+  const result = await Promise.race([read, deadline]);
+  if (result === "timeout" || timedOut) return { code: null, stdout: "" };
+  return result;
 };
+
+/** After a deadline kill, how long stdout may take to close. */
+const AGY_KILL_DRAIN_MS = 1_000;
 
 export type TAgyCliDeps = {
   readonly bin: string;
