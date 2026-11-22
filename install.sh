@@ -2132,12 +2132,25 @@ agy_version_ok() {
   out="$(cat "$tmp" 2>/dev/null)"
   rm -f "$tmp"
   [ "$rc" -eq 0 ] || return 1
-  v="$(printf '%s\n' "$out" | grep -Eo '[0-9]+\.[0-9]+\.[0-9]+' | head -n 1)"
-  [ -n "$v" ] || return 1
-  major="${v%%.*}"
-  minor="${v#*.}"
+  # The daemon's rule (agy-version.ts): the WHOLE output is one version
+  # (`1.5.13`, `agy 1.5.13`, `v1.5.13`, optional -pre / +build), and a
+  # prerelease of 1.5.0 is older than 1.5.0.
+  out="$(printf '%s' "$out" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+  printf '%s' "$out" | grep -Eq '^(agy[[:space:]]+)?v?[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$' || return 1
+  v="$(printf '%s' "$out" | grep -Eo '[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?' | head -n 1)"
+  local core patch pre=""
+  core="${v%%-*}"
+  [ "$core" != "$v" ] && pre=1
+  major="${core%%.*}"
+  minor="${core#*.}"
+  patch="${minor#*.}"
   minor="${minor%%.*}"
-  [ "$major" -gt 1 ] || { [ "$major" -eq 1 ] && [ "$minor" -ge 5 ]; }
+  [ "$major" -gt 1 ] && return 0
+  [ "$major" -eq 1 ] || return 1
+  [ "$minor" -gt 5 ] && return 0
+  [ "$minor" -eq 5 ] || return 1
+  [ "$patch" -gt 0 ] && return 0
+  [ -z "$pre" ]
 }
 
 # Launch the tracked Antigravity install unless a usable `agy` is present.

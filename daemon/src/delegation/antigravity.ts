@@ -466,6 +466,9 @@ export const antigravityDelegate: TProviderDelegate = {
     // listed.
     disposeAccountRuntimes();
     noteAuthStoreIdentityChange(PROVIDER);
+    // Invalid for readers first: a cache that can't be deleted still never
+    // lists the signed-out account's models.
+    agyModelsStale.set(true);
     try {
       rmSync(agyModelsPath(), { force: true });
     } catch (error) {
