@@ -2086,8 +2086,11 @@ ANTIGRAVITY_CLI_BIN="$HOME/.local/bin/agy"
 # The opt-out marker lives where the daemon reads it: its state dir
 # (`stateDir()` in packages/cli/daemon/src/env.ts — an absolute
 # OPENLLM_DAEMON_STATE_DIR, else ~/.openllm).
-case "${OPENLLM_DAEMON_STATE_DIR:-}" in
-  /*) ANTIGRAVITY_DISABLED_MARKER="$OPENLLM_DAEMON_STATE_DIR/antigravity-disabled" ;;
+# Read like the other persisted settings: the shell env first, else the
+# daemon's env file (a state dir set only there is the one it uses).
+ANTIGRAVITY_STATE_DIR="${OPENLLM_DAEMON_STATE_DIR:-$(env_file_lookup OPENLLM_DAEMON_STATE_DIR 2>/dev/null || true)}"
+case "$ANTIGRAVITY_STATE_DIR" in
+  /*) ANTIGRAVITY_DISABLED_MARKER="$ANTIGRAVITY_STATE_DIR/antigravity-disabled" ;;
   *) ANTIGRAVITY_DISABLED_MARKER="$OPENLLM_DIR/antigravity-disabled" ;;
 esac
 
@@ -2138,7 +2141,9 @@ agy_version_ok() {
   env -u OPENLLM_API_KEY -u SUPPLIED_KEY -u API_KEY HOME="$probe_home" \
     "$1" --version >"$tmp" 2>/dev/null </dev/null &
   probe=$!
-  ( sleep 5; kill -9 "$probe" 2>/dev/null ) >/dev/null 2>&1 </dev/null &
+  # The whole tree: a launcher that started a child (`sleep … & wait`)
+  # leaves nothing behind once its probe times out.
+  ( sleep 5; vendor_cli_stop_tree "$probe" KILL ) >/dev/null 2>&1 </dev/null &
   watchdog=$!
   # (the shell's own "Killed" notice for a timed-out probe stays quiet)
   { wait "$probe"; } 2>/dev/null
