@@ -53,12 +53,9 @@ import {
   resolveExecutionSelection,
 } from "../execution-registry";
 import { logDebug, logError, logWarn, safeDiagnosticMessage } from "../logger";
-import type { TAntigravityNativeParams } from "./antigravity-acp";
-import { runAntigravityNative } from "./antigravity-acp";
 import type { TAntigravityHeadlessParams } from "./antigravity-headless";
 import {
   antigravityHeadlessEpoch,
-  isAntigravityHeadlessFallback,
   resolveAntigravityCli,
   runAntigravityHeadless,
 } from "./antigravity-headless";
@@ -136,22 +133,9 @@ export type TNativeServeCaptureToolOverrides = {
 export type TNativeServeOverrides = {
   readonly bin?: string;
   readonly env?: Record<string, string>;
-  /** The `agy` CLI (headless AND `agy acp`). Tests that pass overrides never
-   *  resolve a host `agy`: they set this, or get "not installed". */
+  /** The `agy` CLI. Tests that pass overrides never resolve a host `agy`:
+   *  they set this, or get "not installed". */
   readonly headlessBin?: string | null;
-  /** Test hooks for the `agy acp` fallback (sign-in / keychain gates,
-   *  settings, sandbox probe) so a serve-level test never reaches the real
-   *  `security`, keychain or sandbox. */
-  readonly acpHooks?: Pick<
-    TAntigravityNativeParams,
-    | "signedIn"
-    | "ensureKeychain"
-    | "ensureSettings"
-    | "probe"
-    | "precommitMs"
-    | "idleMs"
-    | "warmIdleTtlMs"
-  >;
   /** Test hooks for the headless spawn (keychain gate, argv, sandbox wrap) so
    *  a serve-level test never reaches the real `security` or sandbox. */
   readonly headlessHooks?: Pick<
@@ -615,7 +599,7 @@ export const tryServeNativeRuntime = async (
     return serveCursorHop(params, overrides);
   }
   if (params.provider === "antigravity") {
-    // antigravity runs on `agy` (headless text; `agy acp` for tools, images).
+    // antigravity runs only on headless `agy` (no ACP fallback).
     // It has no channel for sampling / structured-output controls: decline
     // rather than silently serving at the agent's defaults.
     if (
@@ -624,12 +608,12 @@ export const tryServeNativeRuntime = async (
     ) {
       return {
         declined:
-          "antigravity ACP can't honor n>1 or logprobs (single un-scored message per turn)",
+          "antigravity can't honor n>1 or logprobs (single un-scored message per turn)",
       };
     }
     const unsupported = unsupportedNativeControl(params.canonical);
     if (unsupported !== null) {
-      return { declined: `antigravity ACP can't honor ${unsupported}` };
+      return { declined: `antigravity can't honor ${unsupported}` };
     }
     return serveAntigravityHop(params, overrides);
   }
@@ -1361,13 +1345,14 @@ const serveCursorHop = async (
 };
 
 /**
- * Antigravity serve path. `agy` is the single source of truth for sign-in:
- * plain text runs on its headless stream-json mode (streams as generated);
- * images and client tools — and any unanticipated headless
- * failure (marked `ANTIGRAVITY_HEADLESS_FALLBACK`) — run on `agy acp`, a fresh
- * ACP session per request (on a warm process when one is idle). The
- * conversation is flattened by `cursorRequestOf`; client tools ride the
- * loopback MCP server. A sign-in miss is an `auth` cooldown from either.
+ * Antigravity serve path: the headless `agy` CLI is the ONLY transport
+ * (streams text as generated; `agy` is the single source of truth for
+ * sign-in). Anything it can't serve yet (client tools, images) and any
+ * unanticipated failure declines the hop, and the walker moves to the next
+ * one — there is no second Antigravity transport, so a conversation never
+ * splits across sessions or loses Google's prompt cache
+ * (`docs/plans/antigravity-cli-only-media.md`). A sign-in miss is an `auth`
+ * cooldown.
  */
 /** Antigravity headless conversations (prefix hash → `agy` conversation id). */
 const antigravityHeadlessSessions = new NativeSessionStore();
@@ -1388,10 +1373,17 @@ const serveAntigravityHop = async (
   if (req.promptText.length === 0 && req.images.length === 0) {
     return { declined: "no user turn to answer" };
   }
+  if (req.tools.length > 0) {
+    return {
+      declined: "antigravity: client tools are not served by the agy CLI yet",
+    };
+  }
+  if (req.images.length > 0) {
+    return {
+      declined: "antigravity: image input is not served by the agy CLI yet",
+    };
+  }
   const env = overrides?.env ?? cliEnv("antigravity");
-  // `agy` is the only binary: headless stream-json first (streams text as it
-  // is generated); anything it cannot serve declines with the fallback marker
-  // and runs on `agy acp`.
   const agyBin =
     overrides === undefined
       ? resolveAntigravityCli()
@@ -1401,12 +1393,12 @@ const serveAntigravityHop = async (
   if (agyBin === null) {
     return { declined: "antigravity: agy CLI not installed" };
   }
-  // Plain text conversations only (tools and images are null here → ACP;
+  // Plain text conversations only (tools and images declined above;
   // structured output was already declined by the native-control gate). The conversation is correlated by content like the
   // Claude/Codex native paths: a known one continues its `agy` conversation
   // with only the new turn; an unknown one with history is seeded.
   // `tool_choice: "auto"` with no tools is the default, not a tool request:
-  // it stays on headless. Real tools and forced choices still go to ACP.
+  // it stays on headless. Real tools and forced choices decline.
   const { tool_choice: toolChoice, ...withoutChoice } = params.canonical;
   const text = nativeRequestOf(
     toolChoice === "auto" ? withoutChoice : params.canonical,
@@ -1459,7 +1451,7 @@ const serveAntigravityHop = async (
               )
             : conversation.deltaText;
           // A setup error (keychain, spawn) must still release the lease;
-          // the request then falls back to ACP.
+          // the hop then declines.
           return runAntigravityHeadless({
             bin: agyBin,
             env,
@@ -1488,35 +1480,19 @@ const serveAntigravityHop = async (
     if (promptSent) lease.commit(conversationKey, null);
     else lease.abandon();
   }
-  const toAcp =
-    headless === null ||
-    (headless.kind === "declined" &&
-      isAntigravityHeadlessFallback(headless.reason));
-  const run = !toAcp
-    ? headless
-    : await runAntigravityNative({
-        bin: agyBin,
-        // ACP starts fresh under the account current NOW (a change during
-        // the headless attempt is already behind it): its HOME and its
-        // epoch are read together, so the process can't run under the
-        // previous account's home carrying the new account's epoch. A
-        // change during ACP's own setup or turn retires its process.
-        env: overrides?.env ?? cliEnv("antigravity"),
-        signInEpoch: antigravityHeadlessEpoch(),
-        currentSignInEpoch: antigravityHeadlessEpoch,
-        providerModelId: params.providerModelId,
-        systemText: req.systemText,
-        userText: req.promptText,
-        images: req.images,
-        tools: req.tools,
-        signal: params.signal,
-        ...(overrides?.acpHooks ?? {}),
-      });
+  // No second transport: a headless decline (or a setup error, `null`)
+  // declines the hop and the walker moves on.
+  const run: TNativeRunResult = headless ?? {
+    kind: "declined",
+    reason:
+      text === null
+        ? "antigravity: request shape not served by the agy CLI"
+        : "antigravity: agy CLI unavailable: setup failed",
+  };
   if (run.kind === "declined") {
     return declinedOutcome(run.reason, run.cooldownReason);
   }
-  // Only a committed headless turn holds the conversation lease.
-  const heldLease = run === headless ? lease : null;
+  const heldLease = lease;
   const settle = (
     resp: Awaited<ReturnType<typeof accumulateChunksToResponse>>,
   ): void => {

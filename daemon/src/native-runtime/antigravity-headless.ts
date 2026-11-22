@@ -26,10 +26,10 @@
  * request used one, never in the background on its own (see the spare rules).
  *
  * Scope: plain text turns. Client tools and images decline with
- * {@link ANTIGRAVITY_HEADLESS_FALLBACK} so `serve.ts` runs `agy acp`, which
- * serves them. Spawn / start-up / write failures and a native-tool step carry
- * the same marker (an unanticipated failure falls back to ACP). A sign-in miss
- * does NOT: ACP uses the same sign-in, so it declines with an `auth` cooldown.
+ * {@link ANTIGRAVITY_HEADLESS_UNAVAILABLE} (no cooldown; the walker moves to
+ * the next hop). Spawn / start-up / write failures and a native-tool step
+ * carry the same marker. A sign-in miss declines with an `auth` cooldown.
+ * There is no second transport: `docs/plans/antigravity-cli-only-media.md`.
  */
 
 import { createHash } from "node:crypto";
@@ -56,7 +56,8 @@ import type { TNativeRunResult } from "./types";
 import { PRE_COMMIT_TIMEOUT_MS } from "./types";
 
 /** Decline reason prefix that tells `serve.ts` to run the ACP bridge instead. */
-export const ANTIGRAVITY_HEADLESS_FALLBACK = "antigravity-headless-fallback";
+export const ANTIGRAVITY_HEADLESS_UNAVAILABLE =
+  "antigravity: agy CLI unavailable";
 
 export const ANTIGRAVITY_HEADLESS_TURN_TIMEOUT_MS = 180_000;
 export const ANTIGRAVITY_HEADLESS_IDLE_TIMEOUT_MS = 60_000;
@@ -714,26 +715,26 @@ export type TAntigravityHeadlessParams = {
 };
 
 /**
- * A decline that sends the request on to `agy acp` (it carries
- * {@link ANTIGRAVITY_HEADLESS_FALLBACK}): what headless can't serve (images,
- * client tools) and unanticipated failures — spawn, start-up, a lost write,
- * an account change while `agy` started. Every other decline (a sign-in
- * miss, quota, a turn that failed after its prompt) is final for this hop:
- * `agy acp` shares the same sign-in, so it would fail the same way.
+ * A decline with no cooldown, marked {@link ANTIGRAVITY_HEADLESS_UNAVAILABLE}:
+ * what the CLI can't serve yet (images, client tools) and unanticipated
+ * failures — spawn, start-up, a lost write, an account change while `agy`
+ * started. The hop is declined and the walker moves to the next hop; there
+ * is no second Antigravity transport (`docs/plans/antigravity-cli-only-media.md`),
+ * so the conversation and Google's cache stay on the one `agy` session.
  */
 const fallback = (why: string): TNativeRunResult => ({
   kind: "declined",
-  reason: `${ANTIGRAVITY_HEADLESS_FALLBACK}: ${why}`,
+  reason: `${ANTIGRAVITY_HEADLESS_UNAVAILABLE}: ${why}`,
 });
 
-export const isAntigravityHeadlessFallback = (reason: string): boolean =>
-  reason.startsWith(ANTIGRAVITY_HEADLESS_FALLBACK);
+export const isAntigravityHeadlessUnavailable = (reason: string): boolean =>
+  reason.startsWith(ANTIGRAVITY_HEADLESS_UNAVAILABLE);
 
 /**
  * One turn on a fresh conversation: lease a spare (or spawn one), wait for
  * `init`, send the flattened prompt, stream text deltas. Commit on first
  * output; any pre-commit failure declines (sign-in misses and unsupported
- * shapes decline with {@link ANTIGRAVITY_HEADLESS_FALLBACK}).
+ * shapes decline with {@link ANTIGRAVITY_HEADLESS_UNAVAILABLE}).
  */
 export const runAntigravityHeadless = async (
   params: TAntigravityHeadlessParams,
@@ -939,7 +940,7 @@ export const runAntigravityHeadless = async (
       if (!RESPONSE_STEP_TYPES.has(event.stepType)) {
         // The agent reached for one of ITS tools — never let it run.
         fail({
-          reason: `${ANTIGRAVITY_HEADLESS_FALLBACK}: agy attempted a native tool (${event.stepType})`,
+          reason: `${ANTIGRAVITY_HEADLESS_UNAVAILABLE}: agy attempted a native tool (${event.stepType})`,
           fallback: true,
         });
         return;
@@ -1037,7 +1038,7 @@ export const runAntigravityHeadless = async (
       return;
     }
     fail({
-      reason: `${ANTIGRAVITY_HEADLESS_FALLBACK}: write failed: ${why}`,
+      reason: `${ANTIGRAVITY_HEADLESS_UNAVAILABLE}: write failed: ${why}`,
       fallback: true,
     });
   };

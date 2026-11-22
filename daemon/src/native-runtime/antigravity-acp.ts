@@ -1,10 +1,9 @@
 /**
  * Google Antigravity over the official `agy` CLI's built-in ACP server
- * (`agy acp`, Agent Client Protocol over stdio) — the transport for what
- * headless stream-json (`antigravity-headless.ts`) cannot serve: image input
- * and caller (client) tools via our loopback MCP server. (Structured
- * output is declined before any Antigravity hop runs.) It is also the fallback when a headless run fails unexpectedly
- * (spawn / start-up / write failures carry `ANTIGRAVITY_HEADLESS_FALLBACK`).
+ * (`agy acp`, Agent Client Protocol over stdio). NOT on the chat serve path:
+ * chat runs only on headless `agy` (`antigravity-headless.ts`, no ACP
+ * fallback). Pending removal once media moves to the CLI
+ * (`docs/plans/antigravity-cli-only-media.md`, Phase 5).
  * The JSON-RPC client is the shared {@link AcpClient} (`cursor-acp.ts`).
  *
  * `agy` is the single source of truth for Antigravity sign-in: `agy acp`
