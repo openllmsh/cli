@@ -230,9 +230,9 @@ const wiring = loginWiring({
 /** The live `agy` login screen, while a CLI sign-in waits for its code. */
 const activeAgyLogin = accountCell<TAgyLogin | null>(() => null);
 
-/** Capture `agy models` into the model list. A failure never fails the
- *  caller: the list stays missing and the next Connect captures it. */
-/** True when a fresh list was written. */
+/** Capture `agy models` into the model list; true when a fresh list was
+ *  written. A failure never fails the caller: the list stays missing and
+ *  the next Connect captures it. */
 const captureAgyModels = async (agyBin: string): Promise<boolean> => {
   // The account this capture belongs to: a logout or another sign-in that
   // lands while `agy models` runs must not get the old list written back.
