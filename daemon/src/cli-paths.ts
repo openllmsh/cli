@@ -26,11 +26,6 @@ import { homedir } from "node:os";
 import { delimiter, dirname, join } from "node:path";
 import type { TSubscriptionProviderSlug } from "@openllmsh/sdk/protocol";
 import { scopedSlug } from "./account-scope";
-import {
-  ANTIGRAVITY_HARNESS,
-  ANTIGRAVITY_INSTALL_MARKER,
-  antigravityManagedExecutable,
-} from "./antigravity-layout";
 import { stateDir } from "./env";
 import { interpreterDirFor } from "./launcher-profile-state";
 import { buildLauncherDataRootEnv } from "./launcher-roots";
@@ -67,13 +62,6 @@ type TCliSpec = {
    * applied by {@link cliEnv} for every provider — do not re-pin those here.
    */
   readonly env: (ctx: TCliEnvCtx) => Record<string, string>;
-  /**
-   * Version read from install metadata beside the RESOLVED binary, instead of
-   * spawning `--version`. For agents whose every launch is expensive
-   * (Antigravity's PyInstaller bundle unpacks ~1 GB per start). `null` means
-   * installed / version unknown. Absent = spawn the `--version` probe.
-   */
-  readonly installedVersion?: (resolvedBin: string) => string | null;
 };
 
 /**
@@ -129,42 +117,6 @@ export const resolveMuseNativeBinaryBesideLauncher = (
 const museHostCandidates = (home: string): string[] => [
   join(home, ".local", "bin", "muse"),
 ];
-
-/** The harness beside the RESOLVED agent binary (the managed `current` dir
- *  unless a PATH install resolves elsewhere). */
-const antigravityHarnessPath = (): string => {
-  for (const candidate of hostCliCandidates("antigravity")) {
-    try {
-      return join(dirname(realpathSync(candidate)), ANTIGRAVITY_HARNESS);
-    } catch {
-      // candidate absent — try the next
-    }
-  }
-  return join(
-    dirname(antigravityManagedExecutable(homedir())),
-    ANTIGRAVITY_HARNESS,
-  );
-};
-
-/** `{"version":"x.y.z",…}` from the installer's completion marker. */
-const readAntigravityInstalledVersion = (
-  resolvedBin: string,
-): string | null => {
-  try {
-    const raw = readFileSync(
-      join(dirname(resolvedBin), ANTIGRAVITY_INSTALL_MARKER),
-      "utf8",
-    );
-    const parsed: unknown = JSON.parse(raw);
-    if (parsed === null || typeof parsed !== "object") return null;
-    const version = (parsed as { readonly version?: unknown }).version;
-    return typeof version === "string" && /^\d+\.\d+\.\d+$/.test(version)
-      ? version
-      : null;
-  } catch {
-    return null;
-  }
-};
 
 const SPECS: Readonly<Record<TCliProvider, TCliSpec>> = {
   // `claude install` (run by claude.ai/install.sh under our HOME) places
@@ -288,29 +240,17 @@ const SPECS: Readonly<Record<TCliProvider, TCliSpec>> = {
       MUSE_LOGIN: "0",
     }),
   },
-  // Google Antigravity — Google's official ACP agent `agy_acp_server`. No
-  // vendor install script exists; install.sh fetches the latest release (resolved
-  // from the ACP registry) into `~/.openllm/vendor/antigravity/current/`
-  // (`antigravity-layout.ts`). The agent needs its `localharness_external`
-  // sibling, passed explicitly via ANTIGRAVITY_HARNESS_PATH because the
-  // isolated path is a symlink and the agent must not guess its own dir.
-  //
-  // Profile: GEMINI_HOME is pinned inside the isolated home with file storage
-  // forced, so the agent's Google sign-in token
-  // (`<GEMINI_HOME>/antigravity-acp/acp_token.json`; read only by the usage
-  // probe, `delegation/antigravity-usage.ts`) can never touch the user's own `~/.gemini` or the OS keychain.
-  // PyInstaller unpacks under the shared isolated TMPDIR from {@link cliEnv}.
+  // Google Antigravity — Google's official `agy` CLI (installer launcher at
+  // ~/.local/bin/agy). It is the single source of truth for sign-in: headless
+  // chat and `agy acp` both run it under the isolated HOME from {@link cliEnv},
+  // where it keeps its own sign-in (isolated login keychain on macOS, else its
+  // token file under `<home>/.gemini/antigravity-cli`). No extra env knobs.
   antigravity: {
-    binRel: "bin/agy_acp_server",
-    cmd: "agy_acp_server",
-    hostCandidates: (home) => [antigravityManagedExecutable(home)],
+    binRel: "home/.local/bin/agy",
+    cmd: "agy",
+    hostCandidates: (home) => [join(home, ".local", "bin", "agy")],
     configDir: (home) => join(home, ".gemini"),
-    env: ({ config }) => ({
-      GEMINI_HOME: config,
-      AGY_ACP_FORCE_FILE_STORAGE: "1",
-      ANTIGRAVITY_HARNESS_PATH: antigravityHarnessPath(),
-    }),
-    installedVersion: readAntigravityInstalledVersion,
+    env: () => ({}),
   },
 };
 
@@ -370,13 +310,6 @@ export const cliHome = (
 /** Absolute path to the installed isolated binary. */
 export const cliBin = (provider: TCliProvider, home?: string): string =>
   join(cliRoot(provider, home), SPECS[provider].binRel);
-
-/** Version from install metadata, or `undefined` when the provider has none
- *  (callers then spawn the normal `--version` probe). */
-export const cliInstalledVersion = (
-  provider: TCliProvider,
-  resolvedBin: string,
-): string | null | undefined => SPECS[provider].installedVersion?.(resolvedBin);
 
 /** Shell command name for a provider CLI (`codex`, `claude`, `cursor-agent`, …). */
 export const cliCommand = (provider: TCliProvider): string =>
@@ -516,7 +449,7 @@ export const cliConfigDir = (
  * antigravity). None of them need a real-home XDG credential/config READ
  * passthrough into the isolated child: each pins its own config knob
  * (`CLAUDE_CONFIG_DIR` / `CODEX_HOME` / `KIMI_CODE_HOME` / HOME-rooted `.grok` /
- * isolated `XDG_CONFIG_HOME` for cursor+muse / `GEMINI_HOME`). Real-home paths
+ * isolated `XDG_CONFIG_HOME` for cursor+muse / HOME-rooted `.gemini` for agy). Real-home paths
  * that remain are EXEC-only (`vendorExecDirs`) and launcher data-root FIND
  * pointers (`launcherDataRootEnv`) — never RW on real `~/.local/state`.
  */

@@ -34,7 +34,6 @@ import {
   cliConfigDir,
   cliEnv,
   cliHome,
-  cliInstalledVersion,
   cliRoot,
   hostCliCandidates,
 } from "./cli-paths";
@@ -80,7 +79,7 @@ const VERSION_UNREADABLE_MESSAGES: Readonly<
   grok: safeDiagnosticMessage`The installed grok client version could not be read repeatedly.`,
   cursor: safeDiagnosticMessage`The installed cursor-agent client version could not be read repeatedly.`,
   muse: safeDiagnosticMessage`The installed muse client version could not be read repeatedly.`,
-  antigravity: safeDiagnosticMessage`The installed antigravity agent version could not be read repeatedly.`,
+  antigravity: safeDiagnosticMessage`The installed agy client version could not be read repeatedly.`,
 };
 
 const versionUnreadableMessage = (provider: string): TSafeDiagnosticMessage => {
@@ -717,12 +716,6 @@ const probeCliInstallStateBody = async (
       installKey(provider),
       now + CLI_INSTALL_STATE_TTL_MS,
     );
-  }
-
-  // Agents with install metadata never pay a launch just to read a version.
-  const installed = cliInstalledVersion(provider, linkedTarget);
-  if (installed !== undefined) {
-    return { installed: true, version: installed };
   }
 
   // Cold recognized manager shim (no demand resolution in manager OR

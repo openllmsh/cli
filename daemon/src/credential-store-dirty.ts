@@ -17,6 +17,7 @@ import { join } from "node:path";
 import { readRoster } from "./account-roster";
 import type { TCliProvider } from "./cli-paths";
 import { CLI_PROVIDERS, cliConfigDir, cliHome } from "./cli-paths";
+import { agyTokenFilePath } from "./delegation/antigravity-cli";
 import { keychainStoreIdentity } from "./delegation/keychain";
 import {
   fileStoreIdentity,
@@ -93,12 +94,12 @@ const accountStoreFingerprints = (
         parts.push(...kimiCredentialFingerprints(config));
         break;
       case "antigravity":
+        // `agy`'s own sign-in: its isolated keychain item (macOS) or token file.
+        if (MAC) {
+          parts.push(fingerprintStoreIdentity(keychainStoreIdentity(home)));
+        }
         parts.push(
-          fingerprintStoreIdentity(
-            fileStoreIdentity(
-              join(config, "antigravity-acp", "acp_token.json"),
-            ),
-          ),
+          fingerprintStoreIdentity(fileStoreIdentity(agyTokenFilePath(home))),
         );
         break;
       default: {

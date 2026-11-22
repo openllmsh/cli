@@ -62,7 +62,7 @@ const ANTIGRAVITY_UNCHANGED: TBridgeCaptureReadiness = {
   ready: false,
   mode: "unchanged_bridge",
   reason:
-    "Antigravity serves through plain `acp` only; no request-capture path is proven for agy_acp_server",
+    "Antigravity serves through plain `acp` only; no request-capture path is proven for agy",
 };
 
 const READINESS: Record<TNativeRuntimeProvider, TBridgeCaptureReadiness> = {

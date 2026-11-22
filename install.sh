@@ -62,8 +62,8 @@
 # This is the ONLY shell installer. In full mode it also provisions any missing
 # vendor subscription CLIs (claude / codex / kimi / grok / cursor-agent / muse)
 # via each vendor's official installer — skip if already present. Google
-# Antigravity has no installer script, so the latest official ACP agent release
-# is downloaded under ~/.openllm/vendor/antigravity. It never edits a
+# Antigravity is Google's official `agy` CLI (its own installer, which verifies
+# its download and places ~/.local/bin/agy). It never edits a
 # third-party client config: `openllm <client>` applies OpenLLM at run time.
 # The only files it writes outside ~/.openllm (besides what a vendor installer
 # itself does) are the PATH symlinks and the ONE marked block in your shell rc
@@ -2069,173 +2069,18 @@ launch_vendor_cli_install() {
   VENDOR_LAST_PID="$worker_pid"
 }
 
-# ── Google Antigravity (official ACP agent, latest release) ─────────────────
-# Google ships no install script for `agy_acp_server`. The ACP registry's
-# `antigravity-acp/agent.json` (main branch) names the current version and a
-# per-platform zip on dl.google.com; we resolve it at install time so every
-# install gets the latest release. The registry publishes no hashes, so
-# integrity is HTTPS from dl.google.com (enforced) + a structural check (the
-# zip must hold the agent and its harness); the daemon additionally checks the
-# agent identifies as `antigravity-acp` before use. The release unpacks into a
-# version dir; `current` points at the active one, and the daemon's host
-# candidate is `current/agy_acp_server.par` (packages/cli/daemon/src/cli-paths.ts).
-ANTIGRAVITY_DIR="$OPENLLM_DIR/vendor/antigravity"
-ANTIGRAVITY_EXE="agy_acp_server.par"
-ANTIGRAVITY_HARNESS="localharness_external"
-ANTIGRAVITY_REGISTRY_URL="https://raw.githubusercontent.com/agentclientprotocol/registry/main/antigravity-acp/agent.json"
-# Free space needed: archive + unpacked agent (~1.4 GB on Linux).
-ANTIGRAVITY_SPACE_NEED_KB=1572864
-# Google's official `agy` CLI. Inference prefers it (headless stream-json —
-# it streams; the ACP agent above stays the fallback), so the Antigravity
-# install provisions both. Its own installer verifies the download's SHA-512
-# against Google's manifest and places `agy` at ~/.local/bin/agy, which the
-# daemon resolves (packages/cli/daemon/src/native-runtime/antigravity-headless.ts).
+# ── Google Antigravity (official `agy` CLI) ─────────────────────────────────
+# `agy` is the one Antigravity binary and the single source of truth for its
+# sign-in: headless chat and its built-in ACP server (`agy acp`, images / tools)
+# both run it under the daemon's isolated HOME. Google's own installer
+# verifies the download's SHA-512 against Google's manifest and places `agy` at
+# ~/.local/bin/agy, which the daemon resolves
+# (packages/cli/daemon/src/native-runtime/antigravity-headless.ts). It is
+# installed like every other vendor CLI: `curl -fsSL <url> | bash` under
+# launch_vendor_cli_install.
 ANTIGRAVITY_CLI_INSTALLER_URL="https://antigravity.google/cli/install.sh"
 ANTIGRAVITY_CLI_BIN="$HOME/.local/bin/agy"
 
-# Registry platform key for this host, or nothing when unsupported (Windows is
-# not a daemon target; Intel macOS ships but is untested).
-antigravity_platform_key() {
-  case "$(uname -s 2>/dev/null)/$(uname -m 2>/dev/null)" in
-    Darwin/arm64) echo darwin-aarch64 ;;
-    Darwin/x86_64) echo darwin-x86_64 ;;
-    Linux/x86_64|Linux/amd64) echo linux-x86_64 ;;
-    Linux/aarch64|Linux/arm64) echo linux-aarch64 ;;
-    *) ;;
-  esac
-}
-
-# Prints `version|url` for this platform from registry JSON on stdin. Plain
-# text scan (no jq dependency): the archive URL embeds both the platform's
-# release-file suffix and the version, so we match the URL itself.
-antigravity_parse_registry() {
-  local key="$1" json suffix url version
-  json="$(cat)"
-  case "$key" in
-    darwin-aarch64) suffix="darwin-arm64" ;;
-    darwin-x86_64) suffix="darwin-x86_64" ;;
-    linux-x86_64) suffix="linux-x86_64" ;;
-    linux-aarch64) suffix="linux-arm64" ;;
-    *) return 1 ;;
-  esac
-  url="$(printf '%s' "$json" | grep -oE "https://dl\.google\.com/agy-extensions/releases/[a-z]+/agy-acp-server-[0-9]+\.[0-9]+\.[0-9]+-${suffix}\.zip" | head -n 1)"
-  [ -n "$url" ] || return 1
-  version="$(printf '%s' "$url" | sed -E 's/.*agy-acp-server-([0-9]+\.[0-9]+\.[0-9]+)-.*/\1/')"
-  echo "$version|$url"
-}
-
-# Worker body (runs inside launch_vendor_cli_install's tracked subshell):
-#   install_antigravity_release <curl> <registry-url>
-# Any failure exits nonzero → the tracker records failed/installer_failed. The
-# active pointer flips only after the checked pair + completion marker exist,
-# so an interrupted install never leaves `current` at a half-written version.
-install_antigravity_release() {
-  local curl_bin="$1" registry="$2" key resolved version url
-  key="$(antigravity_platform_key)"
-  [ -n "$key" ] || { echo "Antigravity: unsupported platform." >&2; return 3; }
-  resolved="$("$curl_bin" -fsSL --retry 2 "$registry" | antigravity_parse_registry "$key")" \
-    || { echo "Antigravity: could not resolve the latest release." >&2; return 3; }
-  IFS='|' read -r version url <<<"$resolved"
-  case "$url" in
-    https://dl.google.com/*) ;;
-    *) echo "Antigravity: refusing non-Google download URL." >&2; return 3 ;;
-  esac
-
-  local versions="$ANTIGRAVITY_DIR/versions"
-  local final="$versions/$version"
-  mkdir -p "$versions" || return 6
-  if [ -f "$final/.install-complete" ] && [ -x "$final/$ANTIGRAVITY_EXE" ] \
-    && [ -x "$final/$ANTIGRAVITY_HARNESS" ]; then
-    ln -sfn "versions/$version" "$ANTIGRAVITY_DIR/current" || return 6
-    echo "Antigravity: release $version already unpacked — activated."
-    return 0
-  fi
-
-  local avail_kb
-  avail_kb="$(df -Pk "$versions" 2>/dev/null | awk 'NR==2 {print $4}' || true)"
-  case "$avail_kb" in
-    ''|*[!0-9]*) ;;
-    *)
-      if [ "$avail_kb" -lt "$ANTIGRAVITY_SPACE_NEED_KB" ]; then
-        echo "Antigravity: not enough disk space (need ${ANTIGRAVITY_SPACE_NEED_KB}KB, have ${avail_kb}KB)." >&2
-        return 4
-      fi
-      ;;
-  esac
-
-  local staging rc=0
-  staging="$(mktemp -d "$versions/.staging.XXXXXX")" || return 6
-  [ -n "$staging" ] && [ -d "$staging" ] || return 6
-  # Staging lives beside the target so the final `mv` is a same-filesystem
-  # rename. The body runs in a subshell so staging is removed on every exit
-  # path. It sits in a `|| rc=$?` context, where bash IGNORES `set -e`, so every
-  # side-effecting step checks itself and exits nonzero — `current` only flips
-  # after a complete, checked version is in place.
-  (
-    "$curl_bin" -fsSL --proto '=https' --retry 2 -o "$staging/download.zip" "$url" \
-      || { echo "Antigravity: download failed." >&2; exit 6; }
-    mkdir -p "$staging/runtime" || exit 6
-    # Extract ONLY the two expected members — never anything else the archive holds.
-    unzip -q -o "$staging/download.zip" "$ANTIGRAVITY_EXE" "$ANTIGRAVITY_HARNESS" \
-      -d "$staging/runtime" \
-      || { echo "Antigravity: could not unpack the release." >&2; exit 6; }
-    for f in "$ANTIGRAVITY_EXE" "$ANTIGRAVITY_HARNESS"; do
-      if [ ! -f "$staging/runtime/$f" ] || [ -L "$staging/runtime/$f" ]; then
-        echo "Antigravity: archive is missing the agent or its harness." >&2
-        exit 5
-      fi
-    done
-    chmod 755 "$staging/runtime/$ANTIGRAVITY_EXE" "$staging/runtime/$ANTIGRAVITY_HARNESS" || exit 6
-    printf '{"version":"%s"}\n' "$version" >"$staging/runtime/.install-complete" || exit 6
-    rm -rf "$final" || exit 6
-    mv "$staging/runtime" "$final" || exit 6
-    ln -sfn "versions/$version" "$ANTIGRAVITY_DIR/current" || exit 6
-  ) || rc=$?
-  rm -rf "$staging"
-  [ "$rc" -eq 0 ] || return "$rc"
-  echo "Antigravity: installed release $version."
-}
-
-# Worker step: install the `agy` CLI with Google's official installer when it
-# is missing. Never fatal — the ACP agent still serves Antigravity without it,
-# and the next installer run retries.
-install_antigravity_cli() {
-  local curl_bin="$1"
-  if [ -x "$ANTIGRAVITY_CLI_BIN" ]; then
-    echo "Antigravity CLI: already installed."
-    return 0
-  fi
-  if "$curl_bin" -fsSL --proto '=https' --retry 2 "$ANTIGRAVITY_CLI_INSTALLER_URL" | bash \
-    && [ -x "$ANTIGRAVITY_CLI_BIN" ]; then
-    echo "Antigravity CLI: installed."
-  else
-    echo "Antigravity CLI: install failed — the ACP agent still serves Antigravity; $(vendor_cli_retry_hint) to retry." >&2
-  fi
-  return 0
-}
-
-# Worker body for the whole Antigravity install: the ACP agent release, then
-# the `agy` CLI (never fatal). The CLI is attempted even when the ACP agent
-# fails — it is the primary transport — and the ACP failure is reported after.
-install_antigravity_all() {
-  local curl_bin="$1" registry="$2" acp_rc=0
-  # An active, complete ACP install is left alone — only the CLI is added.
-  # The agent ships as a zip: without `unzip` it is skipped, the CLI is not.
-  if [ ! -x "$ANTIGRAVITY_DIR/current/$ANTIGRAVITY_EXE" ] \
-    || [ ! -x "$ANTIGRAVITY_DIR/current/$ANTIGRAVITY_HARNESS" ]; then
-    if command -v unzip >/dev/null 2>&1; then
-      install_antigravity_release "$curl_bin" "$registry" || acp_rc=$?
-    else
-      echo "Antigravity: unzip not found — skipping the ACP agent (install unzip, then rerun the installer)." >&2
-    fi
-  fi
-  install_antigravity_cli "$curl_bin"
-  return "$acp_rc"
-}
-
-# Launch the tracked Antigravity install when this host can take it. Skips
-# (with no progress record — nothing was started) on an unsupported platform
-# or a host without `unzip`.
 # OPENLLM_ONLY_VENDOR_CLIS — comma-separated subscription slugs to provision
 # (e.g. claude_code,chatgpt). Unset/empty selects every vendor.
 vendor_cli_selected() {
@@ -2259,22 +2104,18 @@ vendor_cli_resolve_curl() {
   printf '%s' "$curl_bin"
 }
 
+# Launch the tracked Antigravity install unless `agy` is already present.
 provision_antigravity() {
   local run_path="$1" curl_bin="$2"
-  local name="Google Antigravity" dest="$ANTIGRAVITY_DIR/current/$ANTIGRAVITY_EXE"
-  if [ -x "$dest" ] && [ -x "$ANTIGRAVITY_DIR/current/$ANTIGRAVITY_HARNESS" ] \
-    && [ -x "$ANTIGRAVITY_CLI_BIN" ]; then
-    echo "  $name agent: already installed."
-    echo "$name agent: already installed ($dest) — skipping install." \
+  local name="Google Antigravity" dest="$ANTIGRAVITY_CLI_BIN"
+  if [ -x "$dest" ]; then
+    echo "  $name CLI: already installed."
+    echo "$name CLI: already installed ($dest) — skipping install." \
       >>"$OPENLLM_DIR/cli-install.log" 2>/dev/null || true
     return 0
   fi
-  if [ -z "$(antigravity_platform_key)" ]; then
-    echo "  $name agent: no supported release for this platform — skipping."
-    return 0
-  fi
-  launch_vendor_cli_install "$name" "$ANTIGRAVITY_EXE" antigravity "$dest" \
-    "$ANTIGRAVITY_REGISTRY_URL" "$run_path" "$curl_bin" install_antigravity_all
+  launch_vendor_cli_install "$name" agy antigravity "$dest" \
+    "$ANTIGRAVITY_CLI_INSTALLER_URL" "$run_path" "$curl_bin"
 }
 
 # Outcome of the last provision_clis run, by display name (", "-joined) — the
@@ -2713,7 +2554,7 @@ build_vendor_status_line() {
     "grok|grok|grok|$HOME/.grok/bin/grok" \
     "cursor-agent|cursor-agent|cursor|$HOME/.local/bin/cursor-agent" \
     "muse|muse|muse|$HOME/.local/bin/muse" \
-    "antigravity|agy_acp_server.par|antigravity|$HOME/.openllm/vendor/antigravity/current/agy_acp_server.par"
+    "antigravity|agy|antigravity|$HOME/.local/bin/agy"
   do
     IFS='|' read -r name bin slug dest <<<"$entry"
     if [ -n "${OPENLLM_SKIP_VENDOR_CLIS:-}" ] || [ "$SETUP_MODE" = minimal ] || [ "$INSTALL_MODE" = update ]; then
@@ -2724,9 +2565,7 @@ build_vendor_status_line() {
       reason=""
     # Prefer a live binary over a stale progress record (e.g. leftover
     # stage=installing / failed after a successful vendor install).
-    # Antigravity counts either transport: the ACP agent or the `agy` CLI.
-    elif has_executable_command "$bin" || [ -x "$dest" ] || [ -x "$HOME/.local/bin/$bin" ] \
-      || { [ "$slug" = antigravity ] && [ -x "$ANTIGRAVITY_CLI_BIN" ]; }; then
+    elif has_executable_command "$bin" || [ -x "$dest" ] || [ -x "$HOME/.local/bin/$bin" ]; then
       stage="installed"
       reason=""
     elif case "$VENDOR_LAUNCH_FAILED_SLUGS" in *",$slug,"*) true ;; *) false ;; esac; then

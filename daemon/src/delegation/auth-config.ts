@@ -340,10 +340,9 @@ const CAPTURE: Readonly<Record<TCliProvider, TCaptureSpec>> = {
     env: () => ({}),
     liveCapture: false,
   },
-  // Antigravity is bridge-only (official `agy_acp_server` ACP agent). Shape-
-  // only entry so `Record<TCliProvider, …>` stays exhaustive — never used for
-  // Gemini API HTTP with subscription credentials, and never spawned (every
-  // agent launch unpacks ~1 GB).
+  // Antigravity is bridge-only (the official `agy` CLI). Shape-only entry so
+  // `Record<TCliProvider, …>` stays exhaustive — never used for Gemini API
+  // HTTP with subscription credentials.
   antigravity: {
     origin: "https://antigravity.google",
     path: "/",

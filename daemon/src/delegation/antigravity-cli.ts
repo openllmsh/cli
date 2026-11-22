@@ -22,7 +22,7 @@ import type {
   TProviderUsageSnapshot,
   TProviderUsageWindow,
 } from "@openllmsh/sdk/protocol";
-import { antigravitySpawnEnv } from "../native-runtime/antigravity-acp";
+import { antigravitySpawnEnv } from "../native-runtime/antigravity-env";
 import { sandboxSpawnArgs } from "../sandbox/exec";
 import { unwrapAntigravityCliSpawn } from "../sandbox/policy";
 import { daemonTempDir } from "../sandbox/working-set";

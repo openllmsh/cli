@@ -16,7 +16,6 @@
  */
 
 import { randomUUID } from "node:crypto";
-import { statSync } from "node:fs";
 import type {
   TBridgeVariant,
   TChatCompletionChunk,
@@ -54,7 +53,8 @@ import {
   resolveExecutionSelection,
 } from "../execution-registry";
 import { logDebug, logError, logWarn, safeDiagnosticMessage } from "../logger";
-import { antigravityTokenPath, runAntigravityNative } from "./antigravity-acp";
+import type { TAntigravityNativeParams } from "./antigravity-acp";
+import { runAntigravityNative } from "./antigravity-acp";
 import type { TAntigravityHeadlessParams } from "./antigravity-headless";
 import {
   antigravityHeadlessEpoch,
@@ -136,14 +136,27 @@ export type TNativeServeCaptureToolOverrides = {
 export type TNativeServeOverrides = {
   readonly bin?: string;
   readonly env?: Record<string, string>;
-  /** Antigravity headless `agy` CLI. Tests that pass overrides skip the
-   *  headless path unless they set this, so a host `agy` is never reached. */
+  /** The `agy` CLI (headless AND `agy acp`). Tests that pass overrides never
+   *  resolve a host `agy`: they set this, or get "not installed". */
   readonly headlessBin?: string | null;
+  /** Test hooks for the `agy acp` fallback (sign-in / keychain gates,
+   *  settings, sandbox probe) so a serve-level test never reaches the real
+   *  `security`, keychain or sandbox. */
+  readonly acpHooks?: Pick<
+    TAntigravityNativeParams,
+    | "signedIn"
+    | "ensureKeychain"
+    | "ensureSettings"
+    | "probe"
+    | "precommitMs"
+    | "idleMs"
+    | "warmIdleTtlMs"
+  >;
   /** Test hooks for the headless spawn (keychain gate, argv, sandbox wrap) so
    *  a serve-level test never reaches the real `security` or sandbox. */
   readonly headlessHooks?: Pick<
     TAntigravityHeadlessParams,
-    "ensureKeychain" | "wrapArgv" | "argv" | "spare"
+    "ensureKeychain" | "wrapArgv" | "argv" | "spare" | "initTimeoutMs"
   >;
   readonly captureTool?: TNativeServeCaptureToolOverrides;
   /** Hermetic `sdk-facade-capture` sender (production omits → real fetch
@@ -602,9 +615,9 @@ export const tryServeNativeRuntime = async (
     return serveCursorHop(params, overrides);
   }
   if (params.provider === "antigravity") {
-    // antigravity is BRIDGE-ONLY over ACP. It serves tools (loopback MCP) and
-    // images, but has no channel for sampling / structured-output controls:
-    // decline rather than silently serving at the agent's defaults.
+    // antigravity runs on `agy` (headless text; `agy acp` for tools, images).
+    // It has no channel for sampling / structured-output controls: decline
+    // rather than silently serving at the agent's defaults.
     if (
       (typeof params.canonical.n === "number" && params.canonical.n > 1) ||
       params.canonical.logprobs === true
@@ -1348,22 +1361,14 @@ const serveCursorHop = async (
 };
 
 /**
- * Antigravity serve path — a fresh ACP session per request through Google's
- * `agy_acp_server` (on a warm agent process when one is idle). The conversation is flattened by `cursorRequestOf` (same
- * ACP prompt shape); client tools ride the loopback MCP server.
+ * Antigravity serve path. `agy` is the single source of truth for sign-in:
+ * plain text runs on its headless stream-json mode (streams as generated);
+ * images, client tools and structured output — and any unanticipated headless
+ * failure (marked `ANTIGRAVITY_HEADLESS_FALLBACK`) — run on `agy acp`, a fresh
+ * ACP session per request (on a warm process when one is idle). The
+ * conversation is flattened by `cursorRequestOf`; client tools ride the
+ * loopback MCP server. A sign-in miss is an `auth` cooldown from either.
  */
-/** ACP's own token file is present (metadata only, never its contents). */
-const acpSignedIn = (env: Readonly<Record<string, string>>): boolean => {
-  const geminiHome = env.GEMINI_HOME;
-  if (geminiHome === undefined) return false;
-  try {
-    const st = statSync(antigravityTokenPath(geminiHome));
-    return st.isFile() && st.size > 0;
-  } catch {
-    return false;
-  }
-};
-
 /** Antigravity headless conversations (prefix hash → `agy` conversation id). */
 const antigravityHeadlessSessions = new NativeSessionStore();
 
@@ -1384,17 +1389,23 @@ const serveAntigravityHop = async (
     return { declined: "no user turn to answer" };
   }
   const env = overrides?.env ?? cliEnv("antigravity");
-  // Headless stream-json first (streams text as it is generated); anything it
-  // cannot serve yet declines with the fallback marker and runs on ACP.
-  const headlessBin =
+  // `agy` is the only binary: headless stream-json first (streams text as it
+  // is generated); anything it cannot serve declines with the fallback marker
+  // and runs on `agy acp`.
+  const agyBin =
     overrides === undefined
       ? resolveAntigravityCli()
-      : (overrides.headlessBin ?? null);
+      : overrides.headlessBin === undefined
+        ? (overrides.bin ?? null)
+        : overrides.headlessBin;
+  if (agyBin === null) {
+    return { declined: "antigravity: agy CLI not installed" };
+  }
   // Plain text conversations only (tools, images and structured output are
   // null here → ACP). The conversation is correlated by content like the
   // Claude/Codex native paths: a known one continues its `agy` conversation
   // with only the new turn; an unknown one with history is seeded.
-  const text = headlessBin === null ? null : nativeRequestOf(params.canonical);
+  const text = nativeRequestOf(params.canonical);
   // Conversations belong to one account slot: its isolated HOME is part of
   // the identity, so another slot never continues this one's `agy` session.
   // The account epoch too: a sign-in or logout in the same slot starts a new
@@ -1417,10 +1428,7 @@ const serveAntigravityHop = async (
             : `first:${crypto.randomUUID()}`,
         );
   const headless =
-    headlessBin === null ||
-    text === null ||
-    conversation === null ||
-    lease === null
+    text === null || conversation === null || lease === null
       ? null
       : await (async (): Promise<TNativeRunResult | null> => {
           // The transcript ends at the last assistant turn: every user turn
@@ -1440,7 +1448,7 @@ const serveAntigravityHop = async (
           // A setup error (keychain, spawn) must still release the lease;
           // the request then falls back to ACP.
           return runAntigravityHeadless({
-            bin: headlessBin,
+            bin: agyBin,
             env,
             providerModelId: params.providerModelId,
             systemText: text.systemText,
@@ -1464,27 +1472,19 @@ const serveAntigravityHop = async (
     headless === null ||
     (headless.kind === "declined" &&
       isAntigravityHeadlessFallback(headless.reason));
-  // A request headless can't serve (images, client tools) needs ACP's own
-  // sign-in. With `agy` present, the account may be signed in through `agy`
-  // only: decline without an auth cooldown, which would also stop the text
-  // requests `agy` serves fine.
-  if (toAcp && headlessBin !== null && text === null && !acpSignedIn(env)) {
-    return {
-      declined:
-        "antigravity: images and client tools need the Antigravity agent signed in",
-    };
-  }
   const run = !toAcp
     ? headless
     : await runAntigravityNative({
-        bin: overrides?.bin ?? cliBin("antigravity"),
+        bin: agyBin,
         env,
+        signInEpoch: epoch,
         providerModelId: params.providerModelId,
         systemText: req.systemText,
         userText: req.promptText,
         images: req.images,
         tools: req.tools,
         signal: params.signal,
+        ...(overrides?.acpHooks ?? {}),
       });
   if (run.kind === "declined") {
     return declinedOutcome(run.reason, run.cooldownReason);

@@ -1,38 +1,44 @@
 /**
- * Google Antigravity ACP bridge — executes an `antigravity` hop through
- * Google's OFFICIAL `agy_acp_server` agent (Agent Client Protocol). Like
- * Cursor, Antigravity has no manual HTTP inference path, so this bridge is the
- * provider's ONLY transport. The JSON-RPC client is the shared
- * {@link AcpClient} (`cursor-acp.ts`), spawned with Antigravity's argv.
+ * Google Antigravity over the official `agy` CLI's built-in ACP server
+ * (`agy acp`, Agent Client Protocol over stdio) — the transport for what
+ * headless stream-json (`antigravity-headless.ts`) cannot serve: image input
+ * and caller (client) tools via our loopback MCP server, plus structured
+ * output. It is also the fallback when a headless run fails unexpectedly
+ * (spawn / start-up / write failures carry `ANTIGRAVITY_HEADLESS_FALLBACK`).
+ * The JSON-RPC client is the shared {@link AcpClient} (`cursor-acp.ts`).
  *
- * Protocol facts (agent 1.3.0, cross-checked against pingdotgg/t3code
- * `AntigravityInstallation.ts` / `AntigravityAuth.ts` / `antigravityAuthSupport.ts`):
+ * `agy` is the single source of truth for Antigravity sign-in: `agy acp`
+ * shares the CLI's app data dir, so under the same isolated HOME (the account
+ * slot's `cliEnv("antigravity")`) it uses the one Google sign-in that
+ * `delegation/antigravity-cli-login.ts` created. There is no token file this
+ * module reads; a sign-in miss is an `auth` cooldown decline.
  *
- *   initialize          → agentInfo.name === "antigravity-acp", protocol 1|2,
- *                         authMethods ∋ "oauth-personal", auth.logout advertised
- *   authenticate        → { methodId: "oauth-personal" }. Signed in: resolves
- *                         immediately. Signed out: the agent starts Google's
- *                         loopback OAuth and BLOCKS until the browser flow
- *                         completes — so inference sends it with a short budget
- *                         and declines; only the explicit login waits.
- *   session/new         → { cwd, mcpServers } → { sessionId, configOptions |
+ * Protocol facts (agy 1.5.x):
+ *
+ *   initialize          -> agentInfo.name === "Antigravity ACP Server",
+ *                         protocol 1|2, authMethods includes "oauth-personal",
+ *                         promptCapabilities.image
+ *   authenticate        -> { methodId: "oauth-personal" }. Signed in: resolves
+ *                         at once. Inference only spawns after the sign-in
+ *                         gate, and waits a short budget before declining.
+ *   session/new         -> { cwd, mcpServers } -> { sessionId, configOptions |
  *                         models }. `-32000` = sign-in required;
- *                         `SUBSCRIPTION_REQUIRED` = no eligible plan;
- *                         `-32603` = authed but models failed.
- *   session/set_config_option { configId: "model", value } — exact pin
+ *                         `SUBSCRIPTION_REQUIRED` = no eligible plan.
+ *   session/set_config_option { configId: "model", value } - exact pin
  *                         (falls back to `session/set_model` on ACP v1 shapes)
- *   session/prompt / session/update / session/cancel — as Cursor.
- *   logout              → clears the agent's own stored sign-in.
+ *   session/prompt / session/update / session/cancel - as Cursor.
  *
- * Isolation: GEMINI_HOME lives in the daemon's isolated home with file storage
- * forced (`cli-paths.ts`), and the spawn env drops every Google API-key /
- * project override (`ANTIGRAVITY_POISON_KEYS`) so an exported GEMINI_API_KEY can
- * never turn a subscription hop into a metered one. Inference never reads the
- * agent's token file (only the usage probe does — `delegation/antigravity-usage.ts`).
+ * Isolation: the spawn env is the isolated `cliEnv` overlay behind
+ * `antigravitySpawnEnv` (drops every Google API-key / project override), so an
+ * exported GEMINI_API_KEY can never turn a subscription hop into a metered
+ * one. On macOS `agy` reaches the isolated login keychain through
+ * `/usr/bin/security`, so the spawn is not sandbox-wrapped and nothing starts
+ * unless `ensureKeychainReady(home)` is `present` (as headless does).
  *
- * Native tools never run: permission requests are rejected, fs/terminal client
- * capabilities are off, the cwd is an empty daemon temp dir, and any native
- * `tool_call` update that is not our loopback MCP tool cancels the turn.
+ * Native tools never run: the daemon's `agy` settings deny them
+ * (`antigravity-cli-settings.ts`), permission requests are rejected, fs/terminal
+ * client capabilities are off, the cwd is an empty daemon temp dir, and any
+ * native `tool_call` update that is not our loopback MCP tool cancels the turn.
  *
  * One FRESH session per request (the conversation is flattened by
  * `cursorRequestOf`), each in its own empty temp cwd with its own loopback
@@ -44,106 +50,47 @@
  */
 
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { existsSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
+import { homedir } from "node:os";
 import { join } from "node:path";
 import type { TChatCompletionChunk } from "@openllmsh/sdk/protocol";
+import { agyCliSignedIn } from "../delegation/antigravity-cli";
+import type { TStoreRead } from "../delegation/util";
+import { ensureKeychainReady } from "../delegation/util";
+import { unwrapAntigravityCliSpawn } from "../sandbox/policy";
 import { daemonTempDir } from "../sandbox/working-set";
 import { DAEMON_VERSION } from "../version";
-import {
-  antigravitySignInIdentity,
-  readAntigravityModels,
-  recordAntigravityModels,
-} from "./antigravity-model-observation";
+import { prepareAntigravityCliProfile } from "./antigravity-cli-settings";
+import { antigravitySpawnEnv } from "./antigravity-env";
 import { AcpClient, AcpRpcError, createAcpTurnState } from "./cursor-acp";
 import type { TCursorMcpServer } from "./cursor-mcp-server";
 import { startCursorMcpServer } from "./cursor-mcp-server";
 import type { TCursorImage, TCursorTool } from "./cursor-request";
 import { acpPromptBlocks } from "./cursor-request";
 import type { TNativeRunResult } from "./types";
-import { cleanNativeSpawnEnv, PRE_COMMIT_TIMEOUT_MS } from "./types";
+import { PRE_COMMIT_TIMEOUT_MS } from "./types";
 
-export const ANTIGRAVITY_AGENT_NAME = "antigravity-acp";
-export const ANTIGRAVITY_AUTH_METHOD = "oauth-personal";
-/** Line the agent prints when it starts Google sign-in (native ≤1.1.1). */
-export const ANTIGRAVITY_AUTH_STDOUT_PREFIX =
-  "Open the following link to authenticate the ACP server: ";
+const ANTIGRAVITY_AGENT_NAME = "Antigravity ACP Server";
+const ANTIGRAVITY_AUTH_METHOD = "oauth-personal";
 
 /** Handshake RPC budget (initialize / session/new / set_config_option). */
 const RPC_TIMEOUT_MS = 30_000;
-/** A signed-in `authenticate` answers at once; a signed-out one blocks on the
- *  browser. Inference waits only this long before declining as `auth`. */
+/** A signed-in `authenticate` answers at once. Inference waits only this long
+ *  before declining as `auth`. */
 const INFERENCE_AUTH_TIMEOUT_MS = 10_000;
 export const ANTIGRAVITY_TURN_TIMEOUT_MS = 180_000;
 export const ANTIGRAVITY_IDLE_TIMEOUT_MS = 60_000;
-
-/**
- * Env keys that would make the agent use a metered key / another project or
- * override the daemon-owned profile. Dropped from every spawn BEFORE the
- * isolated `cliEnv` overlay re-adds GEMINI_HOME / AGY_ACP_FORCE_FILE_STORAGE /
- * ANTIGRAVITY_HARNESS_PATH. List from t3code `removedEnvironmentKeys`.
- */
-const ANTIGRAVITY_POISON_KEYS: ReadonlySet<string> = new Set([
-  "GEMINI_API_KEY",
-  "GOOGLE_API_KEY",
-  "GOOGLE_APPLICATION_CREDENTIALS",
-  "GOOGLE_GENAI_USE_VERTEXAI",
-  "GCLOUD_PROJECT",
-  "CLOUDSDK_CORE_PROJECT",
-  "GEMINI_HOME",
-  "ANTIGRAVITY_HARNESS_PATH",
-  "BROWSER",
-]);
-const ANTIGRAVITY_POISON_PREFIX = /^(GOOGLE_CLOUD_|AGY_ACP_)/;
-
-/**
- * The agent spawn env: the shared native clean env (drops ANTHROPIC_/OPENAI_
- * poison) minus the Google poison, then the isolated overlay on top so the
- * profile pins always win. `extra` (the BROWSER helper on login) lands last.
- */
-export const antigravitySpawnEnv = (
-  isolated: Record<string, string>,
-  extra?: Record<string, string>,
-): Record<string, string> => {
-  const base = cleanNativeSpawnEnv({});
-  const out: Record<string, string> = {};
-  for (const [key, value] of Object.entries(base)) {
-    const upper = key.toUpperCase();
-    if (ANTIGRAVITY_POISON_KEYS.has(upper)) continue;
-    if (ANTIGRAVITY_POISON_PREFIX.test(upper)) continue;
-    out[key] = value;
-  }
-  return { ...out, ...isolated, PYTHONUNBUFFERED: "1", ...(extra ?? {}) };
-};
-
-/** The agent's argv. Linux builds need an explicit empty `--uid=`. */
-export const antigravityArgv = (bin: string): string[] =>
-  process.platform === "linux" ? [bin, "--uid="] : [bin];
-
-/** Where the agent keeps its sign-in token under GEMINI_HOME (read only by
- *  the usage probe). */
-export const antigravityTokenPath = (geminiHome: string): string =>
-  join(geminiHome, "antigravity-acp", "acp_token.json");
-
-/** Ensure the private profile dirs exist with owner-only permissions. */
-export const prepareAntigravityProfile = (geminiHome: string): void => {
-  for (const dir of [geminiHome, join(geminiHome, "antigravity-acp")]) {
-    mkdirSync(dir, { recursive: true, mode: 0o700 });
-  }
-};
 
 /** Read-only view of an `initialize` result the bridge validates. */
 type TInitializeResult = {
   readonly protocolVersion?: unknown;
   readonly agentInfo?: { readonly name?: unknown };
   readonly authMethods?: ReadonlyArray<{ readonly id?: unknown }>;
-  readonly agentCapabilities?: {
-    readonly auth?: { readonly logout?: unknown };
-  };
 };
 
 /** The agent identity check (decline on any mismatch). */
-export const isAntigravityAgent = (result: unknown): boolean => {
+const isAntigravityAgent = (result: unknown): boolean => {
   const init = result as TInitializeResult | null;
   if (init === null || typeof init !== "object") return false;
   return (
@@ -154,7 +101,7 @@ export const isAntigravityAgent = (result: unknown): boolean => {
   );
 };
 
-export const ANTIGRAVITY_INIT_PARAMS = {
+const ANTIGRAVITY_INIT_PARAMS = {
   protocolVersion: 2,
   clientCapabilities: {
     fs: { readTextFile: false, writeTextFile: false },
@@ -312,58 +259,6 @@ type TSelectOption = {
   readonly options?: unknown;
 };
 
-/** Flatten a `select` config option into `{ value, name }` rows. */
-const selectRows = (
-  options: unknown,
-): Array<{ readonly value: string; readonly name: string | null }> => {
-  if (!Array.isArray(options)) return [];
-  const out: Array<{ readonly value: string; readonly name: string | null }> =
-    [];
-  for (const entry of options as ReadonlyArray<TSelectOption>) {
-    if (typeof entry?.value === "string") {
-      out.push({
-        value: entry.value,
-        name: typeof entry.name === "string" ? entry.name : null,
-      });
-    } else out.push(...selectRows(entry?.options));
-  }
-  return out;
-};
-
-/**
- * The account's selectable model rows from a `session/new` result (ACP v2
- * configOptions, else the legacy models block). Empty when absent.
- */
-export const antigravityModelRows = (
-  sessionResult: unknown,
-): ReadonlyArray<{ readonly value: string; readonly name: string | null }> => {
-  const r = sessionResult as {
-    readonly configOptions?: ReadonlyArray<{
-      readonly id?: unknown;
-      readonly category?: unknown;
-      readonly type?: unknown;
-      readonly options?: unknown;
-    }>;
-    readonly models?: {
-      readonly availableModels?: ReadonlyArray<{
-        readonly modelId?: unknown;
-        readonly name?: unknown;
-      }>;
-    };
-  } | null;
-  const config = r?.configOptions?.find(
-    (o) => o.id === "model" || o.category === "model",
-  );
-  if (config !== undefined && config.type === "select") {
-    return selectRows(config.options);
-  }
-  return (r?.models?.availableModels ?? []).flatMap((m) =>
-    typeof m.modelId === "string"
-      ? [{ value: m.modelId, name: typeof m.name === "string" ? m.name : null }]
-      : [],
-  );
-};
-
 /** Flatten a `select` config option (grouped or flat) into its values. */
 const selectValues = (options: unknown): string[] => {
   if (!Array.isArray(options)) return [];
@@ -465,7 +360,7 @@ const isNativeToolUpdate = (update: unknown): boolean => {
 };
 
 /**
- * `session/new` metadata: an EMPTY built-in tool allowlist. agy_acp_server
+ * `session/new` metadata: an EMPTY built-in tool allowlist. `agy acp`
  * reads `_meta.agy.enabledTools` (its `ToolFilterConfig`); `[]` disables every
  * built-in tool (shell, file, web search, subagents…) so the model only sees
  * our loopback MCP tools. Native tools were already refused at permission
@@ -481,7 +376,7 @@ const CLIENT_TOOLS_MCP_SERVER = "openllm-client-tools";
 
 /** Our loopback MCP tool calls surface as tool_call updates too. The agent
  *  tags MCP dispatches with a structured `_meta` bag
- *  (`{ is_mcp_tool_call: true, mcp: { server } }`, agy_acp_server
+ *  (`{ is_mcp_tool_call: true, mcp: { server } }`, `agy acp`
  *  `unwrap_mcp_tool_call`); match that exactly and fail closed otherwise, so
  *  a model-controlled title/rawInput can never pass the native-tool guard. */
 export const isOurMcpToolUpdate = (update: unknown): boolean => {
@@ -532,11 +427,13 @@ export const createMcpCallTracker = (): {
 //   - On demand only. Nothing is spawned, authenticated or pre-opened in the
 //     background; the pool only ever holds processes a real request started.
 //   - Keyed by the binary + the COMPLETE final spawn env (sha256 — the raw
-//     env, which may carry secrets, is never stored as a key or logged), so a
-//     different profile, account home or override never shares a process.
-//   - Bound to the sign-in identity (refresh-token hash) observed when parked;
-//     a different or missing identity at lease time retires the process, and
-//     sign-in / sign-out bumps an epoch that retires every process.
+//     env, which may carry secrets, is never stored as a key or logged) + the
+//     account epoch (`antigravityHeadlessEpoch`, bumped by every sign-in and
+//     sign-out), so a different profile, account home, override or sign-in
+//     never shares a process. There is no token to read: `agy` owns the
+//     sign-in, the daemon only knows when it changed.
+//   - Sign-in / sign-out also dispose the whole pool and make leased
+//     processes un-parkable (`disposeAntigravityWarmPool`).
 //   - Exclusive leases: a parked process is removed from the pool for the
 //     whole turn. A concurrent request finds no idle match and cold-spawns its
 //     own process — two turns never share one agent.
@@ -574,44 +471,42 @@ type TWarmAgent = {
   readonly route: TWarmRoute;
   /** Pool epoch the process was spawned in; a bump makes it un-parkable. */
   readonly epoch: number;
-  /** Isolated GEMINI_HOME this process was spawned under (account slot). */
-  readonly geminiHome: string | undefined;
+  /** Isolated HOME this process was spawned under (account slot). */
+  readonly home: string;
   /**
-   * `geminiHomeGenerations` value observed at spawn. A dispose for that home
+   * `homeGenerations` value observed at spawn. A dispose for that home
    * bumps the counter so leased agents refuse to re-park, while a later reuse
    * of the same path can park again under the new generation.
    */
   readonly homeGeneration: number;
   turns: number;
-  /** Sign-in identity recorded when the process authenticated; never
-   *  overwritten, so a token swap mid-life retires the process. */
-  identity: string | null;
   idleTimer: ReturnType<typeof setTimeout> | undefined;
 };
 
 const idlePool: TWarmAgent[] = [];
 let warmEpoch = 0;
 let exitHookInstalled = false;
-/** Per-GEMINI_HOME generation; dispose bumps it so stale agents retire. */
-const geminiHomeGenerations = new Map<string, number>();
+/** Per-HOME generation; dispose bumps it so stale agents retire. */
+const homeGenerations = new Map<string, number>();
 
-const homeGenerationOf = (geminiHome: string | undefined): number =>
-  geminiHome === undefined ? 0 : (geminiHomeGenerations.get(geminiHome) ?? 0);
+const homeGenerationOf = (home: string): number =>
+  homeGenerations.get(home) ?? 0;
 
 const homeGenerationStale = (agent: TWarmAgent): boolean =>
-  agent.geminiHome !== undefined &&
-  agent.homeGeneration !== homeGenerationOf(agent.geminiHome);
+  agent.homeGeneration !== homeGenerationOf(agent.home);
 
-/** Stable, non-reversible identity of a spawn (binary + final env). */
+/** Stable, non-reversible identity of a spawn (binary + final env + the
+ *  account epoch the request was planned under). */
 export const antigravityWarmKey = (
   bin: string,
   env: Record<string, string>,
+  signInEpoch: number,
 ): string => {
   const entries = Object.entries(env).sort(([a], [b]) =>
     a < b ? -1 : a > b ? 1 : 0,
   );
   return createHash("sha256")
-    .update(JSON.stringify([bin, entries]))
+    .update(JSON.stringify([bin, entries, signInEpoch]))
     .digest("hex");
 };
 
@@ -634,12 +529,7 @@ const removeFromIdlePool = (agent: TWarmAgent): void => {
 };
 
 /** Lease an idle process for `key` (exclusive), or null → cold spawn. */
-const acquireWarmAgent = (
-  key: string,
-  geminiHome: string | undefined,
-): TWarmAgent | null => {
-  const identity =
-    geminiHome === undefined ? null : antigravitySignInIdentity(geminiHome);
+const acquireWarmAgent = (key: string): TWarmAgent | null => {
   for (let i = idlePool.length - 1; i >= 0; i--) {
     const agent = idlePool[i];
     if (agent === undefined || agent.key !== key) continue;
@@ -649,8 +539,6 @@ const acquireWarmAgent = (
     if (
       !agent.client.isAlive() ||
       agent.epoch !== warmEpoch ||
-      identity === null ||
-      agent.identity !== identity ||
       homeGenerationStale(agent)
     ) {
       retireWarmAgent(agent, null);
@@ -662,23 +550,14 @@ const acquireWarmAgent = (
 };
 
 /** Park a process after a clean turn, or retire it when it may not stay. */
-const releaseWarmAgent = (
-  agent: TWarmAgent,
-  geminiHome: string | undefined,
-  idleTtlMs: number,
-): void => {
+const releaseWarmAgent = (agent: TWarmAgent, idleTtlMs: number): void => {
   agent.turns += 1;
   agent.route.onUpdate = null;
   agent.route.allowedMcpTools = new Set();
-  const identity =
-    geminiHome === undefined ? null : antigravitySignInIdentity(geminiHome);
   if (
     !agent.client.isAlive() ||
     agent.epoch !== warmEpoch ||
     agent.turns >= ANTIGRAVITY_WARM_MAX_TURNS ||
-    identity === null ||
-    agent.identity === null ||
-    agent.identity !== identity ||
     homeGenerationStale(agent)
   ) {
     retireWarmAgent(agent, null);
@@ -711,16 +590,14 @@ export const disposeAntigravityWarmPool = (): void => {
 
 /**
  * Retire parked (and block re-parking of leased) warm agents bound to one
- * account's `GEMINI_HOME`. Used when that account slot is removed.
+ * account's isolated HOME. Used when that account slot is removed.
  */
-export const disposeAntigravityWarmPoolForGeminiHome = (
-  geminiHome: string,
-): void => {
-  if (geminiHome.length === 0) return;
-  geminiHomeGenerations.set(geminiHome, homeGenerationOf(geminiHome) + 1);
+export const disposeAntigravityWarmPoolForHome = (home: string): void => {
+  if (home.length === 0) return;
+  homeGenerations.set(home, homeGenerationOf(home) + 1);
   for (let i = idlePool.length - 1; i >= 0; i--) {
     const agent = idlePool[i];
-    if (agent === undefined || agent.geminiHome !== geminiHome) continue;
+    if (agent === undefined || agent.home !== home) continue;
     idlePool.splice(i, 1);
     retireWarmAgent(agent, null);
   }
@@ -730,10 +607,14 @@ export const disposeAntigravityWarmPoolForGeminiHome = (
 export const antigravityWarmPoolSize = (): number => idlePool.length;
 
 export type TAntigravityNativeParams = {
-  /** Isolated agent binary (`cliBin("antigravity")`). */
+  /** The `agy` CLI (`resolveAntigravityCli()`); it is spawned as `agy acp`. */
   readonly bin: string;
-  /** Isolated run env (`cliEnv("antigravity")`). */
+  /** Isolated run env (`cliEnv("antigravity")`): HOME is the account slot. */
   readonly env: Record<string, string>;
+  /** The account epoch the request was planned under
+   *  (`antigravityHeadlessEpoch()`): a sign-in or sign-out changes it, so a
+   *  warm process never serves across one. */
+  readonly signInEpoch: number;
   readonly providerModelId: string;
   readonly systemText: string | null;
   readonly userText: string;
@@ -748,6 +629,16 @@ export type TAntigravityNativeParams = {
   readonly warmIdleTtlMs?: number;
   /** Cancel→SIGTERM grace override for {@link AcpClient.cancelAndDispose}. */
   readonly cancelDisposeGraceMs?: number;
+  /** Sign-in gate (default {@link agyCliSignedIn}: metadata only). */
+  readonly signedIn?: (home: string) => Promise<boolean>;
+  /** Keychain readiness gate (default {@link ensureKeychainReady}). */
+  readonly ensureKeychain?: (home: string) => Promise<TStoreRead<void>>;
+  /** Profile prep: tool deny rules (default
+   *  {@link prepareAntigravityCliProfile}). */
+  readonly ensureSettings?: (home: string) => boolean;
+  /** Spawn unconfined (default {@link unwrapAntigravityCliSpawn}: macOS, where
+   *  `agy` must reach the isolated keychain through `/usr/bin/security`). */
+  readonly probe?: boolean;
 };
 
 /**
@@ -762,26 +653,45 @@ export const runAntigravityNative = async (
   params: TAntigravityNativeParams,
 ): Promise<TNativeRunResult> => {
   if (!existsSync(params.bin)) {
-    return { kind: "declined", reason: "antigravity agent not installed" };
+    return { kind: "declined", reason: "antigravity: agy CLI not installed" };
   }
   if (params.signal.aborted) {
     return { kind: "declined", reason: "client aborted" };
   }
-  // Pre-flight from the selector this sign-in already showed us: a model the
-  // account lacks declines instantly instead of after a cold agent spawn.
-  const geminiHome = params.env.GEMINI_HOME;
-  const observed =
-    geminiHome === undefined ? null : readAntigravityModels(geminiHome);
-  const requestedModel = params.providerModelId.trim();
-  if (
-    observed !== null &&
-    !observed.some((m) => m.provider_model_id === requestedModel)
-  ) {
+  // Never run against the user's real HOME: the isolated home is what keeps
+  // the daemon's Google sign-in separate from the user's own `agy`.
+  const home = params.env.HOME;
+  if (home === undefined || home.length === 0 || home === homedir()) {
+    return { kind: "declined", reason: "antigravity: no isolated HOME" };
+  }
+  // macOS: `agy` reaches the isolated login keychain through
+  // `/usr/bin/security`; nothing spawns unless the readiness gate created or
+  // unlocked it on THIS call. Linux: no-op.
+  const keychain = await (params.ensureKeychain ?? ensureKeychainReady)(home);
+  if (keychain.kind !== "present") {
     return {
       kind: "declined",
-      reason: `antigravity: model ${requestedModel} is not available on this Google account's plan`,
-      cooldownReason: "payment",
+      reason: `antigravity: isolated keychain not ready (${keychain.kind})`,
     };
+  }
+  // `agy acp` shares the CLI's sign-in. Gate on its metadata so a signed-out
+  // account declines as `auth` instead of starting a browser sign-in.
+  if (!(await (params.signedIn ?? agyCliSignedIn)(home))) {
+    return {
+      kind: "declined",
+      reason: "antigravity: Google sign-in required",
+      cooldownReason: "auth",
+    };
+  }
+  // The tool deny rules must be in place before the agent starts.
+  if (!(params.ensureSettings ?? prepareAntigravityCliProfile)(home)) {
+    return {
+      kind: "declined",
+      reason: "antigravity: agy settings could not be locked down",
+    };
+  }
+  if (params.signal.aborted) {
+    return { kind: "declined", reason: "client aborted" };
   }
 
   type TQueueItem =
@@ -809,7 +719,7 @@ export const runAntigravityNative = async (
   });
 
   const spawnEnv = antigravitySpawnEnv(params.env);
-  const warmKey = antigravityWarmKey(params.bin, spawnEnv);
+  const warmKey = antigravityWarmKey(params.bin, spawnEnv, params.signInEpoch);
 
   // Empty, daemon-owned TURN cwd: bounds anything the agent could see
   // natively. Fresh per request, independent of the process cwd.
@@ -852,7 +762,6 @@ export const runAntigravityNative = async (
       if (settle === "park") {
         releaseWarmAgent(
           owned,
-          geminiHome,
           params.warmIdleTtlMs ?? ANTIGRAVITY_WARM_IDLE_TTL_MS,
         );
       } else {
@@ -931,10 +840,8 @@ export const runAntigravityNative = async (
         (method, p) =>
           handleAntigravityServerRequest(method, p, route.allowedMcpTools),
         {
-          argv: antigravityArgv(params.bin),
-          label: "agy_acp_server",
-          // File-backed store under the isolated home — stays confined.
-          probe: false,
+          label: "agy acp",
+          probe: params.probe ?? unwrapAntigravityCliSpawn(),
           exactEnv: true,
           cwd: procCwd,
           ...(params.cancelDisposeGraceMs !== undefined
@@ -952,10 +859,9 @@ export const runAntigravityNative = async (
       procCwd,
       route,
       epoch: warmEpoch,
-      geminiHome,
-      homeGeneration: homeGenerationOf(geminiHome),
+      home,
+      homeGeneration: homeGenerationOf(home),
       turns: 0,
-      identity: null,
       idleTimer: undefined,
     });
     const init = await client.request(
@@ -975,11 +881,6 @@ export const runAntigravityNative = async (
       { methodId: ANTIGRAVITY_AUTH_METHOD },
       params.authTimeoutMs ?? INFERENCE_AUTH_TIMEOUT_MS,
     );
-    const owned = currentAgent();
-    if (owned !== null && owned.client === client) {
-      owned.identity =
-        geminiHome === undefined ? null : antigravitySignInIdentity(geminiHome);
-    }
   };
 
   const openSession = (owned: TWarmAgent): Promise<unknown> =>
@@ -1013,7 +914,6 @@ export const runAntigravityNative = async (
 
   let opened: unknown;
   try {
-    prepareAntigravityProfile(geminiHome ?? cwd);
     if ((params.tools?.length ?? 0) > 0) {
       mcp = startCursorMcpServer({
         tools: params.tools ?? [],
@@ -1024,7 +924,7 @@ export const runAntigravityNative = async (
         },
       });
     }
-    const leased = acquireWarmAgent(warmKey, geminiHome);
+    const leased = acquireWarmAgent(warmKey);
     if (leased !== null) {
       adopt(leased);
       try {
@@ -1067,11 +967,6 @@ export const runAntigravityNative = async (
       });
     }
     sessionId = sid;
-    // Free model discovery: this session/new already carries the account's
-    // selectable models — record them so planning skips ids it lacks.
-    if (geminiHome !== undefined) {
-      recordAntigravityModels(geminiHome, antigravityModelRows(opened));
-    }
     await ensureAntigravityModel(
       owned.client,
       sid,
@@ -1199,136 +1094,4 @@ export const runAntigravityNative = async (
     },
   });
   return { kind: "committed", chunks, sessionId: () => null };
-};
-
-/**
- * Write the BROWSER helper the agent invokes instead of opening a browser on
- * the daemon box. Python's `webbrowser` runs `$BROWSER <url>`; the helper
- * appends the URL to `urlFile`. Returns the helper path (colon-free, since
- * BROWSER is a colon-separated list).
- */
-export const writeAntigravityBrowserHelper = (
-  dir: string,
-  urlFile: string,
-): string => {
-  const helper = join(dir, "browser.sh");
-  writeFileSync(
-    helper,
-    `#!/bin/sh\nprintf '%s\\n' "$1" >> '${urlFile.replaceAll("'", "'\\''")}'\nexit 0\n`,
-    { mode: 0o700 },
-  );
-  return helper;
-};
-
-export type TAntigravityAuthUrl = {
-  readonly url: string;
-  readonly redirectUri: string;
-  readonly state: string;
-};
-
-/** Accept only Google's OAuth endpoint with a high-port loopback redirect. */
-export const parseAntigravityAuthUrl = (
-  raw: string,
-): TAntigravityAuthUrl | null => {
-  const candidate = raw.trim().startsWith(ANTIGRAVITY_AUTH_STDOUT_PREFIX)
-    ? raw.trim().slice(ANTIGRAVITY_AUTH_STDOUT_PREFIX.length)
-    : raw.trim();
-  if (candidate.length > 16_384 || /\s/.test(candidate)) return null;
-  let url: URL;
-  try {
-    url = new URL(candidate);
-  } catch {
-    return null;
-  }
-  const state = url.searchParams.get("state");
-  const redirectUri = url.searchParams.get("redirect_uri");
-  if (
-    url.origin !== "https://accounts.google.com" ||
-    url.pathname !== "/o/oauth2/v2/auth" ||
-    url.username !== "" ||
-    url.password !== "" ||
-    url.hash !== "" ||
-    url.searchParams.getAll("state").length !== 1 ||
-    url.searchParams.getAll("redirect_uri").length !== 1 ||
-    url.searchParams.get("response_type") !== "code" ||
-    state === null ||
-    state.length === 0 ||
-    state.length > 512 ||
-    redirectUri === null ||
-    !/^http:\/\/127\.0\.0\.1:[1-9][0-9]{0,4}\/$/.test(redirectUri)
-  ) {
-    return null;
-  }
-  if (Number(new URL(redirectUri).port) < 1_024) return null;
-  return { url: candidate, redirectUri, state };
-};
-
-/**
- * Validate a pasted callback URL against the live sign-in: loopback origin +
- * path of the advertised redirect, the same `state`, exactly one `code` or
- * `error`, and (when present) Google as issuer. Returns the URL or a reason.
- */
-export const validateAntigravityCallback = (
-  pending: Pick<TAntigravityAuthUrl, "redirectUri" | "state">,
-  pasted: string,
-):
-  | { readonly ok: true; readonly url: URL }
-  | { readonly ok: false; readonly reason: string } => {
-  if (pasted.length > 16_384) {
-    return { ok: false, reason: "The sign-in response URL is too long." };
-  }
-  let callback: URL;
-  try {
-    callback = new URL(pasted.trim());
-  } catch {
-    return {
-      ok: false,
-      reason:
-        "Paste the complete 127.0.0.1 address your browser showed after Google sign-in.",
-    };
-  }
-  const expected = new URL(pending.redirectUri);
-  if (
-    callback.protocol !== "http:" ||
-    callback.hostname !== "127.0.0.1" ||
-    callback.origin !== expected.origin ||
-    callback.pathname !== expected.pathname ||
-    callback.username !== "" ||
-    callback.password !== "" ||
-    callback.hash !== ""
-  ) {
-    return {
-      ok: false,
-      reason: "This address does not belong to the current sign-in.",
-    };
-  }
-  const states = callback.searchParams.getAll("state");
-  if (states.length !== 1 || states[0] !== pending.state) {
-    return {
-      ok: false,
-      reason: "This address does not belong to the current sign-in.",
-    };
-  }
-  const codes = callback.searchParams.getAll("code");
-  const errors = callback.searchParams.getAll("error");
-  const oneCode = codes.length === 1 && codes[0] !== "" && errors.length === 0;
-  const oneError =
-    errors.length === 1 && errors[0] !== "" && codes.length === 0;
-  if (!oneCode && !oneError) {
-    return {
-      ok: false,
-      reason: "The address must contain one Google sign-in response.",
-    };
-  }
-  const issuers = callback.searchParams.getAll("iss");
-  if (
-    issuers.length > 1 ||
-    (issuers.length === 1 && issuers[0] !== "https://accounts.google.com")
-  ) {
-    return {
-      ok: false,
-      reason: "The address is not a Google sign-in response.",
-    };
-  }
-  return { ok: true, url: callback };
 };

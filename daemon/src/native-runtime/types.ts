@@ -68,8 +68,9 @@ const NATIVE_PROVIDERS: ReadonlySet<string> = new Set([
   // muse is BRIDGE-ONLY: official `muse serve` / SDK is the sole inference
   // transport (see native-runtime/muse-runtime.ts).
   "muse",
-  // antigravity is BRIDGE-ONLY: Google's `agy_acp_server` ACP agent is the
-  // sole inference transport (see native-runtime/antigravity-acp.ts).
+  // antigravity is BRIDGE-ONLY: Google's `agy` CLI is the sole inference
+  // transport — headless stream-json, `agy acp` for images/tools and as the
+  // fallback (native-runtime/antigravity-headless.ts, antigravity-acp.ts).
   "antigravity",
 ]);
 

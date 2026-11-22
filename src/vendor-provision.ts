@@ -93,11 +93,10 @@ type TVendorPlatformDeps = {
 };
 
 /**
- * True when the installer would actually call `provision_antigravity`.
- * Mirrors `packages/cli/install.sh` `provision_clis` (kill switch + marker)
- * and the inner skips in `provision_antigravity` (platform key + `unzip`).
- * Default Full install leaves Antigravity OFF — do NOT count it as required
- * unless the kill switch is on.
+ * True when the installer would actually call `provision_antigravity`
+ * (Google's `agy` CLI — the only Antigravity binary). Mirrors
+ * `packages/cli/install.sh` `provision_clis` (kill switch + marker); the
+ * platform check is `agy`'s own installer's support matrix.
  */
 const antigravityInstallable = (deps: TVendorPlatformDeps): boolean => {
   const env =
@@ -116,16 +115,8 @@ const antigravityInstallable = (deps: TVendorPlatformDeps): boolean => {
       (deps.arch === "arm64" || deps.arch === "x64")) ||
     (deps.platform === "linux" &&
       (deps.arch === "x64" || deps.arch === "arm64"));
-  return supported && deps.which("unzip") !== null;
+  return supported;
 };
-
-/** Google's `agy` CLI: same enablement and platforms as the ACP agent, but
- *  its installer needs no `unzip`. */
-const antigravityCliInstallable = (deps: TVendorPlatformDeps): boolean =>
-  antigravityInstallable({
-    ...deps,
-    which: (c) => (c === "unzip" ? "unzip" : deps.which(c)),
-  });
 
 /** `~/.openllm` under an overridden home (tests) or the live openllm dir. */
 const openllmDirFor = (home: string): string =>
@@ -162,24 +153,11 @@ export const PROVISIONED_VENDOR_CLIS: readonly {
     dest: (home) => join(home, ".local", "bin", "muse"),
   },
   {
-    command: "agy_acp_server.par",
-    dest: (home) =>
-      join(
-        home,
-        ".openllm",
-        "vendor",
-        "antigravity",
-        "current",
-        "agy_acp_server.par",
-      ),
-    installable: antigravityInstallable,
-  },
-  {
-    // Google's agy CLI (Antigravity's headless inference; the ACP agent above
-    // is the fallback). Google's own installer places it at ~/.local/bin/agy.
+    // Google's agy CLI — the one Antigravity binary (headless chat and
+    // `agy acp`). Google's own installer places it at ~/.local/bin/agy.
     command: "agy",
     dest: (home) => join(home, ".local", "bin", "agy"),
-    installable: antigravityCliInstallable,
+    installable: antigravityInstallable,
   },
 ];
 

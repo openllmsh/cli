@@ -4,11 +4,12 @@
  * antigravity.google/docs/cli/headless; no token reads, no direct endpoint
  * calls — the CLI does its own auth and inference.
  *
- * Why not ACP (`agy_acp_server`, `antigravity-acp.ts`): measured back to back
- * on the same model, ACP releases the reply only once it is complete (the
- * harness holds it; first text ≈ the headless run's LAST text), while this
- * mode streams ~25 ms text deltas from ~1.8 s after the prompt. See
- * docs/plans/antigravity-headless-transport.md.
+ * `agy` is the single source of truth for Antigravity sign-in; this mode and
+ * `agy acp` (`antigravity-acp.ts`) share it under the same isolated HOME.
+ * Why headless leads: measured back to back on the same model, ACP releases
+ * the reply only once it is complete (first text ≈ the headless run's LAST
+ * text), while this mode streams ~25 ms text deltas from ~1.8 s after the
+ * prompt. See docs/plans/antigravity-headless-transport.md.
  *
  * Protocol (agy 1.3.x), one NDJSON object per line:
  *   stdin   {"event":"user","message":{"content":"…"}}       one per turn
@@ -24,9 +25,11 @@
  * SPARE process may be started for the next request — only right after a real
  * request used one, never in the background on its own (see the spare rules).
  *
- * Phase 1 scope: plain text turns. Client tools and images decline with
- * {@link ANTIGRAVITY_HEADLESS_FALLBACK} so `serve.ts` runs the ACP bridge.
- * Any native-tool step cancels the turn the same way.
+ * Scope: plain text turns. Client tools and images decline with
+ * {@link ANTIGRAVITY_HEADLESS_FALLBACK} so `serve.ts` runs `agy acp`, which
+ * serves them. Spawn / start-up / write failures and a native-tool step carry
+ * the same marker (an unanticipated failure falls back to ACP). A sign-in miss
+ * does NOT: ACP uses the same sign-in, so it declines with an `auth` cooldown.
  */
 
 import { createHash } from "node:crypto";
@@ -41,11 +44,11 @@ import { ensureKeychainReady } from "../delegation/util";
 import { sandboxSpawnArgs } from "../sandbox/exec";
 import { unwrapAntigravityCliSpawn } from "../sandbox/policy";
 import { daemonTempDir } from "../sandbox/working-set";
-import { antigravitySpawnEnv } from "./antigravity-acp";
 import {
   ANTIGRAVITY_CLI_AGENT_NAME,
   prepareAntigravityCliProfile,
 } from "./antigravity-cli-settings";
+import { antigravitySpawnEnv } from "./antigravity-env";
 import { createAcpTurnState } from "./cursor-acp";
 import type { TNativeRunResult } from "./types";
 import { PRE_COMMIT_TIMEOUT_MS } from "./types";
@@ -252,16 +255,18 @@ export type THeadlessFailure = {
   readonly fallback: boolean;
 };
 
-/** Classify a non-SUCCESS `result` error. A sign-in miss falls back to ACP
- *  (its own sign-in may be live) — every other failure is the account's. */
+/** Classify a non-SUCCESS `result` error. A sign-in miss is an `auth`
+ *  cooldown (ACP shares the sign-in, so it cannot help); no failure here falls
+ *  back — those are the account's. */
 export const classifyHeadlessFailure = (
   error: string | null,
 ): THeadlessFailure => {
   const msg = error ?? "antigravity turn failed";
   if (SIGN_IN_RE.test(msg)) {
     return {
-      reason: `${ANTIGRAVITY_HEADLESS_FALLBACK}: agy CLI not signed in`,
-      fallback: true,
+      reason: "antigravity: Google sign-in required",
+      cooldown: "auth",
+      fallback: false,
     };
   }
   if (QUOTA_RE.test(msg)) {
