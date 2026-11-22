@@ -67,7 +67,7 @@ import {
   resolveAntigravityCli,
   runAntigravityHeadless,
 } from "./antigravity-headless";
-import { agyImageView } from "./antigravity-request";
+import { agyAcpImageRefusal, agyImageView } from "./antigravity-request";
 import { agyFileReadsConfined } from "./antigravity-seatbelt";
 import { bridgeRequestCaptureReadiness } from "./bridge-request-capture-readiness";
 import { runClaudeNative } from "./claude-native";
@@ -626,8 +626,8 @@ export const tryServeNativeRuntime = async (
     return serveCursorHop(params, overrides);
   }
   if (params.provider === "antigravity") {
-    // antigravity runs on `agy`: headless for text, `agy acp` for images and
-    // tools (chosen by content, never as a fallback).
+    // antigravity runs on `agy`: `agy acp` by default, the headless CLI only
+    // when `antigravity:stream-json` selects it (never as a fallback).
     // It has no channel for sampling / structured-output controls: decline
     // rather than silently serving at the agent's defaults.
     if (
@@ -1374,18 +1374,20 @@ const serveCursorHop = async (
 
 /**
  * Antigravity serve path. `agy` is the single source of truth for sign-in,
- * and the transport is chosen by the request's CONTENT, never by a failure:
- *   - text and image turns run on the headless `agy` CLI (streams as
- *     generated). Each image is stored once under the hash of its bytes
+ * and the transport is the hop's selected METHOD, never a failure:
+ *   - `acp` (default): every turn on a fresh `agy acp` session per request,
+ *     with the caller's tools and images (see `routeAntigravity`);
+ *   - `stream-json` (`antigravity:stream-json`): text and image turns on the
+ *     headless `agy` CLI (streams as generated). Each image is stored once under the hash of its bytes
  *     (`antigravity-attachments.ts`) and replaced in the prompt by a stable
  *     `[image: <path>]` line, which `agy` opens with its own `read_file`; the
  *     same image always renders the same text, so the conversation and
  *     Google's prompt cache hold across turns. Only where `agy`'s reads are
  *     kernel-confined (`antigravity-seatbelt.ts`: Seatbelt on macOS,
  *     Landlock on Linux) to nothing in `$HOME` or the state dir but its slot,
- *     its binary and the `agy` temp root; elsewhere image turns decline;
- *   - client tools, and shapes with no CLI text view (a final tool-result
- *     turn that omits `tools`), run on a fresh `agy acp` session per request.
+ *     its binary and the `agy` temp root; elsewhere image turns decline.
+ *     Client tools are refused for it, and shapes with no CLI text view
+ *     decline.
  * A decline (including an unanticipated failure) declines the hop and the
  * walker moves on; there is no fallback between the two. A sign-in miss is
  * an `auth` cooldown.
@@ -1426,7 +1428,12 @@ const routeAntigravity = (
   if (req.promptText.length === 0 && req.images.length === 0) {
     return { kind: "declined", reason: "no user turn to answer" };
   }
-  if (variant !== "stream-json") return { kind: "acp", req };
+  if (variant !== "stream-json") {
+    const refused = agyAcpImageRefusal(params.canonical);
+    return refused === null
+      ? { kind: "acp", req }
+      : { kind: "declined", reason: refused };
+  }
   // `tool_choice: "auto"` with no tools is the default, not a tool request.
   // Structured output was already declined by the native-control gate.
   const { tool_choice: toolChoice, ...withoutChoice } = params.canonical;

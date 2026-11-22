@@ -6,7 +6,10 @@
  *
  * `agy` is the single source of truth for Antigravity sign-in; this mode and
  * `agy acp` (`antigravity-acp.ts`) share it under the same isolated HOME.
- * Why headless leads: measured back to back on the same model, ACP releases
+ * This is the `stream-json` method, selected only by
+ * `antigravity:stream-json` (ACP is the default: headless `agy` 1.5.14 never
+ * loads an MCP server, so it can't carry the caller's tools). Why it is kept:
+ * measured back to back on the same model, ACP releases
  * the reply only once it is complete (first text ≈ the headless run's LAST
  * text), while this mode streams ~25 ms text deltas from ~1.8 s after the
  * prompt. See docs/plans/antigravity-headless-transport.md.
@@ -25,11 +28,12 @@
  * SPARE process may be started for the next request — only right after a real
  * request used one, never in the background on its own (see the spare rules).
  *
- * Scope: plain text turns. Client tools and images decline with
+ * Scope: text turns, and images stored by hash (see `serve.ts`). Client
+ * tools are refused before dispatch; other declines use
  * {@link ANTIGRAVITY_HEADLESS_UNAVAILABLE} (no cooldown; the walker moves to
  * the next hop). Spawn / start-up / write failures and a native-tool step
  * carry the same marker. A sign-in miss declines with an `auth` cooldown.
- * There is no second transport: `docs/plans/antigravity-cli-only-media.md`.
+ * A decline never switches to ACP: the selection names the method.
  */
 
 import { createHash } from "node:crypto";

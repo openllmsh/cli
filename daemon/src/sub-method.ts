@@ -22,6 +22,7 @@
 import type { TExecutionSelection } from "@openllmsh/sdk/protocol";
 import {
   defaultExecutionSelectionFor,
+  isExplicitOnlyVariant,
   providerSupportsVariant,
   registeredVariantsFor,
 } from "./execution-registry";
@@ -116,8 +117,17 @@ export const resolveHopExecution = ({
   if (provider === "claude_code" && originator?.isClaudeCode === true) {
     return { methods: ["handrolled"], executionSelection: null };
   }
-  const requested = executionOverrides[provider] ?? executionPreference;
+  const override = executionOverrides[provider];
+  const requested = override ?? executionPreference;
   if (requested === null) return fromDefault(provider, originator);
+  // A global preference never selects a provider's explicit-only variant.
+  if (
+    override === undefined &&
+    requested.kind === "bridge" &&
+    isExplicitOnlyVariant(provider, requested.variant)
+  ) {
+    return fromDefault(provider, originator);
+  }
   if (requested.kind === "bridge") {
     // Never turn a refused concrete variant into a successful handrolled call.
     return nativeThenMaybeHandrolled(provider, requested, false);

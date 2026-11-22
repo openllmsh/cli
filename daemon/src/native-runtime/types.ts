@@ -69,8 +69,9 @@ const NATIVE_PROVIDERS: ReadonlySet<string> = new Set([
   // transport (see native-runtime/muse-runtime.ts).
   "muse",
   // antigravity is BRIDGE-ONLY: Google's `agy` CLI is the sole inference
-  // transport — headless stream-json, `agy acp` for images/tools and as the
-  // fallback (native-runtime/antigravity-headless.ts, antigravity-acp.ts).
+  // transport — `agy acp` by default, the headless CLI as the selectable
+  // `stream-json` method (native-runtime/antigravity-acp.ts,
+  // antigravity-headless.ts).
   "antigravity",
 ]);
 

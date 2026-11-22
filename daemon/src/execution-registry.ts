@@ -29,6 +29,11 @@ export type TProviderExecutionRegistration = {
   /** Capture-capable subset of `variants`; the bridge-only type excludes
    *  `handrolled`, which never supports capture. */
   readonly captureVariants: readonly TBridgeVariant[];
+  /** Variants selected only by a per-provider override
+   *  (`<provider>:<variant>`): a GLOBAL preference naming one keeps this
+   *  provider on its default, so a setting aimed at another provider never
+   *  switches this one. */
+  readonly explicitOnlyVariants?: readonly TBridgeVariant[];
 };
 
 /**
@@ -79,6 +84,9 @@ export const PROVIDER_EXECUTION_REGISTRY: readonly TProviderExecutionRegistratio
       defaultSelection: executionSelectionBridge("acp", false),
       variants: ["acp", "stream-json"],
       captureVariants: [],
+      // A global `stream-json` (meant for Claude) must not move Antigravity
+      // off ACP; only `antigravity:stream-json` selects the headless CLI.
+      explicitOnlyVariants: ["stream-json"],
     },
     {
       provider: "kimi_code",
@@ -111,6 +119,14 @@ export const defaultExecutionSelectionFor = (
   }
   return registration.defaultSelection;
 };
+
+/** True when `variant` is selectable for `provider` only by a per-provider
+ *  override (see `explicitOnlyVariants`). */
+export const isExplicitOnlyVariant = (
+  provider: string,
+  variant: TBridgeVariant,
+): boolean =>
+  registrationFor(provider)?.explicitOnlyVariants?.includes(variant) === true;
 
 export const registeredVariantsFor = (
   provider: string,
