@@ -684,6 +684,14 @@ export const runAntigravityNative = async (
   if (home === undefined || home.length === 0 || home === homedir()) {
     return { kind: "declined", reason: "antigravity: no isolated HOME" };
   }
+  // The account this request was checked for: its sign-in epoch AND its
+  // HOME's generation (removing the slot bumps only the latter), taken
+  // BEFORE any readiness check. Every later gate — spawn, authenticate,
+  // prompt, a decline's cooldown — compares against these.
+  const startGeneration = homeGenerationOf(home);
+  const sameAccount = (): boolean =>
+    params.currentSignInEpoch() === params.signInEpoch &&
+    homeGenerationOf(home) === startGeneration;
   // macOS: `agy` reaches the isolated login keychain through
   // `/usr/bin/security`; nothing spawns unless the readiness gate created or
   // unlocked it on THIS call. Linux: no-op.
@@ -700,11 +708,10 @@ export const runAntigravityNative = async (
     // Only a miss under the account this request was planned for cools the
     // hop: one read across a sign-in must not put the new account on an
     // auth cooldown.
-    const sameAccount = params.currentSignInEpoch() === params.signInEpoch;
     return {
       kind: "declined",
       reason: "antigravity: Google sign-in required",
-      ...(sameAccount ? { cooldownReason: "auth" as const } : {}),
+      ...(sameAccount() ? { cooldownReason: "auth" as const } : {}),
     };
   }
   // The tool deny rules must be in place before the agent starts.
@@ -760,11 +767,7 @@ export const runAntigravityNative = async (
   try {
     cwd = await mkdtemp(join(daemonTempDir(), "agy-"));
   } catch (error) {
-    return declineFrom(
-      error,
-      params.signal,
-      params.currentSignInEpoch() === params.signInEpoch,
-    );
+    return declineFrom(error, params.signal, sameAccount());
   }
   let agent: TWarmAgent | null = null;
   /** Read through a function: `agent` is assigned inside closures, which
@@ -867,6 +870,15 @@ export const runAntigravityNative = async (
 
   /** Spawn a cold process and run the handshake on it. */
   const startCold = async (): Promise<void> => {
+    // Nothing starts for an account that changed or was removed since the
+    // readiness checks.
+    if (!sameAccount()) {
+      throw new AcpRpcError({
+        method: "initialize",
+        kind: "rpc",
+        message: "antigravity account changed during setup",
+      });
+    }
     const procCwd = await mkdtemp(join(daemonTempDir(), "agy-proc-"));
     const route: TWarmRoute = { onUpdate: null, allowedMcpTools: new Set() };
     let client: AcpClient;
@@ -901,7 +913,9 @@ export const runAntigravityNative = async (
       route,
       epoch: warmEpoch,
       home,
-      homeGeneration: homeGenerationOf(home),
+      // The generation the request was checked under: a slot removed in
+      // between already makes this process stale.
+      homeGeneration: startGeneration,
       turns: 0,
       idleTimer: undefined,
     });
@@ -919,7 +933,7 @@ export const runAntigravityNative = async (
     }
     // Signed out (or in) since the gate: never let `authenticate` start a
     // browser sign-in on this host for an account that is gone.
-    if (params.currentSignInEpoch() !== params.signInEpoch) {
+    if (!sameAccount()) {
       throw new AcpRpcError({
         method: "authenticate",
         kind: "rpc",
@@ -959,11 +973,7 @@ export const runAntigravityNative = async (
   const failSetup = (error: unknown): TNativeRunResult => {
     ended = true;
     cleanup("dispose");
-    return declineFrom(
-      error,
-      params.signal,
-      params.currentSignInEpoch() === params.signInEpoch,
-    );
+    return declineFrom(error, params.signal, sameAccount());
   };
 
   let opened: unknown;
@@ -1041,10 +1051,7 @@ export const runAntigravityNative = async (
   // Signed in or out while this process started — or its account slot was
   // removed (that bumps the HOME's generation, not the epoch): it may hold
   // the old account. Never prompt on it.
-  if (
-    params.currentSignInEpoch() !== params.signInEpoch ||
-    homeGenerationStale(owned)
-  ) {
+  if (!sameAccount() || homeGenerationStale(owned)) {
     return failSetup(
       new AcpRpcError({
         method: "session/prompt",
@@ -1143,11 +1150,10 @@ export const runAntigravityNative = async (
           : undefined;
     // A sign-in change since the request was planned: the cooldown is the
     // old account's (the same rule as `declineFrom`).
-    const sameAccount = params.currentSignInEpoch() === params.signInEpoch;
     return {
       kind: "declined",
       reason,
-      ...(failure !== undefined && sameAccount
+      ...(failure !== undefined && sameAccount()
         ? { cooldownReason: failure }
         : {}),
     };

@@ -2180,7 +2180,9 @@ provision_antigravity() {
   # The daemon's precedence: a home launcher that EXISTS decides (even an
   # unusable one — it is repaired); only without it may an `agy` on PATH
   # serve (a second copy would shadow it).
-  if [ -e "$dest" ] || [ -L "$dest" ]; then
+  # `-e` follows the link, as the daemon's existsSync does: a dangling
+  # launcher is absent and an `agy` on PATH may serve.
+  if [ -e "$dest" ]; then
     found="$dest"
   elif has_executable_command agy; then
     found="$(command -v agy)"
@@ -2209,24 +2211,34 @@ provision_antigravity() {
 # 1.4.x is never left without a launcher. A successful upgrade keeps the old
 # build beside it (`agy.pre-1.5`), never deleted.
 install_agy_cli() {
-  local curl_bin="$1" url="$2" dest="$ANTIGRAVITY_CLI_BIN" backup=""
-  restore_agy() {
-    if [ -n "$backup" ] && [ -e "$backup" ] && [ ! -e "$dest" ]; then
-      mv -f "$backup" "$dest" 2>/dev/null || true
+  local curl_bin="$1" url="$2" dest="$ANTIGRAVITY_CLI_BIN" backup="" failed=""
+  # Roll back THIS attempt: a replacement it left (even a partial one) is
+  # moved aside, and the launcher it saved goes back. Nothing to do when it
+  # saved none (a signal before the move leaves the original in place).
+  rollback_agy() {
+    [ -n "$backup" ] && [ -e "$backup" ] || return 0
+    if [ -e "$dest" ] || [ -L "$dest" ]; then
+      failed="$dest.failed-$$"
+      mv -f "$dest" "$failed" 2>/dev/null || true
     fi
+    mv -f "$backup" "$dest" 2>/dev/null || true
   }
-  if { [ -e "$dest" ] || [ -L "$dest" ]; } \
-    && ! { [ -f "$dest" ] && agy_version_ok "$dest"; }; then
+  # Armed BEFORE the move, so no signal can land between the two.
+  trap 'rollback_agy; exit 130' HUP INT TERM
+  if [ -e "$dest" ] && ! { [ -f "$dest" ] && agy_version_ok "$dest"; }; then
+    # Never overwrite an earlier attempt's backup.
     backup="$dest.pre-1.5"
-    mv -f "$dest" "$backup" || return 1
+    [ -e "$backup" ] && backup="$dest.pre-1.5.$(date +%s).$$"
+    mv "$dest" "$backup" || { backup=""; trap - HUP INT TERM; return 1; }
   fi
-  trap 'restore_agy; exit 130' HUP INT TERM
+  # Success is a USABLE launcher (a 1.5.1+ file), not merely the
+  # installer's exit status: anything less takes the rollback path.
   if "$curl_bin" -fsSL --proto '=https' "$url" | bash \
-    && [ -f "$dest" ] && [ -x "$dest" ]; then
+    && [ -f "$dest" ] && [ -x "$dest" ] && agy_version_ok "$dest"; then
     trap - HUP INT TERM
     return 0
   fi
-  restore_agy
+  rollback_agy
   trap - HUP INT TERM
   return 1
 }
@@ -2715,7 +2727,7 @@ build_vendor_status_line() {
     # Antigravity: the daemon's precedence (an existing home launcher
     # decides; PATH only without it), and only a usable 1.5+ file counts.
     elif if [ "$slug" = antigravity ]; then
-        agy_candidate="$(if [ -e "$dest" ] || [ -L "$dest" ]; then printf '%s' "$dest"; else command -v "$bin" 2>/dev/null; fi)"
+        agy_candidate="$(if [ -e "$dest" ]; then printf '%s' "$dest"; else command -v "$bin" 2>/dev/null; fi)"
         [ -n "$agy_candidate" ] && [ -f "$agy_candidate" ] && agy_version_ok "$agy_candidate"
       else
         has_executable_command "$bin" || [ -x "$dest" ] || [ -x "$HOME/.local/bin/$bin" ]

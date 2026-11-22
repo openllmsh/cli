@@ -474,7 +474,12 @@ export const startAgyLogin = (args: {
       // …and only while that prompt is still what `agy` shows: once its
       // screen moved on (the browser finished, the first-run wizard with
       // its consent page), nothing pasted may reach it.
-      const atPrompt = CODE_PROMPT_RE.test(visible);
+      // …and only for the link that was shown: if agy replaced it (a second
+      // attempt), a code from the first link must not reach the second.
+      const atPrompt =
+        CODE_PROMPT_RE.test(visible) &&
+        surfaced !== null &&
+        parseAgyAuthUrl(visible)?.url === surfaced.url;
       if (
         pendingWrites > 0 ||
         settled ||

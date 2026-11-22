@@ -93,8 +93,9 @@ export const summaryQuota = (summary: unknown): TAntigravityQuota => {
     }>;
     readonly buckets?: ReadonlyArray<TBucket>;
   } | null;
-  const groups = s?.groups?.some((g) => (g.buckets?.length ?? 0) > 0)
-    ? s.groups
+  const grouped = s?.groups?.some((g) => (g.buckets?.length ?? 0) > 0) === true;
+  const groups = grouped
+    ? s?.groups
     : [{ displayName: undefined, buckets: s?.buckets }];
   const out = new Map<string, TProviderUsageWindow>();
   const families = new Map<string, string>();
@@ -117,15 +118,14 @@ export const summaryQuota = (summary: unknown): TAntigravityQuota => {
       if (window !== null) {
         // A group's own allowance never shares a key with the reserved
         // bucket-id families (a group named "Gemini" is not `gemini-…`).
-        // A named group's allowance never mixes with an unnamed one's.
-        const named =
-          nonEmpty(group.displayName) && group.displayName.trim().length > 0;
+        // One allowance per payload GROUP (its weekly and 5-hour windows
+        // together), keyed by position — never by name, so two groups that
+        // share a name stay apart. Flat (ungrouped) buckets are each their
+        // own allowance.
         families.set(
           bucket.bucketId,
           quotaFamilyOf(bucket.bucketId) ??
-            // An unnamed group is still ONE allowance (its weekly and 5-hour
-            // windows together): keyed by its position in the payload.
-            (named ? `group:${family}` : `group#${groupIndex}`),
+            (grouped ? `group#${groupIndex}` : `bucket:${bucket.bucketId}`),
         );
         out.set(bucket.bucketId, window);
       }

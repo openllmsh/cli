@@ -79,7 +79,8 @@ export const readCliVersion = (path: string): string | null => {
  *  binary that timed out once may answer next time). */
 export const AGY_VERSION_RETRY_MS = 60_000;
 
-/** Version answers per binary stamp (path + size + mtime): a read that is a
+/** Version answers per binary stamp (path, device + inode, size, mtime,
+ *  ctime): a read that is a
  *  version lasts until the binary is replaced; a failed one — no output, or
  *  output that is no version (a warning line) — only
  *  {@link AGY_VERSION_RETRY_MS}. */
@@ -93,7 +94,9 @@ export const cachedCliVersion = (path: string): string | null => {
   let stamp: string;
   try {
     const st = statSync(path);
-    stamp = `${path}\0${st.size}\0${st.mtimeMs}`;
+    // Identity and change time too: a same-size replacement that kept its
+    // mtime (copied with -p, say) is still a new binary to probe.
+    stamp = `${path}\0${st.dev}\0${st.ino}\0${st.size}\0${st.mtimeMs}\0${st.ctimeMs}`;
   } catch {
     return null;
   }
