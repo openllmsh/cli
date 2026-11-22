@@ -2083,6 +2083,13 @@ launch_vendor_cli_install() {
 # launch_vendor_cli_install.
 ANTIGRAVITY_CLI_INSTALLER_URL="https://antigravity.google/cli/install.sh"
 ANTIGRAVITY_CLI_BIN="$HOME/.local/bin/agy"
+# The opt-out marker lives where the daemon reads it: its state dir
+# (`stateDir()` in packages/cli/daemon/src/env.ts — an absolute
+# OPENLLM_DAEMON_STATE_DIR, else ~/.openllm).
+case "${OPENLLM_DAEMON_STATE_DIR:-}" in
+  /*) ANTIGRAVITY_DISABLED_MARKER="$OPENLLM_DAEMON_STATE_DIR/antigravity-disabled" ;;
+  *) ANTIGRAVITY_DISABLED_MARKER="$OPENLLM_DIR/antigravity-disabled" ;;
+esac
 
 # OPENLLM_ONLY_VENDOR_CLIS — comma-separated subscription slugs to provision
 # (e.g. claude_code,chatgpt). Unset/empty selects every vendor.
@@ -2251,15 +2258,15 @@ provision_clis() {
   ANTIGRAVITY_OPTED_OUT=0
   case "${OPENLLM_ANTIGRAVITY:-}" in
     1)
-      rm -f "$OPENLLM_DIR/antigravity-disabled" 2>/dev/null \
+      rm -f "$ANTIGRAVITY_DISABLED_MARKER" 2>/dev/null \
         || echo "  Google Antigravity: couldn't clear the opt-out marker." >&2
       ;;
     0)
       ANTIGRAVITY_OPTED_OUT=1
-      touch "$OPENLLM_DIR/antigravity-disabled" 2>/dev/null \
+      touch "$ANTIGRAVITY_DISABLED_MARKER" 2>/dev/null \
         || echo "  Google Antigravity: couldn't save the opt-out (it applies to this run)." >&2
       ;;
-    *) [ -f "$OPENLLM_DIR/antigravity-disabled" ] && ANTIGRAVITY_OPTED_OUT=1 ;;
+    *) [ -f "$ANTIGRAVITY_DISABLED_MARKER" ] && ANTIGRAVITY_OPTED_OUT=1 ;;
   esac
   VENDOR_FAILED_NAMES=""
   VENDOR_PENDING_NAMES=""
@@ -2646,7 +2653,7 @@ build_vendor_status_line() {
     # An `agy` older than 1.5.0 is not installed (it is being, or failed to
     # be, upgraded): fall through to the worker's own record.
     # Antigravity opted out: skipped, whatever is (not) on disk.
-    elif [ "$slug" = antigravity ] && { [ "${ANTIGRAVITY_OPTED_OUT:-0}" = 1 ] || [ -f "$OPENLLM_DIR/antigravity-disabled" ]; }; then
+    elif [ "$slug" = antigravity ] && { [ "${ANTIGRAVITY_OPTED_OUT:-0}" = 1 ] || [ -f "$ANTIGRAVITY_DISABLED_MARKER" ]; }; then
       stage="skipped"
       reason=""
     # Antigravity: the daemon's precedence (an existing home launcher

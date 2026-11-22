@@ -4,8 +4,9 @@
  * and the CLI's provisioning presence check (`packages/cli/src/vendor-provision.ts`).
  */
 
-import { statSync } from "node:fs";
+import { mkdtempSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 /** The oldest `agy` with the built-in ACP server (`agy acp`, 1.5.0) — the
  *  daemon's image / tool / fallback transport. An older build is unusable. */
@@ -41,9 +42,13 @@ export const versionAtLeast = (
 /** `<bin> --version` (local, no sign-in, 5 s cap), or null. Run with a
  *  throwaway HOME so it never reads or writes any `agy` profile. */
 export const readCliVersion = (path: string): string | null => {
+  let home: string | null = null;
   try {
+    // A private HOME per probe, removed after: nothing a probe writes is
+    // ever seen by the next one.
+    home = mkdtempSync(join(tmpdir(), "agy-version-"));
     const out = Bun.spawnSync([path, "--version"], {
-      env: { PATH: process.env.PATH ?? "/usr/bin:/bin", HOME: tmpdir() },
+      env: { PATH: process.env.PATH ?? "/usr/bin:/bin", HOME: home },
       stdout: "pipe",
       stderr: "ignore",
       timeout: 5_000,
@@ -51,6 +56,14 @@ export const readCliVersion = (path: string): string | null => {
     return out.exitCode === 0 ? out.stdout.toString().trim() : null;
   } catch {
     return null;
+  } finally {
+    if (home !== null) {
+      try {
+        rmSync(home, { recursive: true, force: true });
+      } catch {
+        // A leftover empty temp dir is harmless.
+      }
+    }
   }
 };
 

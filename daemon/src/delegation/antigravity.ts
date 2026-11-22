@@ -31,6 +31,7 @@ import { logError, logInfo } from "../logger";
 import { disposeAntigravityWarmPool } from "../native-runtime/antigravity-acp";
 import { antigravitySpawnEnv } from "../native-runtime/antigravity-env";
 import {
+  antigravityHeadlessEpoch,
   disposeAntigravityHeadlessSpares,
   resolveAntigravityCli,
 } from "../native-runtime/antigravity-headless";
@@ -182,9 +183,14 @@ const activeAgyLogin = accountCell<TAgyLogin | null>(() => null);
 /** Capture `agy models` into the model list. A failure never fails the
  *  caller: the list stays missing and the next Connect captures it. */
 const captureAgyModels = async (agyBin: string): Promise<void> => {
+  // The account this capture belongs to: a logout or another sign-in that
+  // lands while `agy models` runs must not get the old list written back.
+  const epoch = antigravityHeadlessEpoch();
   try {
     const rows = await readAgyModels(agyDeps(agyBin));
-    if (rows !== null) writeAgyModels(rows);
+    if (rows !== null && epoch === antigravityHeadlessEpoch()) {
+      writeAgyModels(rows);
+    }
   } catch (error) {
     logError("antigravity-connect", error);
   }

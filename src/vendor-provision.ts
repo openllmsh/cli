@@ -23,6 +23,7 @@ import {
   versionAtLeast,
 } from "../daemon/src/agy-version";
 import { ANTIGRAVITY_DISABLED_MARKER } from "../daemon/src/antigravity-feature";
+import { stateDir } from "../daemon/src/env";
 import { cliConfig, openllmDir, userHome } from "./env";
 import { awaitPipeCodes, bunSubprocessPeer } from "./process-pipe";
 import { isSecureOrigin } from "./self-update";
@@ -115,7 +116,9 @@ const antigravityInstallable = (deps: TVendorPlatformDeps): boolean => {
   const disabledMarker =
     deps.antigravityDisabledMarker !== undefined
       ? deps.antigravityDisabledMarker
-      : existsSync(join(openllmDirFor(deps.home), ANTIGRAVITY_DISABLED_MARKER));
+      : // The daemon's state dir (honours OPENLLM_DAEMON_STATE_DIR), where
+        // install.sh writes it and antigravityEnabled() reads it.
+        existsSync(join(stateDir(deps.home), ANTIGRAVITY_DISABLED_MARKER));
   if (env !== "1" && disabledMarker) return false;
   const supported =
     (deps.platform === "darwin" &&
