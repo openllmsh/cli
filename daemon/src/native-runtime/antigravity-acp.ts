@@ -356,6 +356,20 @@ export const ANTIGRAVITY_SESSION_META = {
  * runs, against 3 of 3 tool attempts without it). The conversation's own
  * tools (the loopback MCP server) stay available.
  */
+/** ACP's closed `ToolKind` vocabulary — the only tool detail ever logged. */
+const ACP_TOOL_KINDS: ReadonlySet<string> = new Set([
+  "read",
+  "edit",
+  "delete",
+  "move",
+  "search",
+  "execute",
+  "think",
+  "fetch",
+  "switch_mode",
+  "other",
+]);
+
 export const ANTIGRAVITY_ACP_NO_BUILTIN_TOOLS =
   "You cannot run commands, read or write files, or browse the web here: any such attempt fails and ends your answer. Attached images are already in your context: look at them directly. Only the tools provided for this conversation, if any, may be called.";
 
@@ -717,10 +731,13 @@ export const runAntigravityNative = async (
     wake = null;
   };
 
-  const promptText =
+  // Led by the no-built-in-tools note: what is sent is what usage estimates
+  // count.
+  const promptText = `${ANTIGRAVITY_ACP_NO_BUILTIN_TOOLS}\n\n${
     params.systemText !== null
       ? `${params.systemText}\n\n${params.userText}`
-      : params.userText;
+      : params.userText
+  }`;
   const turn = createAcpTurnState({
     providerModelId: params.providerModelId,
     promptText,
@@ -840,7 +857,7 @@ export const runAntigravityNative = async (
       logWarn(
         "antigravity-acp",
         safeDiagnosticMessage`Antigravity attempted a built-in tool; the turn was stopped.`,
-        { tool_kind: typeof kind === "string" ? kind.slice(0, 32) : null },
+        { tool_kind: ACP_TOOL_KINDS.has(kind as string) ? kind : "other" },
       );
       failStream(new Error("antigravity attempted a native tool"));
       return;
@@ -1061,10 +1078,7 @@ export const runAntigravityNative = async (
       "session/prompt",
       {
         sessionId,
-        prompt: acpPromptBlocks(
-          `${ANTIGRAVITY_ACP_NO_BUILTIN_TOOLS}\n\n${promptText}`,
-          params.images ?? [],
-        ),
+        prompt: acpPromptBlocks(promptText, params.images ?? []),
       },
       params.turnTimeoutMs ?? ANTIGRAVITY_TURN_TIMEOUT_MS,
     )
