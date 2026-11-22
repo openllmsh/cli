@@ -681,10 +681,14 @@ export const runAntigravityNative = async (
   // `agy acp` shares the CLI's sign-in. Gate on its metadata so a signed-out
   // account declines as `auth` instead of starting a browser sign-in.
   if (!(await (params.signedIn ?? agyCliSignedIn)(home))) {
+    // Only a miss under the account this request was planned for cools the
+    // hop: one read across a sign-in must not put the new account on an
+    // auth cooldown.
+    const sameAccount = params.currentSignInEpoch() === params.signInEpoch;
     return {
       kind: "declined",
       reason: "antigravity: Google sign-in required",
-      cooldownReason: "auth",
+      ...(sameAccount ? { cooldownReason: "auth" as const } : {}),
     };
   }
   // The tool deny rules must be in place before the agent starts.

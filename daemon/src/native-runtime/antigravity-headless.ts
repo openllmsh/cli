@@ -635,6 +635,15 @@ export const disposeAntigravityHeadlessSpares = (): void => {
 
 export const antigravityHeadlessSpareCount = (): number => spares.length;
 
+/** Spare starts still between their decision and joining the pool. */
+const pendingSpareStarts = new Set<Promise<void>>();
+
+/** Resolves once every spare start already begun has settled (joined the
+ *  pool or been disposed) — for shutdown and tests that must see them. */
+export const settleAntigravityHeadlessSpareStarts = async (): Promise<void> => {
+  await Promise.all([...pendingSpareStarts]);
+};
+
 /** The pool's account epoch: bumped by every disposal (sign-in, logout), so
  *  conversations keyed with it never continue across an account change. */
 export const antigravityHeadlessEpoch = (): number => sparesEpoch;
@@ -789,12 +798,14 @@ export const runAntigravityHeadless = async (
     noteRequestAndWantSpare(key, spareTtlMs)
   ) {
     const epoch = sparesEpoch;
-    void spawn().then(
+    const start = spawn().then(
       (next) => addSpare(next, spareTtlMs, epoch),
       () => {
         if (epoch === sparesEpoch) releaseSpareReservation();
       },
     );
+    pendingSpareStarts.add(start);
+    void start.finally(() => pendingSpareStarts.delete(start));
   }
 
   type TItem =

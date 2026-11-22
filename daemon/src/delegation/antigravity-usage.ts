@@ -98,7 +98,12 @@ export const summaryWindows = (summary: unknown): TProviderUsageWindow[] => {
         weekly ? WEEK_MS : session ? FIVE_HOURS_MS : undefined,
       );
       if (window !== null) {
-        windowFamily.set(window, family);
+        // A group's own allowance never shares a key with the reserved
+        // bucket-id families (a group named "Gemini" is not `gemini-…`).
+        windowFamily.set(
+          window,
+          quotaFamilyOf(bucket.bucketId) ?? `group:${family}`,
+        );
         out.set(bucket.bucketId, window);
       }
     }
