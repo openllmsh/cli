@@ -149,7 +149,8 @@ export const antigravityQuotaSnapshot = (
     const family =
       (w.meter_id !== undefined ? families.get(w.meter_id) : undefined) ??
       quotaFamilyOf(id) ??
-      id;
+      // A raw meter id never shares a key with a reserved family name.
+      `meter:${id}`;
     const out = w.percent_used >= QUOTA_REJECT_PERCENT;
     exhausted.set(family, (exhausted.get(family) ?? false) || out);
   }

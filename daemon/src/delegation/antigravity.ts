@@ -291,7 +291,9 @@ const connect = (): Promise<TConnectResult> =>
       });
       const dispose = (): void => {
         login.cancel();
-        activeAgyLogin.set(null);
+        // Only the attempt that still owns the cell clears it: a losing
+        // overlapping Connect must not clear the winner's waiting login.
+        if (activeAgyLogin.get() === login) activeAgyLogin.set(null);
         void rm(scratch, { recursive: true, force: true });
       };
       if (!wiring.slot.start(dispose, flow)) {

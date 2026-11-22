@@ -142,7 +142,7 @@ export const AGY_KILL_GRACE_MS = 2_000;
 export const killHard = (proc: {
   readonly kill: (signal?: number | NodeJS.Signals) => void;
   readonly exitCode: number | null;
-  readonly signalCode?: string | null;
+  readonly signalCode?: string | number | null;
 }): void => {
   try {
     proc.kill();
