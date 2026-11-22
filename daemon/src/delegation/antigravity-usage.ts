@@ -64,12 +64,19 @@ const quotaFamilyOf = (bucketId: string): string | null =>
       ? "Claude & GPT"
       : null;
 
-/** The allowance each mapped window belongs to (its bucket-id family, or
- *  its model group): how the snapshot groups windows. */
-const windowFamily = new WeakMap<TProviderUsageWindow, string>();
+/** Mapped quota: the windows, and the allowance (family) each window's
+ *  `meter_id` belongs to — keyed by value, so copies group the same. */
+export type TAntigravityQuota = {
+  readonly windows: TProviderUsageWindow[];
+  readonly families: ReadonlyMap<string, string>;
+};
 
 /** `retrieveUserQuotaSummary` → windows (Claude + GPT share one allowance). */
-export const summaryWindows = (summary: unknown): TProviderUsageWindow[] => {
+export const summaryWindows = (summary: unknown): TProviderUsageWindow[] =>
+  summaryQuota(summary).windows;
+
+/** {@link summaryWindows} plus each window's allowance family. */
+export const summaryQuota = (summary: unknown): TAntigravityQuota => {
   const s = summary as {
     readonly groups?: ReadonlyArray<{
       readonly displayName?: unknown;
@@ -81,6 +88,7 @@ export const summaryWindows = (summary: unknown): TProviderUsageWindow[] => {
     ? s.groups
     : [{ displayName: undefined, buckets: s?.buckets }];
   const out = new Map<string, TProviderUsageWindow>();
+  const families = new Map<string, string>();
   for (const group of groups ?? []) {
     for (const bucket of group.buckets ?? []) {
       if (bucket.disabled === true || !nonEmpty(bucket.bucketId)) continue;
@@ -103,8 +111,8 @@ export const summaryWindows = (summary: unknown): TProviderUsageWindow[] => {
         // An unnamed bucket is its own allowance, never a named group's.
         const named =
           nonEmpty(group.displayName) && group.displayName.trim().length > 0;
-        windowFamily.set(
-          window,
+        families.set(
+          bucket.bucketId,
           quotaFamilyOf(bucket.bucketId) ??
             (named ? `group:${family}` : `bucket:${bucket.bucketId}`),
         );
@@ -112,7 +120,7 @@ export const summaryWindows = (summary: unknown): TProviderUsageWindow[] => {
       }
     }
   }
-  return [...out.values()];
+  return { windows: [...out.values()], families };
 };
 
 /**
@@ -121,6 +129,7 @@ export const summaryWindows = (summary: unknown): TProviderUsageWindow[] => {
  */
 export const antigravityQuotaSnapshot = (
   windows: ReadonlyArray<TProviderUsageWindow>,
+  families: ReadonlyMap<string, string> = new Map(),
 ): TProviderUsageSnapshot => {
   if (windows.length === 0) {
     return {
@@ -134,17 +143,20 @@ export const antigravityQuotaSnapshot = (
   // Gemini hops that still have room). A family is out when ANY of its
   // windows is (a full 7-day window blocks however much 5-hour room is
   // left); reject only when every family is out.
-  const families = new Map<string, boolean>();
+  const exhausted = new Map<string, boolean>();
   for (const w of windows) {
     const id = w.meter_id ?? w.label;
-    const family = windowFamily.get(w) ?? quotaFamilyOf(id) ?? id;
+    const family =
+      (w.meter_id !== undefined ? families.get(w.meter_id) : undefined) ??
+      quotaFamilyOf(id) ??
+      id;
     const out = w.percent_used >= QUOTA_REJECT_PERCENT;
-    families.set(family, (families.get(family) ?? false) || out);
+    exhausted.set(family, (exhausted.get(family) ?? false) || out);
   }
   const percents = windows.map((w) => w.percent_used);
   return {
     kind: "quota",
-    status: [...families.values()].every((out) => out)
+    status: [...exhausted.values()].every((out) => out)
       ? "rejected"
       : percents.some((p) => p >= QUOTA_WARN_PERCENT)
         ? "allowed_warning"

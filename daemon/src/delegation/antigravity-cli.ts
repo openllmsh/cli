@@ -26,10 +26,11 @@ import { antigravitySpawnEnv } from "../native-runtime/antigravity-env";
 import { sandboxSpawnArgs } from "../sandbox/exec";
 import { unwrapAntigravityCliSpawn } from "../sandbox/policy";
 import { daemonTempDir } from "../sandbox/working-set";
+import type { TAntigravityQuota } from "./antigravity-usage";
 import {
   ANTIGRAVITY_PLANS_URL,
   antigravityQuotaSnapshot,
-  summaryWindows,
+  summaryQuota,
 } from "./antigravity-usage";
 import type { TStoreRead } from "./util";
 import {
@@ -176,7 +177,11 @@ const runAgy = async (
  */
 export const agyUsageWindows = (
   stdout: string,
-): ReadonlyArray<TProviderUsageWindow> | null => {
+): ReadonlyArray<TProviderUsageWindow> | null =>
+  agyUsageQuota(stdout)?.windows ?? null;
+
+/** {@link agyUsageWindows} plus each window's allowance family. */
+const agyUsageQuota = (stdout: string): TAntigravityQuota | null => {
   let parsed: unknown;
   try {
     parsed = JSON.parse(stdout);
@@ -229,22 +234,22 @@ export const agyUsageWindows = (
     }
     mapped.push({ displayName: group.name, buckets: out });
   }
-  return summaryWindows({ groups: mapped });
+  return summaryQuota({ groups: mapped });
 };
 
 export const readAgyUsage = async (
   deps: TAgyCliDeps,
 ): Promise<TProviderUsageSnapshot> => {
   const out = await runAgy(deps, ["-p", "/usage", "--output-format", "json"]);
-  const windows = out.kind === "ok" ? agyUsageWindows(out.stdout) : null;
-  if (windows === null) {
+  const quota = out.kind === "ok" ? agyUsageQuota(out.stdout) : null;
+  if (quota === null) {
     return {
       kind: "unavailable",
       reason: "Antigravity limits unavailable.",
       link: ANTIGRAVITY_PLANS_URL,
     };
   }
-  return antigravityQuotaSnapshot(windows);
+  return antigravityQuotaSnapshot(quota.windows, quota.families);
 };
 
 // ─── Models ────────────────────────────────────────────────────────────────

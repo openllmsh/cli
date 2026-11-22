@@ -201,8 +201,9 @@ const declineFrom = (
 ): TNativeRunResult => {
   if (signal.aborted) return { kind: "declined", reason: "client aborted" };
   const failure = classifyAntigravityFailure(error);
-  const cooldown =
-    failure.cooldown === "auth" && !sameAccount ? undefined : failure.cooldown;
+  // Any cooldown (auth, quota, payment) after an account change belongs to
+  // the old account.
+  const cooldown = sameAccount ? failure.cooldown : undefined;
   return {
     kind: "declined",
     reason: failure.reason,
