@@ -54,15 +54,18 @@ const hashConversation = (
   // (V1) cannot share a resumed thread; resuming across a model change would
   // feed the wrong-model thread (audit 2026-07-14 §F3).
   //
-  // Text is compared with its surrounding whitespace trimmed: clients
-  // routinely trim the assistant content they resend (vendor replies end in
-  // "\n"), and an exact match would then miss every follow-up — each one
-  // seeded onto a fresh vendor session with a cold prompt cache (#1053).
+  // An assistant turn is compared without trailing whitespace: clients
+  // routinely trim the reply they resend (vendor replies end in "\n"), and
+  // an exact match would then miss every follow-up — each one seeded onto a
+  // fresh vendor session with a cold prompt cache (#1053). User and system
+  // text stay exact, so an edited message never resumes the old session.
   h.update(
     JSON.stringify({
       model,
-      systemText: systemText?.trim() ?? null,
-      turns: turns.map((t) => ({ role: t.role, text: t.text.trim() })),
+      systemText,
+      turns: turns.map((t) =>
+        t.role === "assistant" ? { role: t.role, text: t.text.trimEnd() } : t,
+      ),
     }),
   );
   return h.digest("hex");

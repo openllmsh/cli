@@ -824,11 +824,14 @@ export const runAntigravityHeadless = async (
       `spawn failed: ${error instanceof Error ? error.message : String(error)}`,
     );
   }
-  logInfo("antigravity-headless", "turn process", {
-    path,
-    continuing: requestedId !== null,
-    accountChanged,
-  });
+  // Only a continuation that missed its warm process is worth a line;
+  // `accountChanged` marks the deliberate drop after a sign-in change.
+  if (requestedId !== null && path !== "parked") {
+    logInfo("antigravity-headless", "continuation missed its parked process", {
+      path,
+      accountChanged,
+    });
+  }
   // This request used a process: when the key is in active use, start the
   // next one now so the following request skips start-up (spare rules above).
   const spareTtlMs = params.spareTtlMs ?? ANTIGRAVITY_HEADLESS_SPARE_TTL_MS;
