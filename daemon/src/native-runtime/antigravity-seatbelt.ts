@@ -26,6 +26,7 @@
 import { realpathSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, sep } from "node:path";
+import { stateDir } from "../env";
 import { daemonTempDir } from "../sandbox/working-set/base";
 
 export const SANDBOX_EXEC = "/usr/bin/sandbox-exec";
@@ -70,6 +71,9 @@ export type TAgySeatbeltPaths = {
   readonly bin: string;
   /** The daemon temp dir holding `agy-*` cwds and `agy-attachments`. */
   readonly tempDir: string;
+  /** The daemon state dir (every provider's sign-in lives under it). Denied
+   *  too, so a state dir relocated outside `$HOME` stays covered. */
+  readonly stateDir: string;
 };
 
 /** The SBPL profile for one inference `agy` spawn. Pure. */
@@ -81,9 +85,14 @@ export const agySeatbeltProfile = (paths: TAgySeatbeltPaths): string => {
   const bin = real(paths.bin);
   const tempDir = real(paths.tempDir);
   const agyTemp = `^${rx(tempDir)}/agy-[^/]*(/.*)?$`;
-  const metadata = new Set<string>([home]);
+  const state = real(paths.stateDir);
+  // `$HOME`, plus the state dir when it lives elsewhere.
+  const denyRoots = inside(home, state) ? [home] : [home, state];
+  const metadata = new Set<string>(denyRoots);
   for (const p of [slotRoot, bin, paths.bin, `${tempDir}/agy-`]) {
-    if (inside(home, p)) for (const a of ancestors(home, p)) metadata.add(a);
+    for (const root of denyRoots) {
+      if (inside(root, p)) for (const a of ancestors(root, p)) metadata.add(a);
+    }
   }
   // The binary's own folder too (a versioned install or an
   // `OPENLLM_AGY_BIN` launcher may load files beside it) — unless that
@@ -93,7 +102,8 @@ export const agySeatbeltProfile = (paths: TAgySeatbeltPaths): string => {
     inside(home, binDir) &&
     binDir !== home &&
     !inside(binDir, slotRoot) &&
-    !inside(binDir, tempDir);
+    !inside(binDir, tempDir) &&
+    !inside(binDir, state);
   const binRules = [
     ...[...new Set([bin, paths.bin])]
       .filter((p) => inside(home, p))
@@ -102,8 +112,8 @@ export const agySeatbeltProfile = (paths: TAgySeatbeltPaths): string => {
   ];
   return `(version 1)
 (allow default)
-(deny file-read* (subpath ${lit(home)}))
-(deny file-write* (subpath ${lit(home)}))
+(deny file-read* ${denyRoots.map((r) => `(subpath ${lit(r)})`).join(" ")})
+(deny file-write* ${denyRoots.map((r) => `(subpath ${lit(r)})`).join(" ")})
 (allow file-read-metadata ${[...metadata].map((p) => `(literal ${lit(p)})`).join(" ")})
 (allow file-read* (subpath ${lit(slotRoot)}) (regex #"${agyTemp}")${binRules.length > 0 ? ` ${binRules.join(" ")}` : ""})
 (allow file-write* (subpath ${lit(slotRoot)}) (regex #"${agyTemp}"))
@@ -129,6 +139,7 @@ export const agySeatbeltArgv = (
       slotHome,
       bin,
       tempDir: daemonTempDir(),
+      stateDir: stateDir(),
     }),
     ...argv,
   ];
