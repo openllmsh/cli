@@ -2653,7 +2653,7 @@ build_vendor_status_line() {
     # An `agy` older than 1.5.0 is not installed (it is being, or failed to
     # be, upgraded): fall through to the worker's own record.
     # Antigravity opted out: skipped, whatever is (not) on disk.
-    elif [ "$slug" = antigravity ] && { [ "${ANTIGRAVITY_OPTED_OUT:-0}" = 1 ] || [ -f "$ANTIGRAVITY_DISABLED_MARKER" ]; }; then
+    elif [ "$slug" = antigravity ] && { [ "${ANTIGRAVITY_OPTED_OUT:-0}" = 1 ] || [ -f "${ANTIGRAVITY_DISABLED_MARKER:-$OPENLLM_DIR/antigravity-disabled}" ]; }; then
       stage="skipped"
       reason=""
     # Antigravity: the daemon's precedence (an existing home launcher
