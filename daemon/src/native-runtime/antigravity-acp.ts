@@ -40,16 +40,19 @@
  * client capabilities are off, the cwd is an empty daemon temp dir, and any
  * native `tool_call` update that is not our loopback MCP tool cancels the turn.
  *
- * One FRESH session per request (the conversation is flattened by
- * `cursorRequestOf`), each in its own empty temp cwd with its own loopback
- * MCP server. The agent PROCESS may be warm: a process whose last turn ended
- * on a clean ACP terminal is parked in a small idle pool (see "Warm process
- * reuse" below) so the next request skips spawn + initialize + authenticate.
- * The agent reports real per-call token totals via ACP `usage_update`
- * (`createAcpTurnState` sums them; output share estimated).
+ * A request carrying a `conversation` continues that conversation's ACP
+ * session (see "Persistent sessions" below): only the new turn is prompted.
+ * Without one (or when the conversation is new, edited or lost) a FRESH
+ * session is opened in its own empty temp cwd with the whole transcript. The
+ * agent PROCESS may be warm: one whose last turn ended on a clean ACP terminal
+ * is parked in a small idle pool (see "Warm process reuse" below) so the next
+ * request skips spawn + initialize + authenticate.
+ * Token usage is the `session/prompt` result's exact split (cache reads
+ * included); mid-turn `usage_update` is only the fallback (it carries the
+ * session's cumulative context size, not a per-call delta).
  */
 
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import { homedir } from "node:os";
@@ -65,6 +68,7 @@ import { DAEMON_VERSION } from "../version";
 import { ensureAntigravityCliSettings } from "./antigravity-cli-settings";
 import type { TAntigravityFailure } from "./antigravity-common";
 import { classifyAgyMessage, prepareAgySpawn } from "./antigravity-common";
+import type { TAntigravityReply } from "./antigravity-conversation";
 import { antigravitySpawnEnv } from "./antigravity-env";
 import { confineAgyArgv } from "./antigravity-seatbelt";
 import { AcpClient, AcpRpcError, createAcpTurnState } from "./cursor-acp";
@@ -72,6 +76,8 @@ import type { TCursorMcpServer } from "./cursor-mcp-server";
 import { startCursorMcpServer } from "./cursor-mcp-server";
 import type { TCursorImage, TCursorTool } from "./cursor-request";
 import { acpPromptBlocks } from "./cursor-request";
+import type { TSessionLease } from "./session-store";
+import { NativeSessionStore } from "./session-store";
 import type { TNativeRunResult } from "./types";
 import { PRE_COMMIT_TIMEOUT_MS } from "./types";
 
@@ -328,6 +334,54 @@ const ensureAntigravityModel = async (
   }
 };
 
+/** How a process reattaches a session it does not hold, from `initialize`'s
+ *  capabilities: `session/resume` (no history replay) is preferred over
+ *  `session/load` (replays the history as updates). */
+const reattachModeOf = (init: unknown): "resume" | "load" | null => {
+  const caps = (
+    init as {
+      readonly agentCapabilities?: {
+        readonly loadSession?: unknown;
+        readonly sessionCapabilities?: { readonly resume?: unknown };
+      };
+    } | null
+  )?.agentCapabilities;
+  if (
+    typeof caps?.sessionCapabilities?.resume === "object" &&
+    caps.sessionCapabilities.resume !== null
+  ) {
+    return "resume";
+  }
+  return caps?.loadSession === true ? "load" : null;
+};
+
+const tokenCount = (value: unknown): number =>
+  typeof value === "number" && Number.isSafeInteger(value) && value > 0
+    ? value
+    : 0;
+
+/** The exact usage `session/prompt` resolves with (`usage.inputTokens` EXCLUDES
+ *  cache reads) as the OpenAI usage row, or null when the agent gave none. */
+const exactUsageOf = (
+  result: unknown,
+): NonNullable<TChatCompletionChunk["usage"]> | null => {
+  const u = (result as { readonly usage?: Record<string, unknown> } | null)
+    ?.usage;
+  if (typeof u !== "object" || u === null) return null;
+  const cacheRead = tokenCount(u.cachedReadTokens);
+  const prompt =
+    tokenCount(u.inputTokens) + cacheRead + tokenCount(u.cachedWriteTokens);
+  // `outputTokens` already includes thinking.
+  const completion = tokenCount(u.outputTokens);
+  if (prompt + completion === 0) return null;
+  return {
+    prompt_tokens: prompt,
+    completion_tokens: completion,
+    total_tokens: prompt + completion,
+    prompt_tokens_details: { cached_tokens: cacheRead },
+  };
+};
+
 /** `session/update` kinds that are the agent's own (native) tool activity. */
 const isNativeToolUpdate = (update: unknown): boolean => {
   const kind = (update as { readonly sessionUpdate?: unknown } | null)
@@ -443,15 +497,23 @@ export const createMcpCallTracker = (): {
 //   - Every request still gets a fresh empty cwd, a fresh session/new and a
 //     fresh loopback MCP server; only the process is reused. The process has
 //     its own daemon-owned cwd that lives until the process is disposed.
-//   - Only a successful `session/prompt` terminal parks. Setup failures,
-//     aborts, idle/turn timeouts, native-tool cancels and the client-tool
-//     early settlement (a cancelled turn) all dispose the process.
+//   - Only a successful `session/prompt` terminal parks (and the client-tool
+//     early settlement, once the cancelled prompt has settled: the session
+//     stays valid). Setup failures, aborts, idle/turn timeouts and native-tool
+//     cancels all dispose the process.
 //   - Bounded: at most ANTIGRAVITY_WARM_POOL_MAX idle processes, each retired
 //     after ANTIGRAVITY_WARM_IDLE_TTL_MS idle or ANTIGRAVITY_WARM_MAX_TURNS
 //     turns, and all killed on daemon exit.
+//
+// Persistent sessions: a process that parks after a CONVERSATION turn keeps
+// that conversation's ACP session (`TWarmAgent.conv`) and serves only it —
+// the next request of the same conversation takes it back and prompts the
+// new turn on the same session. When the process is gone (idle TTL, pool
+// eviction, crash) the conversation record outlives it and the next request
+// reattaches on a fresh process with `session/resume` / `session/load`.
 
 /** Idle processes kept across all keys (oldest evicted first). */
-export const ANTIGRAVITY_WARM_POOL_MAX = 2;
+export const ANTIGRAVITY_WARM_POOL_MAX = 4;
 /** How long a parked process may sit idle before it is killed. */
 export const ANTIGRAVITY_WARM_IDLE_TTL_MS = 180_000;
 /** Turns one process serves before it is retired (bounds agent-side session
@@ -464,6 +526,29 @@ type TWarmRoute = {
   /** Caller tools the leasing turn registered on its MCP server; empty while
    *  parked, so a parked process can never get a permission approved. */
   allowedMcpTools: ReadonlySet<string>;
+};
+
+/** One conversation's persistent ACP session. */
+type TConversation = {
+  readonly id: string;
+  /** The ACP session id on the (current or a past) agent process. */
+  sessionId: string;
+  /** The session's own empty daemon-owned cwd, kept for `session/load`. */
+  readonly cwd: string;
+  /** Loopback MCP server for the caller's tools, alive as long as the
+   *  conversation; its callback is the leasing turn's (`handler`). */
+  readonly mcp: TCursorMcpServer | null;
+  readonly handler: { current: ((name: string, args: unknown) => void) | null };
+  /** Process identity the session was opened on (argv + env + epoch). */
+  readonly warmKey: string;
+  readonly home: string;
+  readonly homeGeneration: number;
+  readonly epoch: number;
+  /** The idle process holding the session, when one is parked. */
+  agent: TWarmAgent | null;
+  /** A turn is running on it. */
+  busy: boolean;
+  lastUsed: number;
 };
 
 type TWarmAgent = {
@@ -484,9 +569,24 @@ type TWarmAgent = {
   readonly homeGeneration: number;
   turns: number;
   idleTimer: ReturnType<typeof setTimeout> | undefined;
+  /** The conversation whose session this process holds (parked or leased). */
+  conv: TConversation | null;
+  /** How the agent reattaches a session it does not hold: `session/resume`
+   *  (no history replay) or `session/load`; null → it cannot. */
+  reattach: "resume" | "load" | null;
 };
 
 const idlePool: TWarmAgent[] = [];
+/** Persistent sessions by id. The lease store below maps a conversation's
+ *  content key to this id. */
+const conversations = new Map<string, TConversation>();
+/** Conversation key → session id, with the per-conversation lock: a second
+ *  concurrent request for the same conversation waits for the first. */
+export const antigravityConversations = new NativeSessionStore();
+/** A conversation not advanced within this window is forgotten. */
+export const ANTIGRAVITY_CONVERSATION_TTL_MS = 60 * 60 * 1000;
+/** Most conversations kept (oldest idle dropped first). */
+export const ANTIGRAVITY_CONVERSATION_MAX = 32;
 let warmEpoch = 0;
 let exitHookInstalled = false;
 /** Per-HOME generation; dispose bumps it so stale agents retire. */
@@ -495,8 +595,10 @@ const homeGenerations = new Map<string, number>();
 const homeGenerationOf = (home: string): number =>
   homeGenerations.get(home) ?? 0;
 
-const homeGenerationStale = (agent: TWarmAgent): boolean =>
-  agent.homeGeneration !== homeGenerationOf(agent.home);
+const homeGenerationStale = (owner: {
+  readonly home: string;
+  readonly homeGeneration: number;
+}): boolean => owner.homeGeneration !== homeGenerationOf(owner.home);
 
 /** `agy acp`, in worker mode (`--process-per-session`) when the session
  *  carries caller tools over an HTTP MCP server. */
@@ -524,6 +626,11 @@ export const antigravityWarmKey = (
 const retireWarmAgent = (agent: TWarmAgent, sessionId: string | null): void => {
   clearTimeout(agent.idleTimer);
   agent.idleTimer = undefined;
+  // The conversation outlives its process (it is reattached on a new one).
+  if (agent.conv !== null && agent.conv.agent === agent) {
+    agent.conv.agent = null;
+  }
+  agent.conv = null;
   agent.route.onUpdate = null;
   agent.route.allowedMcpTools = new Set();
   if (sessionId !== null) agent.client.cancelAndDispose(sessionId);
@@ -539,11 +646,42 @@ const removeFromIdlePool = (agent: TWarmAgent): void => {
   if (index >= 0) idlePool.splice(index, 1);
 };
 
+/** Forget a conversation: its process, loopback MCP server and cwd go. */
+const dropConversation = (conv: TConversation): void => {
+  conversations.delete(conv.id);
+  const agent = conv.agent;
+  conv.agent = null;
+  if (agent !== null) {
+    removeFromIdlePool(agent);
+    retireWarmAgent(agent, null);
+  }
+  conv.mcp?.stop();
+  void rm(conv.cwd, { recursive: true, force: true });
+};
+
+/** Drop conversations idle past the TTL, then the oldest beyond the cap. */
+const sweepConversations = (): void => {
+  const idle = [...conversations.values()]
+    .filter((conv) => !conv.busy)
+    .sort((a, b) => a.lastUsed - b.lastUsed);
+  const cutoff = Date.now() - ANTIGRAVITY_CONVERSATION_TTL_MS;
+  let excess = conversations.size - ANTIGRAVITY_CONVERSATION_MAX;
+  for (const conv of idle) {
+    if (conv.lastUsed < cutoff || excess > 0) {
+      dropConversation(conv);
+      excess -= 1;
+    }
+  }
+};
+
 /** Lease an idle process for `key` (exclusive), or null → cold spawn. */
 const acquireWarmAgent = (key: string): TWarmAgent | null => {
   for (let i = idlePool.length - 1; i >= 0; i--) {
     const agent = idlePool[i];
-    if (agent === undefined || agent.key !== key) continue;
+    // A process holding a conversation serves only that conversation.
+    if (agent === undefined || agent.key !== key || agent.conv !== null) {
+      continue;
+    }
     idlePool.splice(i, 1);
     clearTimeout(agent.idleTimer);
     agent.idleTimer = undefined;
@@ -560,6 +698,26 @@ const acquireWarmAgent = (key: string): TWarmAgent | null => {
   return null;
 };
 
+/** Take back the idle process holding `conv`'s session (exclusive), or null
+ *  when it is gone, dead or stale. */
+const takeConversationAgent = (conv: TConversation): TWarmAgent | null => {
+  const agent = conv.agent;
+  if (agent === null) return null;
+  removeFromIdlePool(agent);
+  clearTimeout(agent.idleTimer);
+  agent.idleTimer = undefined;
+  conv.agent = null;
+  if (
+    !agent.client.isAlive() ||
+    agent.epoch !== warmEpoch ||
+    homeGenerationStale(agent)
+  ) {
+    retireWarmAgent(agent, null);
+    return null;
+  }
+  return agent;
+};
+
 /** Park a process after a clean turn, or retire it when it may not stay. */
 const releaseWarmAgent = (agent: TWarmAgent, idleTtlMs: number): void => {
   agent.turns += 1;
@@ -568,7 +726,8 @@ const releaseWarmAgent = (agent: TWarmAgent, idleTtlMs: number): void => {
   if (
     !agent.client.isAlive() ||
     agent.epoch !== warmEpoch ||
-    agent.turns >= ANTIGRAVITY_WARM_MAX_TURNS ||
+    // A conversation's process is one session, not an accumulating pool.
+    (agent.conv === null && agent.turns >= ANTIGRAVITY_WARM_MAX_TURNS) ||
     homeGenerationStale(agent)
   ) {
     retireWarmAgent(agent, null);
@@ -597,6 +756,10 @@ const releaseWarmAgent = (agent: TWarmAgent, idleTtlMs: number): void => {
 export const disposeAntigravityWarmPool = (): void => {
   warmEpoch += 1;
   for (const agent of idlePool.splice(0)) retireWarmAgent(agent, null);
+  // Running turns drop theirs when they end (the epoch moved).
+  for (const conv of [...conversations.values()]) {
+    if (!conv.busy) dropConversation(conv);
+  }
 };
 
 /**
@@ -612,10 +775,29 @@ export const disposeAntigravityWarmPoolForHome = (home: string): void => {
     idlePool.splice(i, 1);
     retireWarmAgent(agent, null);
   }
+  for (const conv of [...conversations.values()]) {
+    if (conv.home === home && !conv.busy) dropConversation(conv);
+  }
 };
 
 /** Number of parked processes (diagnostics + tests). */
 export const antigravityWarmPoolSize = (): number => idlePool.length;
+
+/**
+ * The conversation a request belongs to (`antigravity-conversation.ts`). The
+ * caller leases it from {@link antigravityConversations} by the plan's
+ * `continueKey` and hands the lease over: the run settles it under
+ * `nextKey(reply)` once the turn ends (or drops/restores it on failure).
+ */
+export type TAntigravityConversation = {
+  readonly lease: TSessionLease;
+  /** What a CONTINUED session is prompted with: only the new turn(s). */
+  readonly delta: {
+    readonly promptText: string;
+    readonly images: ReadonlyArray<TCursorImage>;
+  };
+  readonly nextKey: (reply: TAntigravityReply) => string;
+};
 
 export type TAntigravityNativeParams = {
   /** The `agy` CLI (`resolveAntigravityCli()`); it is spawned as `agy acp`. */
@@ -643,6 +825,11 @@ export type TAntigravityNativeParams = {
   readonly warmIdleTtlMs?: number;
   /** Cancel→SIGTERM grace override for {@link AcpClient.cancelAndDispose}. */
   readonly cancelDisposeGraceMs?: number;
+  /** How long a caller-tool handoff waits for the cancelled prompt to settle
+   *  before the session is given up (default 10s). */
+  readonly cancelSettleMs?: number;
+  /** Continue this conversation's ACP session (see {@link TAntigravityConversation}). */
+  readonly conversation?: TAntigravityConversation;
   /** Sign-in gate (default {@link agyCliSignedIn}: metadata only). */
   readonly signedIn?: (home: string) => Promise<boolean>;
   /** Keychain readiness gate (default {@link ensureKeychainReady}). */
@@ -717,6 +904,7 @@ export const runAntigravityNative = async (
     return { kind: "declined", reason: "client aborted" };
   }
 
+  const cv = params.conversation;
   type TQueueItem =
     | TChatCompletionChunk
     | "end"
@@ -732,14 +920,16 @@ export const runAntigravityNative = async (
     wake = null;
   };
 
-  // Led by the no-built-in-tools note: what is sent is what usage estimates
-  // count.
-  const promptText = `${ANTIGRAVITY_ACP_NO_BUILTIN_TOOLS}\n\n${
+  // A FRESH session is led by the no-built-in-tools note: what is sent is
+  // what usage estimates count. A continued session already holds it (it
+  // belongs to the session's first prompt), so only the new turn goes.
+  const fullPrompt = `${ANTIGRAVITY_ACP_NO_BUILTIN_TOOLS}\n\n${
     params.systemText !== null
       ? `${params.systemText}\n\n${params.userText}`
       : params.userText
   }`;
-  const turn = createAcpTurnState({
+  let promptText = fullPrompt;
+  let turn = createAcpTurnState({
     providerModelId: params.providerModelId,
     promptText,
   });
@@ -764,14 +954,45 @@ export const runAntigravityNative = async (
     params.signInEpoch,
   );
 
-  // Empty, daemon-owned TURN cwd: bounds anything the agent could see
-  // natively. Fresh per request, independent of the process cwd.
+  // The conversation to continue, when its session is still usable here.
+  sweepConversations();
+  const leasedId = cv?.lease.sessionId ?? null;
+  let prior: TConversation | null =
+    leasedId !== null ? (conversations.get(leasedId) ?? null) : null;
+  if (
+    prior !== null &&
+    (prior.busy ||
+      prior.warmKey !== warmKey ||
+      prior.epoch !== warmEpoch ||
+      homeGenerationStale(prior))
+  ) {
+    if (!prior.busy) dropConversation(prior);
+    prior = null;
+  }
+
+  // Empty, daemon-owned cwd: bounds anything the agent could see natively.
+  // A conversation's lives as long as the conversation (`session/load` needs
+  // it); a plain request's is fresh per request.
   let cwd: string;
   try {
-    cwd = await mkdtemp(join(agyTempRoot(), "turn-"));
+    cwd =
+      prior !== null
+        ? prior.cwd
+        : await mkdtemp(
+            join(agyTempRoot(), cv !== undefined ? "conv-" : "turn-"),
+          );
   } catch (error) {
     return declineFrom(error, params.signal, sameAccount());
   }
+  /** Set (never cleared) once a conversation of this request exists. */
+  let conv: TConversation | null = prior;
+  if (prior !== null) prior.busy = true;
+  const handler: TConversation["handler"] = prior?.handler ?? {
+    current: null,
+  };
+  /** The loopback MCP server a plain request owns (a conversation's belongs
+   *  to the conversation). */
+  let ownMcp: TCursorMcpServer | null = null;
   let agent: TWarmAgent | null = null;
   /** Read through a function: `agent` is assigned inside closures, which
    *  TypeScript's flow narrowing does not see. */
@@ -781,46 +1002,118 @@ export const runAntigravityNative = async (
   let cleaned = false;
   let idleTimer: ReturnType<typeof setTimeout> | undefined;
   let rearmIdleWatchdog: (() => void) | null = null;
-  let mcp: TCursorMcpServer | null = null;
   const ourMcpCalls = createMcpCallTracker();
   const allowedMcpTools: ReadonlySet<string> = new Set(
     (params.tools ?? []).map((tool) => tool.name),
   );
+  /** The prompt reached the agent: the session now holds this turn. */
+  let promptSent = false;
+  /** A fresh session replaced the conversation's one (it could not be
+   *  reattached): the old entry no longer describes anything. */
+  let replacedSession = false;
+  let promptSettled: Promise<boolean> | null = null;
+  let contextUsed = 0;
+  let replyText = "";
+  const replyCalls: Array<{ name: string; arguments: string }> = [];
 
-  /** How the turn leaves the agent process. */
-  type TSettle = "park" | "cancel" | "dispose";
+  /** How the turn leaves the agent process. `keep` is the caller-tool
+   *  handoff: the in-flight prompt is cancelled, and the session stays. */
+  type TSettle = "park" | "keep" | "cancel" | "dispose";
+
+  const finish = (settle: "park" | "cancel" | "dispose"): void => {
+    const owned = agent;
+    if (conv === null) {
+      // Settle the process FIRST: `mcp.stop()` force-closes connections and,
+      // called from inside the MCP tool handler, can run other JS before it
+      // returns — the process's fate must already be decided by then.
+      if (owned !== null) {
+        if (
+          settle === "park" &&
+          params.currentSignInEpoch() === params.signInEpoch
+        ) {
+          releaseWarmAgent(
+            owned,
+            params.warmIdleTtlMs ?? ANTIGRAVITY_WARM_IDLE_TTL_MS,
+          );
+        } else {
+          retireWarmAgent(owned, settle === "cancel" ? sessionId : null);
+        }
+      }
+      ownMcp?.stop();
+      ownMcp = null;
+      void rm(cwd, { recursive: true, force: true });
+      return;
+    }
+    const held = conv;
+    held.busy = false;
+    held.lastUsed = Date.now();
+    const reusable =
+      settle === "park" &&
+      promptSent &&
+      owned !== null &&
+      params.currentSignInEpoch() === params.signInEpoch &&
+      held.epoch === warmEpoch &&
+      !homeGenerationStale(held);
+    if (reusable && owned !== null && cv !== undefined) {
+      owned.conv = held;
+      held.agent = owned;
+      held.sessionId = sessionId ?? held.sessionId;
+      releaseWarmAgent(
+        owned,
+        params.warmIdleTtlMs ?? ANTIGRAVITY_WARM_IDLE_TTL_MS,
+      );
+      // A process that could not park (died) leaves the session to be
+      // reattached; the conversation continues under its next key.
+      cv.lease.commit(
+        cv.nextKey({ text: replyText, toolCalls: replyCalls }),
+        held.id,
+      );
+      return;
+    }
+    if (owned !== null) {
+      retireWarmAgent(owned, settle === "cancel" ? sessionId : null);
+    }
+    const consumed = promptSent || replacedSession;
+    if (consumed || prior === null) dropConversation(held);
+    if (consumed) cv?.lease.commit("", null);
+    else cv?.lease.abandon();
+  };
+
   const cleanup = (settle: TSettle): void => {
     if (cleaned) return;
     cleaned = true;
     clearTimeout(idleTimer);
     rearmIdleWatchdog = null;
     params.signal.removeEventListener("abort", abort);
-    // Settle the process FIRST: `mcp.stop()` force-closes connections and,
-    // called from inside the MCP tool handler, can run other JS before it
-    // returns — the process's fate must already be decided by then.
+    handler.current = null;
     const owned = agent;
     if (owned !== null) {
       owned.route.onUpdate = null;
       owned.route.allowedMcpTools = new Set();
-      if (
-        settle === "park" &&
-        params.currentSignInEpoch() === params.signInEpoch
-      ) {
-        releaseWarmAgent(
-          owned,
-          params.warmIdleTtlMs ?? ANTIGRAVITY_WARM_IDLE_TTL_MS,
-        );
-      } else {
-        retireWarmAgent(owned, settle === "cancel" ? sessionId : null);
-      }
     }
-    mcp?.stop();
-    mcp = null;
-    void rm(cwd, { recursive: true, force: true });
+    if (settle === "keep" && owned !== null && sessionId !== null) {
+      // The caller's tool call ended the turn mid-flight. Cancel the prompt
+      // and wait for the agent to settle it: only then is the session idle
+      // and ready for the tool result.
+      owned.client.notify("session/cancel", { sessionId });
+      const budget = params.cancelSettleMs ?? 10_000;
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      void Promise.race([
+        promptSettled ?? Promise.resolve(false),
+        new Promise<boolean>((resolve) => {
+          timer = setTimeout(() => resolve(false), budget);
+        }),
+      ]).then((settled) => {
+        clearTimeout(timer);
+        finish(settled ? "park" : "cancel");
+      });
+      return;
+    }
+    finish(settle === "keep" ? "cancel" : settle);
   };
   const endWith = (
     chunks: ReadonlyArray<TChatCompletionChunk>,
-    settle: "park" | "cancel",
+    settle: "park" | "keep" | "cancel",
   ): void => {
     if (ended) return;
     ended = true;
@@ -841,6 +1134,16 @@ export const runAntigravityNative = async (
     failStream(new DOMException("client aborted", "AbortError"));
   };
 
+  /** The agent's `usage_update` carries the session's CUMULATIVE context size
+   *  (not a per-call delta): the latest one is the fallback when a turn ends
+   *  without the prompt's own exact usage. */
+  const feedContextUsage = (): void => {
+    if (contextUsed > 0) {
+      turn.handleUpdate({ sessionUpdate: "usage_update", used: contextUsed });
+      contextUsed = 0;
+    }
+  };
+
   /** The leasing turn's view of agent notifications (installed per turn on
    *  the process route — the client's own callback outlives every turn). */
   const onUpdate = (p: unknown): void => {
@@ -848,8 +1151,20 @@ export const runAntigravityNative = async (
     const notif = p as
       | { readonly sessionId?: unknown; readonly update?: unknown }
       | undefined;
+    // Nothing before the session is attached counts: a `session/load`
+    // replays the whole history here, and none of it is this turn's output.
     if (sessionId === null || notif?.sessionId !== sessionId) return;
     rearmIdleWatchdog?.();
+    const update = notif.update as {
+      readonly sessionUpdate?: unknown;
+      readonly used?: unknown;
+    } | null;
+    if (update?.sessionUpdate === "usage_update") {
+      if (typeof update.used === "number" && update.used > 0) {
+        contextUsed = update.used;
+      }
+      return;
+    }
     if (isNativeToolUpdate(notif.update) && !ourMcpCalls.admits(notif.update)) {
       // The agent tried one of ITS tools — never let it run. The tool's ACP
       // kind (execute / read / fetch …) is a closed vocabulary; its title or
@@ -864,7 +1179,24 @@ export const runAntigravityNative = async (
       return;
     }
     const chunk = turn.handleUpdate(notif.update);
-    if (chunk !== null) push(chunk);
+    if (chunk !== null) {
+      push(chunk);
+      const content = chunk.choices[0]?.delta.content;
+      if (typeof content === "string") replyText += content;
+    }
+  };
+
+  /** The caller's tool call ends the turn with OpenAI `tool_calls`. */
+  const onToolCall = (name: string, args: unknown): void => {
+    if (ended) return;
+    replyCalls.push({
+      name,
+      arguments: typeof args === "string" ? args : JSON.stringify(args ?? {}),
+    });
+    feedContextUsage();
+    // A conversation keeps its session (the cancelled prompt is settled
+    // first); a plain request is cut off mid-flight and never parks.
+    endWith(turn.emitToolCall(name, args), conv !== null ? "keep" : "cancel");
   };
 
   /** Take ownership of a process for this turn. If the turn already ended
@@ -920,7 +1252,7 @@ export const runAntigravityNative = async (
       void rm(procCwd, { recursive: true, force: true });
       throw error;
     }
-    adopt({
+    const created: TWarmAgent = {
       key: warmKey,
       client,
       procCwd,
@@ -932,7 +1264,10 @@ export const runAntigravityNative = async (
       homeGeneration: startGeneration,
       turns: 0,
       idleTimer: undefined,
-    });
+      conv: null,
+      reattach: null,
+    };
+    adopt(created);
     const init = await client.request(
       "initialize",
       ANTIGRAVITY_INIT_PARAMS,
@@ -945,6 +1280,7 @@ export const runAntigravityNative = async (
         message: "agent is not the expected Google Antigravity release",
       });
     }
+    created.reattach = reattachModeOf(init);
     // Signed out (or in) since the gate: never let `authenticate` start a
     // browser sign-in on this host for an account that is gone.
     if (!sameAccount()) {
@@ -961,24 +1297,24 @@ export const runAntigravityNative = async (
     );
   };
 
+  const mcpServers = (): ReadonlyArray<Record<string, unknown>> => {
+    const server = conv?.mcp ?? ownMcp;
+    return server !== null
+      ? [
+          {
+            type: "http",
+            name: CLIENT_TOOLS_MCP_SERVER,
+            url: server.url,
+            headers: server.headers,
+          },
+        ]
+      : [];
+  };
+
   const openSession = (owned: TWarmAgent): Promise<unknown> =>
     owned.client.request(
       "session/new",
-      {
-        cwd,
-        mcpServers:
-          mcp !== null
-            ? [
-                {
-                  type: "http",
-                  name: CLIENT_TOOLS_MCP_SERVER,
-                  url: mcp.url,
-                  headers: mcp.headers,
-                },
-              ]
-            : [],
-        _meta: ANTIGRAVITY_SESSION_META,
-      },
+      { cwd, mcpServers: mcpServers(), _meta: ANTIGRAVITY_SESSION_META },
       RPC_TIMEOUT_MS,
     );
 
@@ -990,67 +1326,158 @@ export const runAntigravityNative = async (
     return declineFrom(error, params.signal, sameAccount());
   };
 
-  let opened: unknown;
-  try {
-    if ((params.tools?.length ?? 0) > 0) {
-      mcp = startCursorMcpServer({
-        tools: params.tools ?? [],
-        onToolCall: (name, args) => {
-          if (ended) return;
-          // Early settlement: the turn is cut off mid-flight — never park.
-          endWith(turn.emitToolCall(name, args), "cancel");
-        },
-      });
+  /** Bring the conversation's existing session live: the idle process that
+   *  still holds it, else `session/resume` / `session/load` on a (new)
+   *  process. False → it cannot be reattached; a fresh session is opened. */
+  const attachExisting = async (existing: TConversation): Promise<boolean> => {
+    const idle = takeConversationAgent(existing);
+    if (idle !== null) {
+      adopt(idle);
+      return true;
     }
-    const leased = acquireWarmAgent(warmKey);
-    if (leased !== null) {
-      adopt(leased);
-      try {
-        opened = await openSession(leased);
-      } catch (error) {
-        // A parked process that died after its liveness check fails at the
-        // transport; replace it with a cold one once. Anything else (an RPC
-        // answer, an abort) is a real outcome and declines as usual.
-        const stale =
-          error instanceof AcpRpcError &&
-          error.kind === "transport" &&
-          !params.signal.aborted &&
-          !cleaned;
-        if (!stale) throw error;
-        retireWarmAgent(leased, null);
+    const reused = acquireWarmAgent(warmKey);
+    if (reused !== null) adopt(reused);
+    else await startCold();
+    const owned = currentAgent();
+    if (owned === null) throw new DOMException("client aborted", "AbortError");
+    if (owned.reattach === null) return false;
+    try {
+      const result = await owned.client.request(
+        owned.reattach === "resume" ? "session/resume" : "session/load",
+        { sessionId: existing.sessionId, cwd, mcpServers: mcpServers() },
+        RPC_TIMEOUT_MS,
+      );
+      await ensureAntigravityModel(
+        owned.client,
+        existing.sessionId,
+        params.providerModelId,
+        result,
+      );
+      return true;
+    } catch (error) {
+      if (params.signal.aborted || cleaned) throw error;
+      if (!owned.client.isAlive()) {
+        retireWarmAgent(owned, null);
         agent = null;
-        await startCold();
-        const fresh = currentAgent();
-        if (fresh === null) throw error;
-        opened = await openSession(fresh);
       }
-    } else {
+      return false;
+    }
+  };
+
+  /** Open a fresh session on a process (leased, or cold). */
+  const openFresh = async (): Promise<unknown> => {
+    const alive = currentAgent();
+    if (alive !== null && !alive.client.isAlive()) {
+      retireWarmAgent(alive, null);
+      agent = null;
+    }
+    const held = currentAgent();
+    if (held !== null) return openSession(held);
+    const leased = acquireWarmAgent(warmKey);
+    if (leased === null) {
       await startCold();
       const fresh = currentAgent();
       if (fresh === null) {
         throw new DOMException("client aborted", "AbortError");
       }
-      opened = await openSession(fresh);
+      return openSession(fresh);
+    }
+    adopt(leased);
+    try {
+      return await openSession(leased);
+    } catch (error) {
+      // A parked process that died after its liveness check fails at the
+      // transport; replace it with a cold one once. Anything else (an RPC
+      // answer, an abort) is a real outcome and declines as usual.
+      const stale =
+        error instanceof AcpRpcError &&
+        error.kind === "transport" &&
+        !params.signal.aborted &&
+        !cleaned;
+      if (!stale) throw error;
+      retireWarmAgent(leased, null);
+      agent = null;
+      await startCold();
+      const fresh = currentAgent();
+      if (fresh === null) throw error;
+      return openSession(fresh);
+    }
+  };
+
+  let attached = false;
+  try {
+    if ((params.tools?.length ?? 0) > 0 && conv?.mcp == null) {
+      const server = startCursorMcpServer({
+        tools: params.tools ?? [],
+        onToolCall: (name, args) => handler.current?.(name, args),
+      });
+      if (cv !== undefined) {
+        conv = {
+          id: randomUUID(),
+          sessionId: "",
+          cwd,
+          mcp: server,
+          handler,
+          warmKey,
+          home,
+          homeGeneration: startGeneration,
+          epoch: warmEpoch,
+          agent: null,
+          busy: true,
+          lastUsed: Date.now(),
+        };
+        conversations.set(conv.id, conv);
+      } else {
+        ownMcp = server;
+      }
+    }
+    if (conv === null && cv !== undefined) {
+      conv = {
+        id: randomUUID(),
+        sessionId: "",
+        cwd,
+        mcp: null,
+        handler,
+        warmKey,
+        home,
+        homeGeneration: startGeneration,
+        epoch: warmEpoch,
+        agent: null,
+        busy: true,
+        lastUsed: Date.now(),
+      };
+      conversations.set(conv.id, conv);
+    }
+    if (prior !== null) attached = await attachExisting(prior);
+    let opened: unknown = null;
+    if (!attached) {
+      if (prior !== null) replacedSession = true;
+      opened = await openFresh();
     }
     const owned = currentAgent();
     if (owned === null || cleaned) {
       throw new DOMException("client aborted", "AbortError");
     }
-    const sid = (opened as { readonly sessionId?: unknown } | null)?.sessionId;
-    if (typeof sid !== "string" || sid.length === 0) {
-      throw new AcpRpcError({
-        method: "session/new",
-        kind: "rpc",
-        message: "missing sessionId",
-      });
+    if (attached) {
+      sessionId = prior?.sessionId ?? null;
+    } else {
+      const sid = (opened as { readonly sessionId?: unknown } | null)
+        ?.sessionId;
+      if (typeof sid !== "string" || sid.length === 0) {
+        throw new AcpRpcError({
+          method: "session/new",
+          kind: "rpc",
+          message: "missing sessionId",
+        });
+      }
+      sessionId = sid;
+      await ensureAntigravityModel(
+        owned.client,
+        sid,
+        params.providerModelId,
+        opened,
+      );
     }
-    sessionId = sid;
-    await ensureAntigravityModel(
-      owned.client,
-      sid,
-      params.providerModelId,
-      opened,
-    );
     if (params.signal.aborted) {
       throw new DOMException("client aborted", "AbortError");
     }
@@ -1074,15 +1501,26 @@ export const runAntigravityNative = async (
       }),
     );
   }
-  void owned.client
-    .request(
-      "session/prompt",
-      {
-        sessionId,
-        prompt: acpPromptBlocks(promptText, params.images ?? []),
-      },
-      params.turnTimeoutMs ?? ANTIGRAVITY_TURN_TIMEOUT_MS,
-    )
+  if (conv !== null) conv.sessionId = sessionId;
+  const promptImages =
+    attached && cv !== undefined ? cv.delta.images : (params.images ?? []);
+  if (attached && cv !== undefined) promptText = cv.delta.promptText;
+  turn = createAcpTurnState({
+    providerModelId: params.providerModelId,
+    promptText,
+  });
+  handler.current = onToolCall;
+  promptSent = true;
+  const prompt = owned.client.request(
+    "session/prompt",
+    { sessionId, prompt: acpPromptBlocks(promptText, promptImages) },
+    params.turnTimeoutMs ?? ANTIGRAVITY_TURN_TIMEOUT_MS,
+  );
+  promptSettled = prompt.then(
+    () => true,
+    () => false,
+  );
+  void prompt
     .then((result) => {
       if (ended) return;
       const stop = (result as { readonly stopReason?: unknown } | null)
@@ -1100,7 +1538,19 @@ export const runAntigravityNative = async (
         failStream(new Error("antigravity turn ended before producing output"));
       } else {
         // The ONLY path that may park the process: a clean ACP terminal.
-        endWith(turn.finish(stop), "park");
+        const exact = exactUsageOf(result);
+        if (exact === null) feedContextUsage();
+        const terminal = turn.finish(stop);
+        endWith(
+          exact === null
+            ? terminal
+            : terminal.map((chunk) =>
+                chunk.usage !== undefined
+                  ? ({ ...chunk, usage: exact } as TChatCompletionChunk)
+                  : chunk,
+              ),
+          "park",
+        );
       }
     })
     .catch((error: unknown) => {

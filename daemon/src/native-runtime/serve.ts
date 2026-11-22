@@ -60,7 +60,11 @@ import {
   safeDiagnosticMessage,
 } from "../logger";
 import type { TAntigravityNativeParams } from "./antigravity-acp";
-import { runAntigravityNative } from "./antigravity-acp";
+import {
+  antigravityConversations,
+  runAntigravityNative,
+} from "./antigravity-acp";
+import { antigravityConversationPlan } from "./antigravity-conversation";
 import type { TAntigravityHeadlessParams } from "./antigravity-headless";
 import {
   antigravityHeadlessEpoch,
@@ -1375,8 +1379,9 @@ const serveCursorHop = async (
 /**
  * Antigravity serve path. `agy` is the single source of truth for sign-in,
  * and the transport is the hop's selected METHOD, never a failure:
- *   - `acp` (default): every turn on a fresh `agy acp` session per request,
- *     with the caller's tools and images (see `routeAntigravity`);
+ *   - `acp` (default): every turn on `agy acp`, with the caller's tools and
+ *     images (see `routeAntigravity`); a conversation continues its own
+ *     persistent session and sends only the new turn;
  *   - `stream-json` (`antigravity:stream-json`): text and image turns on the
  *     headless `agy` CLI (streams as generated). Each image is stored once under the hash of its bytes
  *     (`antigravity-attachments.ts`) and replaced in the prompt by a stable
@@ -1398,8 +1403,8 @@ const antigravityHeadlessSessions = new NativeSessionStore();
 /** Which `agy` transport serves a request — chosen by its content. */
 type TAntigravityRoute =
   | { readonly kind: "declined"; readonly reason: string }
-  /** The main method: a fresh ACP session with the full transcript, the
-   *  caller's tools and images. */
+  /** The main method: an ACP session (continued, or fresh with the full
+   *  transcript), the caller's tools and images. */
   | { readonly kind: "acp"; readonly req: ReturnType<typeof cursorRequestOf> }
   /** The `stream-json` method (headless CLI, explicitly selected): text and
    *  image turns on the conversation's own `agy` session. */
@@ -1671,6 +1676,18 @@ const serveAntigravityHop = async (
     return serveAntigravityCli(params, overrides, agyBin, env, route);
   }
   const epoch = antigravityHeadlessEpoch();
+  // The conversation continues its own ACP session with only the new turn
+  // (`antigravity-conversation.ts`); a history with no match starts a fresh,
+  // seeded one. The lease serialises requests of the same conversation.
+  const plan = antigravityConversationPlan(params.canonical, {
+    model: params.providerModelId,
+    home: env.HOME ?? "",
+    epoch,
+    tools: route.req.tools,
+  });
+  const lease = await antigravityConversations.lease(
+    plan.continueKey ?? `first:${crypto.randomUUID()}`,
+  );
   const run = await runAntigravityNative({
     bin: agyBin,
     env,
@@ -1682,10 +1699,18 @@ const serveAntigravityHop = async (
     images: route.req.images,
     tools: route.req.tools,
     signal: params.signal,
+    conversation: { lease, delta: plan.delta, nextKey: plan.nextKey },
     ...(overrides?.acpHooks ?? {}),
+  }).catch((error: unknown): null => {
+    logError("native-runtime", error);
+    return null;
   });
-  if (run.kind === "declined") {
-    return declinedOutcome(run.reason, run.cooldownReason);
+  if (run === null || run.kind === "declined") {
+    // Idempotent: a run that already settled the lease keeps its outcome.
+    lease.abandon();
+    return run === null
+      ? declinedOutcome("antigravity: agy ACP unavailable: setup failed")
+      : declinedOutcome(run.reason, run.cooldownReason);
   }
   return deliverAntigravityRun(
     params,
