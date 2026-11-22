@@ -639,6 +639,17 @@ const park = (proc: HeadlessProcess, ttlMs: number): void => {
 
 export const antigravityHeadlessParkedCount = (): number => parked.size;
 
+/**
+ * Kill the parked process holding `conversationId`: another writer (an
+ * `agy acp` turn on the same conversation) moved it on, so that process's
+ * in-memory state is stale. The next CLI turn resumes it from disk
+ * (`--conversation`), which sees every turn.
+ */
+export const dropAntigravityHeadlessParked = (conversationId: string): void => {
+  parked.get(conversationId)?.dispose();
+  parked.delete(conversationId);
+};
+
 export const disposeAntigravityHeadlessSpares = (): void => {
   for (const proc of parked.values()) proc.dispose();
   parked.clear();
