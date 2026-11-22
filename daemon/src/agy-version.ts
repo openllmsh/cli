@@ -19,7 +19,7 @@ const VERSION_SHAPE =
   /^(?:agy\s+)?v?(\d+)\.(\d+)\.(\d+)(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$/;
 
 /** Output that is a version at all (whatever its value). */
-const isVersionOutput = (version: string | null): boolean =>
+const isVersionOutput = (version: string | null): version is string =>
   version !== null && VERSION_SHAPE.test(version.trim());
 
 /**
@@ -89,7 +89,11 @@ export const AGY_VERSION_RETRY_MS = 60_000;
  *  {@link AGY_VERSION_RETRY_MS}. */
 const versionCache = new Map<
   string,
-  { readonly version: string | null; readonly atMs: number }
+  {
+    /** The output; `null` = exited unsuccessfully; `undefined` = timed out. */
+    readonly version: string | null | undefined;
+    readonly atMs: number;
+  }
 >();
 
 /** The binary's stamp: identity and change time too, so a same-size
@@ -107,11 +111,11 @@ const binaryStamp = (path: string): string | null => {
 /** A cached answer still valid for `stamp`, or undefined when it must be read. */
 const freshCached = (
   stamp: string,
-): { readonly version: string | null } | undefined => {
+): { readonly version: string | null | undefined } | undefined => {
   const cached = versionCache.get(stamp);
   if (
     cached !== undefined &&
-    (isVersionOutput(cached.version) ||
+    (isVersionOutput(cached.version ?? null) ||
       Date.now() - cached.atMs < AGY_VERSION_RETRY_MS)
   ) {
     return cached;
@@ -124,17 +128,19 @@ export const cachedCliVersion = (path: string): string | null => {
   const stamp = binaryStamp(path);
   if (stamp === null) return null;
   const cached = freshCached(stamp);
-  if (cached !== undefined) return cached.version;
+  if (cached !== undefined) return cached.version ?? null;
   const version = readCliVersion(path);
   versionCache.set(stamp, { version, atMs: Date.now() });
   return version;
 };
 
 /** `<bin> --version` without blocking the event loop (same env, HOME and
- *  5 s cap as {@link readCliVersion}). */
+ *  5 s cap as {@link readCliVersion}): the output on a clean exit, `null` when
+ *  it exited unsuccessfully (it runs but is not a usable `agy`), `undefined`
+ *  when it was killed at the cap (slow, not broken — its version is unknown). */
 export const readCliVersionAsync = async (
   path: string,
-): Promise<string | null> => {
+): Promise<string | null | undefined> => {
   let home: string | null = null;
   try {
     home = mkdtempSync(join(tmpdir(), "agy-version-"));
@@ -149,6 +155,7 @@ export const readCliVersionAsync = async (
       new Response(proc.stdout).text(),
       proc.exited,
     ]);
+    if (proc.signalCode !== null) return undefined;
     return code === 0 ? out.trim() : null;
   } catch {
     return null;
@@ -167,11 +174,20 @@ export const readCliVersionAsync = async (
 export type TAgyVersionRead = {
   /** A version was read (`agy --version` printed one). */
   readonly ok: boolean;
+  /** Killed at {@link AGY_VERSION_READ_TIMEOUT_MS} (slow, not broken). */
+  readonly timedOut: boolean;
   readonly elapsedMs: number;
 };
 
-/** Background reads in flight, per binary stamp: one `agy --version` at a time. */
-const inflight = new Map<string, Promise<void>>();
+/** Background reads in flight, per binary stamp: one `agy --version` at a
+ *  time; every caller's `onRead` hears the shared read's result. */
+const inflight = new Map<
+  string,
+  {
+    readonly job: Promise<void>;
+    readonly listeners: Set<(result: TAgyVersionRead) => void>;
+  }
+>();
 
 /**
  * Fill the version cache for `path` without blocking the daemon, so the
@@ -182,32 +198,42 @@ const inflight = new Map<string, Promise<void>>();
  */
 export const warmCliVersion = async (
   path: string,
-  read: (path: string) => Promise<string | null> = readCliVersionAsync,
+  read: (
+    path: string,
+  ) => Promise<string | null | undefined> = readCliVersionAsync,
   onRead?: (result: TAgyVersionRead) => void,
 ): Promise<void> => {
   const stamp = binaryStamp(path);
   if (stamp === null || freshCached(stamp) !== undefined) return;
   const running = inflight.get(stamp);
-  if (running !== undefined) return running;
+  if (running !== undefined) {
+    if (onRead !== undefined) running.listeners.add(onRead);
+    return running.job;
+  }
+  const listeners = new Set<(result: TAgyVersionRead) => void>();
+  if (onRead !== undefined) listeners.add(onRead);
   const job = (async (): Promise<void> => {
     const startedAt = performance.now();
     const version = await read(path);
     versionCache.set(stamp, { version, atMs: Date.now() });
-    onRead?.({
-      ok: isVersionOutput(version),
+    const result: TAgyVersionRead = {
+      ok: isVersionOutput(version ?? null),
+      timedOut: version === undefined,
       elapsedMs: performance.now() - startedAt,
-    });
+    };
+    for (const listener of listeners) listener(result);
   })().finally(() => {
     inflight.delete(stamp);
   });
-  inflight.set(stamp, job);
+  inflight.set(stamp, { job, listeners });
   return job;
 };
 
 /**
  * The daemon's NON-BLOCKING view of `path`'s version: the version a past read
- * returned, or `undefined` when it is not known — never read yet, or the last
- * read failed (timed out, printed no version). It never runs the binary on the
+ * returned; `null` when it ran and gave none (exited unsuccessfully, or printed
+ * something that is not a version — not a usable `agy`); or `undefined` when it
+ * is not known — never read yet, or the read timed out. It never runs the binary on the
  * caller's stack: a stale or missing answer starts a background
  * {@link warmCliVersion} instead. Unknown is not "too old": callers treat only
  * a version actually read below {@link AGY_MIN_VERSION} as unusable.
@@ -215,7 +241,7 @@ export const warmCliVersion = async (
 export const peekCliVersion = (
   path: string,
   warm: (path: string) => Promise<void> = warmCliVersion,
-): string | undefined => {
+): string | null | undefined => {
   const stamp = binaryStamp(path);
   if (stamp === null) return undefined;
   if (freshCached(stamp) === undefined) {
@@ -224,9 +250,8 @@ export const peekCliVersion = (
     });
   }
   const cached = versionCache.get(stamp);
-  return cached !== undefined && isVersionOutput(cached.version)
-    ? (cached.version as string)
-    : undefined;
+  if (cached === undefined || cached.version === undefined) return undefined;
+  return isVersionOutput(cached.version) ? cached.version : null;
 };
 
 /** An `agy` the daemon can use (at or above {@link AGY_MIN_VERSION}).
@@ -234,7 +259,7 @@ export const peekCliVersion = (
  *  version actually read (or `null`, no version at all) is judged. */
 export const agyVersionUsable = (
   path: string,
-  versionOf: (path: string) => string | null | undefined = cachedCliVersion,
+  versionOf: (path: string) => string | null | undefined,
 ): boolean => {
   const version = versionOf(path);
   return version === undefined || versionAtLeast(version, AGY_MIN_VERSION);
