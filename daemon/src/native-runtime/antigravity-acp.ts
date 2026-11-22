@@ -57,6 +57,7 @@ import type { TChatCompletionChunk } from "@openllmsh/sdk/protocol";
 import { agyCliSignedIn } from "../delegation/antigravity-cli";
 import type { TStoreRead } from "../delegation/util";
 import { ensureKeychainReady } from "../delegation/util";
+import { logWarn, safeDiagnosticMessage } from "../logger";
 import { unwrapAntigravityCliSpawn } from "../sandbox/policy";
 import { agyTempRoot, daemonTempDir } from "../sandbox/working-set/base";
 import { DAEMON_VERSION } from "../version";
@@ -334,16 +335,29 @@ const isNativeToolUpdate = (update: unknown): boolean => {
 };
 
 /**
- * `session/new` metadata: an EMPTY built-in tool allowlist. `agy acp`
- * reads `_meta.agy.enabledTools` (its `ToolFilterConfig`); `[]` disables every
- * built-in tool (shell, file, web search, subagents…) so the model only sees
- * our loopback MCP tools. Native tools were already refused at permission
- * time, but advertised they let the model plan around them (e.g. `search_web`
- * on a follow-up), costing seconds and failing turns.
+ * `session/new` metadata: an EMPTY built-in tool allowlist
+ * (`_meta.agy.enabledTools`). NOT relied on: `agy` 1.5.14's ACP server ignores
+ * it (and the CLI `settings.json` deny rules) and still offers `run_command`
+ * and friends, asking the client for permission instead. The real guards are
+ * {@link ANTIGRAVITY_ACP_NO_BUILTIN_TOOLS} (so the model doesn't reach for
+ * them) and the turn's native-tool check (so one never runs).
  */
 export const ANTIGRAVITY_SESSION_META = {
   agy: { enabledTools: [] },
 } as const;
+
+/**
+ * Leads every ACP prompt. Under ACP `agy` still offers its built-in tools, and
+ * with an image attached the model tends to inspect it with `run_command`
+ * (python + PIL) instead of looking at it. The daemon must refuse that, and
+ * `agy` then ends the turn with no answer — so the chat failed ("antigravity
+ * attempted a native tool"). Told plainly that those tools are unavailable and
+ * that images are already in its context, it answers directly (3 of 3 live
+ * runs, against 3 of 3 tool attempts without it). The conversation's own
+ * tools (the loopback MCP server) stay available.
+ */
+export const ANTIGRAVITY_ACP_NO_BUILTIN_TOOLS =
+  "You cannot run commands, read or write files, or browse the web here: any such attempt fails and ends your answer. Attached images are already in your context: look at them directly. Only the tools provided for this conversation, if any, may be called.";
 
 /** MCP server name we register for client tools (session/new). */
 const CLIENT_TOOLS_MCP_SERVER = "openllm-client-tools";
@@ -819,7 +833,15 @@ export const runAntigravityNative = async (
     if (sessionId === null || notif?.sessionId !== sessionId) return;
     rearmIdleWatchdog?.();
     if (isNativeToolUpdate(notif.update) && !ourMcpCalls.admits(notif.update)) {
-      // The agent tried one of ITS tools — never let it run.
+      // The agent tried one of ITS tools — never let it run. The tool's ACP
+      // kind (execute / read / fetch …) is a closed vocabulary; its title or
+      // input (a command line) never leaves the machine.
+      const kind = (notif.update as { readonly kind?: unknown }).kind;
+      logWarn(
+        "antigravity-acp",
+        safeDiagnosticMessage`Antigravity attempted a built-in tool; the turn was stopped.`,
+        { tool_kind: typeof kind === "string" ? kind.slice(0, 32) : null },
+      );
       failStream(new Error("antigravity attempted a native tool"));
       return;
     }
@@ -1039,7 +1061,10 @@ export const runAntigravityNative = async (
       "session/prompt",
       {
         sessionId,
-        prompt: acpPromptBlocks(promptText, params.images ?? []),
+        prompt: acpPromptBlocks(
+          `${ANTIGRAVITY_ACP_NO_BUILTIN_TOOLS}\n\n${promptText}`,
+          params.images ?? [],
+        ),
       },
       params.turnTimeoutMs ?? ANTIGRAVITY_TURN_TIMEOUT_MS,
     )
