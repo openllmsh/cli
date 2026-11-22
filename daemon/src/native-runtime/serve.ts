@@ -155,6 +155,8 @@ export type TNativeServeOverrides = {
   /** Where image attachments are stored (default `agyAttachmentsDir()`);
    *  tests point it at a temp dir. */
   readonly attachmentsDir?: string;
+  /** Platform deciding image-input support (default `process.platform`). */
+  readonly platform?: NodeJS.Platform;
   /** Test hooks for the headless spawn (keychain gate, argv, sandbox wrap) so
    *  a serve-level test never reaches the real `security` or sandbox. */
   readonly headlessHooks?: Pick<
@@ -1436,7 +1438,7 @@ const serveAntigravityHop = async (
     !viaAcp &&
     view !== null &&
     view.paths.size > 0 &&
-    !agyImageInputSupported()
+    !agyImageInputSupported(overrides?.platform)
   ) {
     return {
       declined: "antigravity: image input needs the macOS agy sandbox",
