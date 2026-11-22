@@ -50,6 +50,8 @@ import {
   ANTIGRAVITY_CLI_AGENT_NAME,
   prepareAntigravityCliProfile,
 } from "./antigravity-cli-settings";
+import type { TAntigravityFailure } from "./antigravity-common";
+import { classifyAgyMessage, prepareAgySpawn } from "./antigravity-common";
 import { antigravitySpawnEnv } from "./antigravity-env";
 import { confineAgyArgv } from "./antigravity-seatbelt";
 import { createAcpTurnState } from "./cursor-acp";
@@ -96,12 +98,6 @@ const RESPONSE_STEP_TYPES: ReadonlySet<string> = new Set([
   "ephemeral_message",
   "checkpoint",
 ]);
-
-/** Includes print mode's own refusal, "Run 'agy' to log in". */
-const SIGN_IN_RE =
-  /not logged in|to log in|sign in|signed out|authentication failed/i;
-const QUOTA_RE = /quota|exhausted|rate.?limit|resource.?exhausted|429/i;
-const PLAN_RE = /subscription|not eligible|tier|upgrade|license/i;
 
 // ─── Binary ────────────────────────────────────────────────────────────────
 
@@ -293,42 +289,15 @@ export const parseHeadlessLine = (line: string): THeadlessEvent | null => {
   return { kind: "other" };
 };
 
-export type THeadlessFailure = {
-  readonly reason: string;
-  readonly cooldown?: "auth" | "quota_exhausted" | "payment";
-  /** Retry on the ACP bridge rather than failing the hop. */
-  readonly fallback: boolean;
-};
+export type THeadlessFailure = TAntigravityFailure;
 
-/** Classify a non-SUCCESS `result` error. A sign-in miss is an `auth`
- *  cooldown (ACP shares the sign-in, so it cannot help); no failure here falls
- *  back — those are the account's. */
+/** `result.status != SUCCESS` → decline reason + cooldown class
+ *  (`antigravity-common.ts` {@link classifyAgyMessage}). */
 export const classifyHeadlessFailure = (
   error: string | null,
 ): THeadlessFailure => {
   const msg = error ?? "antigravity turn failed";
-  if (SIGN_IN_RE.test(msg)) {
-    return {
-      reason: "antigravity: Google sign-in required",
-      cooldown: "auth",
-      fallback: false,
-    };
-  }
-  if (QUOTA_RE.test(msg)) {
-    return {
-      reason: `antigravity: ${msg}`,
-      cooldown: "quota_exhausted",
-      fallback: false,
-    };
-  }
-  if (PLAN_RE.test(msg)) {
-    return {
-      reason: `antigravity: ${msg}`,
-      cooldown: "payment",
-      fallback: false,
-    };
-  }
-  return { reason: `antigravity: ${msg}`, fallback: false };
+  return classifyAgyMessage(msg) ?? { reason: `antigravity: ${msg}` };
 };
 
 // ─── Process ───────────────────────────────────────────────────────────────
@@ -767,30 +736,22 @@ export const runAntigravityHeadless = async (
   params: TAntigravityHeadlessParams,
 ): Promise<TNativeRunResult> => {
   if (params.hasTools) return fallback("client tools");
-  if (params.signal.aborted) {
-    return { kind: "declined", reason: "client aborted" };
+  // Shared spawn gates (`antigravity-common.ts`); the agent file and the
+  // deny rules are this transport's profile.
+  const gate = await prepareAgySpawn({
+    env: params.env,
+    signal: params.signal,
+    ...(params.ensureKeychain !== undefined
+      ? { ensureKeychain: params.ensureKeychain }
+      : {}),
+    ensureSettings: params.ensureSettings ?? prepareAntigravityCliProfile,
+  });
+  if (!gate.ok) {
+    return gate.aborted
+      ? { kind: "declined", reason: gate.reason }
+      : fallback(gate.reason);
   }
-  // Never run against the user's real HOME: the isolated home is what keeps
-  // the daemon's Google sign-in separate from the user's own `agy`.
-  const home = params.env.HOME;
-  if (home === undefined || home.length === 0 || home === homedir()) {
-    return fallback("no isolated HOME");
-  }
-  // macOS: `agy` reaches the isolated login keychain through
-  // `/usr/bin/security`. A missing keychain raises "Keychain Not Found" and a
-  // locked one asks for its password, so nothing spawns unless the readiness
-  // gate created/unlocked it on THIS call (spares included). Linux: no-op.
-  const keychain = await (params.ensureKeychain ?? ensureKeychainReady)(home);
-  if (keychain.kind !== "present") {
-    return fallback(`isolated keychain not ready (${keychain.kind})`);
-  }
-  // The tool-less agent and the tool deny rules must be in place first.
-  if (!(params.ensureSettings ?? prepareAntigravityCliProfile)(home)) {
-    return fallback("agy settings could not be locked down");
-  }
-  if (params.signal.aborted) {
-    return { kind: "declined", reason: "client aborted" };
-  }
+  const { home } = gate;
   const model = params.providerModelId.trim();
   const spawnEnv = antigravitySpawnEnv(params.env);
   const key = antigravityHeadlessKey(params.bin, model, spawnEnv);
@@ -878,7 +839,7 @@ export const runAntigravityHeadless = async (
       !("failure" in item) &&
       queue.length >= ANTIGRAVITY_HEADLESS_MAX_QUEUED
     ) {
-      fail({ reason: "antigravity reader stopped reading", fallback: false });
+      fail({ reason: "antigravity reader stopped reading" });
       return;
     }
     queue.push(item);
@@ -908,7 +869,7 @@ export const runAntigravityHeadless = async (
     settle(keep);
   };
   const fail = (failure: THeadlessFailure): void => end([{ failure }]);
-  const abort = (): void => fail({ reason: "client aborted", fallback: false });
+  const abort = (): void => fail({ reason: "client aborted" });
   params.signal.addEventListener("abort", abort, { once: true });
   // The client may have gone while the process was being spawned.
   if (params.signal.aborted) abort();
@@ -916,7 +877,7 @@ export const runAntigravityHeadless = async (
   const armIdle = (): void => {
     clearTimeout(idleTimer);
     idleTimer = setTimeout(
-      () => fail({ reason: "antigravity turn idle timeout", fallback: false }),
+      () => fail({ reason: "antigravity turn idle timeout" }),
       params.idleMs ?? ANTIGRAVITY_HEADLESS_IDLE_TIMEOUT_MS,
     );
   };
@@ -975,7 +936,6 @@ export const runAntigravityHeadless = async (
         // The agent reached for one of ITS tools — never let it run.
         fail({
           reason: `${ANTIGRAVITY_HEADLESS_UNAVAILABLE}: agy attempted a native tool (${event.stepType})`,
-          fallback: true,
         });
         return;
       }
@@ -1013,7 +973,6 @@ export const runAntigravityHeadless = async (
       if (!turn.sawOutput()) {
         fail({
           reason: "antigravity turn ended before producing output",
-          fallback: false,
         });
         return;
       }
@@ -1058,7 +1017,7 @@ export const runAntigravityHeadless = async (
   });
   // Exit mid-turn surfaces as a failure rather than a hang.
   proc.onExit(() => {
-    if (!ended) fail({ reason: "agy exited mid-turn", fallback: false });
+    if (!ended) fail({ reason: "agy exited mid-turn" });
   });
 
   // Only a write that never reached agy may fall back to ACP: once the
@@ -1068,12 +1027,11 @@ export const runAntigravityHeadless = async (
   const writeFailed = (error: unknown): void => {
     const why = error instanceof Error ? error.message : String(error);
     if (handedOff) {
-      fail({ reason: `antigravity write failed: ${why}`, fallback: false });
+      fail({ reason: `antigravity write failed: ${why}` });
       return;
     }
     fail({
       reason: `${ANTIGRAVITY_HEADLESS_UNAVAILABLE}: write failed: ${why}`,
-      fallback: true,
     });
   };
   if (!ended) {
@@ -1089,7 +1047,7 @@ export const runAntigravityHeadless = async (
   if (!ended) {
     armIdle();
     turnTimer = setTimeout(
-      () => fail({ reason: "antigravity turn timed out", fallback: false }),
+      () => fail({ reason: "antigravity turn timed out" }),
       params.turnTimeoutMs ?? ANTIGRAVITY_HEADLESS_TURN_TIMEOUT_MS,
     );
   }
@@ -1116,7 +1074,7 @@ export const runAntigravityHeadless = async (
   ]);
   clearTimeout(precommitTimer);
   if (first === "timeout") {
-    fail({ reason: "antigravity produced no output in time", fallback: false });
+    fail({ reason: "antigravity produced no output in time" });
     return {
       kind: "declined",
       reason:
@@ -1128,7 +1086,6 @@ export const runAntigravityHeadless = async (
       first === "end"
         ? {
             reason: "antigravity turn ended before producing output",
-            fallback: false,
           }
         : first.failure;
     const raw =

@@ -61,6 +61,8 @@ import { unwrapAntigravityCliSpawn } from "../sandbox/policy";
 import { agyTempRoot, daemonTempDir } from "../sandbox/working-set/base";
 import { DAEMON_VERSION } from "../version";
 import { ensureAntigravityCliSettings } from "./antigravity-cli-settings";
+import type { TAntigravityFailure } from "./antigravity-common";
+import { classifyAgyMessage, prepareAgySpawn } from "./antigravity-common";
 import { antigravitySpawnEnv } from "./antigravity-env";
 import { confineAgyArgv } from "./antigravity-seatbelt";
 import { AcpClient, AcpRpcError, createAcpTurnState } from "./cursor-acp";
@@ -110,65 +112,17 @@ const ANTIGRAVITY_INIT_PARAMS = {
   clientInfo: { name: "openllm-daemon", version: DAEMON_VERSION },
 } as const;
 
-/** Classified agent failure → bridge decline reason + cooldown class. */
-export type TAntigravityFailure = {
-  readonly reason: string;
-  readonly cooldown?: "auth" | "payment" | "quota_exhausted" | "rate_limit";
-};
-
-const QUOTA_RE =
-  /RESOURCE_EXHAUSTED|quota (?:exceeded|exhausted)|usage limit|out of (?:credits|quota)/i;
-const RATE_RE = /rate[\s_-]?limit|too many requests|\b429\b/i;
+export type { TAntigravityFailure };
 
 export const classifyAntigravityFailure = (
   error: unknown,
 ): TAntigravityFailure => {
   if (error instanceof AcpRpcError) {
-    // Google's onboarding refused the signed-in account (e.g. "User is
-    // ineligible for free-tier … Verify your account", VALIDATION_REQUIRED).
-    // The agent wipes its own token afterwards, so without this branch the
-    // -32000 below would misreport it as a plain missing sign-in.
-    if (
-      /Onboarding failed|not eligible for Antigravity|ineligible/i.test(
-        error.message,
-      )
-    ) {
-      return {
-        reason: /verify your account|VALIDATION_REQUIRED/i.test(error.message)
-          ? "antigravity: Google account not eligible — verify the account with Google, then sign in again"
-          : "antigravity: Google account not eligible for Antigravity",
-        cooldown: "payment",
-      };
-    }
-    if (/SUBSCRIPTION_REQUIRED/.test(error.message)) {
-      return {
-        reason: "antigravity: Google account has no eligible Antigravity plan",
-        cooldown: "payment",
-      };
-    }
-    // Plan-gated model: our pre-submit pin check, or the agent's own -32602
-    // ("Model 'x' is not available for the current authentication method").
-    // Keep the model id so the client sees WHY, not "request rejected".
-    if (
-      /is not available (on this Google account|for the current authentication method)/i.test(
-        error.message,
-      )
-    ) {
-      const model = /model '?([\w.-]+)'?/i.exec(error.message)?.[1];
-      return {
-        reason: `antigravity: model ${model ?? "requested"} is not available on this Google account's plan`,
-        cooldown: "payment",
-      };
-    }
-    if (QUOTA_RE.test(error.message)) {
-      return {
-        reason: "antigravity: quota exhausted",
-        cooldown: "quota_exhausted",
-      };
-    }
-    if (RATE_RE.test(error.message)) {
-      return { reason: "antigravity: rate limited", cooldown: "rate_limit" };
-    }
+    // Account eligibility, plans, quota, rate (`antigravity-common.ts`) —
+    // the same classes the CLI's failures get. Sign-in TEXT is left to the
+    // RPC shape below (-32000, an authenticate timeout).
+    const byMessage = classifyAgyMessage(error.message);
+    if (byMessage !== null && byMessage.cooldown !== "auth") return byMessage;
     if (
       (error.kind === "rpc" && error.rpcCode === -32000) ||
       (error.method === "authenticate" && error.kind === "timeout")
@@ -690,8 +644,6 @@ export const runAntigravityNative = async (
   if (params.signal.aborted) {
     return { kind: "declined", reason: "client aborted" };
   }
-  // Never run against the user's real HOME: the isolated home is what keeps
-  // the daemon's Google sign-in separate from the user's own `agy`.
   const home = params.env.HOME;
   if (home === undefined || home.length === 0 || home === homedir()) {
     return { kind: "declined", reason: "antigravity: no isolated HOME" };
@@ -704,14 +656,20 @@ export const runAntigravityNative = async (
   const sameAccount = (): boolean =>
     params.currentSignInEpoch() === params.signInEpoch &&
     homeGenerationOf(home) === startGeneration;
-  // macOS: `agy` reaches the isolated login keychain through
-  // `/usr/bin/security`; nothing spawns unless the readiness gate created or
-  // unlocked it on THIS call. Linux: no-op.
-  const keychain = await (params.ensureKeychain ?? ensureKeychainReady)(home);
-  if (keychain.kind !== "present") {
+  // Shared spawn gates (`antigravity-common.ts`): isolated HOME, slot
+  // keychain, the deny rules, abort.
+  const gate = await prepareAgySpawn({
+    env: params.env,
+    signal: params.signal,
+    ...(params.ensureKeychain !== undefined
+      ? { ensureKeychain: params.ensureKeychain }
+      : {}),
+    ensureSettings: params.ensureSettings ?? ensureAntigravityCliSettings,
+  });
+  if (!gate.ok) {
     return {
       kind: "declined",
-      reason: `antigravity: isolated keychain not ready (${keychain.kind})`,
+      reason: gate.aborted ? gate.reason : `antigravity: ${gate.reason}`,
     };
   }
   // `agy acp` shares the CLI's sign-in. Gate on its metadata so a signed-out
@@ -724,13 +682,6 @@ export const runAntigravityNative = async (
       kind: "declined",
       reason: "antigravity: Google sign-in required",
       ...(sameAccount() ? { cooldownReason: "auth" as const } : {}),
-    };
-  }
-  // The tool deny rules must be in place before the agent starts.
-  if (!(params.ensureSettings ?? ensureAntigravityCliSettings)(home)) {
-    return {
-      kind: "declined",
-      reason: "antigravity: agy settings could not be locked down",
     };
   }
   if (params.signal.aborted) {
@@ -1168,7 +1119,7 @@ export const runAntigravityNative = async (
     const failure =
       first !== "end" && first.cooldown !== undefined
         ? first.cooldown
-        : QUOTA_RE.test(reason)
+        : classifyAgyMessage(reason)?.cooldown === "quota_exhausted"
           ? ("quota_exhausted" as const)
           : undefined;
     // A sign-in change since the request was planned: the cooldown is the
