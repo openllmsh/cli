@@ -123,6 +123,12 @@ type TSession = {
   engineFocused: boolean;
   readonly consumers: Set<TConsumerState>;
   readonly log: TAgentEvent[];
+  /**
+   * Questions and approvals still waiting, by request id: kept beside the
+   * capped log so a long-held one is still replayed (and a `session.reset`
+   * ends them, the engine having dropped them).
+   */
+  readonly openRequests: Map<string, TAgentEvent>;
   seq: number;
   exited: boolean;
   idleTimer: ReturnType<typeof setTimeout> | undefined;
@@ -221,29 +227,6 @@ const replayOf = (log: readonly TAgentEvent[]): TAgentEvent[] => {
   return log.filter(
     (event) => event.type !== "content.delta" || !completed.has(event.item_id),
   );
-};
-
-/**
- * Questions and approvals still waiting in the log: a `user-input.requested`
- * / `request.opened` with no later resolution. They stay answerable from the
- * web whenever it attaches, so the replay carries them even when the window
- * cut their turn off.
- */
-const pendingRequestsOf = (log: readonly TAgentEvent[]): TAgentEvent[] => {
-  const open = new Map<string, TAgentEvent>();
-  for (const event of log) {
-    if (
-      event.type === "user-input.requested" ||
-      event.type === "request.opened"
-    )
-      open.set(event.request_id, event);
-    else if (
-      event.type === "user-input.resolved" ||
-      event.type === "request.resolved"
-    )
-      open.delete(event.request_id);
-  }
-  return [...open.values()];
 };
 
 /** Strict cwd validation: absolute, existing directory (realpath'd). */
@@ -372,7 +355,10 @@ export const createAgentDispatcher = (
     // session stays connected. Its old replay window must not be offered to a
     // later attach; retain the reset marker itself so an attaching consumer
     // clears before receiving any new-transcript rows.
-    if (event.type === "session.reset") session.log.splice(0);
+    if (event.type === "session.reset") {
+      session.log.splice(0);
+      session.openRequests.clear();
+    }
     session.seq += 1;
     session.lastActivityAt = now();
     const id = commandId ?? session.activeCommandId;
@@ -383,6 +369,16 @@ export const createAgentDispatcher = (
       at: now(),
       ...(id === undefined ? {} : { command_id: id }),
     };
+    if (
+      stamped.type === "user-input.requested" ||
+      stamped.type === "request.opened"
+    )
+      session.openRequests.set(stamped.request_id, stamped);
+    else if (
+      stamped.type === "user-input.resolved" ||
+      stamped.type === "request.resolved"
+    )
+      session.openRequests.delete(stamped.request_id);
     // A history marker is per-consumer framing, never part of the replay.
     if (event.type !== "history.page") session.log.push(stamped);
     if (session.log.length > AGENT_REPLAY_LOG_EVENTS)
@@ -461,6 +457,7 @@ export const createAgentDispatcher = (
       engineFocused: false,
       consumers: new Set([args.state]),
       log: [],
+      openRequests: new Map(),
       seq: 0,
       exited: false,
       idleTimer: undefined,
@@ -677,7 +674,7 @@ export const createAgentDispatcher = (
               );
               for (const event of window.events) deliver(live, state, event);
               const replayed = new Set(window.events);
-              for (const event of pendingRequestsOf(live.log))
+              for (const event of live.openRequests.values())
                 if (!replayed.has(event)) deliver(live, state, event);
               live.consumers.add(state);
               reconcileFocus(live);

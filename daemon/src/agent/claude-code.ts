@@ -29,7 +29,10 @@
  *     folder; the dialog becomes a web approval and the answer is typed back.
  *     A PermissionRequest always reaches the web (and is replayed to any
  *     browser that attaches later). With no terminal attached the hook is held
- *     until the web answers. With one attached the hook returns NO decision,
+ *     until the web answers, or until the hook's own deadline
+ *     ({@link HOOK_HOLD_MS}, under the shim's fetch abort and Claude's hook
+ *     `timeout`) or its HTTP request aborts, when it is handed to Claude's
+ *     dialog like the attached case. With one attached the hook returns NO decision,
  *     so Claude shows its native dialog there, and the request stays open on
  *     the web: a web answer is typed into that dialog (`claude-dialog-keys`),
  *     and it clears when the transcript shows the tool finished (answered at
@@ -120,6 +123,11 @@ import type {
 /** Tool output kept on an item (the full result stays in the engine). */
 export const AGENT_TOOL_OUTPUT_MAX_CHARS = 64 * 1024;
 /** Wait after a dialog key, and after one that moves to the next tab. */
+/**
+ * How long a PermissionRequest hook is held before Claude's own dialog takes
+ * over: under the shim's 110 s fetch abort and the hook's 120 s `timeout`.
+ */
+export const HOOK_HOLD_MS = 100_000;
 const DIALOG_KEY_MS = 40;
 const DIALOG_TAB_MS = 250;
 /**
@@ -683,7 +691,11 @@ export const settleClaudeSessionOpen = async (
 // ─── hooks → sessions ──────────────────────────────────────────────────────
 
 /** What a hook asked; the reply is Claude's hook stdout JSON (or none). */
-type THookHandler = (event: string, payload: TJson) => Promise<TJson | null>;
+type THookHandler = (
+  event: string,
+  payload: TJson,
+  signal?: AbortSignal,
+) => Promise<TJson | null>;
 
 const hookHandlers = new Map<string, THookHandler>();
 
@@ -695,11 +707,12 @@ export const handleAgentHook = async (
   sessionId: string,
   event: string,
   payload: TJson,
+  signal?: AbortSignal,
 ): Promise<TJson | null> => {
   const handler = hookHandlers.get(sessionId);
   if (handler === undefined) return null;
   try {
-    return await handler(event, payload);
+    return await handler(event, payload, signal);
   } catch (err) {
     logError("agent", err);
     return null;
@@ -1513,6 +1526,7 @@ export type TClaudeTuiDeps = {
   /** Transcript re-resolve / re-scan cadence (tests). */
   readonly transcriptScanMs?: number;
   /** Pause after a dialog keystroke / a tab-advancing one (tests shrink it). */
+  readonly holdMs?: number;
   readonly dialogKeyMs?: number;
   readonly dialogTabMs?: number;
   readonly readyMaxMs?: number;
@@ -1551,6 +1565,13 @@ export const createClaudeTuiSession = (
   let link: TPtyLink | null = null;
   /** Requests whose hook returned (Claude's own dialog is open) but the web may still answer. */
   const tuiRequests = new Set<string>();
+  /** The transcript tool_use id behind a request (from its PreToolUse hook). */
+  const requestToolUse = new Map<string, string>();
+  const recentPreTools: { id: string; name: string; input: string }[] = [];
+  /** Tool uses whose result the transcript has shown. */
+  const completedToolUses = new Set<string>();
+  /** Bumped whenever a dialog closes, so a key sequence in flight stops. */
+  let dialogGen = 0;
   /**
    * Real viewers (terminals) attached to the host; null until announced,
    * which counts as present (the terminal must never be locked out).
@@ -1638,9 +1659,14 @@ export const createClaudeTuiSession = (
       if (
         reconciled.type === "item.completed" &&
         reconciled.item.kind === "tool_call"
-      )
-        settleTuiRequests(reconciled.item.tool_name);
-      else if (
+      ) {
+        completedToolUses.add(reconciled.item_id);
+        if (completedToolUses.size > 512)
+          completedToolUses.delete(
+            completedToolUses.values().next().value ?? "",
+          );
+        settleTuiRequests(reconciled.item.tool_name, reconciled.item_id);
+      } else if (
         reconciled.type === "turn.completed" ||
         reconciled.type === "turn.aborted"
       )
@@ -1674,6 +1700,8 @@ export const createClaudeTuiSession = (
         // what we showed as held carries over to the new transcript.
         claudeQueue.length = 0;
         claudeHeld.length = 0;
+        // Questions and approvals of the old conversation are gone with it.
+        dropHeldRequests();
         const reset: TAgentEvent = { type: "session.reset" };
         if (drained !== null) drained.push(reset);
         else emit(reset);
@@ -2224,49 +2252,66 @@ export const createClaudeTuiSession = (
   const handOffAllToTui = (): void => {
     for (const id of [...pending.keys()]) handOffToTui(id);
   };
-  /** Close every held or handed-off request (interrupt): the turn is over. */
+  /** Close every held or handed-off request (interrupt, `/new`): the turn is over. */
   const dropHeldRequests = (): void => {
+    dialogGen += 1;
     for (const [id, request] of [...pending]) {
       if (!("resolve" in request)) continue;
       pending.delete(id);
       tuiRequests.delete(id);
+      requestToolUse.delete(id);
       request.resolve(null);
       emit({ type: "request.resolved", request_id: id, decision: "cancel" });
     }
   };
-  /** The terminal answered (the tool finished) or the turn moved on. */
-  function settleTuiRequests(toolName: string | null): void {
+  /**
+   * The terminal answered (its tool finished) or the turn moved on. A tool
+   * result settles only the request whose own tool_use it is (by id when the
+   * PreToolUse hook gave it, else by tool name).
+   */
+  function settleTuiRequests(
+    toolName: string | null,
+    toolUseId?: string,
+  ): void {
+    let closed = toolName === null;
     for (const id of [...tuiRequests]) {
       const request = pending.get(id);
       if (request === undefined || !("resolve" in request)) {
         tuiRequests.delete(id);
         continue;
       }
-      if (
-        toolName !== null &&
-        (request.kind === "approval" ? request.toolName : "AskUserQuestion") !==
-          toolName
-      )
-        continue;
+      if (toolName !== null) {
+        const own = requestToolUse.get(id);
+        const name =
+          request.kind === "approval" ? request.toolName : "AskUserQuestion";
+        if (own !== undefined ? own !== toolUseId : name !== toolName) continue;
+      }
+      closed = true;
       tuiRequests.delete(id);
+      requestToolUse.delete(id);
       pending.delete(id);
       emit({ type: "request.resolved", request_id: id, decision: "cancel" });
     }
+    // Keys still being typed belong to a dialog that is gone now.
+    if (closed) dialogGen += 1;
   }
-  /** Type keys into Claude's open dialog, a beat apart. */
-  const typeDialogKeys = (keys: readonly TClaudeDialogKey[]): void => {
+  /** Type keys into Claude's open dialog, a beat apart, while it is still open. */
+  const typeDialogKeys = (
+    keys: readonly TClaudeDialogKey[],
+    gen: number = dialogGen,
+  ): void => {
     const [first, ...rest] = keys;
-    if (first === undefined || ended) return;
+    if (first === undefined || ended || gen !== dialogGen) return;
     writeText(first.text);
     setTimeout(
-      () => typeDialogKeys(rest),
+      () => typeDialogKeys(rest, gen),
       first.settle === "tab"
         ? (deps.dialogTabMs ?? DIALOG_TAB_MS)
         : (deps.dialogKeyMs ?? DIALOG_KEY_MS),
     );
   };
 
-  const onHook: THookHandler = async (event, payload) => {
+  const onHook: THookHandler = async (event, payload, signal) => {
     pump();
     // Any hook means Claude's session is running past its startup dialogs.
     if (!started) {
@@ -2309,6 +2354,12 @@ export const createClaudeTuiSession = (
       // item.started; its eventual tool_result completes the same id.
       const toolUseId = str(payload.tool_use_id);
       if (toolUseId !== undefined) {
+        recentPreTools.push({
+          id: toolUseId,
+          name: toolNameOf(payload.tool_name),
+          input: JSON.stringify(payload.tool_input ?? null),
+        });
+        if (recentPreTools.length > 16) recentPreTools.shift();
         preToolUseIds.add(toolUseId);
         emit({
           type: "item.started",
@@ -2399,9 +2450,34 @@ export const createClaudeTuiSession = (
         input,
       });
     });
+    const toolUse = recentPreTools
+      .filter(
+        (tool) =>
+          tool.name === toolName &&
+          tool.input === JSON.stringify(input ?? null),
+      )
+      .at(-1);
+    if (toolUse !== undefined && pending.has(requestId))
+      requestToolUse.set(requestId, toolUse.id);
     // With a terminal attached its dialog is how that person answers, so
-    // Claude shows it now; otherwise the hook is held for the web.
+    // Claude shows it now; otherwise the hook is held for the web — until the
+    // hook's own deadline or its HTTP request ends (the shim's abort, Claude's
+    // hook timeout), after which Claude shows the dialog regardless.
     if (terminalViewers !== 0) handOffToTui(requestId);
+    else {
+      const timer = setTimeout(
+        () => handOffToTui(requestId),
+        deps.holdMs ?? HOOK_HOLD_MS,
+      );
+      timer.unref?.();
+      const onAbort = (): void => handOffToTui(requestId);
+      signal?.addEventListener("abort", onAbort, { once: true });
+      if (signal?.aborted === true) onAbort();
+      return await reply.finally(() => {
+        clearTimeout(timer);
+        signal?.removeEventListener("abort", onAbort);
+      });
+    }
     return await reply;
   };
   hookHandlers.set(options.sessionId, onHook);
@@ -2983,7 +3059,25 @@ export const createClaudeTuiSession = (
         (request.kind === "user-input" || request.kind === "approval") &&
         tuiRequests.has(command.request_id)
       ) {
-        // Claude's dialog is open on the terminal: answer by typing into it.
+        // Claude's dialog is open on the terminal: answer by typing into it —
+        // but only if it still is. The transcript may already show the tool
+        // finished (answered at the terminal) before the hook-side state knew.
+        pump();
+        const toolUse = requestToolUse.get(command.request_id);
+        if (
+          (toolUse !== undefined && completedToolUses.has(toolUse)) ||
+          !tuiRequests.has(command.request_id)
+        ) {
+          tuiRequests.delete(command.request_id);
+          requestToolUse.delete(command.request_id);
+          dialogGen += 1;
+          emit({
+            type: "request.resolved",
+            request_id: command.request_id,
+            decision: "cancel",
+          });
+          return false;
+        }
         const keys =
           request.kind === "user-input"
             ? command.answers === undefined
@@ -3005,6 +3099,7 @@ export const createClaudeTuiSession = (
           return false;
         }
         tuiRequests.delete(command.request_id);
+        requestToolUse.delete(command.request_id);
         typeDialogKeys(keys);
         if (request.kind === "user-input") {
           emit({

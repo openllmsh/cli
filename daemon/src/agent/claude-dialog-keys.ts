@@ -16,7 +16,9 @@
  * - After the last tab a "Review your answers" screen opens on "Submit
  *   answers" — except for a lone single-select question, which submits at
  *   once.
- * - A tool approval: Enter is the first choice (Yes); Esc rejects.
+ * - A tool approval: Enter is the first choice (Yes, once); Esc rejects.
+ *   "Accept for the session" is the same Enter: the "don't ask again" row's
+ *   position and wording differ per tool, so it is not driven.
  * - Esc cancels any of them.
  */
 import type {
@@ -50,6 +52,21 @@ const downs = (count: number): TClaudeDialogKey[] =>
     settle: "key" as const,
   }));
 
+/**
+ * Free text goes to the PTY as keystrokes: no control character (ESC, a
+ * bracketed-paste end, Enter) may reach Claude as one. Line breaks are spaces.
+ */
+const typedText = (value: string): string =>
+  value
+    .replace(/[\r\n]+/g, " ")
+    // biome-ignore lint/suspicious/noControlCharactersInRegex: stripping them is the point
+    .replace(/[\x00-\x1f\x7f]/g, "")
+    .trim();
+
+/** Option labels match ignoring case and runs of whitespace. */
+const labelKey = (value: string): string =>
+  value.trim().replace(/\s+/g, " ").toLowerCase();
+
 const asList = (answer: string | readonly string[]): readonly string[] =>
   typeof answer === "string" ? [answer] : answer;
 
@@ -68,14 +85,14 @@ export const claudeQuestionKeys = (
     const answer = answers[question.id];
     if (options === undefined || options.length === 0 || answer === undefined)
       return null;
-    const labels = options.map((option) => option.label);
+    const labels = options.map((option) => labelKey(option.label));
     const given = asList(answer);
     const picked = new Set<number>();
     const other: string[] = [];
     for (const value of given) {
-      const index = labels.indexOf(value);
+      const index = labels.indexOf(labelKey(value));
       if (index >= 0) picked.add(index);
-      else if (value.trim() !== "") other.push(value);
+      else if (typedText(value) !== "") other.push(typedText(value));
     }
     const otherText = other.join(", ");
     const otherRow = options.length;

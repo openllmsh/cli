@@ -73,6 +73,7 @@ export const handleLocalAgentHook = async (
     sessionId,
     event,
     payload as Record<string, unknown>,
+    req.signal,
   );
   return json(200, output === null ? {} : { output });
 };
