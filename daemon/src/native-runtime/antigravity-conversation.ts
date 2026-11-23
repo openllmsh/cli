@@ -85,7 +85,7 @@ const normalizedAssistant = (
   })),
 });
 
-const normalizedMessage = (message: TMessage): unknown => {
+const normalizedMessage = (message: TMessage, callIndex: number): unknown => {
   if (message.role === "assistant") {
     return normalizedAssistant(
       textOf(message.content),
@@ -96,7 +96,13 @@ const normalizedMessage = (message: TMessage): unknown => {
     );
   }
   if (message.role === "tool") {
-    return { role: "tool", text: textOf(message.content) };
+    return {
+      role: "tool",
+      text: textOf(message.content),
+      // Which call this answers, by position in the preceding assistant turn
+      // (ids are per-client noise; the association is not).
+      call: callIndex,
+    };
   }
   return { role: message.role, content: message.content };
 };
@@ -139,7 +145,18 @@ export const antigravityConversationPlan = (
     messages
       .slice(0, upTo)
       .filter((m) => m.role !== "system")
-      .map(normalizedMessage);
+      .map((m, i, all) => {
+        if (m.role !== "tool") return normalizedMessage(m, -1);
+        const owner = all
+          .slice(0, i)
+          .findLast(
+            (p): p is TMessage & { role: "assistant" } =>
+              p.role === "assistant",
+          );
+        const index =
+          owner?.tool_calls?.findIndex((c) => c.id === m.tool_call_id) ?? -1;
+        return normalizedMessage(m, index);
+      });
   const afterAssistant = messages.slice(lastAssistant + 1);
   // A system/developer message after the last assistant turn cannot be folded
   // into the session's delta: the history diverged, so start fresh.

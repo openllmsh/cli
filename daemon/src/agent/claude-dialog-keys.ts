@@ -16,7 +16,9 @@
  * - After the last tab a "Review your answers" screen opens on "Submit
  *   answers" — except for a lone single-select question, which submits at
  *   once.
- * - A tool approval: Enter is the first choice (Yes, once); Esc rejects.
+ * - A tool approval: the digit `1` picks the first choice (Yes, once) whatever
+ *   row a terminal viewer has highlighted — a bare Enter would apply the
+ *   highlighted row; Esc rejects.
  *   "Accept for the session" is the same Enter: the "don't ask again" row's
  *   position and wording differ per tool, so it is not driven.
  * - Esc cancels any of them.
@@ -36,9 +38,11 @@ export type TClaudeDialogKey = {
   readonly settle: "key" | "tab";
 };
 
-/** Answer a tool approval: Yes is preselected, Esc rejects. */
+/** Answer a tool approval: `1` selects "Yes" directly (independent of the
+ *  highlighted row), Esc rejects. */
+export const CLAUDE_KEY_FIRST_CHOICE = "1";
 export const claudeApprovalKeys = (accept: boolean): TClaudeDialogKey[] => [
-  { text: accept ? CLAUDE_KEY_ENTER : CLAUDE_KEY_ESC, settle: "key" },
+  { text: accept ? CLAUDE_KEY_FIRST_CHOICE : CLAUDE_KEY_ESC, settle: "key" },
 ];
 
 /** Dismiss whatever dialog is open. */

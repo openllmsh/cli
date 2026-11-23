@@ -1062,7 +1062,29 @@ export const runAntigravityNative = async (
   /** A fresh session replaced the conversation's one (it could not be
    *  reattached): the old entry no longer describes anything. */
   let replacedSession = false;
-  let promptSettled: Promise<boolean> | null = null;
+  /** How the prompt ended: `settled` is a clean return (the session is idle),
+   *  `result` what it returned (exact usage rides there). */
+  let promptOutcome: Promise<{
+    readonly settled: boolean;
+    readonly result: unknown;
+  }> | null = null;
+  /** A tool-call terminal held back until the cancelled prompt settles, so it
+   *  can carry the prompt's exact usage instead of the context estimate. */
+  let handoff: ReadonlyArray<TChatCompletionChunk> | null = null;
+  const deliverHandoff = (result: unknown): void => {
+    const chunks = handoff;
+    if (chunks === null) return;
+    handoff = null;
+    const exact = exactUsageOf(result);
+    for (const chunk of chunks) {
+      push(
+        exact !== null && chunk.usage !== undefined
+          ? ({ ...chunk, usage: exact } as TChatCompletionChunk)
+          : chunk,
+      );
+    }
+    push("end");
+  };
   let contextUsed = 0;
   let replyText = "";
   const replyCalls: Array<{ name: string; arguments: string }> = [];
@@ -1167,14 +1189,20 @@ export const runAntigravityNative = async (
       const budget = params.cancelSettleMs ?? 10_000;
       let timer: ReturnType<typeof setTimeout> | undefined;
       void Promise.race([
-        promptSettled ?? Promise.resolve(false),
-        new Promise<boolean>((resolve) => {
-          timer = setTimeout(() => resolve(false), budget);
-        }),
-      ]).then((settled) => {
+        promptOutcome ?? Promise.resolve({ settled: false, result: null }),
+        new Promise<{ readonly settled: boolean; readonly result: unknown }>(
+          (resolve) => {
+            timer = setTimeout(
+              () => resolve({ settled: false, result: null }),
+              budget,
+            );
+          },
+        ),
+      ]).then((outcome) => {
         clearTimeout(timer);
         try {
-          finish(settled ? "park" : "cancel");
+          deliverHandoff(outcome.result);
+          finish(outcome.settled ? "park" : "cancel");
         } finally {
           if (held !== null) held.settled = null;
           markSettled();
@@ -1183,6 +1211,7 @@ export const runAntigravityNative = async (
       return;
     }
     finish(settle === "keep" ? "cancel" : settle);
+    deliverHandoff(null);
   };
   const endWith = (
     chunks: ReadonlyArray<TChatCompletionChunk>,
@@ -1271,7 +1300,17 @@ export const runAntigravityNative = async (
     feedContextUsage();
     // A conversation keeps its session (the cancelled prompt is settled
     // first); a plain request is cut off mid-flight and never parks.
-    endWith(turn.emitToolCall(name, args), conv !== null ? "keep" : "cancel");
+    const chunks = turn.emitToolCall(name, args);
+    if (conv === null) {
+      endWith(chunks, "cancel");
+      return;
+    }
+    // Hold the terminal until the cancelled prompt settles (bounded): its
+    // exact usage replaces the context estimate. The follow-up already waits
+    // on `settled`, so nothing is lost by the wait.
+    ended = true;
+    handoff = chunks;
+    cleanup("keep");
   };
 
   /** Take ownership of a process for this turn. If the turn already ended
@@ -1531,8 +1570,10 @@ export const runAntigravityNative = async (
     if (prior !== null) attached = await attachExisting(prior);
     let opened: unknown = null;
     if (!attached) {
-      if (prior !== null) replacedSession = true;
       opened = await openFresh();
+      // Only once the replacement exists is the old entry spent: a failed
+      // setup leaves the prior conversation to be tried again.
+      if (prior !== null) replacedSession = true;
     }
     const owned = currentAgent();
     if (owned === null || cleaned) {
@@ -1596,9 +1637,9 @@ export const runAntigravityNative = async (
     { sessionId, prompt: acpPromptBlocks(promptText, promptImages) },
     params.turnTimeoutMs ?? ANTIGRAVITY_TURN_TIMEOUT_MS,
   );
-  promptSettled = prompt.then(
-    () => true,
-    () => false,
+  promptOutcome = prompt.then(
+    (result) => ({ settled: true, result }),
+    () => ({ settled: false, result: null }),
   );
   void prompt
     .then((result) => {
