@@ -90,6 +90,7 @@ import type { TClaudeDialogKey } from "./claude-dialog-keys";
 import {
   claudeApprovalKeys,
   claudeCancelKeys,
+  claudeDeclineFeedbackKeys,
   claudeQuestionKeys,
 } from "./claude-dialog-keys";
 import { createClaudeHistory } from "./claude-history";
@@ -1505,6 +1506,8 @@ type TPending =
       readonly kind: "approval";
       readonly toolName: string;
       readonly input: unknown;
+      /** The hook's `permission_suggestions` (what "for session" applies). */
+      readonly suggestions: readonly TJson[];
       readonly resolve: (reply: TJson | null) => void;
     }
   | {
@@ -1542,6 +1545,41 @@ export type TClaudeTuiDeps = {
   readonly attachmentsDir?: (sessionId: string) => string;
   /** Transcript chunks one live drain reads at most (tests shrink it). */
   readonly drainMaxChunks?: number;
+};
+
+const isJsonObject = (value: unknown): value is TJson =>
+  typeof value === "object" && value !== null && !Array.isArray(value);
+
+/**
+ * `updatedPermissions` for "allow for the session" (verified against claude
+ * 2.1.330's PermissionRequest hook): Claude's own suggestions, every one forced
+ * to `destination: "session"` so nothing is written to a settings file; with
+ * none, an allow rule for the whole tool.
+ */
+export const sessionPermissionUpdates = (
+  toolName: string,
+  suggestions: readonly TJson[],
+): TJson[] =>
+  suggestions.length > 0
+    ? suggestions.map((suggestion) => ({
+        ...suggestion,
+        destination: "session",
+      }))
+    : [
+        {
+          type: "addRules",
+          rules: [{ toolName }],
+          behavior: "allow",
+          destination: "session",
+        },
+      ];
+
+/** The denial text the model reads when the web declined with a reason. */
+export const declineMessageOf = (feedback: string | undefined): string => {
+  const said = feedback?.trim() ?? "";
+  return said === ""
+    ? "The user declined this request."
+    : `The user declined this tool call and said: ${said}`;
 };
 
 const permissionReply = (decision: TJson): TJson => ({
@@ -2439,7 +2477,15 @@ export const createClaudeTuiSession = (
         });
         return;
       }
-      pending.set(requestId, { kind: "approval", toolName, input, resolve });
+      pending.set(requestId, {
+        kind: "approval",
+        toolName,
+        input,
+        suggestions: Array.isArray(payload.permission_suggestions)
+          ? (payload.permission_suggestions as TJson[]).filter(isJsonObject)
+          : [],
+        resolve,
+      });
       emit({
         type: "request.opened",
         request_id: requestId,
@@ -3092,7 +3138,10 @@ export const createClaudeTuiSession = (
                   command.decision === "accept_for_session"
                 ? claudeApprovalKeys(true)
                 : command.decision === "decline"
-                  ? claudeApprovalKeys(false)
+                  ? ((command.feedback === undefined
+                      ? null
+                      : claudeDeclineFeedbackKeys(command.feedback)) ??
+                    claudeApprovalKeys(false))
                   : claudeCancelKeys();
         if (keys === null) {
           pending.set(command.request_id, request);
@@ -3111,7 +3160,12 @@ export const createClaudeTuiSession = (
           emit({
             type: "request.resolved",
             request_id: command.request_id,
-            decision: command.decision ?? "cancel",
+            // Claude's dialog can't be told "for the session" reliably (its
+            // row differs per tool): the web hears what actually happened.
+            decision:
+              command.decision === "accept_for_session"
+                ? "accept"
+                : (command.decision ?? "cancel"),
           });
           if (command.decision === "cancel") parser.abortTurn("cancelled");
         }
@@ -3150,7 +3204,17 @@ export const createClaudeTuiSession = (
         pending.set(command.request_id, request);
         return false;
       }
-      if (decision === "accept" || decision === "accept_for_session") {
+      if (decision === "accept_for_session" && request.kind === "approval") {
+        request.resolve(
+          permissionReply({
+            behavior: "allow",
+            updatedPermissions: sessionPermissionUpdates(
+              request.toolName,
+              request.suggestions,
+            ),
+          }),
+        );
+      } else if (decision === "accept") {
         request.resolve(permissionReply({ behavior: "allow" }));
       } else {
         request.resolve(
@@ -3159,7 +3223,7 @@ export const createClaudeTuiSession = (
             message:
               decision === "cancel"
                 ? "The user cancelled this request."
-                : "The user declined this request.",
+                : declineMessageOf(command.feedback),
             ...(decision === "cancel" ? { interrupt: true } : {}),
           }),
         );

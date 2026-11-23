@@ -19,8 +19,12 @@
  * - A tool approval: the digit `1` picks the first choice (Yes, once) whatever
  *   row a terminal viewer has highlighted — a bare Enter would apply the
  *   highlighted row; Esc rejects.
- *   "Accept for the session" is the same Enter: the "don't ask again" row's
- *   position and wording differ per tool, so it is not driven.
+ *   "Accept for the session" is the same `1`: the "don't ask again" row's
+ *   position and wording differ per tool (and per suggestion), so it is not
+ *   driven — the caller reports the approval as allowed once.
+ * - Decline with feedback: the last row is always "No" and Up from the
+ *   first row wraps onto it (3 or 4 rows alike); Tab on it opens an amend
+ *   field, whose text Enter sends to the model as the rejection reason.
  * - Esc cancels any of them.
  */
 import type {
@@ -44,6 +48,27 @@ export const CLAUDE_KEY_FIRST_CHOICE = "1";
 export const claudeApprovalKeys = (accept: boolean): TClaudeDialogKey[] => [
   { text: accept ? CLAUDE_KEY_FIRST_CHOICE : CLAUDE_KEY_ESC, settle: "key" },
 ];
+
+export const CLAUDE_KEY_UP = "\x1b[A";
+export const CLAUDE_KEY_TAB = "\t";
+
+/**
+ * Decline a tool approval and tell Claude why: Up wraps from "Yes" onto the
+ * last row ("No"), Tab opens its amend field, Enter sends the text. Null when
+ * nothing printable is left of the feedback (then a plain reject applies).
+ */
+export const claudeDeclineFeedbackKeys = (
+  feedback: string,
+): TClaudeDialogKey[] | null => {
+  const text = typedText(feedback);
+  if (text === "") return null;
+  return [
+    { text: CLAUDE_KEY_UP, settle: "key" },
+    { text: CLAUDE_KEY_TAB, settle: "tab" },
+    { text, settle: "key" },
+    { text: CLAUDE_KEY_ENTER, settle: "key" },
+  ];
+};
 
 /** Dismiss whatever dialog is open. */
 export const claudeCancelKeys = (): TClaudeDialogKey[] => [
