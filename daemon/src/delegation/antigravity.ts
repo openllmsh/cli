@@ -72,6 +72,7 @@ import { startAgyLogin } from "./antigravity-cli-login";
 import { ANTIGRAVITY_PLANS_URL } from "./antigravity-usage";
 import { loginWiring } from "./delegate-shared";
 import { detailedFromCliList, listWithReason } from "./fetch-model-list";
+import { ensureNoBrowserShimDir } from "./headless-login";
 import type { TConnectResult } from "./login-flow";
 import {
   emitLoginFailed,
@@ -356,11 +357,18 @@ const connect = (): Promise<TConnectResult> =>
       // it is marked unusable now — a daemon that stops between agy saving
       // the sign-in and the capture below never serves it to the new one.
       markAgyModelsStale();
+      // `agy` would open a Google tab on this machine's default browser at
+      // once — often the wrong Google account. The dialog offers the link
+      // (open or copy) instead, so the user picks the browser.
+      const env = antigravitySpawnEnv(cliEnv(PROVIDER));
+      const shimDir = await ensureNoBrowserShimDir();
+      if (shimDir !== null)
+        env.PATH = `${shimDir}:${env.PATH ?? process.env.PATH ?? ""}`;
       const login = startAgyLogin({
         argv: sandboxSpawnArgs([agyBin], {
           probe: unwrapAntigravityCliSpawn(),
         }),
-        env: antigravitySpawnEnv(cliEnv(PROVIDER)),
+        env,
         cwd: scratch,
         urlWaitMs: URL_WAIT_MS,
         loginTimeoutMs: LOGIN_TIMEOUT_MS,
@@ -475,7 +483,7 @@ const connect = (): Promise<TConnectResult> =>
       return {
         connected: false,
         pending: true,
-        detail: `Sign in with Google in the browser window that opened — or open ${surfaced.url}. Then paste the code Google shows back here.`,
+        detail: `Open ${surfaced.url} in the browser signed in to the Google account you want, then paste the code Google shows back here.`,
       };
     },
   );
@@ -492,6 +500,9 @@ const submitLoginCode = async (
   if (login === null || !wiring.slot.inFlight()) {
     return { ok: false, detail: "no Google sign-in is awaiting a response." };
   }
+  // agy's screen redraws continuously; wait (briefly) for it to settle so a
+  // code pasted mid-redraw is typed rather than refused.
+  await Promise.race([login.rendered(), Bun.sleep(2_000)]);
   return login.submitCode(pasted);
 };
 

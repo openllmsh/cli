@@ -197,6 +197,9 @@ export type TAgyLogin = {
     readonly ok: boolean;
     readonly detail: string;
   };
+  /** Resolves once every chunk `agy` wrote so far is rendered. A code pasted
+   *  while its screen is mid-redraw waits on this instead of being refused. */
+  readonly rendered: () => Promise<void>;
   readonly cancel: () => void;
   /** Resolves once the login screen's process has exited (at once when it
    *  never started). */
@@ -474,6 +477,7 @@ export const startAgyLogin = (args: {
         detail: "Code sent to Google Antigravity — finishing.",
       };
     },
+    rendered: allRendered,
     cancel: () => settle({ kind: "failed", reason: "sign-in cancelled" }),
     exited:
       pty === null

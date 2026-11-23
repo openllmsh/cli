@@ -109,7 +109,7 @@ let noBrowserShimDir: string | null | undefined;
  * the printed URL + paste prompt are unaffected; at worst a tab opens on a
  * remote GUI box). Cached after the first success.
  */
-const ensureNoBrowserShimDir = async (): Promise<string | null> => {
+export const ensureNoBrowserShimDir = async (): Promise<string | null> => {
   if (noBrowserShimDir !== undefined) return noBrowserShimDir;
   try {
     const dir = join(daemonTempDir(), "no-browser");
