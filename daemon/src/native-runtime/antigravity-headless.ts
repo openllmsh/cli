@@ -43,13 +43,11 @@ import { homedir } from "node:os";
 import { join, resolve as resolvePath } from "node:path";
 import type { TChatCompletionChunk } from "@openllmsh/sdk/protocol";
 import { agyVersionUsable, peekCliVersion } from "../agy-version";
-import { killHard } from "../delegation/antigravity-cli-login";
+import { killHard } from "../delegation/kill-hard";
 import type { TStoreRead } from "../delegation/util";
 import { ensureKeychainReady } from "../delegation/util";
 import { logError, logInfo } from "../logger";
-import { sandboxSpawnArgs } from "../sandbox/exec";
-import { unwrapAntigravityCliSpawn } from "../sandbox/policy";
-import { agyTempRoot, daemonTempDir } from "../sandbox/working-set/base";
+import { agyTempRoot } from "../sandbox/working-set/base";
 import {
   ANTIGRAVITY_CLI_AGENT_NAME,
   prepareAntigravityCliProfile,
@@ -62,7 +60,8 @@ import { createAcpTurnState } from "./cursor-acp";
 import type { TNativeRunResult } from "./types";
 import { PRE_COMMIT_TIMEOUT_MS } from "./types";
 
-/** Decline reason prefix that tells `serve.ts` to run the ACP bridge instead. */
+/** Decline reason prefix for an `agy` CLI that is unavailable or failed to
+ *  take the turn (the hop declines; there is no fallback to ACP). */
 export const ANTIGRAVITY_HEADLESS_UNAVAILABLE =
   "antigravity: agy CLI unavailable";
 
@@ -1056,9 +1055,8 @@ export const runAntigravityHeadless = async (
     if (!ended) fail({ reason: "agy exited mid-turn" });
   });
 
-  // Only a write that never reached agy may fall back to ACP: once the
-  // prompt was handed off, agy may hold the turn, and ACP running it again
-  // would answer it twice.
+  // A write that never reached agy declines with the unavailable marker; once
+  // the prompt was handed off, agy may hold the turn, so it fails instead.
   let handedOff = false;
   const writeFailed = (error: unknown): void => {
     const why = error instanceof Error ? error.message : String(error);

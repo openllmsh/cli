@@ -102,8 +102,6 @@ const defaultRun: TAgyRun = async (args) => {
     // Native stderr is not a safe diagnostic channel (may carry secrets).
     stderr: "ignore",
   });
-  // At the deadline: SIGKILL (agy can ignore SIGTERM), and stop waiting on
-  // stdout shortly after — a child it left behind may hold the pipe open.
   // At the deadline: SIGKILL (agy can ignore SIGTERM), cancel the stdout
   // read, and stop waiting shortly after — a child it left behind may hold
   // the pipe open even after agy itself exits. The deadline stays armed
@@ -206,17 +204,12 @@ const runAgy = async (
 // ─── Usage ─────────────────────────────────────────────────────────────────
 
 /**
- * `agy -p "/usage" --output-format json` → windows. Its buckets carry the same
- * fields as Google's quota summary, so the shared mapping keeps the window
- * labels and meter ids identical to the token-based reader's.
+ * `agy -p "/usage" --output-format json` → windows plus allowance families.
+ * Its buckets carry the same fields as Google's quota summary, so the shared
+ * mapping keeps the window labels and meter ids identical to the token-based
+ * reader's.
  */
-export const agyUsageWindows = (
-  stdout: string,
-): ReadonlyArray<TProviderUsageWindow> | null =>
-  agyUsageQuota(stdout)?.windows ?? null;
-
-/** {@link agyUsageWindows} plus each window's allowance family. */
-const agyUsageQuota = (stdout: string): TAntigravityQuota | null => {
+export const agyUsageQuota = (stdout: string): TAntigravityQuota | null => {
   let parsed: unknown;
   try {
     parsed = JSON.parse(stdout);

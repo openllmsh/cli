@@ -23,6 +23,7 @@
  */
 
 import { Terminal } from "@xterm/headless";
+import { killHard } from "./kill-hard";
 
 /** Wide enough that Google's OAuth URL (~700 chars) is one line. */
 export const AGY_LOGIN_COLS = 4000;
@@ -136,31 +137,6 @@ export type TAgyLoginPtySpawner = (args: {
   readonly rows: number;
   readonly onData: (chunk: Uint8Array) => void;
 }) => TAgyLoginPty;
-
-/** Grace between SIGTERM and SIGKILL for an `agy` child. */
-export const AGY_KILL_GRACE_MS = 2_000;
-
-/** SIGTERM now, SIGKILL if it is still running after the grace. */
-export const killHard = (proc: {
-  readonly kill: (signal?: number | NodeJS.Signals) => void;
-  readonly exitCode: number | null;
-  readonly signalCode?: string | number | null;
-}): void => {
-  try {
-    proc.kill();
-  } catch {
-    return; // already gone
-  }
-  const timer = setTimeout(() => {
-    if (proc.exitCode !== null || (proc.signalCode ?? null) !== null) return;
-    try {
-      proc.kill("SIGKILL");
-    } catch {
-      /* already gone */
-    }
-  }, AGY_KILL_GRACE_MS);
-  timer.unref?.();
-};
 
 /** Production spawner over Bun's built-in PTY. */
 export const bunAgyLoginPty: TAgyLoginPtySpawner = (args) => {
@@ -322,15 +298,14 @@ export const startAgyLogin = (args: {
   });
   let pty: TAgyLoginPty | null = null;
   const timers: ReturnType<typeof setTimeout>[] = [];
+  let pollTimer: ReturnType<typeof setInterval> | null = null;
   const decoder = new TextDecoder();
 
   const settle = (outcome: TAgyLoginOutcome): void => {
     if (settled) return;
     settled = true;
-    for (const timer of timers) {
-      clearTimeout(timer);
-      clearInterval(timer);
-    }
+    for (const timer of timers) clearTimeout(timer);
+    if (pollTimer !== null) clearInterval(pollTimer);
     resolveUrl(surfaced);
     resolveDone(outcome);
     pty?.kill();
@@ -391,10 +366,9 @@ export const startAgyLogin = (args: {
       if (yes) settle({ kind: "signed_in" });
     });
   };
-  const poll = setInterval(() => {
+  pollTimer = setInterval(() => {
     if (surfaced !== null) checkStore();
   }, args.pollMs ?? 1_000);
-  timers.push(poll as unknown as ReturnType<typeof setTimeout>);
 
   try {
     pty = (args.spawn ?? bunAgyLoginPty)({

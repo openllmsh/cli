@@ -74,12 +74,9 @@ export type TAntigravityQuota = {
   readonly families: ReadonlyMap<string, string>;
 };
 
-/** `retrieveUserQuotaSummary` → windows (Claude + GPT share one allowance). */
-export const summaryWindows = (summary: unknown): TProviderUsageWindow[] =>
-  summaryQuota(summary).windows;
-
 /**
- * {@link summaryWindows} plus each window's allowance family. Takes the
+ * `retrieveUserQuotaSummary` → windows (Claude + GPT share one allowance)
+ * plus each window's allowance family. Takes the
  * NORMALIZED quota shape (`bucketId`, `remainingFraction`, `resetTime`,
  * `displayName`, `disabled`): `agy /usage` emits `id` / `remaining_fraction`
  * / `reset_time` / `name`, which `agyUsageQuota` (`./antigravity-cli.ts`)

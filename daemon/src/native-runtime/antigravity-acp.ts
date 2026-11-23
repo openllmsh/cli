@@ -32,8 +32,8 @@
  * `antigravitySpawnEnv` (drops every Google API-key / project override), so an
  * exported GEMINI_API_KEY can never turn a subscription hop into a metered
  * one. On macOS `agy` reaches the isolated login keychain through
- * `/usr/bin/security`, so the spawn is not sandbox-wrapped and nothing starts
- * unless `ensureKeychainReady(home)` is `present` (as headless does).
+ * `/usr/bin/security`; the spawn is confined by `confineAgyArgv` and nothing
+ * starts unless `ensureKeychainReady(home)` is `present` (as headless does).
  *
  * Native tools never run: the daemon's `agy` settings deny them
  * (`antigravity-cli-settings.ts`), permission requests are rejected, fs/terminal
@@ -64,7 +64,7 @@ import type { TStoreRead } from "../delegation/util";
 import { ensureKeychainReady } from "../delegation/util";
 import { logWarn, safeDiagnosticMessage } from "../logger";
 import { unwrapAntigravityCliSpawn } from "../sandbox/policy";
-import { agyTempRoot, daemonTempDir } from "../sandbox/working-set/base";
+import { agyTempRoot } from "../sandbox/working-set/base";
 import { DAEMON_VERSION } from "../version";
 import { ensureAntigravityCliSettings } from "./antigravity-cli-settings";
 import type { TAntigravityFailure } from "./antigravity-common";
@@ -415,16 +415,6 @@ export const ANTIGRAVITY_SESSION_META = {
   agy: { enabledTools: [] },
 } as const;
 
-/**
- * Leads every ACP prompt. Under ACP `agy` still offers its built-in tools, and
- * with an image attached the model tends to inspect it with `run_command`
- * (python + PIL) instead of looking at it. The daemon must refuse that, and
- * `agy` then ends the turn with no answer — so the chat failed ("antigravity
- * attempted a native tool"). Told plainly that those tools are unavailable and
- * that images are already in its context, it answers directly (3 of 3 live
- * runs, against 3 of 3 tool attempts without it). The conversation's own
- * tools (the loopback MCP server) stay available.
- */
 /** ACP's closed `ToolKind` vocabulary — the only tool detail ever logged. */
 const ACP_TOOL_KINDS: ReadonlySet<string> = new Set([
   "read",
@@ -439,6 +429,16 @@ const ACP_TOOL_KINDS: ReadonlySet<string> = new Set([
   "other",
 ]);
 
+/**
+ * Leads every ACP prompt. Under ACP `agy` still offers its built-in tools, and
+ * with an image attached the model tends to inspect it with `run_command`
+ * (python + PIL) instead of looking at it. The daemon must refuse that, and
+ * `agy` then ends the turn with no answer — so the chat failed ("antigravity
+ * attempted a native tool"). Told plainly that those tools are unavailable and
+ * that images are already in its context, it answers directly (3 of 3 live
+ * runs, against 3 of 3 tool attempts without it). The conversation's own
+ * tools (the loopback MCP server) stay available.
+ */
 export const ANTIGRAVITY_ACP_NO_BUILTIN_TOOLS =
   "You cannot run commands, read or write files, or browse the web here: any such attempt fails and ends your answer. Attached images are already in your context: look at them directly. Only the tools provided for this conversation, if any, may be called.";
 

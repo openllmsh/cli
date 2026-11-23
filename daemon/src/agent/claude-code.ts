@@ -132,15 +132,16 @@ import type {
 
 /** Tool output kept on an item (the full result stays in the engine). */
 export const AGENT_TOOL_OUTPUT_MAX_CHARS = 64 * 1024;
-/** Wait after a dialog key, and after one that moves to the next tab. */
 /**
  * How long a PermissionRequest hook is held before Claude's own dialog takes
  * over: under the shim's 110 s fetch abort and the hook's 120 s `timeout`.
  */
 export const HOOK_HOLD_MS = 100_000;
+/** Wait after a dialog key. */
 const DIALOG_KEY_MS = 40;
 /** How long the amend field has to show itself before a plain Esc reject. */
 const AMEND_OPEN_MS = 1500;
+/** Wait after a key that moves to the next tab. */
 const DIALOG_TAB_MS = 250;
 /**
  * How long a fresh TUI may take to report `SessionStart` before the web is
@@ -2380,7 +2381,6 @@ export const createClaudeTuiSession = (
     // Keys still being typed belong to a dialog that is gone now.
     if (closed) dialogGen += 1;
   }
-  /** Type keys into Claude's open dialog, a beat apart, while it is still open. */
   /**
    * Decline with a reason: open the "No" row's amend field, and type the
    * reason only once the screen shows it open (a digit typed into the dialog
@@ -2409,6 +2409,7 @@ export const createClaudeTuiSession = (
     typeDialogKeys(openKeys, gen);
     setTimeout(settle, deps.dialogTabMs ?? DIALOG_TAB_MS);
   };
+  /** Type keys into Claude's open dialog, a beat apart, while it is still open. */
   const typeDialogKeys = (
     keys: readonly TClaudeDialogKey[],
     gen: number = dialogGen,
@@ -3232,6 +3233,9 @@ export const createClaudeTuiSession = (
         // but only if it still is. The transcript may already show the tool
         // finished (answered at the terminal) before the hook-side state knew.
         pump();
+        // `pending` no longer holds this id (deleted on entry), so a settle
+        // during pump() drops it from `tuiRequests` silently: this branch is
+        // the only place that reports the resolution, exactly once.
         const toolUse = requestToolUse.get(command.request_id);
         if (
           (toolUse !== undefined && completedToolUses.has(toolUse)) ||
@@ -3247,32 +3251,35 @@ export const createClaudeTuiSession = (
           });
           return false;
         }
-        const keys =
-          request.kind === "user-input"
-            ? command.answers === undefined
-              ? claudeCancelKeys()
-              : claudeQuestionKeys(
-                  askUserQuestionsOf(request.input) ?? [],
-                  command.answers,
-                )
-            : command.decision === undefined
-              ? null
-              : command.decision === "accept" ||
-                  command.decision === "accept_for_session"
-                ? claudeApprovalKeys(true)
-                : command.decision === "decline" &&
-                    command.feedback !== undefined &&
-                    claudeDeclineFeedbackKeys(command.feedback) !== null
-                  ? null
-                  : command.decision === "decline"
-                    ? claudeApprovalKeys(false)
-                    : claudeCancelKeys();
         const feedbackKeys =
           request.kind === "approval" &&
           command.decision === "decline" &&
           command.feedback !== undefined
             ? claudeDeclineFeedbackKeys(command.feedback)
             : null;
+        const approvalKeys = (): TClaudeDialogKey[] | null => {
+          if (command.decision === undefined) return null;
+          if (
+            command.decision === "accept" ||
+            command.decision === "accept_for_session"
+          )
+            return claudeApprovalKeys(true);
+          if (command.decision === "decline")
+            return feedbackKeys !== null ? null : claudeApprovalKeys(false);
+          return claudeCancelKeys();
+        };
+        const questions =
+          request.kind === "user-input"
+            ? askUserQuestionsOf(request.input)
+            : null;
+        const keys =
+          request.kind === "user-input"
+            ? command.answers === undefined
+              ? claudeCancelKeys()
+              : questions === null || questions.length === 0
+                ? null
+                : claudeQuestionKeys(questions, command.answers)
+            : approvalKeys();
         if (keys === null && feedbackKeys === null) {
           pending.set(command.request_id, request);
           return false;

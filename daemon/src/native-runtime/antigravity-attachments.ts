@@ -37,6 +37,21 @@ const EXT: Readonly<Record<string, string>> = {
 
 const DATA_URL = /^data:([^;,]+);base64,(.+)$/s;
 
+/** A base64 `data:` image URL whose bytes really are the PNG, JPEG, GIF or
+ *  WebP it declares (the bytes are sniffed), or null. */
+export const parseAgyImageDataUrl = (
+  url: string,
+): { readonly mime: string; readonly bytes: Uint8Array } | null => {
+  const m = url.match(DATA_URL);
+  if (m === null || m[1] === undefined || m[2] === undefined) return null;
+  const declared = m[1].trim().toLowerCase();
+  const bytes = new Uint8Array(Buffer.from(m[2], "base64"));
+  const inspected = inspectImageBytes(bytes);
+  if (inspected === null) return null;
+  const canon = declared === "image/jpg" ? "image/jpeg" : declared;
+  return canon === inspected.mime ? { mime: inspected.mime, bytes } : null;
+};
+
 export const agyAttachmentsDir = (): string =>
   join(agyTempRoot(), "attachments");
 
@@ -76,15 +91,10 @@ export const storeAgyImage = (
   url: string,
   dir: string = agyAttachmentsDir(),
 ): string | null => {
-  const m = url.match(DATA_URL);
-  if (m === null || m[1] === undefined || m[2] === undefined) return null;
-  const declared = m[1].trim().toLowerCase();
-  const bytes = new Uint8Array(Buffer.from(m[2], "base64"));
-  const inspected = inspectImageBytes(bytes);
-  if (inspected === null) return null;
-  const declaredCanon = declared === "image/jpg" ? "image/jpeg" : declared;
-  if (declaredCanon !== inspected.mime) return null;
-  const ext = EXT[inspected.mime];
+  const parsed = parseAgyImageDataUrl(url);
+  if (parsed === null) return null;
+  const { bytes } = parsed;
+  const ext = EXT[parsed.mime];
   if (ext === undefined) return null;
   const hash = createHash("sha256").update(bytes).digest("hex");
   const path = join(dir, `${hash}.${ext}`);

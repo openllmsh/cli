@@ -114,13 +114,14 @@ const asList = (answer: string | readonly string[]): readonly string[] =>
 
 /**
  * The keys that answer an AskUserQuestion dialog, or null when the answers
- * don't fit the dialog (a question without options, or one left unanswered)
+ * don't fit the dialog (no questions, a question without options, or one left unanswered)
  * and nothing should be typed.
  */
 export const claudeQuestionKeys = (
   questions: readonly TAgentUserInputQuestion[],
   answers: TAgentUserInputAnswers,
 ): TClaudeDialogKey[] | null => {
+  if (questions.length === 0) return null;
   const keys: TClaudeDialogKey[] = [];
   for (const question of questions) {
     const options = question.options;

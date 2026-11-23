@@ -47,37 +47,6 @@ export const versionAtLeast = (
 /** The cap on one `agy --version` read. */
 export const AGY_VERSION_READ_TIMEOUT_MS = 5_000;
 
-/** `<bin> --version` (local, no sign-in, 5 s cap), or null. Run with a
- *  throwaway HOME so it never reads or writes any `agy` profile. */
-export const readCliVersion = (path: string): string | null => {
-  let home: string | null = null;
-  try {
-    // A private HOME per probe, removed after: nothing a probe writes is
-    // ever seen by the next one.
-    home = mkdtempSync(join(tmpdir(), "agy-version-"));
-    const out = Bun.spawnSync([path, "--version"], {
-      env: { PATH: process.env.PATH ?? "/usr/bin:/bin", HOME: home },
-      stdout: "pipe",
-      stderr: "ignore",
-      timeout: AGY_VERSION_READ_TIMEOUT_MS,
-      // Uncatchable: a binary that ignores SIGTERM must not hold the daemon
-      // (or this probe's HOME cleanup) past the cap.
-      killSignal: "SIGKILL",
-    });
-    return out.exitCode === 0 ? out.stdout.toString().trim() : null;
-  } catch {
-    return null;
-  } finally {
-    if (home !== null) {
-      try {
-        rmSync(home, { recursive: true, force: true });
-      } catch {
-        // A leftover empty temp dir is harmless.
-      }
-    }
-  }
-};
-
 /** How long a FAILED version read is remembered before it is retried (a
  *  binary that timed out once may answer next time). */
 export const AGY_VERSION_RETRY_MS = 60_000;
@@ -123,19 +92,7 @@ const freshCached = (
   return undefined;
 };
 
-/** {@link readCliVersion}, cached per binary stamp. */
-export const cachedCliVersion = (path: string): string | null => {
-  const stamp = binaryStamp(path);
-  if (stamp === null) return null;
-  const cached = freshCached(stamp);
-  if (cached !== undefined) return cached.version ?? null;
-  const version = readCliVersion(path);
-  versionCache.set(stamp, { version, atMs: Date.now() });
-  return version;
-};
-
-/** `<bin> --version` without blocking the event loop (same env, HOME and
- *  5 s cap as {@link readCliVersion}): the output on a clean exit, `null` when
+/** `<bin> --version` without blocking the event loop (private HOME, 5 s cap as the daemon's other `agy` probes): the output on a clean exit, `null` when
  *  it exited unsuccessfully (it runs but is not a usable `agy`), `undefined`
  *  when it was killed at the cap (slow, not broken — its version is unknown). */
 export const readCliVersionAsync = async (

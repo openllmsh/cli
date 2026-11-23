@@ -19,8 +19,9 @@ import {
 import { join } from "node:path";
 import {
   AGY_MIN_VERSION,
-  cachedCliVersion,
-  versionAtLeast,
+  agyVersionUsable,
+  peekCliVersion,
+  warmCliVersion,
 } from "../daemon/src/agy-version";
 import { cliConfig, openllmDir, userHome } from "./env";
 import { awaitPipeCodes, bunSubprocessPeer } from "./process-pipe";
@@ -70,7 +71,7 @@ export type TProvisionMissingVendorClisDeps = {
    */
   readonly detach?: boolean;
   /** `<bin> --version` (tests override). */
-  readonly cliVersion?: (path: string) => string | null;
+  readonly cliVersion?: (path: string) => string | null | undefined;
 };
 
 /**
@@ -150,12 +151,13 @@ export const allProvisionedVendorClisPresent = (
     readonly which?: (command: string) => string | null;
     readonly platform?: NodeJS.Platform;
     readonly arch?: string;
-    /** `<bin> --version` (tests override; never the real binary there). */
-    readonly cliVersion?: (path: string) => string | null;
+    /** `<bin> --version` (tests override; never the real binary there).
+     *  `undefined` = not known yet (usable, as in the runtime). */
+    readonly cliVersion?: (path: string) => string | null | undefined;
   } = {},
 ): boolean => {
   const home = deps.home ?? userHome();
-  const cliVersion = deps.cliVersion ?? cachedCliVersion;
+  const cliVersion = deps.cliVersion ?? ((path) => peekCliVersion(path));
   const which =
     deps.which ??
     ((command: string): string | null => Bun.which(command) ?? null);
@@ -170,8 +172,7 @@ export const allProvisionedVendorClisPresent = (
       continue;
     const usable = (path: string): boolean =>
       isExecutableFile(path) &&
-      (vendor.minVersion === undefined ||
-        versionAtLeast(cliVersion(path), vendor.minVersion));
+      (vendor.minVersion === undefined || agyVersionUsable(path, cliVersion));
     // A versioned CLI follows the runtime's resolution order: the daemon
     // launches the home launcher whenever it is there, so that one alone
     // decides — a newer copy on PATH never hides an old launcher.
@@ -186,11 +187,43 @@ export const allProvisionedVendorClisPresent = (
     }
     const onPath = which(vendor.command);
     if (onPath !== null && onPath.length > 0 && usable(onPath)) continue;
-    if (usable(vendor.dest(home))) continue;
-    if (usable(join(home, ".local", "bin", vendor.command))) continue;
+    // Versioned vendors were decided by their launcher above (it is `dest`,
+    // and absent here), so only the unversioned ones reach their dest.
+    if (vendor.minVersion === undefined) {
+      if (usable(vendor.dest(home))) continue;
+      if (usable(join(home, ".local", "bin", vendor.command))) continue;
+    }
     return false;
   }
   return true;
+};
+
+/**
+ * {@link allProvisionedVendorClisPresent} for the daemon's event loop: the
+ * versioned vendors' `--version` reads run in the background first (shared,
+ * cached, 5 s cap), so the check itself never spawns on the caller's stack and
+ * answers from real versions.
+ */
+export const allProvisionedVendorClisPresentAsync = async (
+  deps: Parameters<typeof allProvisionedVendorClisPresent>[0] = {},
+): Promise<boolean> => {
+  if (deps.cliVersion === undefined) {
+    const home = deps.home ?? userHome();
+    const which =
+      deps.which ??
+      ((command: string): string | null => Bun.which(command) ?? null);
+    const paths = new Set<string>();
+    for (const vendor of PROVISIONED_VENDOR_CLIS) {
+      if (vendor.minVersion === undefined) continue;
+      paths.add(vendor.dest(home));
+      const onPath = which(vendor.command);
+      if (onPath !== null && onPath.length > 0) paths.add(onPath);
+    }
+    await Promise.all(
+      [...paths].map((path) => warmCliVersion(path).catch(() => {})),
+    );
+  }
+  return allProvisionedVendorClisPresent(deps);
 };
 
 /**
@@ -212,7 +245,7 @@ export const provisionMissingVendorClis = async (
   }
 
   if (
-    allProvisionedVendorClisPresent({
+    await allProvisionedVendorClisPresentAsync({
       home: deps?.home,
       which: deps?.which,
       cliVersion: deps?.cliVersion,

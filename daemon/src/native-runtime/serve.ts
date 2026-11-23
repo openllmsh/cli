@@ -74,6 +74,7 @@ import {
 import {
   agyAcpImageRefusal,
   agyImageView,
+  hasAgyImages,
   inlineRemoteImages,
 } from "./antigravity-request";
 import { agyFileReadsConfined } from "./antigravity-seatbelt";
@@ -1386,27 +1387,6 @@ const serveCursorHop = async (
   );
 };
 
-/**
- * Antigravity serve path. `agy` is the single source of truth for sign-in,
- * and the transport is the hop's selected METHOD, never a failure:
- *   - `acp` (default): every turn on `agy acp`, with the caller's tools and
- *     images (see `routeAntigravity`); a conversation continues its own
- *     persistent session and sends only the new turn;
- *   - `stream-json` (`antigravity:stream-json`): text and image turns on the
- *     headless `agy` CLI (streams as generated). Each image is stored once under the hash of its bytes
- *     (`antigravity-attachments.ts`) and replaced in the prompt by a stable
- *     `[image: <path>]` line, which `agy` opens with its own `read_file`; the
- *     same image always renders the same text, so the conversation and
- *     Google's prompt cache hold across turns. Only where `agy`'s reads are
- *     kernel-confined (`antigravity-seatbelt.ts`: Seatbelt on macOS,
- *     Landlock on Linux) to nothing in `$HOME` or the state dir but its slot,
- *     its binary and the `agy` temp root; elsewhere image turns decline.
- *     Client tools are refused for it, and shapes with no CLI text view
- *     decline.
- * A decline (including an unanticipated failure) declines the hop and the
- * walker moves on; there is no fallback between the two. A sign-in miss is
- * an `auth` cooldown.
- */
 /** Antigravity headless conversations (prefix hash → `agy` conversation id). */
 const antigravityHeadlessSessions = new NativeSessionStore();
 
@@ -1452,6 +1432,16 @@ const routeAntigravity = (
   // `tool_choice: "auto"` with no tools is the default, not a tool request.
   // Structured output was already declined by the native-control gate.
   const { tool_choice: toolChoice, ...withoutChoice } = params.canonical;
+  // Decline before any image bytes are written to disk.
+  if (
+    hasAgyImages(params.canonical) &&
+    !(overrides?.imageReadsConfined ?? agyFileReadsConfined())
+  ) {
+    return {
+      kind: "declined",
+      reason: "antigravity: image input needs agy's file reads confined",
+    };
+  }
   const view = agyImageView(
     toolChoice === "auto" ? withoutChoice : params.canonical,
     overrides?.attachmentsDir,
@@ -1462,15 +1452,6 @@ const routeAntigravity = (
     return {
       kind: "declined",
       reason: "antigravity stream-json has no text view of this request",
-    };
-  }
-  if (
-    view.paths.size > 0 &&
-    !(overrides?.imageReadsConfined ?? agyFileReadsConfined())
-  ) {
-    return {
-      kind: "declined",
-      reason: "antigravity: image input needs agy's file reads confined",
     };
   }
   return { kind: "cli", text, attachments: view.paths };
@@ -1654,6 +1635,27 @@ const serveAntigravityCli = async (
   );
 };
 
+/**
+ * Antigravity serve path. `agy` is the single source of truth for sign-in,
+ * and the transport is the hop's selected METHOD, never a failure:
+ *   - `acp` (default): every turn on `agy acp`, with the caller's tools and
+ *     images (see `routeAntigravity`); a conversation continues its own
+ *     persistent session and sends only the new turn;
+ *   - `stream-json` (`antigravity:stream-json`): text and image turns on the
+ *     headless `agy` CLI (streams as generated). Each image is stored once under the hash of its bytes
+ *     (`antigravity-attachments.ts`) and replaced in the prompt by a stable
+ *     `[image: <path>]` line, which `agy` opens with its own `read_file`; the
+ *     same image always renders the same text, so the conversation and
+ *     Google's prompt cache hold across turns. Only where `agy`'s reads are
+ *     kernel-confined (`antigravity-seatbelt.ts`: Seatbelt on macOS,
+ *     Landlock on Linux) to nothing in `$HOME` or the state dir but its slot,
+ *     its binary and the `agy` temp root; elsewhere image turns decline.
+ *     Client tools are refused for it, and shapes with no CLI text view
+ *     decline.
+ * A decline (including an unanticipated failure) declines the hop and the
+ * walker moves on; there is no fallback between the two. A sign-in miss is
+ * an `auth` cooldown.
+ */
 const serveAntigravityHop = async (
   incoming: TNativeServeParams,
   overrides?: TNativeServeOverrides,

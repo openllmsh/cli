@@ -22,7 +22,7 @@
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import {
-  allProvisionedVendorClisPresent,
+  allProvisionedVendorClisPresentAsync,
   provisionMissingVendorClis,
 } from "../../src/vendor-provision";
 import { stateDir } from "./env";
@@ -101,7 +101,7 @@ export type TVendorProvisionResult =
 export const runVendorProvisioning = async (
   opts: {
     readonly onRoutebox?: () => boolean;
-    readonly allPresent?: () => boolean;
+    readonly allPresent?: () => boolean | Promise<boolean>;
     readonly provision?: () => Promise<number>;
     readonly statePath?: string;
     readonly version?: string;
@@ -110,8 +110,8 @@ export const runVendorProvisioning = async (
 ): Promise<TVendorProvisionResult> => {
   if (!(opts.onRoutebox ?? isRoutebox)()) return "not_routebox";
   const allPresent =
-    opts.allPresent ?? (() => allProvisionedVendorClisPresent());
-  if (allPresent()) return "all_present";
+    opts.allPresent ?? (() => allProvisionedVendorClisPresentAsync());
+  if (await allPresent()) return "all_present";
   const statePath = opts.statePath ?? vendorProvisionStatePath();
   const version = opts.version ?? DAEMON_VERSION;
   const now = opts.now ?? Date.now;
@@ -126,7 +126,7 @@ export const runVendorProvisioning = async (
   } catch (error) {
     logError("vendor-provision", error);
   }
-  const ok = code === 0 && allPresent();
+  const ok = code === 0 && (await allPresent());
   writeAttempt(statePath, { version, at_ms: now(), ok });
   logInfo(
     "vendor-provision",
