@@ -2126,7 +2126,7 @@ agy_version_ok() {
   local v major minor out
   # A nonzero exit is not a version, whatever it printed (matches the
   # daemon's own probe). Capped at 5 s (macOS has no `timeout`): a hung
-  # binary counts as failed, so setup proceeds and upgrades it.
+  # binary is unknown (kept); only a version read below the minimum is old.
   # Output goes to a file, not a pipe: a child the probe left behind can
   # hold a pipe open, never a finished read of a file.
   local tmp probe watchdog rc
@@ -2153,6 +2153,10 @@ agy_version_ok() {
   out="$(cat "$tmp" 2>/dev/null)"
   rm -f "$tmp"
   rm -rf "$probe_home"
+  # Killed at the cap (SIGKILL = 137): slow, not broken — its version is
+  # unknown, and the daemon treats unknown as usable (agyVersionUsable), so a
+  # healthy launcher is kept rather than moved aside and reinstalled.
+  [ "$rc" -eq 137 ] && return 0
   [ "$rc" -eq 0 ] || return 1
   # The daemon's rule (agy-version.ts): the WHOLE output is one version
   # (`1.5.13`, `agy 1.5.13`, `v1.5.13`, optional -pre / +build), and a

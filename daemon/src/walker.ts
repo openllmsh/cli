@@ -4151,6 +4151,7 @@ const walkPlan = async (
         finalHop &&
         served.servedLocally &&
         served.response.status >= 400 &&
+        // < 499 on purpose: 499 is a client abort, never held.
         served.response.status < 499 &&
         !served.response.headers.has(CONTEXT_OVERFLOW_HOP_HEADER) &&
         !args.req.signal.aborted &&
@@ -4410,7 +4411,15 @@ const walkPlan = async (
             : { ...served, accountIndex: index };
         },
       );
-      if (recovered !== null) return commitSubscriptionServe(hop, recovered);
+      if (recovered !== null) {
+        // The recovery answer replaces the held final-hop one: release the
+        // discarded response's upstream body (best effort).
+        if (heldFinal !== null) {
+          void heldFinal.served.response.body?.cancel().catch(() => {});
+          heldFinal = null;
+        }
+        return commitSubscriptionServe(hop, recovered);
+      }
     }
   }
   if (heldFinal !== null) {

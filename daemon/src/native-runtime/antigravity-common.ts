@@ -18,12 +18,13 @@ export type TAntigravityFailure = {
 };
 
 const QUOTA_RE =
-  /RESOURCE_EXHAUSTED|quota|exhausted|usage limit|out of (?:credits|quota)/i;
+  /RESOURCE_EXHAUSTED|quota[\s_-]?(?:exceeded|exhausted|reached|limit)|exhausted (?:your|the|its) (?:\w+ )?quota|usage limit|out of (?:credits|quota)/i;
 const RATE_RE = /rate[\s_-]?limit|too many requests|\b429\b/i;
 /** Includes print mode's own refusal, "Run 'agy' to log in". */
 const SIGN_IN_RE =
   /not logged in|to log in|sign in|signed out|authentication failed/i;
-const PLAN_RE = /SUBSCRIPTION_REQUIRED|subscription|tier|upgrade|license/i;
+const PLAN_RE =
+  /SUBSCRIPTION_REQUIRED|upgrade (?:your|to)\b|(?:requires?|needs?) an? (?:\w+ )?(?:subscription|plan|license)|subscription (?:required|expired|inactive)|no (?:active )?subscription|license required/i;
 
 /**
  * An `agy` failure message (a headless `result.error`, an ACP RPC error's

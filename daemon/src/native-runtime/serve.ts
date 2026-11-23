@@ -71,6 +71,7 @@ import {
   resolveAntigravityCli,
   runAntigravityHeadless,
 } from "./antigravity-headless";
+import type { TResolveHost } from "./antigravity-request";
 import {
   agyAcpImageRefusal,
   agyImageView,
@@ -174,6 +175,8 @@ export type TNativeServeOverrides = {
   readonly imageReadsConfined?: boolean;
   /** Fetch used to inline linked images for Antigravity (tests). */
   readonly fetchImage?: typeof fetch;
+  /** Host resolution for linked images (tests; never real DNS there). */
+  readonly resolveImageHost?: TResolveHost;
   /** Injected headless spawn gates (keychain, argv, confinement wrap);
    *  omitted, the real ones run. */
   readonly headlessHooks?: Pick<
@@ -1674,6 +1677,7 @@ const serveAntigravityHop = async (
   const canonical = await inlineRemoteImages(
     incoming.canonical,
     overrides?.fetchImage,
+    overrides?.resolveImageHost,
   );
   const params =
     canonical === incoming.canonical ? incoming : { ...incoming, canonical };

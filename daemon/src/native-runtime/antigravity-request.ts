@@ -7,6 +7,7 @@
  * conversation hashes (and is cached upstream) the same on every turn.
  */
 
+import { lookup } from "node:dns/promises";
 import type { TChatCompletionRequest } from "@openllmsh/sdk/protocol";
 import { inspectImageBytes } from "@openllmsh/sdk/wire/lib/canonical/image-signature";
 import { parseAgyImageDataUrl, storeAgyImage } from "./antigravity-attachments";
@@ -110,28 +111,41 @@ export const AGY_REMOTE_IMAGE_MAX_BYTES = 10 * 1024 * 1024;
 /** The longest one linked-image fetch may take. */
 export const AGY_REMOTE_IMAGE_TIMEOUT_MS = 15_000;
 
-/** Hosts a linked image must never be fetched from (the daemon runs on the
- *  user's machine: no loopback, link-local or private-network targets). */
-export const isPrivateHost = (host: string): boolean => {
-  const h = host.toLowerCase().replace(/^\[|\]$/g, "");
-  if (h === "localhost" || h.endsWith(".localhost") || h.endsWith(".local")) {
-    return true;
-  }
+const v4Blocked = (a: number, b: number, c: number): boolean =>
+  a === 0 ||
+  a === 10 ||
+  a === 127 ||
+  a >= 224 ||
+  (a === 169 && b === 254) ||
+  (a === 172 && b >= 16 && b <= 31) ||
+  (a === 192 && b === 168) ||
+  (a === 192 && b === 0 && c === 0) ||
+  (a === 100 && b >= 64 && b <= 127) ||
+  (a === 198 && (b === 18 || b === 19));
+
+/** The ONE address classifier: true for a loopback, private, link-local,
+ *  CGNAT, benchmark, multicast or reserved IPv4 / IPv6 literal (incl.
+ *  IPv4-mapped). A non-literal returns false. */
+export const isPrivateAddress = (address: string): boolean => {
+  const h = address.toLowerCase().replace(/^\[|\]$/g, "");
   if (h.includes(":")) {
     if (h === "::1" || h === "::") return true;
     if (/^f[cd][0-9a-f]{2}:/.test(h) || /^fe[89ab][0-9a-f]:/.test(h)) {
       return true;
     }
+    if (/^ff[0-9a-f]{2}:/.test(h)) return true;
     // IPv4-mapped (::ffff:a.b.c.d, or the hex form ::ffff:7f00:1).
     const mapped = h.match(/^(?:0:0:0:0:0:|::)ffff:(.+)$/);
     if (mapped?.[1] !== undefined) {
       const tail = mapped[1];
-      if (tail.includes(".")) return isPrivateHost(tail);
+      if (tail.includes(".")) return isPrivateAddress(tail);
       const hex = tail.split(":");
       if (hex.length === 2) {
         const hi = Number.parseInt(hex[0] ?? "", 16);
         const lo = Number.parseInt(hex[1] ?? "", 16);
-        return isPrivateHost(`${hi >> 8}.${hi & 255}.${lo >> 8}.${lo & 255}`);
+        return isPrivateAddress(
+          `${hi >> 8}.${hi & 255}.${lo >> 8}.${lo & 255}`,
+        );
       }
       return true;
     }
@@ -139,16 +153,42 @@ export const isPrivateHost = (host: string): boolean => {
   }
   const v4 = h.match(/^(\d+)\.(\d+)\.(\d+)\.(\d+)$/);
   if (v4 === null) return false;
-  const [a, b] = [Number(v4[1]), Number(v4[2])];
-  return (
-    a === 0 ||
-    a === 10 ||
-    a === 127 ||
-    (a === 169 && b === 254) ||
-    (a === 172 && b >= 16 && b <= 31) ||
-    (a === 192 && b === 168) ||
-    (a === 100 && b >= 64 && b <= 127)
-  );
+  return v4Blocked(Number(v4[1]), Number(v4[2]), Number(v4[3]));
+};
+
+/** Hosts a linked image must never be fetched from (the daemon runs on the
+ *  user's machine: no loopback, link-local or private-network targets). */
+export const isPrivateHost = (host: string): boolean => {
+  const h = host.toLowerCase().replace(/^\[|\]$/g, "");
+  if (h === "localhost" || h.endsWith(".localhost") || h.endsWith(".local")) {
+    return true;
+  }
+  return isPrivateAddress(h);
+};
+
+export type TResolveHost = (
+  host: string,
+) => Promise<ReadonlyArray<{ readonly address: string }>>;
+
+const resolveHostDefault: TResolveHost = (host) => lookup(host, { all: true });
+
+/** True when the host is a private literal / name, or ANY address it
+ *  resolves to is private (public names such as `10.0.0.5.nip.io`). A failed
+ *  lookup refuses. Residual risk: DNS rebinding between this check and
+ *  fetch's own lookup — fetch cannot pin an IP while keeping TLS SNI. */
+const hostRefused = async (
+  host: string,
+  resolve: TResolveHost,
+): Promise<boolean> => {
+  if (isPrivateHost(host)) return true;
+  const literal = host.replace(/^\[|\]$/g, "");
+  if (/^[\d.]+$/.test(literal) || literal.includes(":")) return false;
+  try {
+    const addrs = await resolve(literal);
+    return addrs.length === 0 || addrs.some((a) => isPrivateAddress(a.address));
+  } catch {
+    return true;
+  }
 };
 
 const MAX_REDIRECTS = 3;
@@ -157,6 +197,7 @@ const MAX_REDIRECTS = 3;
 const fetchImageAsDataUrl = async (
   url: string,
   fetchImpl: typeof fetch,
+  resolve: TResolveHost,
 ): Promise<string | null> => {
   try {
     let target: URL;
@@ -167,7 +208,10 @@ const fetchImageAsDataUrl = async (
     }
     let res: Response | null = null;
     for (let hop = 0; hop <= MAX_REDIRECTS; hop += 1) {
-      if (target.protocol !== "https:" || isPrivateHost(target.hostname)) {
+      if (
+        target.protocol !== "https:" ||
+        (await hostRefused(target.hostname, resolve))
+      ) {
         return null;
       }
       res = await fetchImpl(target, {
@@ -216,6 +260,7 @@ const fetchImageAsDataUrl = async (
 export const inlineRemoteImages = async (
   canonical: TChatCompletionRequest,
   fetchImpl: typeof fetch = fetch,
+  resolve: TResolveHost = resolveHostDefault,
 ): Promise<TChatCompletionRequest> => {
   const urls = new Set<string>();
   for (const url of imageUrlsOf(canonical)) {
@@ -225,7 +270,7 @@ export const inlineRemoteImages = async (
   const resolved = new Map<string, string>();
   await Promise.all(
     [...urls].map(async (url) => {
-      const data = await fetchImageAsDataUrl(url, fetchImpl);
+      const data = await fetchImageAsDataUrl(url, fetchImpl, resolve);
       if (data !== null) resolved.set(url, data);
     }),
   );
