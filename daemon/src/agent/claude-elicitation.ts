@@ -172,7 +172,7 @@ export const elicitationOf = (payload: TJson): TElicitation => {
     )
       unsupported ??= `field "${key}" has options that can't be told apart`;
     const blankOffered =
-      !isRequired && !multi && !labels.includes(ELICITATION_BLANK_LABEL);
+      !isRequired && !labels.includes(ELICITATION_BLANK_LABEL);
     fields[id] = {
       key,
       kind,

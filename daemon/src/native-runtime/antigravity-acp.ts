@@ -1707,10 +1707,7 @@ export const runAntigravityNative = async (
           ? null
           : readLastStepAfter(home, turnSessionId, stepWatermark),
       );
-      if (
-        failure !== undefined &&
-        (failure.broken === true || stop === "refusal" || !turn.sawOutput())
-      ) {
+      if (failure !== undefined) {
         // Failing the stream drops the conversation (never parked), so a
         // broken session is never reattached: the next request starts a
         // fresh, fully seeded one.
