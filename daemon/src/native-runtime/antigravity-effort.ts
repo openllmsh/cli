@@ -77,7 +77,10 @@ export const antigravityPinnedFromAvailable = (
   const prefix = `${stem}-`;
   const levels = available.flatMap((id) => {
     const level = id.startsWith(prefix) ? id.slice(prefix.length) : "";
-    return level in RANK && level !== "none" && level !== "minimal" && level !== "max"
+    return level in RANK &&
+      level !== "none" &&
+      level !== "minimal" &&
+      level !== "max"
       ? [level]
       : [];
   });

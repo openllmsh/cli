@@ -1661,9 +1661,9 @@ const antigravityPinOf = (params: TNativeServeParams): TAntigravityPin => {
   const stem = params.providerModelId;
   const effort = params.canonical.reasoning_effort ?? null;
   const entry = lookupCatalogEntry(`antigravity/${stem}`);
-  const levels = entry?.settings?.min_reasoning_effort?.options.map(
-    (option) => option.value,
-  );
+  // Only a card the catalog marks as served per effort gets a suffix; every
+  // other reasoning card still offers effort settings but is pinned verbatim.
+  const levels = entry?.served_efforts;
   const id = antigravityPinnedId(stem, effort, levels);
   return {
     id,
