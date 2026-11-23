@@ -58,6 +58,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import type { TChatCompletionChunk } from "@openllmsh/sdk/protocol";
+import { AGY_MIN_VERSION, versionAtLeast } from "../agy-version";
 import { agyCliSignedIn } from "../delegation/antigravity-cli";
 import type { TStoreRead } from "../delegation/util";
 import { ensureKeychainReady } from "../delegation/util";
@@ -71,6 +72,11 @@ import { classifyAgyMessage, prepareAgySpawn } from "./antigravity-common";
 import type { TAntigravityReply } from "./antigravity-conversation";
 import { antigravitySpawnEnv } from "./antigravity-env";
 import { confineAgyArgv } from "./antigravity-seatbelt";
+import {
+  classifyTurnOutcome,
+  readLastStepAfter,
+  readStepWatermark,
+} from "./antigravity-turn-outcome";
 import { AcpClient, AcpRpcError, createAcpTurnState } from "./cursor-acp";
 import type { TCursorMcpServer } from "./cursor-mcp-server";
 import { startCursorMcpServer } from "./cursor-mcp-server";
@@ -111,6 +117,17 @@ const isAntigravityAgent = (result: unknown): boolean => {
   );
 };
 
+/** `initialize`'s own version, judged by the one rule the binary gate uses
+ *  ({@link AGY_MIN_VERSION}); an agent that reports none is not judged. */
+export const agyAcpVersionUsable = (init: unknown): boolean => {
+  const version = (
+    init as { readonly agentInfo?: { readonly version?: unknown } } | null
+  )?.agentInfo?.version;
+  return (
+    typeof version !== "string" || versionAtLeast(version, AGY_MIN_VERSION)
+  );
+};
+
 const ANTIGRAVITY_INIT_PARAMS = {
   protocolVersion: 2,
   clientCapabilities: {
@@ -126,6 +143,9 @@ export const classifyAntigravityFailure = (
   error: unknown,
 ): TAntigravityFailure => {
   if (error instanceof AcpRpcError) {
+    if (/update agy/.test(error.message)) {
+      return { reason: `antigravity: ${error.message}` };
+    }
     // Account eligibility, plans, quota, rate (`antigravity-common.ts`) —
     // the same classes the CLI's failures get. Sign-in TEXT is left to the
     // RPC shape below (-32000, an authenticate timeout).
@@ -1394,6 +1414,13 @@ export const runAntigravityNative = async (
         message: "agent is not the expected Google Antigravity release",
       });
     }
+    if (!agyAcpVersionUsable(init)) {
+      throw new AcpRpcError({
+        method: "initialize",
+        kind: "rpc",
+        message: "agy is too old for Antigravity ACP — update agy",
+      });
+    }
     created.reattach = reattachModeOf(init);
     // Signed out (or in) since the gate: never let `authenticate` start a
     // browser sign-in on this host for an account that is gone.
@@ -1632,6 +1659,9 @@ export const runAntigravityNative = async (
   });
   handler.current = onToolCall;
   promptSent = true;
+  // Only steps this prompt adds are judged (agy's own per-session log).
+  const turnSessionId = sessionId;
+  const stepWatermark = readStepWatermark(home, turnSessionId);
   const prompt = owned.client.request(
     "session/prompt",
     { sessionId, prompt: acpPromptBlocks(promptText, promptImages) },
@@ -1648,13 +1678,31 @@ export const runAntigravityNative = async (
         ?.stopReason;
       if (stop === "cancelled") {
         failStream(new Error("antigravity turn cancelled"));
-      } else if (
+        return;
+      }
+      if (
         stop !== "end_turn" &&
         stop !== "max_tokens" &&
         stop !== "max_turn_requests" &&
         stop !== "refusal"
       ) {
         failStream(new Error("antigravity turn returned an invalid terminal"));
+        return;
+      }
+      // agy reports an upstream failure as chat text + `end_turn`, and quota
+      // as `refusal`: its own session log says which. Best effort.
+      const failure = classifyTurnOutcome(
+        stop,
+        readLastStepAfter(home, turnSessionId, stepWatermark),
+      );
+      if (
+        failure !== undefined &&
+        (failure.broken === true || stop === "refusal" || !turn.sawOutput())
+      ) {
+        // Failing the stream drops the conversation (never parked), so a
+        // broken session is never reattached: the next request starts a
+        // fresh, fully seeded one.
+        failStream(new Error(failure.reason), failure.cooldown);
       } else if (!turn.sawOutput()) {
         failStream(new Error("antigravity turn ended before producing output"));
       } else {
