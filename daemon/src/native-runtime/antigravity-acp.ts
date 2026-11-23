@@ -70,6 +70,7 @@ import { ensureAntigravityCliSettings } from "./antigravity-cli-settings";
 import type { TAntigravityFailure } from "./antigravity-common";
 import { classifyAgyMessage, prepareAgySpawn } from "./antigravity-common";
 import type { TAntigravityReply } from "./antigravity-conversation";
+import { antigravityPinnedFromAvailable } from "./antigravity-effort";
 import { antigravitySpawnEnv } from "./antigravity-env";
 import { confineAgyArgv } from "./antigravity-seatbelt";
 import {
@@ -321,9 +322,15 @@ const ensureAntigravityModel = async (
   /** A reattached session already runs the model its conversation key names;
    *  a result that does not say which is not a reason to re-pin. */
   unreportedIsCurrent = false,
+  /** The request's effort: with no catalog levels, a stem `agy` lists only
+   *  as `<stem>-<effort>` ids is resolved to one of them. */
+  effort: string | null = null,
 ): Promise<void> => {
-  const requested = providerModelId.trim();
   const state = antigravityModelState(sessionResult);
+  const stem = providerModelId.trim();
+  const requested = state.available.includes(stem)
+    ? stem
+    : (antigravityPinnedFromAvailable(stem, effort, state.available) ?? stem);
   if (state.current === requested) return;
   if (unreportedIsCurrent && state.current === null) return;
   if (state.available.length > 0 && !state.available.includes(requested)) {
@@ -878,6 +885,8 @@ export type TAntigravityNativeParams = {
    *  an account change during setup or the turn retires the process. */
   readonly currentSignInEpoch: () => number;
   readonly providerModelId: string;
+  /** The request's thinking effort (see {@link ensureAntigravityModel}). */
+  readonly effort?: string | null;
   readonly systemText: string | null;
   readonly userText: string;
   readonly images?: ReadonlyArray<TCursorImage>;
@@ -1504,6 +1513,7 @@ export const runAntigravityNative = async (
         params.providerModelId,
         result,
         true,
+        params.effort ?? null,
       );
       return true;
     } catch (error) {
@@ -1634,6 +1644,8 @@ export const runAntigravityNative = async (
         sid,
         params.providerModelId,
         opened,
+        false,
+        params.effort ?? null,
       );
     }
     if (params.signal.aborted) {

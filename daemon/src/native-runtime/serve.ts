@@ -65,6 +65,7 @@ import {
   runAntigravityNative,
 } from "./antigravity-acp";
 import { antigravityConversationPlan } from "./antigravity-conversation";
+import { antigravityPinnedId } from "./antigravity-effort";
 import type { TAntigravityHeadlessParams } from "./antigravity-headless";
 import {
   antigravityHeadlessEpoch,
@@ -1529,6 +1530,7 @@ const serveAntigravityCli = async (
   agyBin: string,
   env: Record<string, string>,
   route: Extract<TAntigravityRoute, { kind: "cli" }>,
+  pin: TAntigravityPin,
 ): Promise<TNativeServeOutcome> => {
   const { text } = route;
   // Conversations belong to one account slot: its isolated HOME is part of
@@ -1537,7 +1539,7 @@ const serveAntigravityCli = async (
   // one, so nothing continues (or commits into) the previous account's.
   const epoch = antigravityHeadlessEpoch();
   const keyFor = (generation: number): string =>
-    `${params.providerModelId}\u0000${env.HOME ?? ""}\u0000${generation}`;
+    `${pin.keyModel}\u0000${env.HOME ?? ""}\u0000${generation}`;
   const conversationKey = keyFor(epoch);
   /** The generation the process that served this turn started under (a
    *  change during setup starts it under the new one). */
@@ -1582,7 +1584,7 @@ const serveAntigravityCli = async (
   const run = await runAntigravityHeadless({
     bin: agyBin,
     env,
-    providerModelId: params.providerModelId,
+    providerModelId: pin.id,
     systemText: text.systemText,
     userText: lease.sessionId !== null ? conversation.deltaText : seed,
     seedText: seed,
@@ -1638,6 +1640,38 @@ const serveAntigravityCli = async (
   );
 };
 
+/** What a hop pins on `agy`: the exact id, the effort it was resolved from,
+ *  and the model part of the conversation key. */
+type TAntigravityPin = {
+  readonly id: string;
+  /** The request's effort, for resolving an id the catalog gave no levels for. */
+  readonly effort: string | null;
+  readonly keyModel: string;
+};
+
+/**
+ * The catalog card is one model family; `agy` serves it per thinking effort.
+ * The pinned id comes from the request's effort (the user's floor already
+ * applied) clamped to the card's served levels. A card with no levels is an
+ * id `agy` serves verbatim. With no card at all, the ACP runner resolves the
+ * id from `agy`'s own list, so the effort is part of the conversation key
+ * either way: changing it never keeps the old pin.
+ */
+const antigravityPinOf = (params: TNativeServeParams): TAntigravityPin => {
+  const stem = params.providerModelId;
+  const effort = params.canonical.reasoning_effort ?? null;
+  const entry = lookupCatalogEntry(`antigravity/${stem}`);
+  const levels = entry?.settings?.min_reasoning_effort?.options.map(
+    (option) => option.value,
+  );
+  const id = antigravityPinnedId(stem, effort, levels);
+  return {
+    id,
+    effort,
+    keyModel: entry === null && effort !== null ? `${stem}@${effort}` : id,
+  };
+};
+
 /**
  * Antigravity serve path. `agy` is the single source of truth for sign-in,
  * and the transport is the hop's selected METHOD, never a failure:
@@ -1687,6 +1721,7 @@ const serveAntigravityHop = async (
     overrides,
   );
   if (route.kind === "declined") return { declined: route.reason };
+  const pin = antigravityPinOf(params);
   const env = overrides?.env ?? cliEnv("antigravity");
   const agyBin =
     overrides === undefined
@@ -1698,14 +1733,14 @@ const serveAntigravityHop = async (
     return { declined: "antigravity: agy CLI not installed" };
   }
   if (route.kind === "cli") {
-    return serveAntigravityCli(params, overrides, agyBin, env, route);
+    return serveAntigravityCli(params, overrides, agyBin, env, route, pin);
   }
   const epoch = antigravityHeadlessEpoch();
   // The conversation continues its own ACP session with only the new turn
   // (`antigravity-conversation.ts`); a history with no match starts a fresh,
   // seeded one. The lease serialises requests of the same conversation.
   const plan = antigravityConversationPlan(params.canonical, {
-    model: params.providerModelId,
+    model: pin.keyModel,
     home: env.HOME ?? "",
     epoch,
     tools: route.req.tools,
@@ -1718,7 +1753,8 @@ const serveAntigravityHop = async (
     env,
     signInEpoch: epoch,
     currentSignInEpoch: antigravityHeadlessEpoch,
-    providerModelId: params.providerModelId,
+    providerModelId: pin.id,
+    effort: pin.effort,
     systemText: route.req.systemText,
     userText: route.req.promptText,
     images: route.req.images,
