@@ -71,7 +71,11 @@ import {
   resolveAntigravityCli,
   runAntigravityHeadless,
 } from "./antigravity-headless";
-import { agyAcpImageRefusal, agyImageView } from "./antigravity-request";
+import {
+  agyAcpImageRefusal,
+  agyImageView,
+  inlineRemoteImages,
+} from "./antigravity-request";
 import { agyFileReadsConfined } from "./antigravity-seatbelt";
 import { bridgeRequestCaptureReadiness } from "./bridge-request-capture-readiness";
 import { runClaudeNative } from "./claude-native";
@@ -167,6 +171,8 @@ export type TNativeServeOverrides = {
   /** Whether `agy`'s reads are kernel-confined, gating image input
    *  (default `agyFileReadsConfined()`). */
   readonly imageReadsConfined?: boolean;
+  /** Fetch used to inline linked images for Antigravity (tests). */
+  readonly fetchImage?: typeof fetch;
   /** Injected headless spawn gates (keychain, argv, confinement wrap);
    *  omitted, the real ones run. */
   readonly headlessHooks?: Pick<
@@ -1649,17 +1655,26 @@ const serveAntigravityCli = async (
 };
 
 const serveAntigravityHop = async (
-  params: TNativeServeParams,
+  incoming: TNativeServeParams,
   overrides?: TNativeServeOverrides,
 ): Promise<TNativeServeOutcome> => {
   const explicitDispatch = resolveExplicitDispatch(
     "antigravity",
-    params.executionSelection,
-    { hasClientTools: hasClientTools(params.canonical) },
+    incoming.executionSelection,
+    { hasClientTools: hasClientTools(incoming.canonical) },
   );
   if (explicitDispatch !== null && !explicitDispatch.ok) {
     return { declined: explicitDispatch.declined };
   }
+  // `agy` only takes image bytes: a linked image (browser chat sends its
+  // upload's https link) is fetched and inlined first; everything below
+  // serves the inlined request.
+  const canonical = await inlineRemoteImages(
+    incoming.canonical,
+    overrides?.fetchImage,
+  );
+  const params =
+    canonical === incoming.canonical ? incoming : { ...incoming, canonical };
   const route = routeAntigravity(
     params,
     explicitDispatch?.variant ?? "acp",
