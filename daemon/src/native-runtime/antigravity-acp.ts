@@ -53,7 +53,7 @@
  */
 
 import { createHash, randomUUID } from "node:crypto";
-import { existsSync } from "node:fs";
+import { existsSync, rmSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -178,9 +178,10 @@ const declineFrom = (
  * REJECTED (prefer `reject_once`, else `reject_always`, else cancel) — with
  * one exception: the agent's pre-tool hook also asks before dispatching to
  * OUR loopback MCP server, and rejecting that is what made every caller tool
- * call fail. Such an ask is allowed ONCE when its structured `_meta` names our
- * server AND a tool registered for this turn (`allowedMcpTools`); the
- * model-controlled title/rawInput are never consulted. Everything else is
+ * call fail. Such an ask is allowed ONCE when the agent's own tool id
+ * (`toolCall.name`, `mcp_<server>_<tool>` — the same id its transcript records)
+ * is EXACTLY one of this turn's registered tools (`allowedMcpTools`, the
+ * qualified names); the model-controlled title/rawInput are never consulted. Everything else is
  * refused (fs/terminal capabilities are advertised off).
  */
 export const handleAntigravityServerRequest = (
@@ -197,21 +198,10 @@ export const handleAntigravityServerRequest = (
       }>;
     } | null;
     const options = Array.isArray(p?.options) ? p.options : [];
-    const meta = (p?.toolCall as { readonly _meta?: unknown } | null)?._meta as
-      | {
-          readonly is_mcp_tool_call?: unknown;
-          readonly mcp?: {
-            readonly server?: unknown;
-            readonly tool?: unknown;
-          } | null;
-        }
-      | null
-      | undefined;
-    const ours =
-      meta?.is_mcp_tool_call === true &&
-      meta.mcp?.server === CLIENT_TOOLS_MCP_SERVER &&
-      typeof meta.mcp.tool === "string" &&
-      allowedMcpTools.has(meta.mcp.tool);
+    const ours = isOurMcpToolName(
+      (p?.toolCall as { readonly name?: unknown } | null)?.name,
+      allowedMcpTools,
+    );
     const pick = ours
       ? options.find((o) => o.kind === "allow_once")
       : (options.find((o) => o.kind === "reject_once") ??
@@ -308,10 +298,14 @@ const ensureAntigravityModel = async (
   sessionId: string,
   providerModelId: string,
   sessionResult: unknown,
+  /** A reattached session already runs the model its conversation key names;
+   *  a result that does not say which is not a reason to re-pin. */
+  unreportedIsCurrent = false,
 ): Promise<void> => {
   const requested = providerModelId.trim();
   const state = antigravityModelState(sessionResult);
   if (state.current === requested) return;
+  if (unreportedIsCurrent && state.current === null) return;
   if (state.available.length > 0 && !state.available.includes(requested)) {
     throw new AcpRpcError({
       method: "session/set_config_option",
@@ -431,29 +425,31 @@ export const ANTIGRAVITY_ACP_NO_BUILTIN_TOOLS =
 /** MCP server name we register for client tools (session/new). */
 const CLIENT_TOOLS_MCP_SERVER = "openllm-client-tools";
 
-/** Our loopback MCP tool calls surface as tool_call updates too. The agent
- *  tags MCP dispatches with a structured `_meta` bag
- *  (`{ is_mcp_tool_call: true, mcp: { server } }`, `agy acp`
- *  `unwrap_mcp_tool_call`); match that exactly and fail closed otherwise, so
- *  a model-controlled title/rawInput can never pass the native-tool guard. */
-export const isOurMcpToolUpdate = (update: unknown): boolean => {
-  const meta = (update as { readonly _meta?: unknown } | null)?._meta as
-    | {
-        readonly is_mcp_tool_call?: unknown;
-        readonly mcp?: { readonly server?: unknown } | null;
-      }
-    | null
-    | undefined;
-  return (
-    meta?.is_mcp_tool_call === true &&
-    meta.mcp?.server === CLIENT_TOOLS_MCP_SERVER
-  );
-};
+/** The id `agy` gives an MCP tool: `mcp_<server>_<tool>` (agy 1.5.14 carries
+ *  no `_meta` tag on these updates; the id is what its transcript records). */
+export const antigravityMcpToolName = (tool: string): string =>
+  `mcp_${CLIENT_TOOLS_MCP_SERVER}_${tool}`;
 
-/** Tool-call ids the agent tagged as OUR MCP dispatch on their `tool_call`
- *  start. Later `tool_call_update` frames mostly omit `_meta`, so they are
- *  admitted only by an id already proven ours — never by content. */
-export const createMcpCallTracker = (): {
+/** The qualified ids of a turn's registered caller tools. */
+export const antigravityMcpToolNames = (
+  tools: ReadonlyArray<{ readonly name: string }>,
+): ReadonlySet<string> =>
+  new Set(tools.map((tool) => antigravityMcpToolName(tool.name)));
+
+/** Exact membership only — never a prefix or substring match, so a built-in
+ *  (`run_command`, `read_file`, …) can never pass for a caller tool. */
+const isOurMcpToolName = (
+  name: unknown,
+  allowed: ReadonlySet<string>,
+): boolean => typeof name === "string" && allowed.has(name);
+
+/** Tool-call ids proven to be OUR MCP dispatch: a `tool_call` /
+ *  `tool_call_update` whose `name` is exactly a registered qualified tool.
+ *  Later frames of the same call mostly repeat the name but are admitted by
+ *  the proven id too — never by title or input. */
+export const createMcpCallTracker = (
+  allowed: ReadonlySet<string>,
+): {
   readonly admits: (update: unknown) => boolean;
 } => {
   const ours = new Set<string>();
@@ -462,9 +458,10 @@ export const createMcpCallTracker = (): {
       const u = update as {
         readonly sessionUpdate?: unknown;
         readonly toolCallId?: unknown;
+        readonly name?: unknown;
       } | null;
       const id = typeof u?.toolCallId === "string" ? u.toolCallId : null;
-      if (isOurMcpToolUpdate(update)) {
+      if (isOurMcpToolName(u?.name, allowed)) {
         if (id !== null) ours.add(id);
         return true;
       }
@@ -548,6 +545,9 @@ type TConversation = {
   agent: TWarmAgent | null;
   /** A turn is running on it. */
   busy: boolean;
+  /** Set while a caller-tool handoff's cancelled prompt is still settling:
+   *  the follow-up awaits it instead of reseeding a fresh session. */
+  settled: Promise<void> | null;
   lastUsed: number;
 };
 
@@ -577,6 +577,20 @@ type TWarmAgent = {
 };
 
 const idlePool: TWarmAgent[] = [];
+/** True once the process is exiting: nothing async can finish then, so
+ *  directories are removed synchronously. */
+let exiting = false;
+const removeDir = (path: string): void => {
+  if (exiting) {
+    try {
+      rmSync(path, { recursive: true, force: true });
+    } catch {
+      // best effort
+    }
+    return;
+  }
+  void rm(path, { recursive: true, force: true }).catch(() => undefined);
+};
 /** Persistent sessions by id. The lease store below maps a conversation's
  *  content key to this id. */
 const conversations = new Map<string, TConversation>();
@@ -635,9 +649,13 @@ const retireWarmAgent = (agent: TWarmAgent, sessionId: string | null): void => {
   agent.route.allowedMcpTools = new Set();
   if (sessionId !== null) agent.client.cancelAndDispose(sessionId);
   else agent.client.dispose();
+  if (exiting) {
+    removeDir(agent.procCwd);
+    return;
+  }
   void agent.client
     .whenExited()
-    .then(() => rm(agent.procCwd, { recursive: true, force: true }))
+    .then(() => removeDir(agent.procCwd))
     .catch(() => undefined);
 };
 
@@ -656,7 +674,38 @@ const dropConversation = (conv: TConversation): void => {
     retireWarmAgent(agent, null);
   }
   conv.mcp?.stop();
-  void rm(conv.cwd, { recursive: true, force: true });
+  removeDir(conv.cwd);
+};
+
+let sweepTimer: ReturnType<typeof setInterval> | undefined;
+const ANTIGRAVITY_CONVERSATION_SWEEP_MS = 60_000;
+
+const installExitHook = (): void => {
+  if (exitHookInstalled) return;
+  exitHookInstalled = true;
+  process.on("exit", () => {
+    exiting = true;
+    disposeAntigravityWarmPool();
+    for (const conv of [...conversations.values()]) dropConversation(conv);
+  });
+};
+
+/** Register a conversation and keep an unref'd sweep running while any
+ *  exists, so an idle one's MCP port and cwd never outlive the TTL waiting
+ *  for another request. */
+const trackConversation = (conv: TConversation): void => {
+  conversations.set(conv.id, conv);
+  installExitHook();
+  if (sweepTimer === undefined) {
+    sweepTimer = setInterval(() => {
+      sweepConversations();
+      if (conversations.size === 0 && sweepTimer !== undefined) {
+        clearInterval(sweepTimer);
+        sweepTimer = undefined;
+      }
+    }, ANTIGRAVITY_CONVERSATION_SWEEP_MS);
+    (sweepTimer as { unref?: () => void }).unref?.();
+  }
 };
 
 /** Drop conversations idle past the TTL, then the oldest beyond the cap. */
@@ -733,10 +782,7 @@ const releaseWarmAgent = (agent: TWarmAgent, idleTtlMs: number): void => {
     retireWarmAgent(agent, null);
     return;
   }
-  if (!exitHookInstalled) {
-    exitHookInstalled = true;
-    process.on("exit", () => disposeAntigravityWarmPool());
-  }
+  installExitHook();
   idlePool.push(agent);
   agent.idleTimer = setTimeout(() => {
     removeFromIdlePool(agent);
@@ -959,6 +1005,13 @@ export const runAntigravityNative = async (
   const leasedId = cv?.lease.sessionId ?? null;
   let prior: TConversation | null =
     leasedId !== null ? (conversations.get(leasedId) ?? null) : null;
+  // A caller-tool handoff commits its key at once, so this follow-up can
+  // arrive while the cancelled prompt is still settling: wait for it (the
+  // session is valid then) instead of reseeding a fresh one.
+  if (prior !== null && prior.busy && prior.settled !== null) {
+    await prior.settled;
+    prior = leasedId !== null ? (conversations.get(leasedId) ?? null) : null;
+  }
   if (
     prior !== null &&
     (prior.busy ||
@@ -1002,10 +1055,8 @@ export const runAntigravityNative = async (
   let cleaned = false;
   let idleTimer: ReturnType<typeof setTimeout> | undefined;
   let rearmIdleWatchdog: (() => void) | null = null;
-  const ourMcpCalls = createMcpCallTracker();
-  const allowedMcpTools: ReadonlySet<string> = new Set(
-    (params.tools ?? []).map((tool) => tool.name),
-  );
+  const allowedMcpTools = antigravityMcpToolNames(params.tools ?? []);
+  const ourMcpCalls = createMcpCallTracker(allowedMcpTools);
   /** The prompt reached the agent: the session now holds this turn. */
   let promptSent = false;
   /** A fresh session replaced the conversation's one (it could not be
@@ -1041,7 +1092,7 @@ export const runAntigravityNative = async (
       }
       ownMcp?.stop();
       ownMcp = null;
-      void rm(cwd, { recursive: true, force: true });
+      removeDir(cwd);
       return;
     }
     const held = conv;
@@ -1096,6 +1147,23 @@ export const runAntigravityNative = async (
       // and wait for the agent to settle it: only then is the session idle
       // and ready for the tool result.
       owned.client.notify("session/cancel", { sessionId });
+      const held = conv;
+      let markSettled: () => void = () => undefined;
+      if (held !== null && cv !== undefined) {
+        // Calls the agent is still holding on our MCP server end now.
+        held.mcp?.releaseHeld();
+        // The client's tool-result follow-up can arrive before the cancelled
+        // prompt settles: publish the next key NOW (and let that request
+        // wait on `settled`) rather than after the settle.
+        held.sessionId = sessionId;
+        held.settled = new Promise<void>((resolve) => {
+          markSettled = resolve;
+        });
+        cv.lease.commit(
+          cv.nextKey({ text: replyText, toolCalls: replyCalls }),
+          held.id,
+        );
+      }
       const budget = params.cancelSettleMs ?? 10_000;
       let timer: ReturnType<typeof setTimeout> | undefined;
       void Promise.race([
@@ -1105,7 +1173,12 @@ export const runAntigravityNative = async (
         }),
       ]).then((settled) => {
         clearTimeout(timer);
-        finish(settled ? "park" : "cancel");
+        try {
+          finish(settled ? "park" : "cancel");
+        } finally {
+          if (held !== null) held.settled = null;
+          markSettled();
+        }
       });
       return;
     }
@@ -1153,7 +1226,9 @@ export const runAntigravityNative = async (
       | undefined;
     // Nothing before the session is attached counts: a `session/load`
     // replays the whole history here, and none of it is this turn's output.
-    if (sessionId === null || notif?.sessionId !== sessionId) return;
+    if (!promptSent || sessionId === null || notif?.sessionId !== sessionId) {
+      return;
+    }
     rearmIdleWatchdog?.();
     const update = notif.update as {
       readonly sessionUpdate?: unknown;
@@ -1249,7 +1324,7 @@ export const runAntigravityNative = async (
         },
       );
     } catch (error) {
-      void rm(procCwd, { recursive: true, force: true });
+      removeDir(procCwd);
       throw error;
     }
     const created: TWarmAgent = {
@@ -1352,6 +1427,7 @@ export const runAntigravityNative = async (
         existing.sessionId,
         params.providerModelId,
         result,
+        true,
       );
       return true;
     } catch (error) {
@@ -1410,6 +1486,8 @@ export const runAntigravityNative = async (
       const server = startCursorMcpServer({
         tools: params.tools ?? [],
         onToolCall: (name, args) => handler.current?.(name, args),
+        // A persistent session must never record a fake tool success.
+        holdToolCalls: cv !== undefined,
       });
       if (cv !== undefined) {
         conv = {
@@ -1424,9 +1502,10 @@ export const runAntigravityNative = async (
           epoch: warmEpoch,
           agent: null,
           busy: true,
+          settled: null,
           lastUsed: Date.now(),
         };
-        conversations.set(conv.id, conv);
+        trackConversation(conv);
       } else {
         ownMcp = server;
       }
@@ -1444,9 +1523,10 @@ export const runAntigravityNative = async (
         epoch: warmEpoch,
         agent: null,
         busy: true,
+        settled: null,
         lastUsed: Date.now(),
       };
-      conversations.set(conv.id, conv);
+      trackConversation(conv);
     }
     if (prior !== null) attached = await attachExisting(prior);
     let opened: unknown = null;
@@ -1541,6 +1621,10 @@ export const runAntigravityNative = async (
         const exact = exactUsageOf(result);
         if (exact === null) feedContextUsage();
         const terminal = turn.finish(stop);
+        for (const chunk of terminal) {
+          const content = chunk.choices[0]?.delta.content;
+          if (typeof content === "string") replyText += content;
+        }
         endWith(
           exact === null
             ? terminal

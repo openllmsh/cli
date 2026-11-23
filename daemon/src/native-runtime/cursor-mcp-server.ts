@@ -29,6 +29,9 @@ export type TCursorMcpServer = {
     readonly value: string;
   }>;
   readonly stop: () => void;
+  /** End every held `tools/call` now (as a cancelled error) without
+   *  stopping the server — the persistent session stays reachable. */
+  readonly releaseHeld: () => void;
 };
 
 type TRpcRequest = {
@@ -60,11 +63,26 @@ export const startCursorMcpServer = (params: {
   readonly onRequest?: (
     method: "initialize" | "tools/list" | "tools/call",
   ) => void;
+  /**
+   * Persistent-session mode: a `tools/call` is NEVER answered with a fake
+   * success (the agent would record it, and the client's real tool result
+   * would then be a second result for one call). The response is held until
+   * the agent drops the request (its prompt was cancelled) or the server
+   * stops, then answered as a cancelled error. Every call is held, not only
+   * the first.
+   */
+  readonly holdToolCalls?: boolean;
 }): TCursorMcpServer => {
   const token = randomUUID();
+  const held = new Set<() => void>();
+  const releaseHeld = (): void => {
+    for (const release of held) release();
+    held.clear();
+  };
   const server = Bun.serve({
     hostname: "127.0.0.1",
     port: 0,
+    idleTimeout: 0,
     fetch: async (req: Request): Promise<Response> => {
       if (req.headers.get("authorization") !== `Bearer ${token}`) {
         return new Response("unauthorized", { status: 401 });
@@ -117,6 +135,22 @@ export const startCursorMcpServer = (params: {
           if (typeof p?.name !== "string") {
             return rpcError(id, -32602, "tools/call requires a name");
           }
+          if (params.holdToolCalls === true) {
+            // Registered BEFORE the callback: it may end the turn (and
+            // release every held call) synchronously.
+            const hold = new Promise<void>((resolve) => {
+              held.add(resolve);
+              req.signal.addEventListener("abort", () => resolve(), {
+                once: true,
+              });
+            });
+            params.onToolCall(p.name, p.arguments ?? {});
+            await hold;
+            return rpcResult(id, {
+              content: [{ type: "text", text: "Cancelled." }],
+              isError: true,
+            });
+          }
           params.onToolCall(p.name, p.arguments ?? {});
           // The turn is being finished with OpenAI tool_calls semantics; the
           // agent session is cancelled by the caller. Answer anyway so a
@@ -141,7 +175,9 @@ export const startCursorMcpServer = (params: {
   return {
     url: `http://127.0.0.1:${server.port}/mcp`,
     headers: [{ name: "Authorization", value: `Bearer ${token}` }],
+    releaseHeld,
     stop: () => {
+      releaseHeld();
       server.stop(true);
     },
   };

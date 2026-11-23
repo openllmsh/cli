@@ -140,13 +140,15 @@ export const antigravityConversationPlan = (
       .slice(0, upTo)
       .filter((m) => m.role !== "system")
       .map(normalizedMessage);
-  const deltaMessages = messages
-    .slice(lastAssistant + 1)
-    .filter((m) => m.role !== "system");
+  const afterAssistant = messages.slice(lastAssistant + 1);
+  // A system/developer message after the last assistant turn cannot be folded
+  // into the session's delta: the history diverged, so start fresh.
+  const lateSystem = afterAssistant.some((m) => m.role === "system");
+  const deltaMessages = afterAssistant.filter((m) => m.role !== "system");
   const delta = cursorRequestOf({ ...canonical, messages: deltaMessages });
   return {
     continueKey:
-      lastAssistant >= 0 && deltaMessages.length > 0
+      lastAssistant >= 0 && deltaMessages.length > 0 && !lateSystem
         ? keyOf(
             identity,
             systemOf(lastAssistant + 1),
