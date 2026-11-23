@@ -383,6 +383,8 @@ export type TNativeRunResult =
       readonly kind: "declined";
       readonly reason: string;
       readonly cooldownReason?: TCooldownReason;
+      /** Absolute time the vendor says the cooldown lifts (a quota reset). */
+      readonly recoverAtMs?: number;
       /**
        * Capture send ownership when a bridge-capture attempt already touched
        * upstream. `accepted` / `uncertain` MUST be terminal for the hop —

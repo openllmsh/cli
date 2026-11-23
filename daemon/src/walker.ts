@@ -3536,6 +3536,7 @@ const walkPlan = async (
       methods.includes("handrolled") && wire !== undefined;
     let nativeDecline: string | null = null;
     let nativeCooldownReason: TCooldownReason | undefined;
+    let nativeRecoverAtMs: number | undefined;
     let handrolledRetry: THopRetry | null = null;
 
     if (methods.includes("native") && isNativeRuntimeProvider(hop.provider)) {
@@ -3670,6 +3671,7 @@ const walkPlan = async (
       }
       nativeDecline = `native hop ${hop.modelId} declined: ${native.declined}`;
       nativeCooldownReason = native.cooldownReason;
+      nativeRecoverAtMs = native.recoverAtMs;
       // Capture already owned (or may have owned) the upstream send — never
       // handroll, fleet, or advance to another provider for the same turn.
       const captureOwnership = native.captureOwnership;
@@ -3680,7 +3682,13 @@ const walkPlan = async (
             servedLocally: true,
           };
         }
-        addHopFailure(hop, nativeDecline, undefined, nativeCooldownReason);
+        addHopFailure(
+          hop,
+          nativeDecline,
+          undefined,
+          nativeCooldownReason,
+          nativeRecoverAtMs,
+        );
         lastError = nativeDecline;
         return {
           response: errorJson(
@@ -3707,7 +3715,13 @@ const walkPlan = async (
           };
         }
         lastError = nativeDecline;
-        addHopFailure(hop, nativeDecline, undefined, nativeCooldownReason);
+        addHopFailure(
+          hop,
+          nativeDecline,
+          undefined,
+          nativeCooldownReason,
+          nativeRecoverAtMs,
+        );
         return HOP_CONTINUE;
       }
       if (hasHandrolledFallback) {
@@ -3882,7 +3896,13 @@ const walkPlan = async (
         ? `${hop.provider} hop ${hop.modelId} has no local transport on this box`
         : (lastError ??
           `${hop.provider} hop ${hop.modelId} could not be served locally`));
-    addHopFailure(hop, lastError, undefined, nativeCooldownReason);
+    addHopFailure(
+      hop,
+      lastError,
+      undefined,
+      nativeCooldownReason,
+      nativeRecoverAtMs,
+    );
     return HOP_CONTINUE;
   };
   const forwardCloudHop = async (

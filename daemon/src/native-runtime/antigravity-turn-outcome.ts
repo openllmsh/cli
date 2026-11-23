@@ -89,26 +89,41 @@ const openReadOnly = (file: string): Database | null => {
     // A regular file only: never follow a link out of the profile.
     if (!existsSync(file) || !lstatSync(file).isFile()) return null;
     const db = new Database(file, { readonly: true });
-    db.exec("PRAGMA busy_timeout = 100");
+    db.exec("PRAGMA busy_timeout = 50");
     return db;
   } catch {
     return null;
   }
 };
 
-/** The highest step index now in the session log (-1 for none or unreadable):
- *  taken before a prompt so only that prompt's steps are judged. */
-export const readStepWatermark = (home: string, sessionId: string): number => {
+/**
+ * The highest step index now in the session log, taken before a prompt so
+ * only that prompt's steps are judged. -1 when the session has no log yet
+ * (every step is then this prompt's); `undefined` when the log exists but
+ * could not be read — the caller must then skip step-log judging, or a stale
+ * error from an earlier turn would be blamed on this prompt.
+ */
+export const readStepWatermark = (
+  home: string,
+  sessionId: string,
+): number | undefined => {
   const file = conversationDb(home, sessionId);
-  const db = file === null ? null : openReadOnly(file);
-  if (db === null) return -1;
+  if (file === null) return undefined;
+  if (!existsSync(file)) return -1;
+  const db = openReadOnly(file);
+  if (db === null) return undefined;
   try {
     const row = db.query("SELECT max(idx) AS idx FROM steps").get() as {
       idx?: unknown;
     } | null;
-    return typeof row?.idx === "number" ? row.idx : -1;
+    if (row === null) return -1;
+    return typeof row.idx === "number"
+      ? row.idx
+      : row.idx === null
+        ? -1
+        : undefined;
   } catch {
-    return -1;
+    return undefined;
   } finally {
     db.close();
   }
@@ -162,12 +177,20 @@ export type TTurnFailure = TAntigravityFailure & {
   readonly broken?: boolean;
   /** Safe to retry (a transient upstream error). */
   readonly retryable?: boolean;
+  /** Absolute time the quota / rate limit lifts, when agy's log names it. */
+  readonly recoverAtMs?: number;
 };
 
-const withReset = (reason: string, resetAt: number | null): string =>
-  resetAt === null
-    ? reason
-    : `${reason} (resets ${new Date(resetAt).toISOString()})`;
+/** A short, control-free excerpt of vendor text — never the whole message. */
+const excerpt = (text: string): string =>
+  Array.from(
+    text
+      .replace(/\p{Cc}+/gu, " ")
+      .replace(/\s+/g, " ")
+      .trim(),
+  )
+    .slice(0, 80)
+    .join("");
 
 /**
  * Classify a turn from its stop reason and `agy`'s last step. `undefined`
@@ -182,14 +205,18 @@ export const classifyTurnOutcome = (
   const text = step?.type === ERROR_STEP_TYPE ? step.text : undefined;
   if (text === undefined && stopReason !== "refusal") return undefined;
   const body = text ?? "";
-  if (stopReason === "refusal" || QUOTA_EXHAUSTED_RE.test(body)) {
+  const resetAt = quotaResetAtMs(body, now);
+  const at = resetAt === null ? {} : { recoverAtMs: resetAt };
+  const byMessage = classifyAgyMessage(body);
+  if (
+    QUOTA_EXHAUSTED_RE.test(body) ||
+    byMessage?.cooldown === "quota_exhausted"
+  ) {
     return {
-      reason: withReset(
-        "antigravity: quota exhausted",
-        quotaResetAtMs(body, now),
-      ),
+      reason: "antigravity: quota exhausted",
       cooldown: "quota_exhausted",
       retryable: true,
+      ...at,
     };
   }
   if (INVALID_THINKING_SIGNATURE_RE.test(body)) {
@@ -200,33 +227,32 @@ export const classifyTurnOutcome = (
       retryable: true,
     };
   }
+  // A refusal with no quota evidence is a plain failure: a safety refusal
+  // must never rest the account.
+  if (stopReason === "refusal" && text === undefined) {
+    return { reason: "antigravity: the model refused the turn" };
+  }
   const api = API_ERROR_RE.exec(body);
   const alt = api === null ? STATUS_ERROR_RE.exec(body) : null;
   const httpStatus = api?.[1] ?? alt?.[2];
-  const message = (api?.[2] ?? alt?.[3] ?? body).trim().slice(0, 300);
-  const byMessage = classifyAgyMessage(body);
   if (byMessage !== null) {
-    const reset =
-      byMessage.cooldown === "quota_exhausted" ||
-      byMessage.cooldown === "rate_limit"
-        ? quotaResetAtMs(body, now)
-        : null;
     return {
       ...byMessage,
-      reason: withReset(byMessage.reason, reset),
       retryable: byMessage.cooldown === "rate_limit",
+      ...(byMessage.cooldown === "rate_limit" ? at : {}),
     };
   }
   // A 404 before the model answered is an unknown / unentitled model; after
   // it, a transient edge error.
   if (httpStatus === "404" && step?.reachedModel === true) {
     return {
-      reason: `antigravity: transient upstream 404: ${message}`,
+      reason: "antigravity: transient upstream 404",
       retryable: true,
     };
   }
+  const detail = excerpt(api?.[2] ?? alt?.[3] ?? body);
   return {
-    reason: `antigravity: ${message.length > 0 ? message : "turn stopped because of an error"}`,
+    reason: `antigravity: upstream error${httpStatus !== undefined ? ` (HTTP ${httpStatus})` : ""}${detail.length > 0 ? `: ${detail}` : ""}`,
     retryable: httpStatus !== undefined && Number(httpStatus) >= 500,
   };
 };

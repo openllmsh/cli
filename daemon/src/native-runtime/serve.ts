@@ -351,6 +351,7 @@ export type TNativeServeOutcome =
   | {
       readonly declined: string;
       readonly cooldownReason?: TCooldownReason;
+      readonly recoverAtMs?: number;
       readonly captureOwnership?: "none" | "accepted" | "uncertain";
     };
 
@@ -510,13 +511,16 @@ const declinedOutcome = (
   declined: string,
   cooldownReason?: TCooldownReason,
   captureOwnership?: "none" | "accepted" | "uncertain",
+  recoverAtMs?: number,
 ): {
   readonly declined: string;
   readonly cooldownReason?: TCooldownReason;
+  readonly recoverAtMs?: number;
   readonly captureOwnership?: "none" | "accepted" | "uncertain";
 } => ({
   declined,
   ...(cooldownReason !== undefined ? { cooldownReason } : {}),
+  ...(recoverAtMs !== undefined ? { recoverAtMs } : {}),
   ...(captureOwnership !== undefined && captureOwnership !== "none"
     ? { captureOwnership }
     : {}),
@@ -1710,7 +1714,12 @@ const serveAntigravityHop = async (
     lease.abandon();
     return run === null
       ? declinedOutcome("antigravity: agy ACP unavailable: setup failed")
-      : declinedOutcome(run.reason, run.cooldownReason);
+      : declinedOutcome(
+          run.reason,
+          run.cooldownReason,
+          undefined,
+          run.recoverAtMs,
+        );
   }
   return deliverAntigravityRun(
     params,

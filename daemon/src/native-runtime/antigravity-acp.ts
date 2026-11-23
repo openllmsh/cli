@@ -977,6 +977,7 @@ export const runAntigravityNative = async (
     | {
         readonly error: Error;
         readonly cooldown?: TAntigravityFailure["cooldown"];
+        readonly recoverAtMs?: number;
       };
   const queue: TQueueItem[] = [];
   let wake: (() => void) | null = null;
@@ -1246,10 +1247,19 @@ export const runAntigravityNative = async (
   const failStream = (
     error: Error,
     cooldown?: TAntigravityFailure["cooldown"],
+    recoverAtMs?: number,
   ): void => {
     if (ended) return;
     ended = true;
-    push(cooldown !== undefined ? { error, cooldown } : { error });
+    push(
+      cooldown !== undefined
+        ? {
+            error,
+            cooldown,
+            ...(recoverAtMs !== undefined ? { recoverAtMs } : {}),
+          }
+        : { error },
+    );
     cleanup("cancel");
   };
   const abort = (): void => {
@@ -1693,7 +1703,9 @@ export const runAntigravityNative = async (
       // as `refusal`: its own session log says which. Best effort.
       const failure = classifyTurnOutcome(
         stop,
-        readLastStepAfter(home, turnSessionId, stepWatermark),
+        stepWatermark === undefined
+          ? null
+          : readLastStepAfter(home, turnSessionId, stepWatermark),
       );
       if (
         failure !== undefined &&
@@ -1702,7 +1714,11 @@ export const runAntigravityNative = async (
         // Failing the stream drops the conversation (never parked), so a
         // broken session is never reattached: the next request starts a
         // fresh, fully seeded one.
-        failStream(new Error(failure.reason), failure.cooldown);
+        failStream(
+          new Error(failure.reason),
+          failure.cooldown,
+          failure.recoverAtMs,
+        );
       } else if (!turn.sawOutput()) {
         failStream(new Error("antigravity turn ended before producing output"));
       } else {
@@ -1791,7 +1807,12 @@ export const runAntigravityNative = async (
       kind: "declined",
       reason,
       ...(failure !== undefined && sameAccount()
-        ? { cooldownReason: failure }
+        ? {
+            cooldownReason: failure,
+            ...(first !== "end" && "recoverAtMs" in first
+              ? { recoverAtMs: first.recoverAtMs }
+              : {}),
+          }
         : {}),
     };
   }
