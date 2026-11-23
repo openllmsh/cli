@@ -26,6 +26,7 @@ const isRecord = (value: unknown): value is TJson =>
 
 const MAX_FIELDS = 16;
 const MAX_OPTIONS = 63;
+const MAX_LABEL = 200;
 export const ELICITATION_BLANK_LABEL = "Leave blank";
 export const ELICITATION_CONTINUE_LABEL = "Continue";
 export const ELICITATION_DECLINE_LABEL = "Decline";
@@ -40,6 +41,10 @@ type TField = {
   readonly kind: "enum" | "boolean" | "number" | "integer" | "string" | "multi";
   readonly options: readonly TOption[];
   readonly required: boolean;
+  /** The schema's `default`, applied when an optional field is left blank. */
+  readonly default?: unknown;
+  /** "Leave blank" is offered (and no option of the field is called that). */
+  readonly blankOffered: boolean;
 };
 
 export type TElicitation = {
@@ -47,6 +52,8 @@ export type TElicitation = {
   readonly fields: Record<string, TField>;
   /** A URL elicitation has no content: Continue accepts, anything else declines. */
   readonly url: boolean;
+  /** Why this form can't be shown faithfully: it is declined, never half-accepted. */
+  readonly unsupported?: string;
 };
 
 const labelOf = (value: unknown): string =>
@@ -120,62 +127,79 @@ export const elicitationOf = (payload: TJson): TElicitation => {
   );
   const questions: TAgentUserInputQuestion[] = [];
   const fields: Record<string, TField> = {};
-  Object.entries(properties)
-    .slice(0, MAX_FIELDS)
-    .forEach(([key, raw], index) => {
-      const spec = isRecord(raw) ? raw : {};
-      const id = `f${index}`;
-      const title = typeof spec.title === "string" ? spec.title : key;
-      const description =
-        typeof spec.description === "string" ? spec.description : undefined;
-      const isRequired = required.has(key);
-      let kind: TField["kind"] = "string";
-      let options: TOption[] = [];
-      let multi = false;
-      const direct = enumOptionsOf(spec);
-      if (direct !== null) {
-        kind = "enum";
-        options = direct;
-      } else if (spec.type === "array" && isRecord(spec.items)) {
-        const items = enumOptionsOf(spec.items);
-        if (items !== null) {
-          kind = "multi";
-          options = items;
-          multi = true;
-        }
-      } else if (spec.type === "boolean") {
-        kind = "boolean";
-        options = [
-          { label: "Yes", value: true },
-          { label: "No", value: false },
-        ];
-      } else if (spec.type === "number" || spec.type === "integer") {
-        kind = spec.type;
+  const entries = Object.entries(properties);
+  let unsupported: string | undefined;
+  if (entries.length > MAX_FIELDS)
+    unsupported = `the form has ${entries.length} fields (at most ${MAX_FIELDS} can be shown)`;
+  entries.slice(0, MAX_FIELDS).forEach(([key, raw], index) => {
+    const spec = isRecord(raw) ? raw : {};
+    const id = `f${index}`;
+    const title = typeof spec.title === "string" ? spec.title : key;
+    const description =
+      typeof spec.description === "string" ? spec.description : undefined;
+    const isRequired = required.has(key);
+    let kind: TField["kind"] = "string";
+    let options: TOption[] = [];
+    let multi = false;
+    const direct = enumOptionsOf(spec);
+    if (direct !== null) {
+      kind = "enum";
+      options = direct;
+    } else if (spec.type === "array") {
+      const items = isRecord(spec.items) ? enumOptionsOf(spec.items) : null;
+      if (items === null) unsupported ??= `field "${key}" is an open list`;
+      else {
+        kind = "multi";
+        options = items;
+        multi = true;
       }
-      options = options.slice(0, MAX_OPTIONS).map((option) => ({
-        ...option,
-        label: clip(option.label, 200),
-      }));
-      fields[id] = { key, kind, options, required: isRequired };
-      const offered = [
-        ...options.map((option) => ({ label: option.label })),
-        ...(!isRequired && !multi ? [{ label: ELICITATION_BLANK_LABEL }] : []),
+    } else if (spec.type === "boolean") {
+      kind = "boolean";
+      options = [
+        { label: "Yes", value: true },
+        { label: "No", value: false },
       ];
-      questions.push({
-        id,
-        header: clip(title, 200),
-        question: clip(
-          index === 0
-            ? description === undefined
-              ? heading
-              : `${heading}\n${description}`
-            : (description ?? title),
-          4000,
-        ),
-        ...(offered.length > 0 ? { options: offered } : {}),
-        ...(multi ? { multi_select: true } : {}),
-      });
+    } else if (spec.type === "number" || spec.type === "integer") {
+      kind = spec.type;
+    } else if (spec.type !== undefined && spec.type !== "string") {
+      unsupported ??= `field "${key}" has an unsupported type`;
+    }
+    const labels = options.map((option) => option.label);
+    if (
+      options.length > MAX_OPTIONS ||
+      labels.some((label) => label.length > MAX_LABEL || label === "") ||
+      new Set(labels).size !== labels.length
+    )
+      unsupported ??= `field "${key}" has options that can't be told apart`;
+    const blankOffered =
+      !isRequired && !multi && !labels.includes(ELICITATION_BLANK_LABEL);
+    fields[id] = {
+      key,
+      kind,
+      options,
+      required: isRequired,
+      blankOffered,
+      ...("default" in spec ? { default: spec.default } : {}),
+    };
+    const offered = [
+      ...options.map((option) => ({ label: option.label })),
+      ...(blankOffered ? [{ label: ELICITATION_BLANK_LABEL }] : []),
+    ];
+    questions.push({
+      id,
+      header: clip(title, 200),
+      question: clip(
+        index === 0
+          ? description === undefined
+            ? heading
+            : `${heading}\n${description}`
+          : (description ?? title),
+        4000,
+      ),
+      ...(offered.length > 0 ? { options: offered.slice(0, 64) } : {}),
+      ...(multi ? { multi_select: true } : {}),
     });
+  });
   if (questions.length === 0)
     return {
       url: true,
@@ -192,66 +216,99 @@ export const elicitationOf = (payload: TJson): TElicitation => {
         },
       ],
     };
-  return { questions, fields, url: false };
+  return {
+    questions,
+    fields,
+    url: false,
+    ...(unsupported === undefined ? {} : { unsupported }),
+  };
 };
 
 const asList = (answer: string | readonly string[]): readonly string[] =>
   typeof answer === "string" ? [answer] : answer;
 
-const normalize = (value: string): string =>
-  value.trim().replace(/\s+/g, " ").toLowerCase();
+export type TElicitationReply =
+  | { readonly ok: true; readonly reply: TJson }
+  | { readonly ok: false; readonly message: string };
 
-const typedValueOf = (field: TField, text: string): unknown => {
-  const trimmed = text.trim();
-  if (field.kind === "number" || field.kind === "integer") {
-    const n = Number(trimmed);
-    return trimmed !== "" && Number.isFinite(n) ? n : trimmed;
-  }
-  return trimmed;
-};
+const replyOf = (action: string, content?: TJson): TJson => ({
+  hookSpecificOutput: {
+    hookEventName: "Elicitation",
+    action,
+    ...(content === undefined ? {} : { content }),
+  },
+});
 
-/** The Elicitation hook's output for the web's answers. */
+/**
+ * The Elicitation hook's output for the web's answers, or why they can't be
+ * sent: a required field left blank, a number that isn't one (an integer
+ * field refuses 1.5), a value no option offers. Options match their label
+ * exactly and map to the schema's own value, so nothing is retyped or merged.
+ */
 export const elicitationReplyOf = (
   elicitation: TElicitation,
   answers: TAgentUserInputAnswers,
-): TJson => {
-  const reply = (action: string, content?: TJson): TJson => ({
-    hookSpecificOutput: {
-      hookEventName: "Elicitation",
-      action,
-      ...(content === undefined ? {} : { content }),
-    },
-  });
+): TElicitationReply => {
   if (elicitation.url) {
     const first = answers.f0;
     const said = first === undefined ? "" : (asList(first)[0] ?? "");
-    return reply(
-      normalize(said) === normalize(ELICITATION_CONTINUE_LABEL)
-        ? "accept"
-        : "decline",
-    );
+    return {
+      ok: true,
+      reply: replyOf(
+        said === ELICITATION_CONTINUE_LABEL ? "accept" : "decline",
+      ),
+    };
   }
   const content: TJson = {};
   for (const [id, field] of Object.entries(elicitation.fields)) {
     const given = answers[id];
-    if (given === undefined) continue;
-    const values = asList(given).filter(
-      (value) => normalize(value) !== normalize(ELICITATION_BLANK_LABEL),
-    );
-    if (values.length === 0) continue;
-    const byLabel = (value: string): unknown => {
-      const option = field.options.find(
-        (candidate) => normalize(candidate.label) === normalize(value),
-      );
-      return option === undefined ? typedValueOf(field, value) : option.value;
-    };
-    content[field.key] =
-      field.kind === "multi" ? values.map(byLabel) : byLabel(values[0] ?? "");
+    const values =
+      given === undefined
+        ? []
+        : asList(given).filter(
+            (value) =>
+              value.trim() !== "" &&
+              !(field.blankOffered && value === ELICITATION_BLANK_LABEL),
+          );
+    if (values.length === 0) {
+      if (field.required)
+        return { ok: false, message: `"${field.key}" needs an answer.` };
+      if (field.default !== undefined) content[field.key] = field.default;
+      continue;
+    }
+    const known = (value: string): TOption | undefined =>
+      field.options.find((option) => option.label === value);
+    if (field.kind === "multi") {
+      const picked: unknown[] = [];
+      for (const value of values) {
+        const option = known(value);
+        if (option === undefined)
+          return { ok: false, message: `"${field.key}": pick from the list.` };
+        picked.push(option.value);
+      }
+      content[field.key] = picked;
+    } else if (field.kind === "enum" || field.kind === "boolean") {
+      const option = known(values[0] ?? "");
+      if (option === undefined)
+        return { ok: false, message: `"${field.key}": pick from the list.` };
+      content[field.key] = option.value;
+    } else if (field.kind === "number" || field.kind === "integer") {
+      const text = (values[0] ?? "").trim();
+      const n = Number(text);
+      if (
+        !Number.isFinite(n) ||
+        (field.kind === "integer" && !Number.isInteger(n))
+      )
+        return {
+          ok: false,
+          message: `"${field.key}" must be ${field.kind === "integer" ? "a whole number" : "a number"}.`,
+        };
+      content[field.key] = n;
+    } else content[field.key] = (values[0] ?? "").trim();
   }
-  return reply("accept", content);
+  return { ok: true, reply: replyOf("accept", content) };
 };
 
 /** A dismissed elicitation (`decline`, or `cancel` to abandon the whole call). */
-export const elicitationRefusalOf = (action: "decline" | "cancel"): TJson => ({
-  hookSpecificOutput: { hookEventName: "Elicitation", action },
-});
+export const elicitationRefusalOf = (action: "decline" | "cancel"): TJson =>
+  replyOf(action);

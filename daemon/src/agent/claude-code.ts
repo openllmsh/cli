@@ -88,8 +88,11 @@ import { defaultSessionHostClient } from "../session-host-proc";
 import { linkCachedAttachment, sweepAttachmentCache } from "./attachment-cache";
 import type { TClaudeDialogKey } from "./claude-dialog-keys";
 import {
+  CLAUDE_AMEND_OPEN,
+  CLAUDE_KEY_ESC,
   claudeApprovalKeys,
   claudeCancelKeys,
+  claudeDeclineAmendOpenKeys,
   claudeDeclineFeedbackKeys,
   claudeQuestionKeys,
 } from "./claude-dialog-keys";
@@ -136,6 +139,8 @@ export const AGENT_TOOL_OUTPUT_MAX_CHARS = 64 * 1024;
  */
 export const HOOK_HOLD_MS = 100_000;
 const DIALOG_KEY_MS = 40;
+/** How long the amend field has to show itself before a plain Esc reject. */
+const AMEND_OPEN_MS = 1500;
 const DIALOG_TAB_MS = 250;
 /**
  * How long a fresh TUI may take to report `SessionStart` before the web is
@@ -1539,6 +1544,7 @@ export type TClaudeTuiDeps = {
   /** Pause after a dialog keystroke / a tab-advancing one (tests shrink it). */
   readonly holdMs?: number;
   readonly dialogKeyMs?: number;
+  readonly amendOpenMs?: number;
   readonly dialogTabMs?: number;
   readonly readyMaxMs?: number;
   readonly readySettleMs?: number;
@@ -1558,29 +1564,35 @@ export type TClaudeTuiDeps = {
 const isJsonObject = (value: unknown): value is TJson =>
   typeof value === "object" && value !== null && !Array.isArray(value);
 
+/** A tool a whole-tool allow rule must never cover (shell access). */
+const SHELL_TOOLS = new Set(["Bash", "PowerShell", "BashOutput"]);
+
 /**
  * `updatedPermissions` for "allow for the session" (verified against claude
- * 2.1.330's PermissionRequest hook): Claude's own suggestions, every one forced
- * to `destination: "session"` so nothing is written to a settings file; with
- * none, an allow rule for the whole tool.
+ * 2.1.330's PermissionRequest hook): only Claude's own `addRules` suggestions,
+ * each forced to `destination: "session"` so nothing is written to a settings
+ * file (mode and directory suggestions are not rules and are dropped). With
+ * none, a non-shell tool gets an allow rule for the whole tool; a shell tool
+ * gets null — allowed once, never "every command".
  */
 export const sessionPermissionUpdates = (
   toolName: string,
   suggestions: readonly TJson[],
-): TJson[] =>
-  suggestions.length > 0
-    ? suggestions.map((suggestion) => ({
-        ...suggestion,
-        destination: "session",
-      }))
-    : [
-        {
-          type: "addRules",
-          rules: [{ toolName }],
-          behavior: "allow",
-          destination: "session",
-        },
-      ];
+): TJson[] | null => {
+  const rules = suggestions
+    .filter((suggestion) => suggestion.type === "addRules")
+    .map((suggestion) => ({ ...suggestion, destination: "session" }));
+  if (rules.length > 0) return rules;
+  if (SHELL_TOOLS.has(toolName)) return null;
+  return [
+    {
+      type: "addRules",
+      rules: [{ toolName }],
+      behavior: "allow",
+      destination: "session",
+    },
+  ];
+};
 
 /** The denial text the model reads when the web declined with a reason. */
 export const declineMessageOf = (feedback: string | undefined): string => {
@@ -1651,6 +1663,8 @@ export const createClaudeTuiSession = (
   let trustSeenAt = 0;
   /** Whitespace-free, ANSI-stripped recent screen text (trust detection only). */
   let recentScreen = "";
+  /** Whitespace-free recent screen text (the amend field's prompt only). */
+  let dialogScreen = "";
   /** Screen text since the last `/model` was typed (its dialog only). */
   let modelScreen = "";
   /** The open "Switch model?" request, while it waits for the web. */
@@ -2188,6 +2202,10 @@ export const createClaudeTuiSession = (
   // The ONE screen read: Claude's folder-trust dialog. Input stays held (it is
   // asked before SessionStart) until the web answers it.
   const onOutput = (bytes: Uint8Array): void => {
+    dialogScreen = (
+      dialogScreen +
+      new TextDecoder().decode(bytes).replace(ANSI, "").replace(/\s+/g, "")
+    ).slice(-2048);
     if (modelInFlight && modelRequestId === null && !ended) {
       modelScreen = (
         modelScreen +
@@ -2363,6 +2381,34 @@ export const createClaudeTuiSession = (
     if (closed) dialogGen += 1;
   }
   /** Type keys into Claude's open dialog, a beat apart, while it is still open. */
+  /**
+   * Decline with a reason: open the "No" row's amend field, and type the
+   * reason only once the screen shows it open (a digit typed into the dialog
+   * would pick an option); otherwise reject plainly with Esc.
+   */
+  const declineWithFeedback = (
+    feedbackKeys: readonly TClaudeDialogKey[],
+  ): void => {
+    const gen = dialogGen;
+    dialogScreen = "";
+    const openKeys = claudeDeclineAmendOpenKeys();
+    const keyMs = deps.dialogKeyMs ?? DIALOG_KEY_MS;
+    const deadline = Date.now() + (deps.amendOpenMs ?? AMEND_OPEN_MS);
+    const settle = (): void => {
+      if (ended || gen !== dialogGen) return;
+      if (CLAUDE_AMEND_OPEN.test(dialogScreen)) {
+        typeDialogKeys(feedbackKeys, gen);
+        return;
+      }
+      if (Date.now() >= deadline) {
+        writeText(CLAUDE_KEY_ESC);
+        return;
+      }
+      setTimeout(settle, Math.max(keyMs, 10));
+    };
+    typeDialogKeys(openKeys, gen);
+    setTimeout(settle, deps.dialogTabMs ?? DIALOG_TAB_MS);
+  };
   const typeDialogKeys = (
     keys: readonly TClaudeDialogKey[],
     gen: number = dialogGen,
@@ -2486,6 +2532,15 @@ export const createClaudeTuiSession = (
     if (event === "Elicitation") {
       settleTuiRequests(null);
       const elicitation = elicitationOf(payload);
+      if (elicitation.unsupported !== undefined) {
+        // Never half-accept a form the web can't show whole.
+        emit({
+          type: "runtime.warning",
+          code: "elicitation_declined",
+          message: `An MCP request for input was declined: ${elicitation.unsupported}.`,
+        });
+        return elicitationRefusalOf("decline");
+      }
       requestCounter += 1;
       const requestId = `r${requestCounter}`;
       const reply = new Promise<TJson | null>((resolve) => {
@@ -2510,7 +2565,11 @@ export const createClaudeTuiSession = (
         const open = pending.get(requestId);
         if (open === undefined || !("resolve" in open)) return;
         pending.delete(requestId);
-        open.resolve(null);
+        // With no terminal attached Claude's own dialog would sit unwatched
+        // (the MCP call blocked): decline instead. A terminal is told by it.
+        open.resolve(
+          terminalViewers === 0 ? elicitationRefusalOf("decline") : null,
+        );
         emit({
           type: "request.resolved",
           request_id: requestId,
@@ -3201,19 +3260,27 @@ export const createClaudeTuiSession = (
               : command.decision === "accept" ||
                   command.decision === "accept_for_session"
                 ? claudeApprovalKeys(true)
-                : command.decision === "decline"
-                  ? ((command.feedback === undefined
-                      ? null
-                      : claudeDeclineFeedbackKeys(command.feedback)) ??
-                    claudeApprovalKeys(false))
-                  : claudeCancelKeys();
-        if (keys === null) {
+                : command.decision === "decline" &&
+                    command.feedback !== undefined &&
+                    claudeDeclineFeedbackKeys(command.feedback) !== null
+                  ? null
+                  : command.decision === "decline"
+                    ? claudeApprovalKeys(false)
+                    : claudeCancelKeys();
+        const feedbackKeys =
+          request.kind === "approval" &&
+          command.decision === "decline" &&
+          command.feedback !== undefined
+            ? claudeDeclineFeedbackKeys(command.feedback)
+            : null;
+        if (keys === null && feedbackKeys === null) {
           pending.set(command.request_id, request);
           return false;
         }
         tuiRequests.delete(command.request_id);
         requestToolUse.delete(command.request_id);
-        typeDialogKeys(keys);
+        if (keys !== null) typeDialogKeys(keys);
+        else if (feedbackKeys !== null) declineWithFeedback(feedbackKeys);
         if (request.kind === "user-input") {
           emit({
             type: "user-input.resolved",
@@ -3237,17 +3304,32 @@ export const createClaudeTuiSession = (
       }
       if (request.kind === "user-input") {
         if (request.elicitation !== undefined) {
-          request.resolve(
+          const answered =
             command.answers === undefined
+              ? null
+              : elicitationReplyOf(request.elicitation, command.answers);
+          if (answered !== null && !answered.ok) {
+            // Keep the question open and say what to fix.
+            pending.set(command.request_id, request);
+            emit({
+              type: "runtime.warning",
+              code: "elicitation_invalid",
+              message: answered.message,
+            });
+            return false;
+          }
+          request.resolve(
+            answered === null
               ? elicitationRefusalOf(
                   command.decision === "cancel" ? "cancel" : "decline",
                 )
-              : elicitationReplyOf(request.elicitation, command.answers),
+              : answered.reply,
           );
+          // The answers (free text may be sensitive) stay out of the replay log.
           emit({
             type: "user-input.resolved",
             request_id: command.request_id,
-            answers: command.answers ?? {},
+            answers: {},
           });
           return true;
         }
@@ -3283,17 +3365,18 @@ export const createClaudeTuiSession = (
         pending.set(command.request_id, request);
         return false;
       }
-      if (decision === "accept_for_session" && request.kind === "approval") {
+      const sessionUpdates =
+        decision === "accept_for_session" && request.kind === "approval"
+          ? sessionPermissionUpdates(request.toolName, request.suggestions)
+          : null;
+      if (sessionUpdates !== null) {
         request.resolve(
           permissionReply({
             behavior: "allow",
-            updatedPermissions: sessionPermissionUpdates(
-              request.toolName,
-              request.suggestions,
-            ),
+            updatedPermissions: sessionUpdates,
           }),
         );
-      } else if (decision === "accept") {
+      } else if (decision === "accept" || decision === "accept_for_session") {
         request.resolve(permissionReply({ behavior: "allow" }));
       } else {
         request.resolve(
@@ -3311,7 +3394,11 @@ export const createClaudeTuiSession = (
       emit({
         type: "request.resolved",
         request_id: command.request_id,
-        decision,
+        // "For session" that could not be applied was allowed once.
+        decision:
+          decision === "accept_for_session" && sessionUpdates === null
+            ? "accept"
+            : decision,
       });
       return true;
     },

@@ -53,18 +53,31 @@ export const CLAUDE_KEY_UP = "\x1b[A";
 export const CLAUDE_KEY_TAB = "\t";
 
 /**
- * Decline a tool approval and tell Claude why: Up wraps from "Yes" onto the
- * last row ("No"), Tab opens its amend field, Enter sends the text. Null when
- * nothing printable is left of the feedback (then a plain reject applies).
+ * Decline a tool approval and tell Claude why, in two steps the caller must
+ * not run blind: Up wraps from "Yes" onto the last row ("No") and Tab opens
+ * its amend field ({@link claudeDeclineAmendOpenKeys}); only once the screen
+ * shows {@link CLAUDE_AMEND_OPEN} may the text and Enter follow
+ * ({@link claudeDeclineFeedbackKeys}) — typed before it, a leading digit would
+ * pick an option. Without that sign the caller rejects with Esc instead.
+ */
+export const claudeDeclineAmendOpenKeys = (): TClaudeDialogKey[] => [
+  { text: CLAUDE_KEY_UP, settle: "key" },
+  { text: CLAUDE_KEY_TAB, settle: "tab" },
+];
+
+/** The amend field's prompt on screen (whitespace removed). */
+export const CLAUDE_AMEND_OPEN = /tellClaudewhattododifferently/;
+
+/**
+ * The text and Enter for an open amend field, or null when nothing printable
+ * is left (then a plain reject applies). Leading digits are dropped too.
  */
 export const claudeDeclineFeedbackKeys = (
   feedback: string,
 ): TClaudeDialogKey[] | null => {
-  const text = typedText(feedback);
+  const text = typedText(feedback).replace(/^\d+\s*/, "");
   if (text === "") return null;
   return [
-    { text: CLAUDE_KEY_UP, settle: "key" },
-    { text: CLAUDE_KEY_TAB, settle: "tab" },
     { text, settle: "key" },
     { text: CLAUDE_KEY_ENTER, settle: "key" },
   ];
@@ -89,7 +102,7 @@ const typedText = (value: string): string =>
   value
     .replace(/[\r\n]+/g, " ")
     // biome-ignore lint/suspicious/noControlCharactersInRegex: stripping them is the point
-    .replace(/[\x00-\x1f\x7f]/g, "")
+    .replace(/[\x00-\x1f\x7f-\x9f]/g, "")
     .trim();
 
 /** Option labels match ignoring case and runs of whitespace. */
