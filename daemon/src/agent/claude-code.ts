@@ -93,6 +93,12 @@ import {
   claudeDeclineFeedbackKeys,
   claudeQuestionKeys,
 } from "./claude-dialog-keys";
+import type { TElicitation } from "./claude-elicitation";
+import {
+  elicitationOf,
+  elicitationRefusalOf,
+  elicitationReplyOf,
+} from "./claude-elicitation";
 import { createClaudeHistory } from "./claude-history";
 import {
   createSubagentFollower,
@@ -1513,6 +1519,8 @@ type TPending =
   | {
       readonly kind: "user-input";
       readonly input: unknown;
+      /** An MCP elicitation (the Elicitation hook), not an AskUserQuestion. */
+      readonly elicitation?: TElicitation;
       readonly resolve: (reply: TJson | null) => void;
     }
   | { readonly kind: "trust" }
@@ -2281,9 +2289,30 @@ export const createClaudeTuiSession = (
    * decision; never an allow). The request stays open on the web: its answer
    * is typed into that dialog.
    */
+  const approvalOpenedEvent = (
+    requestId: string,
+    toolName: string,
+    input: unknown,
+    dialog: boolean,
+  ): Parameters<TAgentEngineEmit>[0] => ({
+    type: "request.opened",
+    request_id: requestId,
+    ...parser.turnField(),
+    request_kind: requestKindOfTool(toolName),
+    title: requestTitleOf(toolName, input),
+    detail: requestDetailOf(toolName, input),
+    input,
+    ...(dialog ? { dialog: true } : {}),
+  });
   const handOffToTui = (requestId: string): void => {
     const open = pending.get(requestId);
     if (open === undefined || !("resolve" in open)) return;
+    // Claude's elicitation dialog is a form no verified keys drive: it stays
+    // held for the web, and only the deadline hands it to Claude.
+    if (open.kind === "user-input" && open.elicitation !== undefined) return;
+    if (open.kind === "approval" && !tuiRequests.has(requestId))
+      // Same id: consumers upsert, a late attach replays the latest.
+      emit(approvalOpenedEvent(requestId, open.toolName, open.input, true));
     tuiRequests.add(requestId);
     open.resolve(null);
   };
@@ -2454,6 +2483,49 @@ export const createClaudeTuiSession = (
       }
       return null;
     }
+    if (event === "Elicitation") {
+      settleTuiRequests(null);
+      const elicitation = elicitationOf(payload);
+      requestCounter += 1;
+      const requestId = `r${requestCounter}`;
+      const reply = new Promise<TJson | null>((resolve) => {
+        pending.set(requestId, {
+          kind: "user-input",
+          input: null,
+          elicitation,
+          resolve,
+        });
+        emit({
+          type: "user-input.requested",
+          request_id: requestId,
+          ...parser.turnField(),
+          questions: elicitation.questions,
+          dismissible: true,
+        });
+      });
+      // Held with or without a terminal, until the web answers or the hook's
+      // deadline / abort: then Claude's own dialog takes it, and the web's
+      // question closes (exactly once — `respond` takes it off `pending`).
+      const giveUp = (): void => {
+        const open = pending.get(requestId);
+        if (open === undefined || !("resolve" in open)) return;
+        pending.delete(requestId);
+        open.resolve(null);
+        emit({
+          type: "request.resolved",
+          request_id: requestId,
+          decision: "cancel",
+        });
+      };
+      const timer = setTimeout(giveUp, deps.holdMs ?? HOOK_HOLD_MS);
+      timer.unref?.();
+      signal?.addEventListener("abort", giveUp, { once: true });
+      if (signal?.aborted === true) giveUp();
+      return await reply.finally(() => {
+        clearTimeout(timer);
+        signal?.removeEventListener("abort", giveUp);
+      });
+    }
     if (event !== "PermissionRequest") return null;
     // A new request means the previous dialog is over.
     settleTuiRequests(null);
@@ -2486,15 +2558,7 @@ export const createClaudeTuiSession = (
           : [],
         resolve,
       });
-      emit({
-        type: "request.opened",
-        request_id: requestId,
-        ...parser.turnField(),
-        request_kind: requestKindOfTool(toolName),
-        title: requestTitleOf(toolName, input),
-        detail: requestDetailOf(toolName, input),
-        input,
-      });
+      emit(approvalOpenedEvent(requestId, toolName, input, false));
     });
     const toolUse = recentPreTools
       .filter(
@@ -3172,6 +3236,21 @@ export const createClaudeTuiSession = (
         return true;
       }
       if (request.kind === "user-input") {
+        if (request.elicitation !== undefined) {
+          request.resolve(
+            command.answers === undefined
+              ? elicitationRefusalOf(
+                  command.decision === "cancel" ? "cancel" : "decline",
+                )
+              : elicitationReplyOf(request.elicitation, command.answers),
+          );
+          emit({
+            type: "user-input.resolved",
+            request_id: command.request_id,
+            answers: command.answers ?? {},
+          });
+          return true;
+        }
         if (command.answers === undefined) {
           request.resolve(
             permissionReply({

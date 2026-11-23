@@ -27,6 +27,7 @@ export const AGENT_HOOK_EVENT_NAMES = [
   "Stop",
   "SessionStart",
   "UserPromptSubmit",
+  "Elicitation",
 ] as const;
 
 /** Upper bound on one hook round trip (under the hook's own `timeout`). */
