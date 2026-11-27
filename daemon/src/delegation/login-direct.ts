@@ -212,7 +212,7 @@ export const makeBlockingConnect = (
           };
         };
         try {
-          if (operation.signal.aborted || slot?.wasCancelled() === true) {
+          if (cancelled()) {
             releaseNoChild();
             return cancelledResult();
           }
@@ -220,7 +220,7 @@ export const makeBlockingConnect = (
           lifecycle?.record("readiness_wait", readyMark);
           const ready = await cfg.beforeLogin?.();
           lifecycle?.record("readiness", readyMark);
-          if (operation.signal.aborted || slot?.wasCancelled() === true) {
+          if (cancelled()) {
             releaseNoChild();
             return cancelledResult();
           }
@@ -241,7 +241,7 @@ export const makeBlockingConnect = (
           }
           emitLoginStarted(flow);
           lifecycle?.record("start");
-          if (operation.signal.aborted || slot?.wasCancelled() === true) {
+          if (cancelled()) {
             releaseNoChild();
             return cancelledResult();
           }
@@ -277,7 +277,7 @@ export const makeBlockingConnect = (
                   : undefined,
               );
             }
-            if (operation.signal.aborted || slot?.wasCancelled() === true) {
+            if (cancelled()) {
               releaseNoChild();
               return cancelledResult();
             }
@@ -304,7 +304,7 @@ export const makeBlockingConnect = (
           ) {
             return retainUnconfirmedCleanup(result.whenReleased);
           }
-          if (operation.signal.aborted || slot?.wasCancelled() === true) {
+          if (cancelled()) {
             slot?.end(flow.flowId);
             clearPendingAuth(cfg.provider, flow.flowId);
             return cancelledResult();
@@ -313,7 +313,7 @@ export const makeBlockingConnect = (
           lifecycle?.record("prep_wait", prepMark);
           const granted = await cfg.afterLogin?.();
           lifecycle?.record("prep", prepMark);
-          if (operation.signal.aborted || slot?.wasCancelled() === true) {
+          if (cancelled()) {
             slot?.end(flow.flowId);
             clearPendingAuth(cfg.provider, flow.flowId);
             return cancelledResult();
@@ -337,7 +337,7 @@ export const makeBlockingConnect = (
             verified = await sample();
           }
           lifecycle?.record("verify", verifyMark);
-          if (operation.signal.aborted || slot?.wasCancelled() === true) {
+          if (cancelled()) {
             slot?.end(flow.flowId);
             clearPendingAuth(cfg.provider, flow.flowId);
             return cancelledResult();
