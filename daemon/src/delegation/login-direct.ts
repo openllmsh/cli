@@ -20,6 +20,7 @@ import {
   classifyFailureOutput,
   wireCompatibleFailureSignature,
 } from "@openllmsh/sdk/protocol";
+import { wasUserCancelledFlow } from "../auth-events";
 import type { TReapOutcome } from "../child-supervisor";
 import { opaqueDoctorCorrelation } from "../doctor-report/correlation";
 import { clearPendingAuth } from "../pending-auth";
@@ -155,13 +156,20 @@ export const makeBlockingConnect = (
           slot?.end(flow.flowId);
           clearPendingAuth(cfg.provider, flow.flowId);
         };
+        const cancelled = (): boolean =>
+          operation.signal.aborted || slot?.wasCancelled() === true;
         const cancelledResult = (): TConnectResult => {
           terminalLedger = { outcome: "cancelled" };
-          emitLoginFailed(flow, {
-            code: "user_cancelled",
-            message: "sign-in cancelled",
-            retryable: false,
-          });
+          // `cancelConnect` (makeCancelConnect) already emitted the one
+          // `user_cancelled` terminal for this flow; a second would double
+          // count the cancel (#1052).
+          if (!wasUserCancelledFlow(flow.flowId)) {
+            emitLoginFailed(flow, {
+              code: "user_cancelled",
+              message: "sign-in cancelled",
+              retryable: false,
+            });
+          }
           return { connected: false, detail: "sign-in cancelled" };
         };
         const retainUnconfirmedCleanup = (
@@ -175,6 +183,16 @@ export const makeBlockingConnect = (
                 clearPendingAuth(cfg.provider, flow.flowId);
               }
             });
+          }
+          // A cancelled flow has had its terminal; an unconfirmed reap must not
+          // add a second, conflicting `poll_expired` one.
+          if (cancelled()) {
+            const result = cancelledResult();
+            return {
+              ...result,
+              pending: true,
+              detail: UNCONFIRMED_CLEANUP_DETAIL,
+            };
           }
           finalizeLoginTerminal({
             flow,
